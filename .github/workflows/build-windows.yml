@@ -1,0 +1,108 @@
+name: Build AI.EXE (Windows + CUDA)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    name: Windows x64 + CUDA
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout AI.EXE
+        uses: actions/checkout@v4
+
+      # ── Install CUDA Toolkit (for llama.cpp CUDA build)
+      - name: Install CUDA Toolkit
+        uses: Jimver/cuda-toolkit@v0.2.17
+        id: cuda-toolkit
+        with:
+          cuda: '12.4.0'
+          method: 'network'
+          sub-packages: '["nvcc", "cudart", "cublas", "cublas_dev", "thrust", "visual_studio_integration"]'
+
+      # ── Build llama.cpp with CUDA
+      - name: Clone llama.cpp
+        run: |
+          git clone --depth 1 https://github.com/ggerganov/llama.cpp.git llama_cpp_src
+
+      - name: Build llama.cpp (CUDA + static)
+        shell: cmd
+        run: |
+          cd llama_cpp_src
+          cmake -B build -G "Visual Studio 17 2022" -A x64 ^
+            -DGGML_CUDA=ON ^
+            -DGGML_STATIC=ON ^
+            -DCMAKE_BUILD_TYPE=Release ^
+            -DCMAKE_MSVC_RUNTIME_LIBRARY="MultiThreaded" ^
+            -DLLAMA_BUILD_TESTS=OFF ^
+            -DLLAMA_BUILD_EXAMPLES=OFF ^
+            -DLLAMA_BUILD_SERVER=OFF ^
+            -DLLAMA_CURL=OFF
+          cmake --build build --config Release --target llama-cli -- /m
+
+      # ── Build AI.EXE Windows GUI
+      - name: Build AI.EXE
+        shell: cmd
+        run: |
+          cmake -B build -G "Visual Studio 17 2022" -A x64 ^
+            -DCMAKE_BUILD_TYPE=Release ^
+            -DBUILD_BACKEND_STUB=OFF
+          cmake --build build --config Release --target ai_exe_gui -- /m
+
+      # ── Assemble release folder
+      - name: Assemble release
+        shell: pwsh
+        run: |
+          $out = "release/AI.EXE"
+          New-Item -ItemType Directory -Force "$out/data/runtime" | Out-Null
+          New-Item -ItemType Directory -Force "$out/data/model"   | Out-Null
+
+          # Main app
+          Copy-Item "build/Release/ai_exe_gui.exe" "$out/AI.EXE.exe"
+
+          # UI files (copied by CMake post-build)
+          if (Test-Path "build/Release/ui") {
+            Copy-Item -Recurse "build/Release/ui" "$out/ui"
+          }
+
+          # llama-cli CUDA binary + required DLLs
+          Copy-Item "llama_cpp_src/build/bin/Release/llama-cli.exe" "$out/data/runtime/llama-cli.exe"
+
+          # Copy CUDA runtime DLLs that llama-cli needs
+          $cudaPath = "$env:CUDA_PATH/bin"
+          if (Test-Path "$cudaPath/cudart64_12.dll")  { Copy-Item "$cudaPath/cudart64_12.dll"  "$out/data/runtime/" }
+          if (Test-Path "$cudaPath/cublas64_12.dll")   { Copy-Item "$cudaPath/cublas64_12.dll"  "$out/data/runtime/" }
+          if (Test-Path "$cudaPath/cublasLt64_12.dll") { Copy-Item "$cudaPath/cublasLt64_12.dll" "$out/data/runtime/" }
+
+          # Copy any ggml DLLs
+          Get-ChildItem "llama_cpp_src/build/bin/Release/" -Filter "ggml*.dll" | ForEach-Object {
+            Copy-Item $_.FullName "$out/data/runtime/"
+          }
+          Get-ChildItem "llama_cpp_src/build/bin/Release/" -Filter "llama*.dll" | ForEach-Object {
+            Copy-Item $_.FullName "$out/data/runtime/"
+          }
+
+          # Setup script & prompts
+          Copy-Item "setup_model.bat" "$out/"
+
+          if (Test-Path "ui/prompts") {
+            New-Item -ItemType Directory -Force "$out/ui/prompts" | Out-Null
+            Copy-Item "ui/prompts/*" "$out/ui/prompts/" -Force
+          }
+
+          Write-Host "Release assembled at: $out"
+          Get-ChildItem -Recurse "$out" | Format-Table FullName, Length
+
+      # ── Upload as artifact
+      - name: Upload Release
+        uses: actions/upload-artifact@v4
+        with:
+          name: AI.EXE-Windows-CUDA
+          path: release/AI.EXE/
+          compression-level: 9
+          retention-days: 30

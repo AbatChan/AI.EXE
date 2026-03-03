@@ -1,0 +1,16 @@
+#pragma once
+
+constexpr int kUiMinWindowWidth = @AI_EXE_MIN_WIDTH@;
+constexpr int kUiMinWindowHeight = @AI_EXE_MIN_HEIGHT@;
+constexpr int kUiDefaultWindowWidth = @AI_EXE_DEFAULT_WIDTH@;
+constexpr int kUiDefaultWindowHeight = @AI_EXE_DEFAULT_HEIGHT@;
+constexpr int kUiSidebarDefaultWidth = @AI_EXE_SIDEBAR_DEFAULT_WIDTH@;
+constexpr int kUiSidebarMinWidth = @AI_EXE_SIDEBAR_MIN_WIDTH@;
+constexpr int kUiSidebarMaxWidth = @AI_EXE_SIDEBAR_MAX_WIDTH@;
+constexpr int kUiRightDefaultWidth = @AI_EXE_RIGHT_DEFAULT_WIDTH@;
+constexpr int kUiRightMinWidth = @AI_EXE_RIGHT_MIN_WIDTH@;
+constexpr int kUiRightMaxWidth = @AI_EXE_RIGHT_MAX_WIDTH@;
+constexpr int kUiMiddleMinWidth = @AI_EXE_MIDDLE_MIN_WIDTH@;
+constexpr int kUiResizerWidth = @AI_EXE_RESIZER_WIDTH@;
+constexpr bool kUiAnimationsDefault = @AI_EXE_UI_ANIMATIONS_DEFAULT_CPP@;
+constexpr bool kUiRememberLayoutDefault = @AI_EXE_UI_REMEMBER_LAYOUT_CPP@;

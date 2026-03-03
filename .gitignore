@@ -1,0 +1,40 @@
+# Build outputs
+/build/
+*.obj
+*.o
+*.exe
+*.pdb
+*.ilk
+*.log
+*.app
+*.dSYM/
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+generated/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Model files (too large for git)
+data/model/*.gguf
+
+# Runtime binaries (platform-specific, built by CI)
+data/runtime/
+
+# Local data
+data/logs/
+data/memory/
+data/snapshots/
+data/sandbox/
+
+# IDE
+.vscode/
+.idea/
+
+# Gemini
+.gemini/
