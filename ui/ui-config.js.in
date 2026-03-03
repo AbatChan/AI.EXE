@@ -1,0 +1,20 @@
+window.AI_EXE_UI_CONFIG = Object.freeze({
+  minWindowWidth: @AI_EXE_MIN_WIDTH@,
+  minWindowHeight: @AI_EXE_MIN_HEIGHT@,
+  defaultWindowWidth: @AI_EXE_DEFAULT_WIDTH@,
+  defaultWindowHeight: @AI_EXE_DEFAULT_HEIGHT@,
+  panel: Object.freeze({
+    sidebarDefaultWidth: @AI_EXE_SIDEBAR_DEFAULT_WIDTH@,
+    sidebarMinWidth: @AI_EXE_SIDEBAR_MIN_WIDTH@,
+    sidebarMaxWidth: @AI_EXE_SIDEBAR_MAX_WIDTH@,
+    rightDefaultWidth: @AI_EXE_RIGHT_DEFAULT_WIDTH@,
+    rightMinWidth: @AI_EXE_RIGHT_MIN_WIDTH@,
+    rightMaxWidth: @AI_EXE_RIGHT_MAX_WIDTH@,
+    middleMinWidth: @AI_EXE_MIDDLE_MIN_WIDTH@
+  }),
+  ui: Object.freeze({
+    resizerWidth: @AI_EXE_RESIZER_WIDTH@,
+    animationsDefault: @AI_EXE_UI_ANIMATIONS_DEFAULT_JS@,
+    rememberLayout: @AI_EXE_UI_REMEMBER_LAYOUT_JS@
+  })
+});

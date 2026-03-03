@@ -1,0 +1,44 @@
+                SOFTWARE DEVELOPMENT AGREEMENT
+        Project Name: AI.EXE Phase 1
+        Contract Date: February 15, 2026
+        Client: Alex Tkachev
+        Developer: Abat Chan (Mathew)
+        1. PROJECT SCOPE
+        The Developer agrees to design, develop, and deliver Phase 1 of a software application 
+        named AI.EXE. Phase 1 shall consist of a fully offline, self-contained Windows 
+        executable designed to operate on an NVIDIA GeForce RTX 3060 (12GB VRAM) 
+        system without requiring internet access or external API connectivity.
+        • Self-contained executable packaging with bundled runtime components.
+        • Local AI inference engine optimized for 12GB VRAM hardware.
+        • Hardware diagnostics including GPU detection, VRAM validation, and storage checks.
+        • Sandboxed runtime environment for controlled local execution.
+        • Persistent local memory system for maintaining context across sessions.
+        • Logging, rollback capability, and execution safety controls.
+        Phase 1 does not include guaranteed implementation of recursive self-improvement, 
+        consciousness simulation, singularity monitoring, intelligence explosion mechanisms, or 
+        hardware-level ternary computation. Such features may be considered under separate 
+        agreement.
+        2. COMPENSATION AND PAYMENT TERMS
+        Total compensation for Phase 1 development shall be Two Thousand US Dollars 
+        ($2,000.00 USD), payable in full on February 15, 2026.
+        An additional $150.00 USD is due to close out prior development work initiated under 
+        the previously cancelled project direction.
+        3. TIMELINE AND DELIVERABLES
+        • Month 1: Core architecture setup, runtime packaging framework, hardware diagnostics 
+        module.
+        • Month 2: Local AI inference integration, sandboxed execution environment, 
+        performance stabilization.
+        • Month 3: Persistent local memory system, logging system, rollback mechanisms.
+        • Month 4: Testing, performance tuning, documentation, and final executable packaging.
+         4. INTELLECTUAL PROPERTY
+         Upon full payment of the agreed compensation, all intellectual property rights related to 
+         AI.EXE Phase 1 shall transfer to the Client. The Developer retains no ownership rights 
+         after final payment.
+         5. LIMITATION OF LIABILITY
+         Developer's total liability under this Agreement shall not exceed the total amount paid 
+         for Phase 1 development. Performance of the software is subject to hardware limitations 
+         and system configuration.
+                                          2025/02/15
+         CLIENT SIGNATURE: ________________________________
+                                          2025/02/15
+         DEVELOPER SIGNATURE: ________________________________
