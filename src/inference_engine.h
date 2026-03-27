@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <functional>
 #include <cstdint>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -33,6 +34,8 @@ class InferenceEngine {
   bool IsBackendConfigured() const;
   std::string BackendPath() const;
   std::string BackendVersion() const;
+  std::string LastInferenceRoute() const;
+  std::string LastPersistentError() const;
   ModelInfo GetModelInfo() const;
 
   std::string Generate(const std::string& prompt,
@@ -59,6 +62,8 @@ class InferenceEngine {
                                  std::string* err,
                                  int max_tokens,
                                  const std::string& grammar) const;
+  void UpdateLastInferenceTelemetry(const std::string& route,
+                                    const std::string& persistent_error) const;
 
   std::filesystem::path loaded_model_;
   std::uint64_t model_size_bytes_ = 0;
@@ -67,4 +72,7 @@ class InferenceEngine {
   std::string backend_version_;
   bool backend_configured_ = false;
   bool loaded_ = false;
+  mutable std::mutex telemetry_mu_;
+  mutable std::string last_inference_route_ = "none";
+  mutable std::string last_persistent_error_;
 };

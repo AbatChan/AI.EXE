@@ -31,6 +31,19 @@ bool FileExists(const std::filesystem::path &p) {
          std::filesystem::is_regular_file(p, ec);
 }
 
+bool IsTruthyEnv(const char *value) {
+  if (!value || value[0] == '\0') {
+    return false;
+  }
+
+  std::string normalized(value);
+  std::transform(
+      normalized.begin(), normalized.end(), normalized.begin(),
+      [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  return normalized == "1" || normalized == "true" || normalized == "yes" ||
+         normalized == "on";
+}
+
 bool LooksLikeProjectRoot(const std::filesystem::path &p) {
   std::error_code ec_html;
   const bool has_ui =
@@ -1118,7 +1131,16 @@ std::string StatusToJson(const WebRuntimeStatus &s) {
       << "\"backendSelfTest\":\"" << EscapeJson(s.backend_selftest_details)
       << "\","
       << "\"backendVersion\":\"" << EscapeJson(s.backend_version) << "\","
-      << "\"lastError\":\"" << EscapeJson(s.last_error) << "\""
+      << "\"lastError\":\"" << EscapeJson(s.last_error) << "\","
+      << "\"lastInferenceRoute\":\"" << EscapeJson(s.last_inference_route)
+      << "\","
+      << "\"lastPersistentError\":\"" << EscapeJson(s.last_persistent_error)
+      << "\","
+      << "\"lastCompletionStatus\":\"" << EscapeJson(s.last_completion_status)
+      << "\","
+      << "\"lastCompletionLikelyTruncated\":"
+      << (s.last_completion_likely_truncated ? "true" : "false") << ","
+      << "\"lastCompletionMaxTokens\":" << s.last_completion_max_tokens
       << "}";
   return oss.str();
 }
@@ -1262,7 +1284,10 @@ std::string BuildStreamEvent(const std::string &id, bool done,
 
 - (void)initializeRuntime {
   std::string runtime_err;
-  _runtime.Initialize(ResolveRuntimeRoot(_loadedHtmlPath), true, &runtime_err);
+  const bool force_cpu =
+      IsTruthyEnv(std::getenv("AI_EXE_FORCE_CPU"));
+  _runtime.Initialize(ResolveRuntimeRoot(_loadedHtmlPath), force_cpu,
+                      &runtime_err);
   _runtimeInitError = runtime_err;
 }
 
@@ -1554,6 +1579,8 @@ std::string BuildStreamEvent(const std::string &id, bool done,
     }
   } else if (action == "workspaceNewProject") {
     // Create a new project folder in ~/Downloads and set it as root.
+    NSString *requestedName =
+        [NSString stringWithUTF8String:ExtractJsonStringField(requestJson, "name").c_str()];
     NSString *dlDir = [NSSearchPathForDirectoriesInDomains(
         NSDownloadsDirectory, NSUserDomainMask, YES) firstObject];
     if (!dlDir) {
@@ -1564,8 +1591,35 @@ std::string BuildStreamEvent(const std::string &id, bool done,
       NSDateFormatter *fmt = [[NSDateFormatter alloc] init];
       [fmt setDateFormat:@"yyyy-MM-dd"];
       NSString *dateSuffix = [fmt stringFromDate:[NSDate date]];
+      NSString *cleanName = @"";
+      if (requestedName.length > 0) {
+        NSCharacterSet *allowed = [NSCharacterSet characterSetWithCharactersInString:
+            @"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 -_"];
+        NSMutableString *filtered = [NSMutableString string];
+        BOOL lastWasSpace = NO;
+        for (NSUInteger i = 0; i < requestedName.length; i++) {
+          unichar c = [requestedName characterAtIndex:i];
+          if ([allowed characterIsMember:c]) {
+            if (c == ' ' || c == '-' || c == '_') {
+              if (filtered.length > 0 && !lastWasSpace) {
+                [filtered appendString:@" "];
+                lastWasSpace = YES;
+              }
+            } else {
+              [filtered appendFormat:@"%C", c];
+              lastWasSpace = NO;
+            }
+          }
+        }
+        cleanName = [[filtered stringByTrimmingCharactersInSet:
+            [NSCharacterSet whitespaceCharacterSet]] substringToIndex:
+            MIN((NSUInteger)48, [[filtered stringByTrimmingCharactersInSet:
+            [NSCharacterSet whitespaceCharacterSet]] length])];
+      }
       NSString *baseName =
-          [NSString stringWithFormat:@"New Project %@", dateSuffix];
+          cleanName.length > 0
+            ? cleanName
+            : [NSString stringWithFormat:@"New Project %@", dateSuffix];
       NSString *folderPath = [dlDir stringByAppendingPathComponent:baseName];
       NSFileManager *fm = [NSFileManager defaultManager];
       int counter = 1;

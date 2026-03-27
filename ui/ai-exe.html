@@ -5,7 +5,10 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>AI.EXE</title>
+  <link rel="stylesheet" href="vendor/katex/katex.min.css">
+  <link rel="stylesheet" href="vendor/texmath/texmath.css">
   <link rel="stylesheet" href="ai-exe.css">
+  <script src="vendor/codemirror/file-editor.bundle.js" data-codemirror-bundle="true"></script>
 </head>
 
 <body>
@@ -197,9 +200,36 @@
       <div class="file-viewer hidden" id="fileViewer">
         <div class="file-viewer-toolbar" id="fileViewerToolbar">
           <span class="fv-filename" id="fvFilename"></span>
-          <span class="fv-meta" id="fvMeta"></span>
+          <div class="file-viewer-search hidden" id="fileViewerSearch">
+            <input class="file-viewer-search-input" id="fileViewerSearchInput" type="text" placeholder="Find in file">
+            <span class="file-viewer-search-count" id="fileViewerSearchCount"></span>
+            <button class="file-viewer-search-btn" id="fileViewerSearchPrev" type="button" aria-label="Previous match">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="15 18 9 12 15 6"></polyline>
+              </svg>
+            </button>
+            <button class="file-viewer-search-btn" id="fileViewerSearchNext" type="button" aria-label="Next match">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="9 18 15 12 9 6"></polyline>
+              </svg>
+            </button>
+            <button class="file-viewer-search-btn" id="fileViewerSearchClose" type="button" aria-label="Close find">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M18 6 6 18"></path>
+                <path d="m6 6 12 12"></path>
+              </svg>
+            </button>
+          </div>
         </div>
-        <textarea class="file-viewer-editor" id="fileViewerEditor" spellcheck="false" readonly></textarea>
+        <div class="file-viewer-surface" id="fileViewerSurface">
+          <div class="file-viewer-cm-host" id="fileViewerCmHost"></div>
+          <div class="file-viewer-gutter" id="fileViewerGutter" aria-hidden="true">
+            <div class="file-viewer-gutter-lines" id="fileViewerGutterLines"></div>
+          </div>
+          <div class="file-viewer-current-line" id="fileViewerCurrentLine" aria-hidden="true"></div>
+          <pre class="file-viewer-highlight" id="fileViewerHighlight" aria-hidden="true"><code id="fileViewerHighlightCode"></code></pre>
+          <textarea class="file-viewer-editor" id="fileViewerEditor" spellcheck="false" wrap="off"></textarea>
+        </div>
       </div>
 
       <div class="artifact-browser hidden" id="artifactBrowser">
@@ -258,6 +288,13 @@
       </div>
 
       <div class="bottom-bar">
+        <button class="chat-scroll-down-btn hidden" id="chatScrollDownBtn" type="button" aria-label="">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round"
+            stroke-linejoin="round">
+            <path d="M12 6v12"></path>
+            <path d="m7 13 5 5 5-5"></path>
+          </svg>
+        </button>
         <!--<div class="beta-label">∷ ALWAYS IN BETA ∷</div>-->
         <div class="input-row" id="inputRow">
           <div class="dictation-bar hidden" id="dictationBar">
@@ -325,14 +362,14 @@
                   </svg>
                   <span class="close-on-hover">×</span><span class="label-on-hover">Attach</span>
                 </button>
-                <button class="iact-btn hidden" id="agentBtn" type="button" title="Developer agent mode">
+                <button class="iact-btn hidden" id="agentBtn" type="button" aria-label="Agent">
                   <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <polyline points="16 18 22 12 16 6"></polyline>
                     <polyline points="8 6 2 12 8 18"></polyline>
                   </svg>
                   <span class="close-on-hover">×</span><span class="label-on-hover">Agent</span>
                 </button>
-                <button class="iact-btn hidden" id="thinkBtn" type="button" title="Think mode">
+                <button class="iact-btn hidden" id="thinkBtn" type="button" aria-label="Think">
                   <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <path d="M9.5 18h5"></path>
                     <path d="M10 22h4"></path>
@@ -512,7 +549,7 @@
 
   <div class="modal-backdrop" id="chatActionBackdrop" aria-hidden="true">
     <div class="chat-modal" role="dialog" aria-modal="true" aria-label="Chat settings">
-      <button class="modal-x-btn" id="chatCancelBtn" type="button" aria-label="Close chat options">
+      <button class="modal-x-btn" id="chatCancelBtn" type="button" aria-label="Close">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <line x1="18" y1="6" x2="6" y2="18"></line>
           <line x1="6" y1="6" x2="18" y2="18"></line>
@@ -533,7 +570,7 @@
 
   <div class="modal-backdrop" id="authBackdrop" aria-hidden="true">
     <div class="chat-modal" role="dialog" aria-modal="true" aria-label="Account access">
-      <button class="modal-x-btn" id="authCancelBtn" type="button" aria-label="Close account modal">
+      <button class="modal-x-btn" id="authCancelBtn" type="button" aria-label="Close">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <line x1="18" y1="6" x2="6" y2="18"></line>
           <line x1="6" y1="6" x2="18" y2="18"></line>
@@ -569,7 +606,7 @@
 
   <div class="modal-backdrop" id="settingsBackdrop" aria-hidden="true">
     <div class="chat-modal settings-modal" role="dialog" aria-modal="true" aria-label="Runtime settings">
-      <button class="modal-x-btn" id="settingsCloseBtn" type="button" aria-label="Close settings modal">
+      <button class="modal-x-btn" id="settingsCloseBtn" type="button" aria-label="Close">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <line x1="18" y1="6" x2="6" y2="18"></line>
           <line x1="6" y1="6" x2="18" y2="18"></line>
@@ -585,6 +622,21 @@
 
       <div class="chat-modal-label">Backend Status</div>
       <div class="settings-kv" id="settingsBackendStatus">unknown</div>
+
+      <div class="chat-modal-label">Inference Provider</div>
+      <select class="chat-modal-input" id="settingsProviderSelect">
+        <option value="local">Local Model</option>
+        <option value="huggingface">Hugging Face Test</option>
+      </select>
+
+      <div id="settingsHfFieldsWrap" style="display:none;">
+        <div class="chat-modal-label">Hugging Face Token</div>
+        <input class="chat-modal-input" id="settingsHfTokenInput" type="password" placeholder="hf_...">
+
+        <div class="chat-modal-label">Hugging Face Model</div>
+        <input class="chat-modal-input" id="settingsHfModelInput" type="text"
+          placeholder="Qwen/Qwen2.5-Coder-32B-Instruct:fastest">
+      </div>
 
       <div id="settingsModelUrlWrap">
         <div class="chat-modal-label">Model Download URL (Optional)</div>
@@ -615,7 +667,7 @@
   <!-- PLUS MODAL -->
   <div class="modal-backdrop" id="plusModalBackdrop" aria-hidden="true">
     <div class="chat-modal plus-modal" role="dialog" aria-modal="true" aria-label="Add options">
-      <button class="modal-x-btn" id="plusModalCloseBtn" type="button" aria-label="Close add modal">
+      <button class="modal-x-btn" id="plusModalCloseBtn" type="button" aria-label="Close">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <line x1="18" y1="6" x2="6" y2="18"></line>
           <line x1="6" y1="6" x2="18" y2="18"></line>
@@ -665,7 +717,7 @@
   <!-- URL CONTEXT MODAL -->
   <div class="modal-backdrop" id="urlContextBackdrop" aria-hidden="true">
     <div class="chat-modal" role="dialog" aria-modal="true" aria-label="Add URL or context">
-      <button class="modal-x-btn" id="urlContextCancelBtn" type="button" aria-label="Close URL/context modal">
+      <button class="modal-x-btn" id="urlContextCancelBtn" type="button" aria-label="Close">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <line x1="18" y1="6" x2="6" y2="18"></line>
           <line x1="6" y1="6" x2="18" y2="18"></line>
@@ -690,6 +742,9 @@
   <input id="workspaceImportInput" type="file" multiple style="display:none">
   <input id="workspaceImportFolderInput" type="file" webkitdirectory directory multiple style="display:none">
   <script src="ui-config.js"></script>
+  <script src="vendor/markdown-it/markdown-it.min.js"></script>
+  <script src="vendor/katex/katex.min.js"></script>
+  <script src="vendor/texmath/texmath.js"></script>
   <script src="ai-exe.js"></script>
 </body>
 
