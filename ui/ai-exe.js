@@ -11,6 +11,7 @@ const chatsStoragePrefix = 'ai_exe_chats_v3';
 const activeChatStoragePrefix = 'ai_exe_active_chat_v2';
 const artifactsStoragePrefix = 'ai_exe_artifacts_v1';
 const workspaceStoragePrefix = 'ai_exe_workspace_v1';
+const fileTabsStoragePrefix = 'ai_exe_file_tabs_v1';
 const authStorageKey = 'ai_exe_auth_v1';
 const settingsStorageKey = 'ai_exe_settings_v1';
 if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.aiexe) {
@@ -616,6 +617,7 @@ const mainInput = document.getElementById('mainInput');
 const inputRow = document.getElementById('inputRow');
 const sendBtn = document.getElementById('sendBtn');
 const continueBtn = document.getElementById('continueBtn');
+const chatScrollDownBtn = document.getElementById('chatScrollDownBtn');
 const canvasBtn = document.getElementById('canvasBtn');
 const attachBtn = document.getElementById('attachBtn');
 const agentBtn = document.getElementById('agentBtn');
@@ -651,9 +653,21 @@ const workspacePathLabel = document.getElementById('workspacePathLabel');
 const middleTabBar = document.getElementById('middleTabBar');
 const tabChatEl = document.getElementById('tabChat');
 const fileViewer = document.getElementById('fileViewer');
+const fileViewerSurface = document.getElementById('fileViewerSurface');
+const fileViewerCmHost = document.getElementById('fileViewerCmHost');
+const fileViewerGutter = document.getElementById('fileViewerGutter');
+const fileViewerGutterLines = document.getElementById('fileViewerGutterLines');
+const fileViewerCurrentLine = document.getElementById('fileViewerCurrentLine');
+const fileViewerHighlight = document.getElementById('fileViewerHighlight');
+const fileViewerHighlightCode = document.getElementById('fileViewerHighlightCode');
 const fileViewerEditor = document.getElementById('fileViewerEditor');
 const fvFilename = document.getElementById('fvFilename');
-const fvMeta = document.getElementById('fvMeta');
+const fileViewerSearch = document.getElementById('fileViewerSearch');
+const fileViewerSearchInput = document.getElementById('fileViewerSearchInput');
+const fileViewerSearchCount = document.getElementById('fileViewerSearchCount');
+const fileViewerSearchPrev = document.getElementById('fileViewerSearchPrev');
+const fileViewerSearchNext = document.getElementById('fileViewerSearchNext');
+const fileViewerSearchClose = document.getElementById('fileViewerSearchClose');
 const workspaceBackBtn = document.getElementById('workspaceBackBtn');
 const expImportBtn = document.getElementById('expImportBtn');
 const expImportMenu = document.getElementById('expImportMenu');
@@ -689,6 +703,10 @@ const settingsBackdrop = document.getElementById('settingsBackdrop');
 const settingsModelPath = document.getElementById('settingsModelPath');
 const settingsModelHash = document.getElementById('settingsModelHash');
 const settingsBackendStatus = document.getElementById('settingsBackendStatus');
+const settingsProviderSelect = document.getElementById('settingsProviderSelect');
+const settingsHfFieldsWrap = document.getElementById('settingsHfFieldsWrap');
+const settingsHfTokenInput = document.getElementById('settingsHfTokenInput');
+const settingsHfModelInput = document.getElementById('settingsHfModelInput');
 const settingsModelUrlInput = document.getElementById('settingsModelUrlInput');
 const settingsKeepModelChk = document.getElementById('settingsKeepModelChk');
 const settingsDebugTraceChk = document.getElementById('settingsDebugTraceChk');
@@ -740,7 +758,13 @@ let thinkingStartedAt = 0;
 let activeStreamRow = null;
 let activeStreamRawText = '';
 let activeStreamText = '';
+let activeAgentStreamState = null;
 let liveStreamRenderRaf = 0;
+let liveStreamRenderTimer = 0;
+let liveStreamLastRenderAt = 0;
+let lastRenderedChatId = '';
+let chatAutoScrollPinned = true;
+let chatProgrammaticScrollDepth = 0;
 let canvasModeEnabled = false;
 let developerAgentEnabled = false;
 let thinkModeEnabled = false;
@@ -766,6 +790,14 @@ let middleViewMode = 'chat';
 let artifactDetailKey = '';
 let artifactDetailOrigin = 'artifacts';
 let openFileTabs = [];
+let fileTabsPersistTimer = 0;
+let fileTabsRestoreToken = 0;
+const FILE_VIEWER_HIGHLIGHT_LIMIT_BYTES = 256 * 1024;
+const FILE_VIEWER_LINE_TOP_PADDING = 16;
+let fileViewerSearchState = { query: '', matches: [], index: -1 };
+let fileViewerCodeMirror = null;
+let suppressFileViewerEditorChange = false;
+let fileViewerCodeMirrorReady = null;
 let activeTabId = 'chat';
 let inNewChatMode = false;
 let deleteArmed = false;
@@ -783,6 +815,9 @@ let authStore = {
   currentUser: null,
 };
 let appSettings = {
+  inferenceProvider: 'local',
+  huggingFaceToken: '',
+  huggingFaceModel: 'Qwen/Qwen2.5-Coder-32B-Instruct:fastest',
   modelUrl: '',
   keepModelOnUpdate: true,
   debugTraceEnabled: false,
@@ -792,11 +827,20 @@ const debugTraceMaxEntries = 120;
 const maxArtifactContentChars = 12000;
 const maxPendingAttachments = 6;
 const maxAttachmentTextChars = 7000;
-const agentMaxSteps = 8;
+const agentMaxSteps = 10;
 const agentMaxToolOutputChars = 3200;
-const agentStepTimeoutMs = 25000;
-const agentTotalTimeoutMs = 90000;
+const agentStepTimeoutMs = 45000;
+const agentTotalTimeoutMs = 180000;
+const agentDecisionMaxTokens = 220;
+const agentFileContentMaxTokens = 2400;
+const agentPlannerEndpoint = 'http://127.0.0.1:8765/plan';
+const agentPlannerRequestTimeoutMs = 7000;
+const agentFileGenerationRequestTimeoutMs = 120000;
+const chatAutoScrollThresholdPx = 56;
+const autoContinuationMaxPasses = 1;
+const continuationTailChars = 700;
 const promptTemplateCache = new Map();
+const autoContinuingChatIds = new Set();
 const promptTemplateDefaults = {
   chat_main: [
     '<|im_start|>system',
@@ -813,10 +857,22 @@ const promptTemplateDefaults = {
     '',
     'Response style:',
     '- Prioritize the latest user message and use chat context naturally.',
-    '- Friendly and human; occasional emoji is okay (not every reply).',
+    '- Friendly, conversational, and professional by default.',
+    '- Sound human and natural, like a knowledgeable expert talking casually to a real person.',
+    '- Warm and relatable is good; occasional emoji is okay when it feels natural, but not in every reply.',
     '- Concise by default; expand with detail when asked.',
     '- Use bullet points only when they improve clarity.',
     '- Reply in the same language as the user.',
+    '- Always answer the latest user message directly; avoid generic filler.',
+    '- Prefer natural everyday wording over assistant-style stock phrasing.',
+    '- When explaining how you know something from chat context, say it simply and naturally.',
+    '- For short casual questions, answer like a normal helpful person would, not like a helpdesk script.',
+    '- Be authentic and honest; it is okay to disagree politely or be direct when needed.',
+    '- Use simple language and practical examples when helpful.',
+    '- Format lists, code, and math for markdown-style chat display.',
+    '- Prefer plain-text math or markdown-friendly steps over LaTeX delimiters unless the user explicitly asks for LaTeX.',
+    '- Ask at most one short follow-up question only when it is genuinely helpful or necessary.',
+    '- Do not add follow-up questions for simple greetings, direct factual questions, or when the answer is already complete.',
     '{{CHAT_NAME_INSTRUCTION}}',
     '{{THINK_INSTRUCTION}}',
     '',
@@ -834,37 +890,41 @@ const promptTemplateDefaults = {
     '<|im_start|>assistant',
   ].join('\n'),
   developer_agent_decision: [
-    'SYSTEM: You are AI.EXE Developer Agent for local project work.',
-    'Goal: complete the user task by using tools for file/folder operations, then reply to user.',
-    'Return ONE JSON object only. No markdown, no prose outside JSON.',
-    'JSON keys required: action, message, tool, path, content, src_path, dst_path.',
-    'If ready for user response: action="final", put full reply in message, set tool="none", leave other fields empty.',
-    'If a tool step is required: action="tool", put a short reason in message, set one tool and required fields.',
-    'Available tools:',
-    '- list_dir(path): list folder entries',
-    '- read_file(path): read file text',
-    '- write_file(path, content): create/update text file',
-    '- mkdir(path): create folder',
-    '- move(src_path, dst_path): rename or move file/folder',
-    '- delete(path): move item to Trash (only when user explicitly asked to delete/remove)',
+    'Return exactly one JSON object. No prose. No markdown.',
+    'Keys: action, message, tool, path, content, src_path, dst_path',
+    'action: "tool" or "final"',
+    'tool: "none" | "new_project" | "list_dir" | "read_file" | "write_file" | "mkdir" | "move" | "delete"',
     'Rules:',
-    '- Use workspace absolute paths like /src/main.js',
-    '- Never invent tool output; rely on tool results',
-    '- Prefer minimal, incremental edits',
-    '- If user asks to run/test commands, explain it is not available yet in agent tools and provide exact commands they can run manually',
+    '- One step only.',
+    '- TOOL_RESULTS are true. Do not repeat successful steps.',
+    '- If new_project already succeeded in TOOL_RESULTS, do not call new_project again.',
+    '- If the task is a new project/app/site/game, create the workspace first, then create the missing files and folders.',
+    '- If a workspace is already open and the task could apply to it, inspect and use the current workspace before creating a new one.',
+    '- Only create a new workspace immediately when the user clearly asks for a new project/app/site/game from scratch.',
+    '- If the user did not specify the file tree, choose a conventional one yourself.',
+    '- Use write_file to choose the target file path. The app can generate full file contents separately.',
+    '- Do not use move unless an existing source really exists.',
+    '- Never ask the user for file contents you can write yourself.',
+    '- Never finalize while anything in PENDING_REQUIREMENTS is still missing.',
+    '- For new software projects, include a README with basic run instructions by default.',
+    '- Use concise project and file names from the task\'s core feature nouns.',
+    '- If the user did not specify a stack, prefer a self-contained offline implementation with the fewest external runtime requirements.',
     'Agent step: {{AGENT_STEP}}/{{AGENT_MAX_STEPS}}',
-    'Current selection: {{CURRENT_SELECTION}} ({{CURRENT_SELECTION_KIND}})',
-    'CHAT_HISTORY: {{CHAT_HISTORY}}',
+    'Current workspace: {{CURRENT_WORKSPACE_ROOT}}',
+    'Selection: {{CURRENT_SELECTION}} ({{CURRENT_SELECTION_KIND}})',
+    'PENDING_REQUIREMENTS:',
+    '{{PENDING_REQUIREMENTS}}',
     'TOOL_RESULTS:',
     '{{TOOL_RESULTS}}',
-    'TASK: {{TASK}}',
+    'TASK:',
+    '{{TASK}}',
     'JSON:',
   ].join('\n'),
 };
 const agentDecisionGrammar = [
   'root ::= ws "{" ws "\\"action\\"" ws ":" ws action ws "," ws "\\"message\\"" ws ":" ws string ws "," ws "\\"tool\\"" ws ":" ws tool ws "," ws "\\"path\\"" ws ":" ws string ws "," ws "\\"content\\"" ws ":" ws string ws "," ws "\\"src_path\\"" ws ":" ws string ws "," ws "\\"dst_path\\"" ws ":" ws string ws "}" ws',
   'action ::= "\\"final\\"" | "\\"tool\\""',
-  'tool ::= "\\"none\\"" | "\\"list_dir\\"" | "\\"read_file\\"" | "\\"write_file\\"" | "\\"mkdir\\"" | "\\"move\\"" | "\\"delete\\""',
+  'tool ::= "\\"none\\"" | "\\"new_project\\"" | "\\"list_dir\\"" | "\\"read_file\\"" | "\\"write_file\\"" | "\\"mkdir\\"" | "\\"move\\"" | "\\"delete\\""',
   'string ::= "\\"" chars "\\""',
   'chars ::= "" | char chars',
   'char ::= [^"\\\\\\x00-\\x1F] | "\\\\" (["\\\\/bfnrt] | "u" hex hex hex hex)',
@@ -875,6 +935,882 @@ const attachAcceptTypes = '.txt,.md,.markdown,.json,.yaml,.yml,.csv,.tsv,.log,.j
 
 function nowTs() {
   return Date.now();
+}
+
+function getScrollBottomDistance(element) {
+  if (!element) return 0;
+  return Math.max(0, element.scrollHeight - element.scrollTop - element.clientHeight);
+}
+
+function isElementNearBottom(element, thresholdPx = chatAutoScrollThresholdPx) {
+  if (!element) return true;
+  return getScrollBottomDistance(element) <= Math.max(0, Number(thresholdPx) || 0);
+}
+
+function shouldShowChatScrollDownButton() {
+  if (!chatArea || middleViewMode !== 'chat') return false;
+  if (inNewChatMode) return false;
+  if (getScrollBottomDistance(chatArea) <= Math.max(72, chatAutoScrollThresholdPx)) return false;
+  return chatArea.scrollHeight > (chatArea.clientHeight + 24);
+}
+
+function updateChatScrollDownButtonVisibility() {
+  if (!chatScrollDownBtn) return;
+  const show = shouldShowChatScrollDownButton();
+  chatScrollDownBtn.classList.toggle('visible', show);
+  chatScrollDownBtn.classList.toggle('hidden', !show);
+  chatScrollDownBtn.disabled = !show;
+  chatScrollDownBtn.setAttribute('aria-hidden', show ? 'false' : 'true');
+}
+
+function withProgrammaticChatScroll(fn) {
+  if (typeof fn !== 'function') return;
+  chatProgrammaticScrollDepth += 1;
+  try {
+    fn();
+  } finally {
+    requestAnimationFrame(() => {
+      chatProgrammaticScrollDepth = Math.max(0, chatProgrammaticScrollDepth - 1);
+      chatAutoScrollPinned = isElementNearBottom(chatArea);
+    });
+  }
+}
+
+function scrollChatToBottom(force = false) {
+  if (!chatArea) return;
+  if (!force && !chatAutoScrollPinned) {
+    updateChatScrollDownButtonVisibility();
+    return;
+  }
+  withProgrammaticChatScroll(() => {
+    chatArea.scrollTop = chatArea.scrollHeight;
+  });
+  chatAutoScrollPinned = true;
+  updateChatScrollDownButtonVisibility();
+}
+
+function restoreChatScrollPosition(distanceFromBottom = 0) {
+  if (!chatArea) return;
+  const safeDistance = Math.max(0, Number(distanceFromBottom) || 0);
+  withProgrammaticChatScroll(() => {
+    chatArea.scrollTop = Math.max(0, chatArea.scrollHeight - chatArea.clientHeight - safeDistance);
+  });
+  updateChatScrollDownButtonVisibility();
+}
+
+function syncStreamingCodeBlockScroll(container, force = false) {
+  if (!container) return;
+  if (!force && !chatAutoScrollPinned) return;
+  container.querySelectorAll('.code-block').forEach((block) => {
+    block.scrollTop = block.scrollHeight;
+  });
+}
+
+if (chatArea) {
+  chatArea.addEventListener('scroll', () => {
+    if (chatProgrammaticScrollDepth > 0) return;
+    chatAutoScrollPinned = isElementNearBottom(chatArea);
+    updateChatScrollDownButtonVisibility();
+  }, { passive: true });
+}
+
+if (chatScrollDownBtn) {
+  chatScrollDownBtn.addEventListener('click', () => {
+    if (!chatArea) return;
+    chatAutoScrollPinned = true;
+    withProgrammaticChatScroll(() => {
+      chatArea.scrollTo({
+        top: chatArea.scrollHeight,
+        behavior: 'smooth',
+      });
+    });
+    updateChatScrollDownButtonVisibility();
+  });
+}
+
+function makeMessageActionIcon(kind) {
+  if (kind === 'edit') {
+    return `
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M12 20h9"></path>
+        <path d="M16.5 3.5a2.1 2.1 0 1 1 3 3L7 19l-4 1 1-4z"></path>
+      </svg>
+    `;
+  }
+  if (kind === 'retry') {
+    return `
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M3 12a9 9 0 1 0 3-6.7"></path>
+        <polyline points="3 3 3 9 9 9"></polyline>
+      </svg>
+    `;
+  }
+  return `
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <rect x="9" y="9" width="13" height="13" rx="2"></rect>
+      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+    </svg>
+  `;
+}
+
+function applyCustomTooltip(target, fallback = '') {
+  if (!target) return;
+  if (
+    target.classList.contains('panel-resizer')
+    || target.classList.contains('sidebar-toggle')
+    || target.classList.contains('explorer-help-btn')
+    || target.classList.contains('iact-btn')
+    || target.classList.contains('send-btn')
+  ) {
+    return;
+  }
+  const text = String(
+    target.dataset.tooltip
+    || target.getAttribute('title')
+    || target.getAttribute('aria-label')
+    || fallback
+    || ''
+  ).trim();
+  if (!text) return;
+  target.dataset.tooltip = text;
+  target.classList.add('ui-tooltip-anchor');
+  if (target.hasAttribute('title')) {
+    target.removeAttribute('title');
+  }
+}
+
+function hydrateCustomTooltips(root = document) {
+  if (!root || typeof root.querySelectorAll !== 'function') return;
+  const selectors = [
+    'button[title]',
+    'button[aria-label]',
+    '.col-icon[title]',
+    '.avatar-btn[title]',
+    '.artifact-open-chat-btn[title]',
+    '.artifact-delete-btn[title]',
+  ];
+  root.querySelectorAll(selectors.join(',')).forEach((node) => {
+    if (!(node instanceof HTMLElement)) return;
+    applyCustomTooltip(node);
+  });
+}
+
+let globalTooltipEl = null;
+let globalTooltipLabelEl = null;
+let globalTooltipArrowEl = null;
+let activeTooltipTarget = null;
+
+function ensureGlobalTooltip() {
+  if (globalTooltipEl && globalTooltipLabelEl && globalTooltipArrowEl) {
+    return globalTooltipEl;
+  }
+  const el = document.createElement('div');
+  el.className = 'ui-global-tooltip';
+  el.setAttribute('aria-hidden', 'true');
+  const label = document.createElement('div');
+  label.className = 'ui-global-tooltip-label';
+  const arrow = document.createElement('div');
+  arrow.className = 'ui-global-tooltip-arrow';
+  el.appendChild(label);
+  el.appendChild(arrow);
+  document.body.appendChild(el);
+  globalTooltipEl = el;
+  globalTooltipLabelEl = label;
+  globalTooltipArrowEl = arrow;
+  return el;
+}
+
+function hideGlobalTooltip() {
+  activeTooltipTarget = null;
+  if (!globalTooltipEl) return;
+  globalTooltipEl.classList.remove('visible');
+  globalTooltipEl.setAttribute('aria-hidden', 'true');
+}
+
+function updateGlobalTooltipPosition(target) {
+  if (!target) return;
+  if (!(target instanceof HTMLElement) || !target.isConnected) {
+    hideGlobalTooltip();
+    return;
+  }
+  const tooltip = ensureGlobalTooltip();
+  const text = String(target.dataset.tooltip || '').trim();
+  if (!text) {
+    hideGlobalTooltip();
+    return;
+  }
+
+  globalTooltipLabelEl.textContent = text;
+  tooltip.dataset.placement = 'bottom';
+  tooltip.style.left = '-9999px';
+  tooltip.style.top = '-9999px';
+  tooltip.classList.add('visible');
+  tooltip.setAttribute('aria-hidden', 'false');
+
+  const rect = target.getBoundingClientRect();
+  const tipRect = tooltip.getBoundingClientRect();
+  const viewportW = window.innerWidth || document.documentElement.clientWidth || 0;
+  const viewportH = window.innerHeight || document.documentElement.clientHeight || 0;
+  const gap = 12;
+  const edge = 10;
+  const arrowInset = 14;
+
+  const spaceTop = rect.top;
+  const spaceBottom = viewportH - rect.bottom;
+  const spaceLeft = rect.left;
+  const spaceRight = viewportW - rect.right;
+
+  let placement = 'bottom';
+  if (spaceBottom >= tipRect.height + gap) {
+    placement = 'bottom';
+  } else if (spaceTop >= tipRect.height + gap) {
+    placement = 'top';
+  } else if (spaceRight >= tipRect.width + gap) {
+    placement = 'right';
+  } else if (spaceLeft >= tipRect.width + gap) {
+    placement = 'left';
+  } else {
+    placement = spaceBottom >= spaceTop ? 'bottom' : 'top';
+  }
+
+  let left = 0;
+  let top = 0;
+  let arrowX = tipRect.width / 2;
+  let arrowY = tipRect.height / 2;
+
+  if (placement === 'top' || placement === 'bottom') {
+    left = rect.left + (rect.width / 2) - (tipRect.width / 2);
+    left = Math.min(Math.max(left, edge), Math.max(edge, viewportW - tipRect.width - edge));
+    top = placement === 'top'
+      ? rect.top - tipRect.height - gap
+      : rect.bottom + gap;
+    arrowX = Math.min(Math.max((rect.left + rect.width / 2) - left, arrowInset), tipRect.width - arrowInset);
+  } else {
+    top = rect.top + (rect.height / 2) - (tipRect.height / 2);
+    top = Math.min(Math.max(top, edge), Math.max(edge, viewportH - tipRect.height - edge));
+    left = placement === 'right'
+      ? rect.right + gap
+      : rect.left - tipRect.width - gap;
+    arrowY = Math.min(Math.max((rect.top + rect.height / 2) - top, arrowInset), tipRect.height - arrowInset);
+  }
+
+  tooltip.dataset.placement = placement;
+  tooltip.style.left = `${Math.round(left)}px`;
+  tooltip.style.top = `${Math.round(top)}px`;
+  tooltip.style.setProperty('--tooltip-arrow-x', `${Math.round(arrowX)}px`);
+  tooltip.style.setProperty('--tooltip-arrow-y', `${Math.round(arrowY)}px`);
+}
+
+function showGlobalTooltip(target) {
+  if (!target || !(target instanceof HTMLElement)) return;
+  activeTooltipTarget = target;
+  updateGlobalTooltipPosition(target);
+}
+
+function initGlobalTooltipSystem() {
+  ensureGlobalTooltip();
+
+  document.addEventListener('mousemove', (evt) => {
+    const target = evt.target instanceof Element
+      ? evt.target.closest('.ui-tooltip-anchor[data-tooltip]')
+      : null;
+    if (!(target instanceof HTMLElement)) {
+      if (activeTooltipTarget) hideGlobalTooltip();
+      return;
+    }
+    if (target === activeTooltipTarget) return;
+    showGlobalTooltip(target);
+  });
+
+  document.addEventListener('mouseleave', () => {
+    hideGlobalTooltip();
+  }, true);
+
+  document.addEventListener('pointerdown', () => {
+    hideGlobalTooltip();
+  });
+
+  document.addEventListener('focusin', (evt) => {
+    const target = evt.target instanceof Element
+      ? evt.target.closest('.ui-tooltip-anchor[data-tooltip]')
+      : null;
+    if (!(target instanceof HTMLElement)) return;
+    showGlobalTooltip(target);
+  });
+
+  document.addEventListener('focusout', (evt) => {
+    if (!activeTooltipTarget) return;
+    const related = evt.relatedTarget instanceof Node ? evt.relatedTarget : null;
+    if (related && activeTooltipTarget.contains(related)) return;
+    hideGlobalTooltip();
+  });
+
+  window.addEventListener('resize', () => {
+    if (activeTooltipTarget) {
+      updateGlobalTooltipPosition(activeTooltipTarget);
+    }
+  });
+
+  window.addEventListener('scroll', () => {
+    if (activeTooltipTarget) {
+      updateGlobalTooltipPosition(activeTooltipTarget);
+    }
+  }, true);
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      hideGlobalTooltip();
+      persistFileTabsStateNow();
+    }
+  });
+}
+
+function placeComposerText(text) {
+  if (!mainInput) return;
+  const value = String(text || '').trim();
+  if (!value) return;
+  if (activeChatId) {
+    enterChatView();
+  }
+  mainInput.value = value;
+  autoResize(mainInput);
+  mainInput.focus();
+  const end = mainInput.value.length;
+  if (typeof mainInput.setSelectionRange === 'function') {
+    mainInput.setSelectionRange(end, end);
+  }
+}
+
+let editingMessageState = null;
+
+function makeBranchGroupId() {
+  return `branch_${nowTs().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function makeThreadId() {
+  return `thread_${nowTs().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function cloneThreadState(source, overrides = {}) {
+  const thread = source && typeof source === 'object' ? source : {};
+  return {
+    id: String(thread.id || makeThreadId()),
+    messages: Array.isArray(thread.messages) ? thread.messages.map((msg) => (msg ? { ...msg } : msg)) : [],
+    branchLinks: normalizeBranchLinks(thread.branchLinks),
+    pendingBranchLink: thread.pendingBranchLink && typeof thread.pendingBranchLink === 'object'
+      ? {
+          anchorTs: Number(thread.pendingBranchLink.anchorTs) || 0,
+          groupId: String(thread.pendingBranchLink.groupId || '').trim(),
+          order: Number(thread.pendingBranchLink.order) || 0,
+          kind: String(thread.pendingBranchLink.kind || '').trim().toLowerCase(),
+        }
+      : null,
+    needsContinue: Boolean(thread.needsContinue),
+    ...overrides,
+  };
+}
+
+function ensureChatThreadState(chat) {
+  if (!chat || typeof chat !== 'object') return null;
+  if (!Array.isArray(chat.threads) || !chat.threads.length) {
+    const baseThread = cloneThreadState({
+      id: makeThreadId(),
+      messages: Array.isArray(chat.messages) ? chat.messages : [],
+      branchLinks: chat.branchLinks,
+      pendingBranchLink: chat.pendingBranchLink,
+      needsContinue: chat.needsContinue,
+    });
+    chat.threads = [baseThread];
+    chat.activeThreadId = baseThread.id;
+  }
+  const active = chat.threads.find((thread) => String(thread.id || '') === String(chat.activeThreadId || '')) || chat.threads[0];
+  if (!active) return null;
+  if (!chat.activeThreadId || String(chat.activeThreadId) !== String(active.id)) {
+    chat.activeThreadId = active.id;
+  }
+  chat.messages = Array.isArray(active.messages) ? active.messages : [];
+  chat.branchLinks = normalizeBranchLinks(active.branchLinks);
+  if (active.pendingBranchLink && typeof active.pendingBranchLink === 'object') {
+    chat.pendingBranchLink = {
+      anchorTs: Number(active.pendingBranchLink.anchorTs) || 0,
+      groupId: String(active.pendingBranchLink.groupId || '').trim(),
+      order: Number(active.pendingBranchLink.order) || 0,
+      kind: String(active.pendingBranchLink.kind || '').trim().toLowerCase(),
+    };
+  } else {
+    delete chat.pendingBranchLink;
+  }
+  chat.needsContinue = Boolean(active.needsContinue);
+  return active;
+}
+
+function getChatActiveThread(chat) {
+  return ensureChatThreadState(chat);
+}
+
+function syncChatFromThread(chat, thread) {
+  if (!chat || !thread) return;
+  chat.activeThreadId = String(thread.id || '');
+  chat.messages = Array.isArray(thread.messages) ? thread.messages : [];
+  chat.branchLinks = normalizeBranchLinks(thread.branchLinks);
+  if (thread.pendingBranchLink && typeof thread.pendingBranchLink === 'object') {
+    chat.pendingBranchLink = {
+      anchorTs: Number(thread.pendingBranchLink.anchorTs) || 0,
+      groupId: String(thread.pendingBranchLink.groupId || '').trim(),
+      order: Number(thread.pendingBranchLink.order) || 0,
+      kind: String(thread.pendingBranchLink.kind || '').trim().toLowerCase(),
+    };
+  } else {
+    delete chat.pendingBranchLink;
+  }
+  chat.needsContinue = Boolean(thread.needsContinue);
+}
+
+function normalizeBranchLinks(list) {
+  return Array.from(list || [])
+    .map((item) => {
+      if (!item || typeof item !== 'object') return null;
+      const messageTs = Number(item.messageTs) || 0;
+      const groupId = String(item.groupId || '').trim();
+      const order = Number.isFinite(Number(item.order)) ? Number(item.order) : 0;
+      const kind = String(item.kind || '').trim().toLowerCase();
+      if (!messageTs || !groupId) return null;
+      return { messageTs, groupId, order, kind: kind === 'retry' ? 'retry' : (kind === 'edit' ? 'edit' : '') };
+    })
+    .filter(Boolean);
+}
+
+function getChatBranchLink(chat, messageTs) {
+  const target = chat && typeof chat === 'object' ? chat : null;
+  if (!target || !Array.isArray(target.branchLinks)) return null;
+  const targetTs = Number(messageTs) || 0;
+  return target.branchLinks.find((item) => Number(item && item.messageTs) === targetTs) || null;
+}
+
+function setChatBranchLink(chat, messageTs, groupId, order, kind = '') {
+  const target = chat && typeof chat === 'object' ? chat : null;
+  if (!target) return;
+  const targetTs = Number(messageTs) || 0;
+  const cleanGroupId = String(groupId || '').trim();
+  const cleanKind = String(kind || '').trim().toLowerCase();
+  if (!targetTs || !cleanGroupId) return;
+  const links = normalizeBranchLinks(target.branchLinks);
+  const next = links.filter((item) => Number(item.messageTs) !== targetTs);
+  next.push({
+    messageTs: targetTs,
+    groupId: cleanGroupId,
+    order: Number.isFinite(Number(order)) ? Number(order) : 0,
+    kind: cleanKind === 'retry' ? 'retry' : (cleanKind === 'edit' ? 'edit' : ''),
+  });
+  target.branchLinks = next.sort((a, b) => a.messageTs - b.messageTs);
+}
+
+function getBranchLinkMap(thread) {
+  const map = new Map();
+  normalizeBranchLinks(thread && thread.branchLinks).forEach((item) => {
+    map.set(Number(item.messageTs) || 0, item);
+  });
+  return map;
+}
+
+function areThreadsCompatibleBeforeMessage(referenceThread, candidateThread, messageTs) {
+  const cutoffTs = Number(messageTs) || 0;
+  if (!cutoffTs) return true;
+  const refMap = getBranchLinkMap(referenceThread);
+  const candidateMap = getBranchLinkMap(candidateThread);
+  const keys = new Set([
+    ...Array.from(refMap.keys()),
+    ...Array.from(candidateMap.keys()),
+  ]);
+  for (const key of keys) {
+    if (!(Number(key) < cutoffTs)) continue;
+    const ref = refMap.get(key) || null;
+    const candidate = candidateMap.get(key) || null;
+    if (!ref && !candidate) continue;
+    if (!ref || !candidate) return false;
+    if (String(ref.groupId || '') !== String(candidate.groupId || '')) return false;
+    if ((Number(ref.order) || 0) !== (Number(candidate.order) || 0)) return false;
+    if (String(ref.kind || '') !== String(candidate.kind || '')) return false;
+  }
+  return true;
+}
+
+function getMessageBranchState(chatId, messageTs, expectedKind = '') {
+  const chat = findChatById(chatId);
+  if (!chat) return { siblings: [], currentIndex: -1, total: 0 };
+  const activeThread = getChatActiveThread(chat);
+  if (!activeThread) return { siblings: [], currentIndex: -1, total: 0 };
+  const link = getChatBranchLink(activeThread, messageTs);
+  if (!link) return { siblings: [], currentIndex: -1, total: 0 };
+  const cleanKind = String(expectedKind || '').trim().toLowerCase();
+  if (cleanKind && link.kind !== cleanKind) return { siblings: [], currentIndex: -1, total: 0 };
+  const recencyOfThread = (thread) => {
+    const msgs = Array.isArray(thread && thread.messages) ? thread.messages : [];
+    if (!msgs.length) return 0;
+    return msgs.reduce((max, msg) => Math.max(max, Number(msg && msg.ts) || 0), 0);
+  };
+  const variantsByOrder = new Map();
+  Array.from(chat.threads || []).forEach((entry) => {
+    if (!areThreadsCompatibleBeforeMessage(activeThread, entry, messageTs)) {
+      return;
+    }
+    const siblingLink = getChatBranchLink(entry, messageTs);
+    if (!siblingLink || siblingLink.groupId !== link.groupId || (cleanKind && siblingLink.kind !== cleanKind)) {
+      return;
+    }
+    const orderKey = Number(siblingLink.order) || 0;
+    const existing = variantsByOrder.get(orderKey);
+    if (!existing) {
+      variantsByOrder.set(orderKey, entry);
+      return;
+    }
+    if (String(entry.id || '') === String(activeThread.id || '')) {
+      variantsByOrder.set(orderKey, entry);
+      return;
+    }
+    if (String(existing.id || '') === String(activeThread.id || '')) {
+      return;
+    }
+    if (recencyOfThread(entry) > recencyOfThread(existing)) {
+      variantsByOrder.set(orderKey, entry);
+    }
+  });
+  const siblings = Array.from(variantsByOrder.entries())
+    .sort((a, b) => a[0] - b[0])
+    .map((entry) => entry[1]);
+  const currentOrder = Number(link.order) || 0;
+  return {
+    siblings,
+    currentIndex: siblings.findIndex((entry) => {
+      const siblingLink = getChatBranchLink(entry, messageTs);
+      return (Number(siblingLink && siblingLink.order) || 0) === currentOrder;
+    }),
+    total: siblings.length,
+  };
+}
+
+function navigateMessageBranch(chatId, messageTs, direction, expectedKind = '') {
+  const state = getMessageBranchState(chatId, messageTs, expectedKind);
+  if (state.total < 2 || state.currentIndex < 0) return;
+  const nextIndex = state.currentIndex + Number(direction || 0);
+  if (nextIndex < 0 || nextIndex >= state.total) return;
+  const chat = findChatById(chatId);
+  const nextThread = state.siblings[nextIndex];
+  if (!chat || !nextThread) return;
+  syncChatFromThread(chat, nextThread);
+  chat.updatedAt = nowTs();
+  saveChats();
+  loadHistory(chat.id);
+}
+
+function buildBranchNavigator(chatId, messageTs, expectedKind = '') {
+  const branchState = getMessageBranchState(chatId, messageTs, expectedKind);
+  if (branchState.total < 2 || branchState.currentIndex < 0) return null;
+
+  const nav = document.createElement('div');
+  nav.className = 'msg-branch-nav';
+
+  const prevBtn = document.createElement('button');
+  prevBtn.className = 'msg-branch-btn';
+  prevBtn.type = 'button';
+  prevBtn.setAttribute('aria-label', 'Previous branch');
+  prevBtn.disabled = branchState.currentIndex <= 0;
+  prevBtn.innerHTML = `
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M15 18 9 12 15 6"></path>
+    </svg>
+  `;
+  prevBtn.addEventListener('click', (evt) => {
+    evt.preventDefault();
+    evt.stopPropagation();
+    navigateMessageBranch(chatId, messageTs, -1, expectedKind);
+  });
+  nav.appendChild(prevBtn);
+
+  const label = document.createElement('span');
+  label.className = 'msg-branch-label';
+  label.textContent = `${branchState.currentIndex + 1}/${branchState.total}`;
+  nav.appendChild(label);
+
+  const nextBtn = document.createElement('button');
+  nextBtn.className = 'msg-branch-btn';
+  nextBtn.type = 'button';
+  nextBtn.setAttribute('aria-label', 'Next branch');
+  nextBtn.disabled = branchState.currentIndex >= branchState.total - 1;
+  nextBtn.innerHTML = `
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M9 18 15 12 9 6"></path>
+    </svg>
+  `;
+  nextBtn.addEventListener('click', (evt) => {
+    evt.preventDefault();
+    evt.stopPropagation();
+    navigateMessageBranch(chatId, messageTs, 1, expectedKind);
+  });
+  nav.appendChild(nextBtn);
+
+  return nav;
+}
+
+function findFallbackRetryAnchorTs(chatId, messageTs) {
+  const chat = findChatById(chatId);
+  const activeThread = getChatActiveThread(chat);
+  if (!chat || !activeThread || !Array.isArray(activeThread.messages)) return 0;
+  const targetTs = Number(messageTs) || 0;
+  const aiMessages = activeThread.messages.filter((msg) => msg && msg.role === 'ai');
+  if (!aiMessages.length) return 0;
+  const lastAi = aiMessages[aiMessages.length - 1];
+  if (!lastAi || Number(lastAi.ts) !== targetTs) return 0;
+  const retryLinks = normalizeBranchLinks(activeThread.branchLinks).filter((item) => item.kind === 'retry');
+  if (!retryLinks.length) return 0;
+  const anchorsAlreadyUsed = new Set(
+    aiMessages
+      .map((msg) => Number(msg && msg.branchAnchorTs) || 0)
+      .filter((value) => value > 0),
+  );
+  const directMatch = retryLinks.find((item) => Number(item.messageTs) === targetTs);
+  if (directMatch) return Number(directMatch.messageTs) || 0;
+  const candidate = [...retryLinks]
+    .sort((a, b) => (Number(b.order) || 0) - (Number(a.order) || 0))
+    .find((item) => !anchorsAlreadyUsed.has(Number(item.messageTs) || 0));
+  return Number(candidate && candidate.messageTs) || 0;
+}
+
+function isEditingUserMessage(chatId, messageTs) {
+  return Boolean(
+    editingMessageState
+    && String(editingMessageState.chatId || '') === String(chatId || '')
+    && Number(editingMessageState.messageTs) === Number(messageTs)
+  );
+}
+
+function focusInlineMessageEditor(chatId, messageTs) {
+  if (!chatArea) return;
+  const selector = `.msg.user[data-msg-ts="${Number(messageTs) || 0}"] .msg-edit-textarea`;
+  const textarea = chatArea.querySelector(selector);
+  if (!(textarea instanceof HTMLTextAreaElement)) return;
+  autoResizeInlineMessageEditor(textarea);
+  textarea.focus();
+  const end = textarea.value.length;
+  if (typeof textarea.setSelectionRange === 'function') {
+    textarea.setSelectionRange(end, end);
+  }
+}
+
+function enterMessageEditMode(chatId, messageTs) {
+  if (pendingInferenceCount > 0) return;
+  const chat = findChatById(chatId);
+  if (!chat || !Array.isArray(chat.messages)) return;
+  const target = chat.messages.find((msg) => msg && msg.role === 'user' && Number(msg.ts) === Number(messageTs));
+  if (!target) return;
+  editingMessageState = {
+    chatId: String(chatId || ''),
+    messageTs: Number(messageTs) || 0,
+    draft: String(target.text || ''),
+  };
+  if (activeChatId !== String(chat.id || '')) {
+    activeChatId = String(chat.id || '');
+    inNewChatMode = false;
+  }
+  renderActiveChat();
+  requestAnimationFrame(() => focusInlineMessageEditor(chatId, messageTs));
+}
+
+function cancelMessageEditMode() {
+  if (!editingMessageState) return;
+  const chatId = String(editingMessageState.chatId || '');
+  editingMessageState = null;
+  if (activeChatId === chatId && !inNewChatMode) {
+    renderActiveChat();
+  }
+}
+
+function updateEditingMessageDraft(value) {
+  if (!editingMessageState) return;
+  editingMessageState.draft = String(value || '');
+}
+
+function autoResizeInlineMessageEditor(el) {
+  if (!(el instanceof HTMLTextAreaElement)) return;
+  el.style.height = 'auto';
+  el.style.height = `${Math.min(el.scrollHeight, 132)}px`;
+}
+
+function editUserMessage(chatId, messageTs) {
+  enterMessageEditMode(chatId, messageTs);
+}
+
+function saveEditedUserMessage(chatId, messageTs, nextText) {
+  if (pendingInferenceCount > 0) return;
+  maybeStopDictationForSend();
+  if (!ensureSignedIn()) return;
+  const chat = findChatById(chatId);
+  const activeThread = getChatActiveThread(chat);
+  if (!chat || !activeThread || !Array.isArray(activeThread.messages)) return;
+  const userIndex = activeThread.messages.findIndex((msg) => msg && msg.role === 'user' && Number(msg.ts) === Number(messageTs));
+  if (userIndex < 0) return;
+
+  const cleaned = String(nextText || '').trim();
+  if (!cleaned) return;
+
+  const target = activeThread.messages[userIndex];
+  const original = String(target && target.text || '').trim();
+  if (!target) return;
+
+  editingMessageState = null;
+  if (cleaned === original) {
+    if (activeChatId === String(chat.id || '') && !inNewChatMode) {
+      renderActiveChat();
+    }
+    return;
+  }
+
+  const targetTs = Number(messageTs) || 0;
+  let branchLink = getChatBranchLink(activeThread, targetTs);
+  if (!branchLink) {
+    branchLink = {
+      groupId: makeBranchGroupId(),
+      order: 0,
+    };
+    setChatBranchLink(activeThread, targetTs, branchLink.groupId, 0, 'edit');
+  }
+
+  const siblingOrders = Array.from(chat.threads || [])
+    .map((entry) => {
+      const link = getChatBranchLink(entry, targetTs);
+      if (!link || link.groupId !== branchLink.groupId) return -1;
+      return Number(link.order) || 0;
+    })
+    .filter((value) => value >= 0);
+  const nextOrder = siblingOrders.length > 0 ? Math.max(...siblingOrders) + 1 : 1;
+
+  const branchedMessages = activeThread.messages.slice(0, userIndex + 1).map((msg) => {
+    if (!msg) return msg;
+    if (Number(msg.ts) === targetTs && msg.role === 'user') {
+      return { ...msg, text: cleaned };
+    }
+    return { ...msg };
+  });
+
+  const branchedThread = cloneThreadState(activeThread, {
+    id: makeThreadId(),
+    messages: branchedMessages,
+    needsContinue: false,
+    pendingBranchLink: null,
+  });
+  setChatBranchLink(branchedThread, targetTs, branchLink.groupId, nextOrder, 'edit');
+  chat.threads.push(branchedThread);
+  syncChatFromThread(chat, branchedThread);
+  activeChatId = chat.id;
+  inNewChatMode = false;
+  chat.updatedAt = nowTs();
+  saveChats();
+  renderHistory();
+  renderSidebarCounts();
+  renderActiveChat();
+
+  beginInferenceRequest();
+  chatAutoScrollPinned = true;
+  void requestAssistantReply(chat.id, buildPromptWithInputAugments(cleaned), true);
+}
+
+function isRetryableAssistantMessage(chatId, messageTs) {
+  const chat = findChatById(chatId);
+  if (!chat || !Array.isArray(chat.messages)) return false;
+  for (let i = chat.messages.length - 1; i >= 0; i -= 1) {
+    const msg = chat.messages[i];
+    if (msg && msg.role === 'ai') {
+      return Number(msg.ts) === Number(messageTs);
+    }
+  }
+  return false;
+}
+
+function removeArtifactsForChatAfter(chatId, minMessageTs) {
+  const chatKey = String(chatId || '');
+  const cutoff = Number(minMessageTs) || 0;
+  const before = artifacts.length;
+  artifacts = artifacts.filter((item) => !(item && String(item.chatId || '') === chatKey && Number(item.messageTs || 0) > cutoff));
+  if (artifacts.length !== before) {
+    saveArtifacts();
+    renderArtifacts();
+  }
+}
+
+function retryAssistantMessage(chatId, messageTs) {
+  if (pendingInferenceCount > 0) return;
+  maybeStopDictationForSend();
+  if (!ensureSignedIn()) return;
+  const chat = findChatById(chatId);
+  const activeThread = getChatActiveThread(chat);
+  if (!chat || !activeThread || !Array.isArray(activeThread.messages)) return;
+  const aiIndex = activeThread.messages.findIndex((msg) => msg && msg.role === 'ai' && Number(msg.ts) === Number(messageTs));
+  if (aiIndex <= 0) return;
+  let userIndex = -1;
+  for (let i = aiIndex - 1; i >= 0; i -= 1) {
+    if (activeThread.messages[i] && activeThread.messages[i].role === 'user') {
+      userIndex = i;
+      break;
+    }
+  }
+  if (userIndex < 0) return;
+
+  const userMessage = String(activeThread.messages[userIndex].text || '').trim();
+  if (!userMessage) return;
+
+  const originalAiMessage = activeThread.messages[aiIndex];
+  const targetTs = Number(originalAiMessage && originalAiMessage.branchAnchorTs) || Number(messageTs) || 0;
+  if (originalAiMessage && !Number(originalAiMessage.branchAnchorTs)) {
+    originalAiMessage.branchAnchorTs = targetTs;
+  }
+  let branchLink = getChatBranchLink(activeThread, targetTs);
+  if (!branchLink) {
+    branchLink = {
+      groupId: makeBranchGroupId(),
+      order: 0,
+      kind: 'retry',
+    };
+    setChatBranchLink(activeThread, targetTs, branchLink.groupId, 0, 'retry');
+  } else if (branchLink.kind !== 'retry') {
+    setChatBranchLink(activeThread, targetTs, branchLink.groupId, branchLink.order, 'retry');
+    branchLink = getChatBranchLink(activeThread, targetTs) || branchLink;
+  }
+
+  const siblingOrders = Array.from(chat.threads || [])
+    .map((entry) => {
+      const link = getChatBranchLink(entry, targetTs);
+      if (!link || link.groupId !== branchLink.groupId) return -1;
+      return Number(link.order) || 0;
+    })
+    .filter((value) => value >= 0);
+  const nextOrder = siblingOrders.length > 0 ? Math.max(...siblingOrders) + 1 : 1;
+
+  const branchedMessages = activeThread.messages.slice(0, userIndex + 1).map((msg) => msg ? { ...msg } : msg);
+  const branchedThread = cloneThreadState(activeThread, {
+    id: makeThreadId(),
+    messages: branchedMessages,
+    needsContinue: false,
+    pendingBranchLink: {
+      anchorTs: targetTs,
+      groupId: branchLink.groupId,
+      order: nextOrder,
+      kind: 'retry',
+    },
+  });
+
+  chat.threads.push(branchedThread);
+  syncChatFromThread(chat, branchedThread);
+  activeChatId = chat.id;
+  inNewChatMode = false;
+  chat.updatedAt = nowTs();
+  saveChats();
+  renderHistory();
+  renderSidebarCounts();
+  renderActiveChat();
+
+  beginInferenceRequest();
+  chatAutoScrollPinned = true;
+  void requestAssistantReply(chat.id, buildPromptWithInputAugments(userMessage), true);
 }
 
 function makeChatId() {
@@ -1100,6 +2036,39 @@ function handleAddUrlContext() {
 let searchQuery = '';
 let searchBlurTimer = null;
 
+function getWorkspaceSearchEntries() {
+  const entries = [];
+  const seen = new Set();
+
+  if (workspaceRootName) {
+    entries.push({
+      type: 'project',
+      name: workspaceRootName,
+      path: '/',
+      sub: 'Current project',
+    });
+  }
+
+  workspaceTreeState.forEach((state) => {
+    const children = Array.isArray(state && state.children) ? state.children : [];
+    children.forEach((entry) => {
+      const path = normalizeWorkspacePath(entry && entry.path);
+      if (!path || seen.has(path)) return;
+      seen.add(path);
+      const kind = entry && entry.kind === 'file' ? 'file' : 'folder';
+      const name = String((entry && entry.name) || workspaceBaseName(path) || (kind === 'file' ? 'file' : 'folder')).trim();
+      entries.push({
+        type: kind,
+        name,
+        path,
+        sub: path,
+      });
+    });
+  });
+
+  return entries;
+}
+
 function renderSearchDropdown(query) {
   if (!searchDropdown) return;
   const q = String(query || '').toLowerCase().trim();
@@ -1116,7 +2085,15 @@ function renderSearchDropdown(query) {
     String(a.name || '').toLowerCase().includes(q) ||
     String(a.content || '').toLowerCase().includes(q)
   )).slice(0, 4);
-  if (matchedChats.length === 0 && matchedArtifacts.length === 0) {
+  const workspaceMatches = getWorkspaceSearchEntries().filter((entry) => entry && (
+    String(entry.name || '').toLowerCase().includes(q) ||
+    String(entry.path || '').toLowerCase().includes(q) ||
+    String(entry.sub || '').toLowerCase().includes(q)
+  ));
+  const matchedProjects = workspaceMatches.filter((entry) => entry.type === 'project').slice(0, 2);
+  const matchedFiles = workspaceMatches.filter((entry) => entry.type === 'file').slice(0, 5);
+  const matchedFolders = workspaceMatches.filter((entry) => entry.type === 'folder').slice(0, 4);
+  if (matchedChats.length === 0 && matchedArtifacts.length === 0 && matchedProjects.length === 0 && matchedFiles.length === 0 && matchedFolders.length === 0) {
     searchDropdown.innerHTML = '<div class="search-no-results">No results</div>';
     searchDropdown.classList.add('open');
     return;
@@ -1140,10 +2117,28 @@ function renderSearchDropdown(query) {
       html += `<button class="search-result-item" data-type="artifact" data-key="${escapeHtml(makeArtifactKey(a))}" type="button"><svg class="search-result-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M8 10h8"/><path d="M8 14h5"/></svg><div class="search-result-text"><div class="search-result-title">${escapeHtml(a.name || 'Artifact')}</div><div class="search-result-sub">${escapeHtml(typeLabel)}</div></div></button>`;
     });
   }
+  if (matchedProjects.length > 0) {
+    html += '<div class="search-section-label">PROJECTS</div>';
+    matchedProjects.forEach((entry) => {
+      html += `<button class="search-result-item" data-type="project" data-path="${escapeHtml(entry.path)}" type="button"><svg class="search-result-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7h6l2 2h10v10a2 2 0 0 1-2 2H3z"></path><path d="M3 7V5a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v2"></path></svg><div class="search-result-text"><div class="search-result-title">${escapeHtml(entry.name || 'Project')}</div><div class="search-result-sub">${escapeHtml(entry.sub || 'Current project')}</div></div></button>`;
+    });
+  }
+  if (matchedFiles.length > 0) {
+    html += '<div class="search-section-label">FILES</div>';
+    matchedFiles.forEach((entry) => {
+      html += `<button class="search-result-item" data-type="file" data-path="${escapeHtml(entry.path)}" data-name="${escapeHtml(entry.name)}" type="button"><svg class="search-result-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg><div class="search-result-text"><div class="search-result-title">${escapeHtml(entry.name || 'File')}</div><div class="search-result-sub">${escapeHtml(entry.sub || entry.path || '')}</div></div></button>`;
+    });
+  }
+  if (matchedFolders.length > 0) {
+    html += '<div class="search-section-label">FOLDERS</div>';
+    matchedFolders.forEach((entry) => {
+      html += `<button class="search-result-item" data-type="folder" data-path="${escapeHtml(entry.path)}" type="button"><svg class="search-result-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7h6l2 2h10v10a2 2 0 0 1-2 2H3z"></path><path d="M3 7V5a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v2"></path></svg><div class="search-result-text"><div class="search-result-title">${escapeHtml(entry.name || 'Folder')}</div><div class="search-result-sub">${escapeHtml(entry.sub || entry.path || '')}</div></div></button>`;
+    });
+  }
   searchDropdown.innerHTML = html;
   searchDropdown.classList.add('open');
   searchDropdown.querySelectorAll('.search-result-item').forEach((btn) => {
-    btn.addEventListener('click', () => {
+    btn.addEventListener('click', async () => {
       if (btn.dataset.type === 'chat') {
         const targetTs = Number(btn.dataset.ts) || 0;
         const targetQuery = String(q || '');
@@ -1152,6 +2147,19 @@ function renderSearchDropdown(query) {
       } else if (btn.dataset.type === 'artifact') {
         openArtifactDetail(btn.dataset.key, 'artifacts');
         setTimeout(() => flashArtifactSearchResult(), 60);
+      } else if (btn.dataset.type === 'project') {
+        setWorkspaceSelection('/', 'folder');
+        await renderArtifacts();
+      } else if (btn.dataset.type === 'file') {
+        const path = normalizeWorkspacePath(btn.dataset.path || '/');
+        const name = String(btn.dataset.name || '').trim();
+        setWorkspaceSelection(path, 'file');
+        await renderArtifacts();
+        await openFileTab(path, name);
+      } else if (btn.dataset.type === 'folder') {
+        const path = normalizeWorkspacePath(btn.dataset.path || '/');
+        setWorkspaceSelection(path, 'folder');
+        await renderArtifacts();
       }
       if (searchInput) searchInput.value = '';
       searchQuery = '';
@@ -1381,20 +2389,20 @@ function updateInputActionChips() {
   if (canvasBtn) {
     canvasBtn.classList.toggle('hidden', !canvasModeEnabled);
     canvasBtn.classList.toggle('active', canvasModeEnabled);
-    canvasBtn.title = canvasModeEnabled ? 'Disable canvas mode' : 'Canvas mode off';
     canvasBtn.setAttribute('aria-pressed', canvasModeEnabled ? 'true' : 'false');
+    canvasBtn.setAttribute('aria-label', canvasModeEnabled ? 'Canvas on' : 'Canvas');
   }
   if (agentBtn) {
     agentBtn.classList.toggle('hidden', !developerAgentEnabled);
     agentBtn.classList.toggle('active', developerAgentEnabled);
-    agentBtn.title = developerAgentEnabled ? 'Disable developer agent mode' : 'Developer agent mode off';
     agentBtn.setAttribute('aria-pressed', developerAgentEnabled ? 'true' : 'false');
+    agentBtn.setAttribute('aria-label', developerAgentEnabled ? 'Agent on' : 'Agent');
   }
   if (thinkBtn) {
     thinkBtn.classList.toggle('hidden', !thinkModeEnabled);
     thinkBtn.classList.toggle('active', thinkModeEnabled);
-    thinkBtn.title = thinkModeEnabled ? 'Disable think mode' : 'Think mode off';
     thinkBtn.setAttribute('aria-pressed', thinkModeEnabled ? 'true' : 'false');
+    thinkBtn.setAttribute('aria-label', thinkModeEnabled ? 'Think on' : 'Think');
   }
   // Keep plus-menu actions visually neutral; active state is shown by chips only.
   if (menuThinkBtn) menuThinkBtn.setAttribute('aria-pressed', thinkModeEnabled ? 'true' : 'false');
@@ -1403,7 +2411,7 @@ function updateInputActionChips() {
     contextBtn.classList.toggle('hidden', !hasContext);
     contextBtn.classList.toggle('active', hasContext);
     contextBtn.setAttribute('aria-pressed', hasContext ? 'true' : 'false');
-    contextBtn.title = hasContext ? 'Remove context note from this chat' : 'No context note';
+    contextBtn.setAttribute('aria-label', hasContext ? 'Context on' : 'Context');
   }
   updateAttachButtonState();
   syncComposerLayoutState();
@@ -1842,19 +2850,216 @@ function makeUniqueChatName(baseTitle, chatId, sourceText = '') {
   return base;
 }
 
+function stripInlineChatNameMarkers(text, options = {}) {
+  const trimLeading = options && options.trimLeading !== false;
+  let out = String(text || '')
+    .replace(/\[\[\s*\*?\*?(?:CHAT_NAME\s*:\s*)?[^\]]+?\*?\*?\s*\]\]\s*\n?/gi, '')
+    .replace(/\n{3,}/g, '\n\n');
+  if (trimLeading) {
+    out = out.trimStart();
+  }
+  return out;
+}
+
+function stripLeadingInlineChatNameFragment(text, chatId = '') {
+  const src = String(text || '');
+  if (!src) return src;
+  const chat = chatId ? findChatById(chatId) : null;
+  if (!shouldInlineNameChatResponse(chat)) {
+    return src;
+  }
+  if (!/^\s*\[/.test(src)) {
+    return src;
+  }
+
+  const newlineIdx = src.indexOf('\n');
+  if (newlineIdx < 0) {
+    return '';
+  }
+
+  const firstLine = src.slice(0, newlineIdx).trim();
+  if (/^\[\[$/.test(firstLine) ||
+      /^\[\[/.test(firstLine) ||
+      /^\[$/.test(firstLine) ||
+      /chat_name/i.test(firstLine)) {
+    return src.slice(newlineIdx + 1).trimStart();
+  }
+
+  return src;
+}
+
+function stripLeadingLlamaEngineNoise(text, options = {}) {
+  const trimLeading = options && options.trimLeading !== false;
+  const src = String(text || '');
+  if (!src) return src;
+
+  const isBannerGlyphLine = (line) => {
+    const t = String(line || '').trim();
+    if (!t) return false;
+    for (const ch of t) {
+      if (/\s/.test(ch)) continue;
+      if (ch.charCodeAt(0) >= 128) continue;
+      return false;
+    }
+    return true;
+  };
+
+  const isNoiseLine = (line) => {
+    const t = String(line || '').trim();
+    if (!t) return true;
+    const lower = t.toLowerCase();
+    if (
+      lower.startsWith('ggml_') ||
+      lower.startsWith('llama_') ||
+      lower.startsWith('load_tensors:') ||
+      lower.startsWith('main: ') ||
+      lower === 'loading model...' ||
+      lower === 'available commands:' ||
+      lower.startsWith('build      :') ||
+      lower.startsWith('model      :') ||
+      lower.startsWith('modalities :') ||
+      lower.startsWith('/exit') ||
+      lower.startsWith('/regen') ||
+      lower.startsWith('/clear') ||
+      lower.startsWith('/read') ||
+      lower.startsWith('> ')
+    ) {
+      return true;
+    }
+    return isBannerGlyphLine(t);
+  };
+
+  const lines = src.split('\n');
+  const kept = [];
+  let keeping = false;
+  for (const line of lines) {
+    if (!keeping && isNoiseLine(line)) {
+      continue;
+    }
+    if (!keeping && !String(line || '').trim()) {
+      continue;
+    }
+    keeping = true;
+    kept.push(line);
+  }
+
+  const out = kept.join('\n');
+  return trimLeading ? out.trimStart() : out;
+}
+
+function stripLeadingAiExePromptLeak(text, options = {}) {
+  const trimLeading = options && options.trimLeading !== false;
+  let src = stripLeadingLlamaEngineNoise(String(text || ''), { trimLeading: false });
+  if (!src) return src;
+
+  const lines = src.split('\n');
+  const firstNonEmpty = lines.findIndex((line) => String(line || '').trim());
+  if (firstNonEmpty < 0) return trimLeading ? src.trimStart() : src;
+
+  const firstLine = String(lines[firstNonEmpty] || '').trim();
+  if (!/^You are AI\.EXE\b/i.test(firstLine) && !/^<\|im_start\|>system$/i.test(firstLine)) {
+    return trimLeading ? src.trimStart() : src;
+  }
+
+  const promptTrailerPatterns = [
+    /\.\.\.\s+\(truncated\)/gi,
+    /\.\.\.\(truncated\)/gi,
+  ];
+  for (const pattern of promptTrailerPatterns) {
+    const matches = [...src.matchAll(pattern)];
+    if (!matches.length) continue;
+    const last = matches[matches.length - 1];
+    const end = Number(last.index || 0) + String(last[0] || '').length;
+    const suffix = src.slice(end).trimStart();
+    if (suffix) {
+      return trimLeading ? suffix.trimStart() : suffix;
+    }
+  }
+
+  let skippingPrompt = true;
+  let inKnownSection = false;
+  const kept = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = String(lines[i] || '');
+    const t = line.trim();
+    const lower = t.toLowerCase();
+
+    if (!skippingPrompt) {
+      kept.push(line);
+      continue;
+    }
+
+    if (!t) {
+      continue;
+    }
+
+    if (
+      /^<\|im_(?:start|end)\|>.*$/i.test(t) ||
+      /^you are ai\.exe\b/i.test(t) ||
+      /^(identity|core capabilities|response style|safety)\s*:\s*$/i.test(t) ||
+      /^current_user\s*:/i.test(t) ||
+      /^mandatory output prefix for this response\s*:/i.test(t) ||
+      /^title rules\s*:/i.test(t) ||
+      /^(think_mode|canvas_mode)\s*:/i.test(t)
+    ) {
+      inKnownSection = true;
+      continue;
+    }
+
+    if (inKnownSection && /^-\s+/.test(t)) {
+      continue;
+    }
+
+    if (inKnownSection && /^[1-9]\.\s+/.test(t)) {
+      continue;
+    }
+
+    skippingPrompt = false;
+    kept.push(line);
+  }
+
+  const out = kept.join('\n');
+  return trimLeading ? out.trimStart() : out;
+}
+
+function shouldInlineNameChatResponse(chat) {
+  if (!chat || chat.customName || !chat.isNaming) return false;
+  const userMessages = Array.isArray(chat.messages)
+    ? chat.messages.filter((msg) => msg && msg.role === 'user' && String(msg.text || '').trim())
+    : [];
+  const firstUserText = userMessages.length > 0 ? String(userMessages[0].text || '').trim() : '';
+  if (isGreetingLikeChatSeed(firstUserText)) {
+    return false;
+  }
+  const aiCount = Array.isArray(chat.messages)
+    ? chat.messages.filter((msg) => msg && msg.role === 'ai' && String(msg.text || '').trim()).length
+    : 0;
+  return aiCount === 0;
+}
+
+function isGreetingLikeChatSeed(text) {
+  const clean = String(text || '').trim().toLowerCase();
+  if (!clean) return true;
+  const normalized = clean
+    .replace(/[!?.,]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!normalized) return true;
+  if (normalized.split(' ').length > 5) return false;
+  return /^(hi|hello|hey|hey there|hello there|yo|sup|what'?s up|whats up|howdy|good morning|good afternoon|good evening|how are you|how are you doing|who are you)$/.test(normalized);
+}
+
 function extractInlineChatNameMarker(text) {
   const src = String(text || '');
   if (!src) return { title: '', cleaned: '' };
-  const marker = src.match(/\[\[\s*CHAT_NAME\s*:\s*([^\]\n]{1,90})\s*\]\]/i);
+  // Match [[CHAT_NAME: title]] OR just [[title]] with or without markdown, allow line breaks
+  const marker = src.match(/\[\[\s*\*?\*?(?:CHAT_NAME\s*:\s*)?([^\]]+?)\*?\*?\s*\]\]/i);
   if (!marker) {
     return { title: '', cleaned: src };
   }
   const rawTitle = String(marker[1] || '').trim();
   const title = sanitizeAutoTitle(rawTitle);
-  const cleaned = src
-    .replace(/\[\[\s*CHAT_NAME\s*:\s*[^\]\n]{1,90}\s*\]\]\s*\n?/gi, '')
-    .replace(/\n{3,}/g, '\n\n')
-    .trimStart();
+  const cleaned = stripInlineChatNameMarkers(src);
   return { title, cleaned };
 }
 
@@ -1879,13 +3084,26 @@ function deriveFallbackChatName(chat, assistantText = '') {
   return makeUniqueChatName(candidate, String(chat && chat.id ? chat.id : ''), source);
 }
 
+function resolveChatNamingFallback(chatId, fallbackName = 'New Chat') {
+  const chat = findChatById(chatId);
+  if (!chat || chat.customName || !chat.isNaming) {
+    return false;
+  }
+  chat.name = normalizeChatName(fallbackName || 'New Chat');
+  chat.isNaming = false;
+  chat.updatedAt = nowTs();
+  saveChats();
+  renderHistory();
+  return true;
+}
+
 function applyInlineChatNameFromResponse(chatId, text) {
   const parsed = extractInlineChatNameMarker(text);
   const chat = findChatById(chatId);
   if (!chat) {
     return { text: parsed.cleaned || String(text || '') };
   }
-  if (!chat.customName && chat.isNaming) {
+  if (shouldInlineNameChatResponse(chat)) {
     const validTitle = Boolean(parsed.title);
     if (validTitle) {
       chat.name = makeUniqueChatName(parsed.title, chatId, parsed.title);
@@ -2199,12 +3417,27 @@ function formatBytes(bytes) {
 }
 
 function loadAppSettings() {
-  appSettings = { modelUrl: '', keepModelOnUpdate: true, debugTraceEnabled: false };
+  appSettings = {
+    inferenceProvider: 'local',
+    huggingFaceToken: '',
+    huggingFaceModel: 'Qwen/Qwen2.5-Coder-32B-Instruct:fastest',
+    modelUrl: '',
+    keepModelOnUpdate: true,
+    debugTraceEnabled: false,
+  };
   try {
     const raw = localStorage.getItem(settingsStorageKey);
     if (!raw) return;
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== 'object') return;
+    if (typeof parsed.inferenceProvider === 'string') {
+      const provider = parsed.inferenceProvider.trim().toLowerCase();
+      appSettings.inferenceProvider = provider === 'huggingface' ? 'huggingface' : 'local';
+    }
+    if (typeof parsed.huggingFaceToken === 'string') appSettings.huggingFaceToken = parsed.huggingFaceToken.trim();
+    if (typeof parsed.huggingFaceModel === 'string' && parsed.huggingFaceModel.trim()) {
+      appSettings.huggingFaceModel = parsed.huggingFaceModel.trim();
+    }
     if (typeof parsed.modelUrl === 'string') appSettings.modelUrl = parsed.modelUrl.trim();
     if (typeof parsed.keepModelOnUpdate === 'boolean') appSettings.keepModelOnUpdate = parsed.keepModelOnUpdate;
     if (typeof parsed.debugTraceEnabled === 'boolean') appSettings.debugTraceEnabled = parsed.debugTraceEnabled;
@@ -2215,6 +3448,20 @@ function saveAppSettings() {
   try {
     localStorage.setItem(settingsStorageKey, JSON.stringify(appSettings));
   } catch (_) { }
+}
+
+function isHuggingFaceProviderEnabled() {
+  return String(appSettings && appSettings.inferenceProvider ? appSettings.inferenceProvider : 'local') === 'huggingface';
+}
+
+function syncSettingsProviderUi() {
+  const isHf = settingsProviderSelect && settingsProviderSelect.value === 'huggingface';
+  if (settingsHfFieldsWrap) {
+    settingsHfFieldsWrap.style.display = isHf ? 'block' : 'none';
+  }
+  if (settingsModelUrlInput) {
+    settingsModelUrlInput.disabled = Boolean(isHf);
+  }
 }
 
 function debugPreview(value, maxLen = 99999) {
@@ -2440,6 +3687,7 @@ function cancelActiveInference() {
   const token = activeInferenceRequest;
   if (!token || token.cancelled) return;
   token.cancelled = true;
+  setChatAutoContinuing(String(token.chatId || ''), false);
   pushDebugTrace('request_cancelled', {
     chatId: String(token.chatId || ''),
     streamId: String(token.streamId || ''),
@@ -2448,6 +3696,11 @@ function cancelActiveInference() {
   });
   if (token.streamId) {
     nativeBridge.cancelStream(token.streamId);
+  }
+  if (token.abortController) {
+    try {
+      token.abortController.abort();
+    } catch (_) { }
   }
   clearTypingIndicator();
   const partialRaw = consumeLiveAssistantText();
@@ -2459,6 +3712,8 @@ function cancelActiveInference() {
       chatId: String(token.chatId || ''),
       preview: debugPreview(partialText, 600),
     });
+  } else {
+    resolveChatNamingFallback(String(token.chatId || ''), 'New Chat');
   }
   setThinkingStatus('Cancelled');
   completeInferenceRequest(token);
@@ -2467,6 +3722,118 @@ function cancelActiveInference() {
       setThinkingStatus('');
     }
   }, 900);
+}
+
+async function streamHuggingFaceChatCompletion(prompt, handlers = {}, options = {}) {
+  const token = String(appSettings && appSettings.huggingFaceToken ? appSettings.huggingFaceToken : '').trim();
+  const model = String(appSettings && appSettings.huggingFaceModel ? appSettings.huggingFaceModel : '').trim();
+  if (!token) {
+    return { ok: false, message: 'Hugging Face token is missing in Settings.' };
+  }
+  if (!model) {
+    return { ok: false, message: 'Hugging Face model is missing in Settings.' };
+  }
+
+  const controller = options.abortController instanceof AbortController
+    ? options.abortController
+    : new AbortController();
+  const req = {
+    model,
+    stream: true,
+    messages: [
+      { role: 'user', content: String(prompt || '') },
+    ],
+  };
+  const maxTokens = Math.max(0, Number(options.maxTokens) || 0);
+  if (maxTokens > 0) {
+    req.max_tokens = maxTokens;
+  }
+
+  if (typeof handlers.onStart === 'function') {
+    handlers.onStart(`hf_${Date.now()}`);
+  }
+
+  try {
+    const response = await fetch('https://router.huggingface.co/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(req),
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      const body = await response.text().catch(() => '');
+      return {
+        ok: false,
+        message: `Hugging Face request failed (${response.status}): ${body || response.statusText || 'unknown error'}`,
+      };
+    }
+    if (!response.body) {
+      return { ok: false, message: 'Hugging Face response body is empty.' };
+    }
+
+    let output = '';
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const parts = buffer.split('\n\n');
+      buffer = parts.pop() || '';
+      for (const part of parts) {
+        const lines = String(part || '').split('\n');
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed.startsWith('data:')) continue;
+          const payload = trimmed.slice(5).trim();
+          if (!payload || payload === '[DONE]') continue;
+          let parsed = null;
+          try {
+            parsed = JSON.parse(payload);
+          } catch (_) {
+            continue;
+          }
+          const delta = parsed
+            && Array.isArray(parsed.choices)
+            && parsed.choices[0]
+            && parsed.choices[0].delta
+            && typeof parsed.choices[0].delta.content === 'string'
+            ? parsed.choices[0].delta.content
+            : '';
+          if (!delta) continue;
+          output += delta;
+          if (typeof handlers.onDelta === 'function') {
+            handlers.onDelta(delta);
+          }
+        }
+      }
+    }
+
+    return {
+      ok: true,
+      output,
+      status: {
+        lastInferenceRoute: `huggingface:${model}`,
+        lastPersistentError: '',
+        lastCompletionStatus: 'ok',
+        lastCompletionLikelyTruncated: false,
+      },
+    };
+  } catch (err) {
+    if (err && err.name === 'AbortError') {
+      return { ok: false, cancelled: true, message: 'Cancelled by user.' };
+    }
+    return {
+      ok: false,
+      message: `Hugging Face request error: ${err && err.message ? err.message : 'unknown error'}`,
+    };
+  }
 }
 
 function handleSendButtonClick() {
@@ -2504,19 +3871,179 @@ async function ensureMinLoading(startedAtMs, minMs = 240) {
 function isLikelyIncompleteResponse(text) {
   const clean = String(text || '').trim();
   if (!clean) return false;
+  if (/^<?DONE>?$/i.test(clean)) return false;
 
   const fences = (clean.match(/```/g) || []).length;
   if (fences % 2 !== 0) return true;
 
   if (/[,:;(\[{`"]$/.test(clean)) return true;
-  if (!/[.!?'"`)\]}]$/.test(clean) && clean.length >= 320) return true;
+  if (!/[.!?'"`)\]}]$/.test(clean) && !/[\p{Extended_Pictographic}\p{Emoji_Presentation}]$/u.test(clean) && clean.length >= 320) return true;
   return false;
+}
+
+function isRepetitiveEnumeratedOutput(text) {
+  const clean = String(text || '').trim();
+  if (!clean) return false;
+  const lines = clean.split('\n').map((line) => line.trim()).filter(Boolean);
+  if (lines.length < 8) return false;
+
+  const numbered = [];
+  for (const line of lines) {
+    const match = line.match(/^(\d+)\.\s+(.+)$/);
+    if (!match) continue;
+    numbered.push({
+      index: Number(match[1]),
+      body: String(match[2] || '').trim(),
+    });
+  }
+  if (numbered.length < 8) return false;
+
+  let monotonic = true;
+  for (let i = 1; i < numbered.length; i += 1) {
+    if (numbered[i].index !== numbered[i - 1].index + 1) {
+      monotonic = false;
+      break;
+    }
+  }
+  if (!monotonic) return false;
+
+  const counts = new Map();
+  for (const entry of numbered) {
+    const key = entry.body.toLowerCase();
+    counts.set(key, (counts.get(key) || 0) + 1);
+  }
+  let dominant = 0;
+  for (const count of counts.values()) {
+    dominant = Math.max(dominant, count);
+  }
+  return dominant >= Math.max(6, Math.floor(numbered.length * 0.7));
+}
+
+function isLikelyTruncatedStatus(status) {
+  if (!status || typeof status !== 'object') return false;
+  if (status.lastCompletionLikelyTruncated === true) return true;
+  return String(status.lastCompletionStatus || '').trim().toLowerCase() === 'likely_truncated';
+}
+
+function isChatAutoContinuing(chatId) {
+  const key = String(chatId || '');
+  return Boolean(key && autoContinuingChatIds.has(key));
+}
+
+function setChatAutoContinuing(chatId, active) {
+  const key = String(chatId || '');
+  if (!key) return;
+  if (active) {
+    autoContinuingChatIds.add(key);
+  } else {
+    autoContinuingChatIds.delete(key);
+  }
+  if (activeChatId === key) {
+    updateContinueButtonVisibility();
+  }
+}
+
+function findLastAssistantMessage(chat) {
+  if (!chat || !Array.isArray(chat.messages)) return null;
+  for (let i = chat.messages.length - 1; i >= 0; i -= 1) {
+    const msg = chat.messages[i];
+    if (msg && msg.role === 'ai' && typeof msg.text === 'string') {
+      return msg;
+    }
+  }
+  return null;
+}
+
+function findContinuationOverlap(leftText, rightText, minProbe = 24, maxProbe = 480) {
+  const left = String(leftText || '');
+  const right = String(rightText || '');
+  const maxLen = Math.min(left.length, right.length, Math.max(minProbe, maxProbe));
+  for (let len = maxLen; len >= minProbe; len -= 1) {
+    if (left.slice(-len) === right.slice(0, len)) {
+      return len;
+    }
+  }
+  return 0;
+}
+
+function mergeAssistantContinuationText(previousText, nextText) {
+  const previous = String(previousText || '');
+  const incoming = String(nextText || '');
+  const trimmedIncoming = incoming.trim();
+  if (!trimmedIncoming || /^<?DONE>?$/i.test(trimmedIncoming)) {
+    return previous;
+  }
+  if (!previous) {
+    return trimmedIncoming;
+  }
+  const overlap = findContinuationOverlap(previous, incoming);
+  return overlap > 0 ? `${previous}${incoming.slice(overlap)}` : `${previous}${incoming}`;
+}
+
+function updateLastAssistantMessage(chatId, text, options = {}) {
+  const chat = findChatById(chatId);
+  if (!chat) return null;
+  const lastAssistant = findLastAssistantMessage(chat);
+  if (!lastAssistant) {
+    return appendMessageToChat(chatId, 'ai', text, 0, options);
+  }
+  const merged = mergeAssistantContinuationText(lastAssistant.text, text).trim();
+  lastAssistant.text = merged || String(lastAssistant.text || '').trim();
+  if (typeof options.thinking === 'string' && options.thinking.trim()) {
+    lastAssistant.thinking = mergeAssistantContinuationText(lastAssistant.thinking, options.thinking).trim();
+  }
+  if (Array.isArray(options.agentActivities) && options.agentActivities.length > 0) {
+    lastAssistant.agentActivities = cloneAgentActivities(options.agentActivities);
+  }
+  chat.updatedAt = nowTs();
+  if (typeof options.forceNeedsContinue === 'boolean') {
+    chat.needsContinue = options.forceNeedsContinue;
+  } else {
+    chat.needsContinue = isLikelyIncompleteResponse(lastAssistant.text);
+  }
+  saveChats();
+  renderHistory();
+  renderSidebarCounts();
+  updateContinueButtonVisibility();
+  if (activeChatId === chatId) {
+    renderActiveChat();
+  }
+  return lastAssistant;
+}
+
+function buildContinuationPrompt(chatId) {
+  const chat = findChatById(chatId);
+  const tail = String(findLastAssistantMessage(chat)?.text || '').slice(-continuationTailChars);
+  return [
+    'Continue the previous assistant response from exactly where it stopped.',
+    'Do not restart, summarize, repeat completed text, add a new greeting, or add a new chat title marker.',
+    'Preserve existing formatting, numbering, bullet lists, code fences, and math notation.',
+    'If the previous response is already complete, output exactly: <DONE>',
+    '',
+    '<LAST_ASSISTANT_TAIL>',
+    tail,
+    '</LAST_ASSISTANT_TAIL>',
+  ].join('\n');
+}
+
+function shouldAutoContinueResponse(chatId, text, status, options = {}) {
+  if (canvasModeEnabled) return false;
+  if ((Number(options.autoContinuationRemaining) || 0) <= 0) return false;
+  if (!findChatById(chatId)) return false;
+  if (isRepetitiveEnumeratedOutput(text)) return false;
+  const clean = String(text || '').trim();
+  if (!clean || /^<?DONE>?$/i.test(clean)) return false;
+  return isLikelyTruncatedStatus(status) && isLikelyIncompleteResponse(clean);
 }
 
 function updateContinueButtonVisibility() {
   if (!continueBtn) return;
   const chat = getActiveChat();
-  const show = Boolean(chat && chat.needsContinue && pendingInferenceCount === 0 && !inNewChatMode);
+  const show = Boolean(chat
+    && chat.needsContinue
+    && pendingInferenceCount === 0
+    && !inNewChatMode
+    && !isChatAutoContinuing(chat.id));
   continueBtn.classList.toggle('hidden', !show);
   continueBtn.disabled = !show;
   syncComposerLayoutState();
@@ -2582,9 +4109,13 @@ async function fetchRuntimeStatus(action = 'status') {
 async function openSettingsModal() {
   if (!settingsBackdrop) return;
   loadAppSettings();
+  if (settingsProviderSelect) settingsProviderSelect.value = appSettings.inferenceProvider || 'local';
+  if (settingsHfTokenInput) settingsHfTokenInput.value = appSettings.huggingFaceToken || '';
+  if (settingsHfModelInput) settingsHfModelInput.value = appSettings.huggingFaceModel || '';
   if (settingsModelUrlInput) settingsModelUrlInput.value = appSettings.modelUrl;
   if (settingsKeepModelChk) settingsKeepModelChk.checked = appSettings.keepModelOnUpdate;
   if (settingsDebugTraceChk) settingsDebugTraceChk.checked = appSettings.debugTraceEnabled;
+  syncSettingsProviderUi();
   setSettingsNote('');
   settingsBackdrop.classList.add('open');
   settingsBackdrop.setAttribute('aria-hidden', 'false');
@@ -2643,6 +4174,12 @@ function refreshWorkspaceForCurrentUser() {
   workspaceDraftFocusId = 0;
   workspaceRenameDraft = null;
   workspaceRenameFocusId = 0;
+  openFileTabs = [];
+  activeTabId = 'chat';
+  fileTabsRestoreToken += 1;
+  renderTabBar();
+  if (chatArea) chatArea.style.display = 'flex';
+  if (fileViewer) fileViewer.classList.add('hidden');
 
   loadStoredChats();
   loadStoredArtifacts();
@@ -2669,6 +4206,7 @@ function refreshWorkspaceForCurrentUser() {
     if (charCount) charCount.textContent = '0 / ∞';
   }
   updateContinueButtonVisibility();
+  void loadStoredFileTabs(fileTabsRestoreToken);
 }
 
 async function handleAuthAction() {
@@ -2748,7 +4286,9 @@ function sortChatsInPlace() {
 }
 
 function findChatById(chatId) {
-  return chats.find((c) => c.id === chatId) || null;
+  const chat = chats.find((c) => c.id === chatId) || null;
+  if (chat) ensureChatThreadState(chat);
+  return chat;
 }
 
 function getActiveChat() {
@@ -2948,8 +4488,25 @@ function extractMetaLinesFromCanvasPayloads(payloads) {
 }
 
 function buildCanvasChatSummary(displayText, payloads) {
-  const rawDisplay = String(displayText || '').trim();
   const firstPayload = Array.isArray(payloads) && payloads.length > 0 ? payloads[0] : null;
+  const normalizeForCompare = (value) => String(value || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+  const payloadBody = normalizeForCompare(firstPayload && firstPayload.content ? firstPayload.content : '');
+  const rawDisplay = String(displayText || '')
+    .split(/\n{2,}/)
+    .map((part) => String(part || '').trim())
+    .filter(Boolean)
+    .filter((part) => {
+      const normalized = normalizeForCompare(part);
+      if (!normalized) return false;
+      if (normalized.length < 80) return true;
+      if (!payloadBody) return true;
+      return !payloadBody.includes(normalized);
+    })
+    .join('\n\n')
+    .trim();
   const canvasName = String(firstPayload && firstPayload.name ? firstPayload.name : '').trim();
   const type = String(firstPayload && firstPayload.format ? firstPayload.format : 'text').toLowerCase() === 'code' ? 'code' : 'canvas';
   const titleChunk = canvasName ? ` "${canvasName}"` : '';
@@ -2959,6 +4516,17 @@ function buildCanvasChatSummary(displayText, payloads) {
 
   if (!rawDisplay) {
     return { text: fallback, followUp: '' };
+  }
+
+  const parts = rawDisplay
+    .split(/\n{2,}/)
+    .map((part) => String(part || '').trim())
+    .filter(Boolean);
+  if (parts.length > 1) {
+    return {
+      text: parts[0] || fallback,
+      followUp: parts.slice(1).join('\n\n').trim(),
+    };
   }
 
   return {
@@ -3092,8 +4660,9 @@ function addCodeArtifacts(chatId, text, messageTs = 0) {
   return added;
 }
 
-function commitAssistantMessage(chatId, text, rawTextForArtifacts = '') {
+function commitAssistantMessage(chatId, text, rawTextForArtifacts = '', options = {}) {
   const sourceForArtifacts = String(rawTextForArtifacts || text || '');
+  const thinkingState = buildThinkingState(sourceForArtifacts);
   const parsed = extractCanvasBlocksFromReply(sourceForArtifacts);
   if (canvasModeEnabled && parsed.payloads.length === 0) {
     const fallbackBody = String(parsed.displayText || text || '').trim();
@@ -3121,12 +4690,21 @@ function commitAssistantMessage(chatId, text, rawTextForArtifacts = '') {
     : String(text || parsed.displayText || '').trim();
   let appendedMessage = null;
   const showDisplayInChat = Boolean(display);
+  const forceNeedsContinue = typeof options.forceNeedsContinue === 'boolean'
+    ? options.forceNeedsContinue
+    : undefined;
   if (showDisplayInChat) {
-    appendedMessage = appendMessageToChat(chatId, 'ai', display);
+    appendedMessage = options.appendToLastAssistant && !hasCanvasPayload
+      ? updateLastAssistantMessage(chatId, display, { forceNeedsContinue, thinking: thinkingState.text, agentActivities: options.agentActivities })
+      : appendMessageToChat(chatId, 'ai', display, 0, { forceNeedsContinue, thinking: thinkingState.text, agentActivities: options.agentActivities });
   } else if (parsed.payloads.length > 0) {
-    appendedMessage = appendMessageToChat(chatId, 'ai', 'Artifact created. Open details below.');
+    appendedMessage = appendMessageToChat(chatId, 'ai', 'Artifact created. Open details below.', 0, {
+      forceNeedsContinue: false,
+      thinking: thinkingState.text,
+      agentActivities: options.agentActivities,
+    });
   } else {
-    appendedMessage = appendMessageToChat(chatId, 'ai', '[offline-inference backend empty-output]');
+    appendedMessage = appendErrorMessageToChat(chatId, 'Offline inference backend returned empty output.', 0);
   }
   const messageTs = appendedMessage ? Number(appendedMessage.ts) || nowTs() : nowTs();
   let addedAnyArtifacts = false;
@@ -3200,7 +4778,14 @@ function normalizeWorkspaceName(raw) {
 
 function normalizeWorkspacePath(raw) {
   const value = String(raw || '/').replace(/\\/g, '/').trim();
-  const parts = value.split('/').filter((part) => part && part !== '.');
+  let parts = value.split('/').filter((part) => part && part !== '.');
+  if (parts.length > 0 && workspaceRootName) {
+    const currentRoot = normalizeWorkspaceName(workspaceRootName).toLowerCase();
+    const firstPart = normalizeWorkspaceName(parts[0]).toLowerCase();
+    if (currentRoot && firstPart === currentRoot) {
+      parts = parts.slice(1);
+    }
+  }
   const clean = [];
   parts.forEach((part) => {
     if (part === '..') return;
@@ -4303,6 +5888,491 @@ async function downloadWorkspaceFile(entry) {
 
 /* ─── File Tab Management ─── */
 
+function getOpenFileTab(path) {
+  const normalized = normalizeWorkspacePath(path || '');
+  return openFileTabs.find((t) => t.path === normalized) || null;
+}
+
+function getActiveFileTab() {
+  if (!activeTabId || activeTabId === 'chat') return null;
+  return openFileTabs.find((t) => t.path === activeTabId) || null;
+}
+
+function formatFileViewerBreadcrumb(path) {
+  const normalized = normalizeWorkspacePath(path || '');
+  const parts = normalized.split('/').filter(Boolean);
+  if (parts.length === 0) return 'file';
+  if (parts.length === 1) return parts[0];
+  return `${parts[parts.length - 2]} > ${parts[parts.length - 1]}`;
+}
+
+function inferFileViewerLanguage(path) {
+  const normalized = normalizeWorkspacePath(path || '');
+  const name = workspaceBaseName(normalized).toLowerCase();
+  const ext = name.includes('.') ? name.split('.').pop() : '';
+  const map = {
+    js: 'javascript',
+    mjs: 'javascript',
+    cjs: 'javascript',
+    ts: 'typescript',
+    jsx: 'jsx',
+    tsx: 'tsx',
+    py: 'python',
+    sh: 'bash',
+    bash: 'bash',
+    zsh: 'bash',
+    json: 'json',
+    html: 'html',
+    htm: 'html',
+    xml: 'xml',
+    css: 'css',
+    scss: 'scss',
+    less: 'less',
+    yml: 'yaml',
+    yaml: 'yaml',
+    md: 'markdown',
+    java: 'java',
+    c: 'c',
+    h: 'c',
+    cpp: 'cpp',
+    cc: 'cpp',
+    cxx: 'cpp',
+    hpp: 'cpp',
+    cs: 'csharp',
+    go: 'go',
+    rs: 'rust',
+    php: 'php',
+    rb: 'ruby',
+    sql: 'sql',
+  };
+  return normalizeCodeLanguage(map[ext] || ext || 'text') || 'text';
+}
+
+function renderFileViewerHighlight(text, lang) {
+  if (!fileViewerHighlightCode) return;
+  const content = String(text || '');
+  const safe = content.endsWith('\n') ? `${content}\u200b` : content;
+  fileViewerHighlightCode.innerHTML = highlightCodeHtml(safe, lang || 'text');
+}
+
+function loadFileViewerCodeMirrorBundle() {
+  if (window.AIExeCodeMirror && typeof window.AIExeCodeMirror.createFileEditor === 'function') {
+    return Promise.resolve(window.AIExeCodeMirror);
+  }
+  if (fileViewerCodeMirrorReady) return fileViewerCodeMirrorReady;
+  fileViewerCodeMirrorReady = new Promise((resolve) => {
+    const existing = document.querySelector('script[data-codemirror-bundle="true"]');
+    if (existing) {
+      existing.addEventListener('load', () => {
+        resolve(window.AIExeCodeMirror || null);
+      }, { once: true });
+      existing.addEventListener('error', () => resolve(null), { once: true });
+      return;
+    }
+    const script = document.createElement('script');
+    script.src = 'vendor/codemirror/file-editor.bundle.js';
+    script.async = false;
+    script.dataset.codemirrorBundle = 'true';
+    script.addEventListener('load', () => {
+      resolve(window.AIExeCodeMirror || null);
+    }, { once: true });
+    script.addEventListener('error', () => resolve(null), { once: true });
+    document.head.appendChild(script);
+  });
+  return fileViewerCodeMirrorReady;
+}
+
+async function ensureCodeMirrorFileEditor() {
+  if (fileViewerCodeMirror || !fileViewerCmHost) return fileViewerCodeMirror;
+  const mod = await loadFileViewerCodeMirrorBundle();
+  if (!mod || typeof mod.createFileEditor !== 'function') return null;
+  fileViewerCodeMirror = mod.createFileEditor(fileViewerCmHost, {
+    value: '',
+    language: 'text',
+    onChange: (value) => {
+      if (suppressFileViewerEditorChange) return;
+      setActiveFileTabContent(value);
+    },
+    onSave: () => {
+      void saveFileTab();
+    },
+  });
+  return fileViewerCodeMirror;
+}
+
+function renderFileViewerLineNumbers(text) {
+  if (!fileViewerGutterLines) return;
+  const content = String(text || '');
+  const lineCount = Math.max(1, content.split('\n').length);
+  const lines = new Array(lineCount);
+  for (let i = 0; i < lineCount; i += 1) {
+    lines[i] = `<span class="file-viewer-gutter-line" data-line="${i + 1}">${i + 1}</span>`;
+  }
+  fileViewerGutterLines.innerHTML = lines.join('');
+}
+
+function findLineBounds(text, lineNumber) {
+  const content = String(text || '');
+  const targetLine = Math.max(1, Number(lineNumber) || 1);
+  let currentLine = 1;
+  let start = 0;
+  for (let i = 0; i < content.length; i += 1) {
+    if (currentLine === targetLine) {
+      start = i;
+      break;
+    }
+    if (content.charCodeAt(i) === 10) currentLine += 1;
+  }
+  if (targetLine > 1 && currentLine < targetLine) {
+    start = content.length;
+  }
+  let end = content.indexOf('\n', start);
+  if (end === -1) end = content.length;
+  return { start, end };
+}
+
+function getFileViewerActiveLineInfo() {
+  if (!fileViewerEditor) return { lineNumber: 1, lineHeight: 20.8, lineTop: FILE_VIEWER_LINE_TOP_PADDING };
+  const value = String(fileViewerEditor.value || '');
+  const cursor = Number(fileViewerEditor.selectionStart || 0);
+  const before = value.slice(0, cursor);
+  const lineNumber = before.split('\n').length;
+  const lineHeight = parseFloat(getComputedStyle(fileViewerEditor).lineHeight || '20.8');
+  const lineTop = FILE_VIEWER_LINE_TOP_PADDING + ((lineNumber - 1) * lineHeight) - fileViewerEditor.scrollTop;
+  return { lineNumber, lineHeight, lineTop };
+}
+
+function updateFileViewerCurrentLine() {
+  if (!fileViewerEditor || !fileViewerCurrentLine) return;
+  const { lineNumber, lineTop } = getFileViewerActiveLineInfo();
+  fileViewerCurrentLine.style.transform = `translateY(${lineTop}px)`;
+  if (fileViewerGutterLines) {
+    fileViewerGutterLines.querySelectorAll('.file-viewer-gutter-line.active').forEach((el) => el.classList.remove('active'));
+    const activeLine = fileViewerGutterLines.querySelector(`.file-viewer-gutter-line[data-line="${lineNumber}"]`);
+    if (activeLine) activeLine.classList.add('active');
+  }
+}
+
+function revealFileViewerSelection(start) {
+  if (!fileViewerEditor) return;
+  const value = String(fileViewerEditor.value || '');
+  const lineHeight = parseFloat(getComputedStyle(fileViewerEditor).lineHeight || '20.8');
+  const before = value.slice(0, Math.max(0, Number(start) || 0));
+  const lineNumber = before.split('\n').length;
+  const targetTop = FILE_VIEWER_LINE_TOP_PADDING + ((lineNumber - 1) * lineHeight);
+  const centeredTop = Math.max(0, targetTop - ((fileViewerEditor.clientHeight - lineHeight) / 2));
+  fileViewerEditor.scrollTop = centeredTop;
+  syncFileViewerScroll();
+}
+
+function selectFileViewerLine(lineNumber, options = {}) {
+  if (!fileViewerEditor) return;
+  const focusEditor = options.focusEditor !== false;
+  const revealSelection = options.reveal !== false;
+  const { start, end } = findLineBounds(fileViewerEditor.value, lineNumber);
+  fileViewerEditor.selectionStart = start;
+  fileViewerEditor.selectionEnd = end;
+  if (typeof fileViewerEditor.setSelectionRange === 'function') {
+    fileViewerEditor.setSelectionRange(start, end);
+  }
+  if (revealSelection) {
+    revealFileViewerSelection(start);
+  } else {
+    updateFileViewerCurrentLine();
+  }
+  if (focusEditor) {
+    fileViewerEditor.focus();
+  }
+}
+
+function resetFileViewerSearchState() {
+  fileViewerSearchState = { query: '', matches: [], index: -1 };
+  if (fileViewerSearchCount) fileViewerSearchCount.textContent = '';
+}
+
+function collectFileViewerSearchMatches(query) {
+  const content = String(fileViewerEditor && fileViewerEditor.value || '');
+  const needle = String(query || '');
+  if (!needle) return [];
+  const lowerHaystack = content.toLowerCase();
+  const lowerNeedle = needle.toLowerCase();
+  const matches = [];
+  let start = 0;
+  while (start <= lowerHaystack.length) {
+    const idx = lowerHaystack.indexOf(lowerNeedle, start);
+    if (idx === -1) break;
+    matches.push({ start: idx, end: idx + needle.length });
+    start = idx + Math.max(1, needle.length);
+  }
+  return matches;
+}
+
+function applyFileViewerSearchSelection(index, options = {}) {
+  if (!fileViewerEditor) return;
+  const keepSearchFocus = Boolean(options.keepSearchFocus);
+  if (!fileViewerSearchState.matches.length) {
+    if (fileViewerSearchCount) fileViewerSearchCount.textContent = '0/0';
+    return;
+  }
+  const nextIndex = ((index % fileViewerSearchState.matches.length) + fileViewerSearchState.matches.length) % fileViewerSearchState.matches.length;
+  fileViewerSearchState.index = nextIndex;
+  const match = fileViewerSearchState.matches[nextIndex];
+  selectFileViewerLine(String(fileViewerEditor.value || '').slice(0, match.start).split('\n').length, { focusEditor: !keepSearchFocus, reveal: true });
+  fileViewerEditor.selectionStart = match.start;
+  fileViewerEditor.selectionEnd = match.end;
+  if (typeof fileViewerEditor.setSelectionRange === 'function') {
+    fileViewerEditor.setSelectionRange(match.start, match.end);
+  }
+  updateFileViewerCurrentLine();
+  if (!keepSearchFocus) {
+    fileViewerEditor.focus();
+  }
+  if (fileViewerSearchCount) {
+    fileViewerSearchCount.textContent = `${nextIndex + 1}/${fileViewerSearchState.matches.length}`;
+  }
+}
+
+function updateFileViewerSearch() {
+  if (!fileViewerSearchInput) return;
+  const query = String(fileViewerSearchInput.value || '');
+  fileViewerSearchState.query = query;
+  fileViewerSearchState.matches = collectFileViewerSearchMatches(query);
+  fileViewerSearchState.index = -1;
+  if (!query) {
+    if (fileViewerSearchCount) fileViewerSearchCount.textContent = '';
+    return;
+  }
+  applyFileViewerSearchSelection(0, { keepSearchFocus: true });
+}
+
+function setFileViewerSearchOpen(open) {
+  if (!fileViewerSearch) return;
+  const next = Boolean(open);
+  fileViewerSearch.classList.toggle('hidden', !next);
+  if (!next) {
+    resetFileViewerSearchState();
+    if (fileViewerSearchInput) fileViewerSearchInput.value = '';
+    return;
+  }
+  if (fileViewerSearchInput) {
+    fileViewerSearchInput.focus();
+    fileViewerSearchInput.select();
+  }
+}
+
+function syncFileViewerScroll() {
+  if (!fileViewerEditor) return;
+  if (fileViewerHighlight) {
+    fileViewerHighlight.scrollTop = fileViewerEditor.scrollTop;
+    fileViewerHighlight.scrollLeft = fileViewerEditor.scrollLeft;
+  }
+  if (fileViewerGutterLines) {
+    fileViewerGutterLines.style.transform = `translateY(${-fileViewerEditor.scrollTop}px)`;
+  }
+  updateFileViewerCurrentLine();
+}
+
+function refreshActiveFileTabView() {
+  const tab = getActiveFileTab();
+  if (!tab) return;
+  tab.dirty = String(tab.content || '') !== String(tab.savedContent || '');
+  if (fvFilename) fvFilename.textContent = formatFileViewerBreadcrumb(tab.path || tab.name || 'file');
+  void ensureCodeMirrorFileEditor().then((editor) => {
+    if (!editor || getActiveFileTab() !== tab) return;
+    if (fileViewerSurface) fileViewerSurface.classList.add('cm-active');
+    suppressFileViewerEditorChange = true;
+    editor.setLanguage(tab.language || inferFileViewerLanguage(tab.path));
+    editor.setValue(tab.content || '');
+    suppressFileViewerEditorChange = false;
+  });
+  if (window.AIExeCodeMirror && fileViewerSurface) {
+    fileViewerSurface.classList.add('cm-active');
+  }
+  if (fileViewerSurface) {
+    fileViewerSurface.classList.toggle('no-highlight', !tab.highlightEnabled);
+  }
+  if (fileViewerEditor && fileViewerEditor.value !== String(tab.content || '')) {
+    fileViewerEditor.value = String(tab.content || '');
+  }
+  renderFileViewerLineNumbers(tab.content || '');
+  if (tab.highlightEnabled) {
+    renderFileViewerHighlight(tab.content || '', tab.language || inferFileViewerLanguage(tab.path));
+  } else if (fileViewerHighlightCode) {
+    fileViewerHighlightCode.textContent = '';
+  }
+  syncFileViewerScroll();
+  resetFileViewerSearchState();
+}
+
+function setActiveFileTabContent(value) {
+  const tab = getActiveFileTab();
+  if (!tab) return;
+  tab.content = String(value || '');
+  tab.dirty = tab.content !== String(tab.savedContent || '');
+  if (fileViewerCodeMirror && fileViewerCodeMirror.getValue() !== tab.content) {
+    suppressFileViewerEditorChange = true;
+    fileViewerCodeMirror.setValue(tab.content);
+    suppressFileViewerEditorChange = false;
+  }
+  renderFileViewerLineNumbers(tab.content);
+  if (tab.highlightEnabled) {
+    renderFileViewerHighlight(tab.content, tab.language || inferFileViewerLanguage(tab.path));
+  }
+  renderTabBar();
+  syncFileViewerScroll();
+  if (fileViewerSearch && !fileViewerSearch.classList.contains('hidden') && fileViewerSearchState.query) {
+    updateFileViewerSearch();
+  }
+  schedulePersistFileTabsState();
+}
+
+async function saveFileTab(tab) {
+  const target = tab || getActiveFileTab();
+  if (!target || !target.path) return false;
+  const response = await invokeWorkspaceAction('workspaceWriteFile', {
+    path: target.path,
+    content: String(target.content || ''),
+  });
+  if (!response || !response.ok) {
+    window.alert((response && response.message) || 'Failed to save file.');
+    return false;
+  }
+  target.savedContent = String(target.content || '');
+  target.dirty = false;
+  renderTabBar();
+  if (activeTabId === target.path) {
+    refreshActiveFileTabView();
+  }
+  persistFileTabsStateNow();
+  return true;
+}
+
+function serializeFileTabState() {
+  return openFileTabs.slice(0, 12).map((tab) => {
+    const content = String(tab && tab.content || '');
+    const savedContent = String(tab && tab.savedContent || '');
+    const dirty = content !== savedContent;
+    return {
+      path: normalizeWorkspacePath(tab && tab.path || ''),
+      name: String(tab && tab.name || workspaceBaseName(tab && tab.path || '') || 'file'),
+      language: inferFileViewerLanguage(tab && tab.path || ''),
+      dirty,
+      content: dirty ? content : '',
+      savedContent: dirty ? savedContent : '',
+    };
+  }).filter((tab) => Boolean(tab.path && tab.path !== '/'));
+}
+
+function persistFileTabsStateNow() {
+  if (fileTabsPersistTimer) {
+    clearTimeout(fileTabsPersistTimer);
+    fileTabsPersistTimer = 0;
+  }
+  const key = scopedStorageKey(fileTabsStoragePrefix);
+  if (!key) return;
+  const payload = {
+    activeTabId: activeTabId === 'chat' ? 'chat' : normalizeWorkspacePath(activeTabId),
+    tabs: serializeFileTabState(),
+  };
+  try {
+    localStorage.setItem(key, JSON.stringify(payload));
+  } catch (_) { }
+}
+
+function schedulePersistFileTabsState(delay = 160) {
+  if (fileTabsPersistTimer) {
+    clearTimeout(fileTabsPersistTimer);
+  }
+  fileTabsPersistTimer = setTimeout(() => {
+    fileTabsPersistTimer = 0;
+    persistFileTabsStateNow();
+  }, Math.max(0, Number(delay) || 0));
+}
+
+async function loadStoredFileTabs(restoreToken = 0) {
+  openFileTabs = [];
+  activeTabId = 'chat';
+  const key = scopedStorageKey(fileTabsStoragePrefix);
+  if (!key) {
+    renderTabBar();
+    return;
+  }
+
+  let storedActive = 'chat';
+  let storedTabs = [];
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) {
+      renderTabBar();
+      return;
+    }
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object') {
+      if (typeof parsed.activeTabId === 'string') {
+        storedActive = parsed.activeTabId;
+      }
+      if (Array.isArray(parsed.tabs)) {
+        storedTabs = parsed.tabs.slice(0, 12);
+      }
+    }
+  } catch (_) {
+    renderTabBar();
+    return;
+  }
+
+  const restoredTabs = [];
+  for (const entry of storedTabs) {
+    const path = normalizeWorkspacePath(entry && entry.path || '');
+    if (!path || path === '/') continue;
+
+    let content = '';
+    let savedContent = '';
+    let dirty = false;
+
+    if (entry && entry.dirty && typeof entry.content === 'string') {
+      content = String(entry.content || '');
+      savedContent = typeof entry.savedContent === 'string' ? String(entry.savedContent) : content;
+      dirty = content !== savedContent;
+    } else {
+      const response = await invokeWorkspaceAction('workspaceReadFile', { path });
+      if (!response || !response.ok) continue;
+      content = String(response.output || '');
+      savedContent = content;
+      dirty = false;
+    }
+
+    if (restoreToken !== fileTabsRestoreToken) return;
+
+    restoredTabs.push({
+      path,
+      name: String(entry && entry.name || workspaceBaseName(path) || 'file'),
+      content,
+      savedContent,
+      dirty,
+      language: inferFileViewerLanguage(path),
+      highlightEnabled: new Blob([content]).size <= FILE_VIEWER_HIGHLIGHT_LIMIT_BYTES,
+    });
+  }
+
+  if (restoreToken !== fileTabsRestoreToken) return;
+
+  openFileTabs = restoredTabs;
+  if (storedActive !== 'chat' && openFileTabs.some((tab) => tab.path === storedActive)) {
+    activeTabId = storedActive;
+  } else {
+    activeTabId = openFileTabs[0]?.path || 'chat';
+  }
+
+  renderTabBar();
+  if (activeTabId === 'chat') {
+    if (chatArea) chatArea.style.display = 'flex';
+    if (fileViewer) fileViewer.classList.add('hidden');
+    renderMiddleView();
+  } else {
+    switchToTab(activeTabId);
+  }
+}
+
 function renderTabBar() {
   if (!middleTabBar) return;
   const existing = middleTabBar.querySelectorAll('.middle-tab[data-tab]:not(#tabChat)');
@@ -4315,7 +6385,7 @@ function renderTabBar() {
 
   openFileTabs.forEach((tab) => {
     const el = document.createElement('div');
-    el.className = `middle-tab${activeTabId === tab.path ? ' active' : ''}`;
+    el.className = `middle-tab${activeTabId === tab.path ? ' active' : ''}${tab.dirty ? ' dirty' : ''}`;
     el.dataset.tab = tab.path;
     el.title = tab.path;
 
@@ -4346,6 +6416,34 @@ function renderTabBar() {
   });
 }
 
+function syncFileTabFromWorkspaceWrite(path, content, name = '') {
+  const normalized = normalizeWorkspacePath(path);
+  if (!normalized || normalized === '/') return;
+  const nextContent = String(content || '');
+  let tab = openFileTabs.find((entry) => entry.path === normalized) || null;
+  if (!tab) {
+    tab = {
+      path: normalized,
+      name: String(name || workspaceBaseName(normalized) || 'file'),
+      content: nextContent,
+      savedContent: nextContent,
+      dirty: false,
+      language: inferFileViewerLanguage(normalized),
+      highlightEnabled: new Blob([nextContent]).size <= FILE_VIEWER_HIGHLIGHT_LIMIT_BYTES,
+    };
+    openFileTabs.push(tab);
+  } else {
+    tab.name = String(name || tab.name || workspaceBaseName(normalized) || 'file');
+    tab.content = nextContent;
+    tab.savedContent = nextContent;
+    tab.dirty = false;
+    tab.language = inferFileViewerLanguage(normalized);
+    tab.highlightEnabled = new Blob([nextContent]).size <= FILE_VIEWER_HIGHLIGHT_LIMIT_BYTES;
+  }
+  middleViewMode = 'chat';
+  switchToTab(normalized);
+}
+
 function switchToTab(tabId) {
   activeTabId = tabId;
 
@@ -4358,17 +6456,12 @@ function switchToTab(tabId) {
     const tab = openFileTabs.find((t) => t.path === tabId);
     if (tab && fileViewer) {
       fileViewer.classList.remove('hidden');
-      if (fvFilename) fvFilename.textContent = tab.name || 'file';
-      if (fvMeta) {
-        const lines = (tab.content || '').split('\n').length;
-        const chars = (tab.content || '').length;
-        fvMeta.textContent = `${lines} lines · ${formatBytes(chars)}`;
-      }
-      if (fileViewerEditor) fileViewerEditor.value = tab.content || '';
+      refreshActiveFileTabView();
     }
   }
 
   renderTabBar();
+  persistFileTabsStateNow();
 
   if (tabId === 'chat') {
     renderMiddleView();
@@ -4396,15 +6489,25 @@ async function openFileTab(path, name) {
     path: normalized,
     name: name || workspaceBaseName(normalized) || 'file',
     content,
+    savedContent: content,
+    dirty: false,
+    language: inferFileViewerLanguage(normalized),
+    highlightEnabled: new Blob([content]).size <= FILE_VIEWER_HIGHLIGHT_LIMIT_BYTES,
   });
 
   middleViewMode = 'chat';
+  persistFileTabsStateNow();
   switchToTab(normalized);
 }
 
 function closeFileTab(path) {
   const idx = openFileTabs.findIndex((t) => t.path === path);
   if (idx === -1) return;
+
+  if (openFileTabs[idx] && openFileTabs[idx].dirty) {
+    const shouldClose = window.confirm(`Close ${openFileTabs[idx].name || 'file'} without saving?`);
+    if (!shouldClose) return;
+  }
 
   openFileTabs.splice(idx, 1);
 
@@ -4417,6 +6520,7 @@ function closeFileTab(path) {
     }
   } else {
     renderTabBar();
+    persistFileTabsStateNow();
   }
 }
 
@@ -4781,6 +6885,7 @@ function renderArtifactBrowser() {
       }
       const openBtn = row.querySelector('.artifact-open-chat-btn');
       if (openBtn) {
+        applyCustomTooltip(openBtn, 'Open source chat');
         const canOpen = Boolean(linkedChat);
         openBtn.disabled = !canOpen;
         openBtn.addEventListener('click', (evt) => {
@@ -4792,6 +6897,7 @@ function renderArtifactBrowser() {
       }
       const delBtn = row.querySelector('.artifact-delete-btn');
       if (delBtn) {
+        applyCustomTooltip(delBtn, 'Delete artifact');
         delBtn.addEventListener('click', (evt) => {
           evt.preventDefault();
           evt.stopPropagation();
@@ -4804,8 +6910,12 @@ function renderArtifactBrowser() {
           } else {
             delBtn.dataset.armed = 'true';
             delBtn.classList.add('armed');
-            delBtn.title = 'Click again to confirm delete';
-            setTimeout(() => { delBtn.dataset.armed = ''; delBtn.classList.remove('armed'); delBtn.title = 'Delete artifact'; }, 2500);
+            delBtn.dataset.tooltip = 'Click again to confirm delete';
+            setTimeout(() => {
+              delBtn.dataset.armed = '';
+              delBtn.classList.remove('armed');
+              delBtn.dataset.tooltip = 'Delete artifact';
+            }, 2500);
           }
         });
       }
@@ -4863,6 +6973,7 @@ function renderMiddleView() {
   }
   renderTabBar();
   syncSidebarNavState();
+  updateChatScrollDownButtonVisibility();
 }
 
 function saveArtifacts() {
@@ -4988,6 +7099,7 @@ function persistActiveChatId() {
 function saveChats() {
   const key = scopedStorageKey(chatsStoragePrefix);
   if (!key) return;
+  chats.forEach((chat) => ensureChatThreadState(chat));
   sortChatsInPlace();
   try {
     localStorage.setItem(key, JSON.stringify(chats.slice(0, 60)));
@@ -5018,22 +7130,56 @@ function loadStoredChats() {
     .filter((chat) => chat && typeof chat.id === 'string')
     .slice(0, 60)
     .map((chat) => {
-      const messages = Array.isArray(chat.messages)
-        ? chat.messages
-          .filter((m) => m && (m.role === 'user' || m.role === 'ai') && typeof m.text === 'string')
-          .map((m) => ({ role: m.role, text: m.text, ts: Number(m.ts) || nowTs() }))
+      const normalizeStoredMessages = (list) => Array.isArray(list)
+        ? list
+          .filter((m) => m && (m.role === 'user' || m.role === 'ai' || m.role === 'error') && typeof m.text === 'string')
+          .map((m) => ({
+            role: m.role,
+            text: m.text,
+            ts: Number(m.ts) || nowTs(),
+            thinking: m && m.role === 'ai' && typeof m.thinking === 'string'
+              ? m.thinking.slice(0, 20000)
+              : '',
+            agentActivities: m && m.role === 'ai' && Array.isArray(m.agentActivities)
+              ? normalizeAgentActivities(m.agentActivities)
+              : [],
+            branchAnchorTs: Number(m && m.branchAnchorTs) || 0,
+          }))
         : [];
+
+      const rawThreads = Array.isArray(chat.threads) && chat.threads.length
+        ? chat.threads
+        : [{
+            id: String(chat.activeThreadId || makeThreadId()),
+            messages: chat.messages,
+            branchLinks: chat.branchLinks,
+        pendingBranchLink: chat.pendingBranchLink,
+        needsContinue: chat.needsContinue,
+      }];
+      const threads = rawThreads.map((thread) => cloneThreadState({
+        id: String(thread && thread.id ? thread.id : makeThreadId()),
+        messages: normalizeStoredMessages(thread && thread.messages),
+        branchLinks: thread && thread.branchLinks,
+        pendingBranchLink: thread && thread.pendingBranchLink,
+        needsContinue: Boolean(thread && thread.needsContinue),
+      }));
+      const activeThread = threads.find((thread) => String(thread.id || '') === String(chat.activeThreadId || '')) || threads[0] || cloneThreadState({});
+      const messages = normalizeStoredMessages(activeThread.messages);
       const createdAt = Number(chat.createdAt) || nowTs();
       const updatedAt = Number(chat.updatedAt) || createdAt;
+      const hasAiMessage = messages.some((m) => m.role === 'ai' && String(m.text || '').trim());
+      const hasErrorMessage = messages.some((m) => m.role === 'error' && String(m.text || '').trim());
+      const shouldResetNaming = Boolean(chat.isNaming) && !hasAiMessage;
+      const isNaming = Boolean(chat.isNaming) && !shouldResetNaming;
       return {
         id: chat.id,
         name: normalizeChatName(
           chat.customName
             ? (chat.name || messages.find((m) => m.role === 'user')?.text || 'New Chat')
-            : toAutoTitleCase(chat.name || messages.find((m) => m.role === 'user')?.text || 'New Chat')
+            : toAutoTitleCase((shouldResetNaming ? 'New Chat' : chat.name) || messages.find((m) => m.role === 'user')?.text || 'New Chat')
         ),
         customName: Boolean(chat.customName),
-        isNaming: Boolean(chat.isNaming),
+        isNaming,
         createdAt,
         updatedAt,
         messages,
@@ -5043,9 +7189,14 @@ function loadStoredChats() {
         thinkMode: Boolean(chat.thinkMode),
         pendingAttachments: normalizePendingAttachmentList(chat.pendingAttachments),
         manualContext: typeof chat.manualContext === 'string' ? chat.manualContext.slice(0, 4000) : '',
+        branchLinks: normalizeBranchLinks(activeThread.branchLinks),
+        pendingBranchLink: activeThread.pendingBranchLink ? { ...activeThread.pendingBranchLink } : null,
+        threads,
+        activeThreadId: String(activeThread.id || ''),
       };
     });
 
+  chats.forEach((chat) => ensureChatThreadState(chat));
   sortChatsInPlace();
   let storedActive = null;
   try {
@@ -5272,18 +7423,35 @@ if (settingsVerifyBtn) {
     }
   });
 }
+if (settingsProviderSelect) {
+  settingsProviderSelect.addEventListener('change', () => {
+    syncSettingsProviderUi();
+  });
+}
 if (settingsSaveBtn) {
   settingsSaveBtn.addEventListener('click', async () => {
     const startedAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
     setButtonLoading(settingsSaveBtn, true);
     await waitForUiPaint();
     try {
+      appSettings.inferenceProvider = settingsProviderSelect && settingsProviderSelect.value === 'huggingface'
+        ? 'huggingface'
+        : 'local';
+      appSettings.huggingFaceToken = settingsHfTokenInput ? settingsHfTokenInput.value.trim() : '';
+      appSettings.huggingFaceModel = settingsHfModelInput && settingsHfModelInput.value.trim()
+        ? settingsHfModelInput.value.trim()
+        : 'Qwen/Qwen2.5-Coder-32B-Instruct:fastest';
       appSettings.modelUrl = settingsModelUrlInput ? settingsModelUrlInput.value.trim() : '';
       appSettings.keepModelOnUpdate = Boolean(settingsKeepModelChk && settingsKeepModelChk.checked);
       appSettings.debugTraceEnabled = Boolean(settingsDebugTraceChk && settingsDebugTraceChk.checked);
       saveAppSettings();
       await ensureMinLoading(startedAt, 180);
-      setSettingsNote('Settings saved locally.', 'info');
+      setSettingsNote(
+        appSettings.inferenceProvider === 'huggingface'
+          ? 'Settings saved locally. Hugging Face test mode is active.'
+          : 'Settings saved locally.',
+        'info'
+      );
     } finally {
       setButtonLoading(settingsSaveBtn, false);
     }
@@ -5500,8 +7668,112 @@ if (authConfirmInput) {
     }
   });
 }
+if (fileViewerEditor) {
+  fileViewerEditor.addEventListener('input', () => {
+    setActiveFileTabContent(fileViewerEditor.value);
+  });
+  fileViewerEditor.addEventListener('scroll', () => {
+    syncFileViewerScroll();
+  });
+  fileViewerEditor.addEventListener('click', () => {
+    updateFileViewerCurrentLine();
+  });
+  fileViewerEditor.addEventListener('mouseup', () => {
+    updateFileViewerCurrentLine();
+  });
+  fileViewerEditor.addEventListener('keyup', () => {
+    updateFileViewerCurrentLine();
+  });
+  fileViewerEditor.addEventListener('keydown', (e) => {
+    if (e.key === 'Tab' && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      e.preventDefault();
+      const start = Number(fileViewerEditor.selectionStart || 0);
+      const end = Number(fileViewerEditor.selectionEnd || 0);
+      const value = String(fileViewerEditor.value || '');
+      const next = `${value.slice(0, start)}  ${value.slice(end)}`;
+      fileViewerEditor.value = next;
+      fileViewerEditor.selectionStart = fileViewerEditor.selectionEnd = start + 2;
+      setActiveFileTabContent(next);
+      return;
+    }
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'f') {
+      e.preventDefault();
+      setFileViewerSearchOpen(true);
+      return;
+    }
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 's') {
+      e.preventDefault();
+      void saveFileTab();
+    }
+  });
+}
+if (fileViewerGutterLines) {
+  fileViewerGutterLines.addEventListener('click', (e) => {
+    const lineEl = e.target instanceof Element ? e.target.closest('.file-viewer-gutter-line') : null;
+    if (!lineEl || !fileViewerEditor) return;
+    const lineNumber = Number(lineEl.getAttribute('data-line') || 1);
+    selectFileViewerLine(lineNumber, { focusEditor: true, reveal: false });
+  });
+}
+if (fileViewerSearchInput) {
+  fileViewerSearchInput.addEventListener('input', () => {
+    updateFileViewerSearch();
+  });
+  fileViewerSearchInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      applyFileViewerSearchSelection(fileViewerSearchState.index + (e.shiftKey ? -1 : 1));
+      return;
+    }
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      setFileViewerSearchOpen(false);
+      fileViewerEditor && fileViewerEditor.focus();
+    }
+  });
+}
+if (fileViewerSearchPrev) {
+  fileViewerSearchPrev.addEventListener('click', () => {
+    applyFileViewerSearchSelection(fileViewerSearchState.index - 1);
+  });
+}
+if (fileViewerSearchNext) {
+  fileViewerSearchNext.addEventListener('click', () => {
+    applyFileViewerSearchSelection(fileViewerSearchState.index + 1);
+  });
+}
+if (fileViewerSearchClose) {
+  fileViewerSearchClose.addEventListener('click', () => {
+    setFileViewerSearchOpen(false);
+    if (fileViewerEditor) fileViewerEditor.focus();
+  });
+}
 document.addEventListener('keydown', (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'f') {
+    const activeFileTab = getActiveFileTab();
+    if (activeFileTab) {
+      if (fileViewerSurface && fileViewerSurface.classList.contains('cm-active')) {
+        return;
+      }
+      e.preventDefault();
+      setFileViewerSearchOpen(true);
+      return;
+    }
+  }
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 's') {
+    const activeFileTab = getActiveFileTab();
+    if (activeFileTab) {
+      e.preventDefault();
+      void saveFileTab(activeFileTab);
+      return;
+    }
+  }
   if (e.key === 'Escape') {
+    if (fileViewerSearch && !fileViewerSearch.classList.contains('hidden')) {
+      setFileViewerSearchOpen(false);
+      if (fileViewerEditor) fileViewerEditor.focus();
+      return;
+    }
     setComposerMenuOpen(false);
     closeExplorerMenus();
     stopDictationForEscape();
@@ -5587,7 +7859,9 @@ function renderHistory() {
 }
 
 function loadHistory(chatId) {
-  if (!findChatById(chatId)) return;
+  const chat = findChatById(chatId);
+  if (!chat) return;
+  ensureChatThreadState(chat);
   enterChatView();
   activeChatId = chatId;
   inNewChatMode = false;
@@ -5618,11 +7892,18 @@ function sanitizeHref(rawHref) {
 function renderInlineMarkdown(text) {
   const codeTokens = [];
   const linkTokens = [];
+  const mathTokens = [];
   let working = String(text || '');
 
   working = working.replace(/`([^`\n]+)`/g, (_, codeText) => {
     const token = `@@MD_CODE_${codeTokens.length}@@`;
     codeTokens.push(`<code>${escapeHtml(codeText)}</code>`);
+    return token;
+  });
+
+  working = working.replace(/\\\(([^`\n]+?)\\\)/g, (_, expr) => {
+    const token = `@@MD_MATH_INLINE_${mathTokens.length}@@`;
+    mathTokens.push(`<span class="md-math-inline">${escapeHtml(expr)}</span>`);
     return token;
   });
 
@@ -5643,8 +7924,608 @@ function renderInlineMarkdown(text) {
   working = working.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
   working = working.replace(/\*([^*\n]+)\*/g, '<em>$1</em>');
   working = working.replace(/@@MD_CODE_(\d+)@@/g, (_, idx) => codeTokens[Number(idx)] || '');
+  working = working.replace(/@@MD_MATH_INLINE_(\d+)@@/g, (_, idx) => mathTokens[Number(idx)] || '');
   working = working.replace(/@@MD_LINK_(\d+)@@/g, (_, idx) => linkTokens[Number(idx)] || '');
   return working;
+}
+
+const codeLanguageAliases = {
+  js: 'javascript',
+  mjs: 'javascript',
+  cjs: 'javascript',
+  jsx: 'javascript',
+  ts: 'typescript',
+  tsx: 'typescript',
+  py: 'python',
+  sh: 'bash',
+  shell: 'bash',
+  zsh: 'bash',
+  fish: 'bash',
+  yml: 'yaml',
+  htm: 'html',
+  svg: 'xml',
+  cc: 'cpp',
+  cxx: 'cpp',
+  hpp: 'cpp',
+  cs: 'csharp',
+  rs: 'rust',
+  rb: 'ruby',
+  plaintext: 'text',
+  txt: 'text',
+};
+
+const javascriptLikeLangs = new Set(['javascript', 'typescript']);
+const cLikeLangs = new Set(['c', 'cpp', 'csharp', 'java', 'go', 'rust', 'php']);
+
+const highlightRulesJsLike = [
+  { cls: 'comment', priority: 0, regex: /\/\*[\s\S]*?\*\/|\/\/.*$/gm },
+  { cls: 'string', priority: 1, regex: /'(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*"|`(?:\\.|[^`\\])*`/gm },
+  { cls: 'decorator', priority: 2, regex: /@[A-Za-z_$][\w$]*/gm },
+  { cls: 'keyword', priority: 3, regex: /\b(?:abstract|as|async|await|break|case|catch|class|const|continue|debugger|declare|default|delete|do|else|enum|export|extends|finally|for|from|function|if|implements|import|in|instanceof|interface|let|namespace|new|of|override|private|protected|public|readonly|return|static|super|switch|throw|try|type|typeof|var|void|while|with|yield)\b/gm },
+  { cls: 'constant', priority: 4, regex: /\b(?:true|false|null|undefined|NaN|Infinity|this)\b/gm },
+  { cls: 'number', priority: 5, regex: /\b(?:0x[\da-fA-F]+|0b[01]+|0o[0-7]+|\d+(?:\.\d+)?(?:e[+-]?\d+)?)\b/gm },
+  { cls: 'function', priority: 6, regex: /\b[A-Za-z_$][\w$]*(?=\s*\()/gm },
+];
+
+const highlightRulesCLike = [
+  { cls: 'comment', priority: 0, regex: /\/\*[\s\S]*?\*\/|\/\/.*$/gm },
+  { cls: 'decorator', priority: 1, regex: /^\s*#\s*[A-Za-z_]\w*.*$/gm },
+  { cls: 'string', priority: 2, regex: /'(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*"/gm },
+  { cls: 'keyword', priority: 3, regex: /\b(?:auto|bool|break|case|catch|char|class|const|constexpr|continue|default|delete|do|double|else|enum|explicit|export|extern|false|final|float|for|friend|goto|if|inline|int|interface|long|mutable|namespace|new|null|nullptr|operator|override|private|protected|public|register|return|short|signed|sizeof|static|struct|super|switch|template|this|throw|true|try|typedef|typename|union|unsigned|using|virtual|void|volatile|while)\b/gm },
+  { cls: 'number', priority: 4, regex: /\b(?:0x[\da-fA-F]+|\d+(?:\.\d+)?(?:e[+-]?\d+)?)(?:[uUlLfF]*)\b/gm },
+  { cls: 'function', priority: 5, regex: /\b[A-Za-z_]\w*(?=\s*\()/gm },
+];
+
+const highlightRulesPython = [
+  { cls: 'comment', priority: 0, regex: /#.*$/gm },
+  { cls: 'string', priority: 1, regex: /'''[\s\S]*?'''|"""[\s\S]*?"""|'(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*"/gm },
+  { cls: 'decorator', priority: 2, regex: /@[A-Za-z_][\w.]*/gm },
+  { cls: 'keyword', priority: 3, regex: /\b(?:and|as|assert|async|await|break|case|class|continue|def|del|elif|else|except|finally|for|from|global|if|import|in|is|lambda|match|nonlocal|not|or|pass|raise|return|try|while|with|yield)\b/gm },
+  { cls: 'constant', priority: 4, regex: /\b(?:True|False|None|self|cls)\b/gm },
+  { cls: 'number', priority: 5, regex: /\b(?:0x[\da-fA-F]+|\d+(?:\.\d+)?(?:e[+-]?\d+)?)\b/gm },
+  { cls: 'function', priority: 6, regex: /\b[A-Za-z_]\w*(?=\s*\()/gm },
+];
+
+const highlightRulesBash = [
+  { cls: 'comment', priority: 0, regex: /#.*$/gm },
+  { cls: 'string', priority: 1, regex: /'(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*"/gm },
+  { cls: 'variable', priority: 2, regex: /\$\{?[A-Za-z_][\w]*\}?|\$[@*#?$!-]|\$\d+/gm },
+  { cls: 'keyword', priority: 3, regex: /\b(?:case|coproc|do|done|elif|else|esac|export|fi|for|function|if|in|local|readonly|select|then|time|until|while)\b/gm },
+  { cls: 'number', priority: 4, regex: /\b\d+\b/gm },
+];
+
+const highlightRulesJson = [
+  { cls: 'key', priority: 0, regex: /"(?:\\.|[^"\\])*"(?=\s*:)/gm },
+  { cls: 'string', priority: 1, regex: /"(?:\\.|[^"\\])*"/gm },
+  { cls: 'constant', priority: 2, regex: /\b(?:true|false|null)\b/gm },
+  { cls: 'number', priority: 3, regex: /\b-?(?:0|[1-9]\d*)(?:\.\d+)?(?:e[+-]?\d+)?\b/gm },
+];
+
+const highlightRulesMarkup = [
+  { cls: 'comment', priority: 0, regex: /<!--[\s\S]*?-->/gm },
+  { cls: 'string', priority: 1, regex: /'(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*"/gm },
+  { cls: 'tag', priority: 2, regex: /<\/?[A-Za-z][A-Za-z0-9:-]*/gm },
+  { cls: 'attr', priority: 3, regex: /\b[A-Za-z_:][A-Za-z0-9:._-]*(?=\=)/gm },
+];
+
+const highlightRulesCss = [
+  { cls: 'comment', priority: 0, regex: /\/\*[\s\S]*?\*\//gm },
+  { cls: 'string', priority: 1, regex: /'(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*"/gm },
+  { cls: 'decorator', priority: 2, regex: /@[A-Za-z-]+/gm },
+  { cls: 'attr', priority: 3, regex: /\b[A-Za-z-]+(?=\s*:)/gm },
+  { cls: 'constant', priority: 4, regex: /#[\da-fA-F]{3,8}\b/gm },
+  { cls: 'number', priority: 5, regex: /\b\d+(?:\.\d+)?(?:%|px|em|rem|vh|vw|deg|ms|s)?\b/gm },
+];
+
+const highlightRulesYaml = [
+  { cls: 'comment', priority: 0, regex: /#.*$/gm },
+  { cls: 'key', priority: 1, regex: /^[ \t-]*[A-Za-z0-9_.-]+(?=\s*:)/gm },
+  { cls: 'string', priority: 2, regex: /'(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*"/gm },
+  { cls: 'constant', priority: 3, regex: /\b(?:true|false|null|yes|no|on|off)\b/gim },
+  { cls: 'number', priority: 4, regex: /\b-?(?:0|[1-9]\d*)(?:\.\d+)?\b/gm },
+];
+
+function normalizeCodeLanguage(lang) {
+  const input = String(lang || '').trim().toLowerCase();
+  if (!input) return '';
+  return codeLanguageAliases[input] || input;
+}
+
+function findNextHighlightMatch(code, cursor, rules) {
+  let best = null;
+  for (const rule of rules) {
+    rule.regex.lastIndex = cursor;
+    const match = rule.regex.exec(code);
+    if (!match || !match[0]) continue;
+    const candidate = {
+      cls: rule.cls,
+      priority: Number(rule.priority) || 0,
+      index: match.index,
+      text: match[0],
+    };
+    if (!best ||
+        candidate.index < best.index ||
+        (candidate.index === best.index && candidate.priority < best.priority) ||
+        (candidate.index === best.index && candidate.priority === best.priority &&
+         candidate.text.length > best.text.length)) {
+      best = candidate;
+    }
+  }
+  return best;
+}
+
+function highlightCodeWithRules(code, rules) {
+  const input = String(code || '');
+  if (!input) return '';
+  let cursor = 0;
+  let out = '';
+  while (cursor < input.length) {
+    const match = findNextHighlightMatch(input, cursor, rules);
+    if (!match) {
+      out += escapeHtml(input.slice(cursor));
+      break;
+    }
+    if (match.index > cursor) {
+      out += escapeHtml(input.slice(cursor, match.index));
+    }
+    out += `<span class="tok-${match.cls}">${escapeHtml(match.text)}</span>`;
+    cursor = match.index + match.text.length;
+  }
+  return out;
+}
+
+function highlightCodeHtml(code, lang) {
+  const input = String(code || '').replace(/\n$/, '');
+  const normalized = normalizeCodeLanguage(lang);
+  if (!input) return '';
+  if (!normalized || normalized === 'text' || normalized === 'markdown') {
+    return escapeHtml(input);
+  }
+  if (normalized === 'python') return highlightCodeWithRules(input, highlightRulesPython);
+  if (normalized === 'bash') return highlightCodeWithRules(input, highlightRulesBash);
+  if (normalized === 'json') return highlightCodeWithRules(input, highlightRulesJson);
+  if (normalized === 'html' || normalized === 'xml') return highlightCodeWithRules(input, highlightRulesMarkup);
+  if (normalized === 'css' || normalized === 'scss' || normalized === 'less') return highlightCodeWithRules(input, highlightRulesCss);
+  if (normalized === 'yaml') return highlightCodeWithRules(input, highlightRulesYaml);
+  if (javascriptLikeLangs.has(normalized)) return highlightCodeWithRules(input, highlightRulesJsLike);
+  if (cLikeLangs.has(normalized)) return highlightCodeWithRules(input, highlightRulesCLike);
+  return highlightCodeWithRules(input, highlightRulesJsLike);
+}
+
+let markdownRenderer = null;
+let markdownRendererInitAttempted = false;
+
+function renderCodeFenceHtml(code, lang) {
+  const normalized = normalizeCodeLanguage(lang) || 'text';
+  return `<pre><code class="language-${escapeHtml(normalized)}">${highlightCodeHtml(code, normalized)}</code></pre>`;
+}
+
+function escapeRegex(text) {
+  return String(text || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function looksLikeMathBlockBody(text) {
+  const body = String(text || '').trim();
+  if (!body) return false;
+  if (/\\[A-Za-z]+(?:\s*[{[]|\b)/.test(body)) {
+    return true;
+  }
+  const normalized = body.replace(/\s+/g, ' ').trim();
+  if (!/[=+\-*/^<>±≈≤≥×÷]/.test(normalized) && !/[\p{L}\p{N}]_[\p{L}\p{N}{]/u.test(normalized)) {
+    return false;
+  }
+  return /^[\p{L}\p{N}\s+\-*/=(),.^_%<>|[\]{}:!;\\&±≈≤≥×÷·∞∂∇∑∫√→←↔]+$/u.test(normalized);
+}
+
+function normalizeStandaloneBracketMathBlocks(text) {
+  const lines = String(text || '').replace(/\r\n?/g, '\n').split('\n');
+  if (!lines.length) return '';
+  const out = [];
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const current = String(lines[i] || '');
+    const trimmed = current.trim();
+    if (!/^(?:\\)?\[$/.test(trimmed)) {
+      out.push(current);
+      continue;
+    }
+
+    const bodyLines = [];
+    let closingIndex = -1;
+    for (let j = i + 1; j < lines.length && j <= i + 12; j += 1) {
+      const candidate = String(lines[j] || '');
+      const candidateTrimmed = candidate.trim();
+      if (/^(?:\\)?\]$/.test(candidateTrimmed)) {
+        closingIndex = j;
+        break;
+      }
+      bodyLines.push(candidate);
+    }
+
+    if (closingIndex === -1) {
+      out.push(current);
+      continue;
+    }
+
+    const bodyText = bodyLines.join('\n').trim();
+    if (!looksLikeMathBlockBody(bodyText)) {
+      out.push(current);
+      continue;
+    }
+
+    const leading = current.match(/^\s*/)?.[0] || '';
+    out.push(`${leading}\\[`);
+    bodyLines.forEach((line) => out.push(line));
+    out.push(`${leading}\\]`);
+    i = closingIndex;
+  }
+
+  return out.join('\n');
+}
+
+function normalizeMarkdownForDisplay(text) {
+  return normalizeStandaloneBracketMathBlocks(text);
+}
+
+function dedentBlockText(lines) {
+  const srcLines = Array.isArray(lines) ? lines.map((line) => String(line || '')) : [];
+  const nonEmpty = srcLines.filter((line) => line.trim().length > 0);
+  if (!nonEmpty.length) {
+    return '';
+  }
+  const minIndent = nonEmpty.reduce((min, line) => {
+    const indent = (line.match(/^\s*/) || [''])[0].length;
+    return Math.min(min, indent);
+  }, Number.MAX_SAFE_INTEGER);
+  return srcLines
+    .map((line) => line.slice(Math.min(minIndent, line.length)))
+    .join('\n')
+    .trim();
+}
+
+function renderKatexInlineHtml(expr) {
+  const source = String(expr || '').trim();
+  if (!source) {
+    return '';
+  }
+  try {
+    if (typeof window !== 'undefined' &&
+        window.katex &&
+        typeof window.katex.renderToString === 'function') {
+      return window.katex.renderToString(source, {
+        displayMode: false,
+        throwOnError: false,
+        strict: 'ignore',
+      });
+    }
+  } catch (_) {
+  }
+  return `<span class="md-math-inline">${escapeHtml(source)}</span>`;
+}
+
+function renderKatexDisplayHtml(expr) {
+  const source = String(expr || '').trim();
+  if (!source) {
+    return '';
+  }
+  try {
+    if (typeof window !== 'undefined' &&
+        window.katex &&
+        typeof window.katex.renderToString === 'function') {
+      const html = window.katex.renderToString(source, {
+        displayMode: true,
+        throwOnError: false,
+        strict: 'ignore',
+      });
+      return `<div class="md-katex-block">${html}</div>`;
+    }
+  } catch (_) {
+  }
+  return `<div class="md-math-block">${escapeHtml(source).replace(/\n/g, '<br>')}</div>`;
+}
+
+function looksLikeInlineMathSource(text) {
+  const source = String(text || '').trim();
+  if (!source) return false;
+  if (/\\[A-Za-z]+(?:\s*[{[]|\b)/.test(source)) return true;
+  if (/^[A-Za-z]$/.test(source)) return true;
+  if (/^[A-Za-z](?:_[A-Za-z0-9{}]+|\^[A-Za-z0-9{}]+)+$/.test(source)) return true;
+  if (/[=+\-*/^_<>±≈≤≥×÷]/.test(source)) return true;
+  if (/[∂∇∑∫√∞μρϵεψΨℏ]/.test(source)) return true;
+  return false;
+}
+
+function replaceDollarMathDelimiters(text, replacements) {
+  const src = String(text || '');
+  let out = '';
+
+  const pushInlineToken = (expr) => {
+    const source = String(expr || '').trim();
+    if (!source || !looksLikeInlineMathSource(source)) {
+      return null;
+    }
+    const token = `@@MD_KATEX_INLINE_${replacements.length}@@`;
+    replacements.push({
+      token,
+      html: renderKatexInlineHtml(source),
+      display: false,
+    });
+    return token;
+  };
+
+  const pushDisplayToken = (expr) => {
+    const source = String(expr || '').trim();
+    if (!source) {
+      return null;
+    }
+    const token = `@@MD_KATEX_BLOCK_${replacements.length}@@`;
+    replacements.push({
+      token,
+      html: renderKatexDisplayHtml(source),
+      display: true,
+    });
+    return token;
+  };
+
+  for (let i = 0; i < src.length; i += 1) {
+    const ch = src[i];
+
+    if (ch === '\\') {
+      out += ch;
+      if (i + 1 < src.length) {
+        out += src[i + 1];
+        i += 1;
+      }
+      continue;
+    }
+
+    if (ch !== '$') {
+      out += ch;
+      continue;
+    }
+
+    const isDouble = src[i + 1] === '$';
+    if (isDouble) {
+      let end = i + 2;
+      let found = -1;
+      while (end < src.length) {
+        if (src[end] === '\\') {
+          end += 2;
+          continue;
+        }
+        if (src[end] === '$' && src[end + 1] === '$') {
+          found = end;
+          break;
+        }
+        end += 1;
+      }
+      if (found === -1) {
+        out += '$$';
+        i += 1;
+        continue;
+      }
+      const expr = src.slice(i + 2, found);
+      const token = pushDisplayToken(expr);
+      if (!token) {
+        out += src.slice(i, found + 2);
+      } else {
+        out += token;
+      }
+      i = found + 1;
+      continue;
+    }
+
+    let end = i + 1;
+    let found = -1;
+    while (end < src.length) {
+      if (src[end] === '\n' || src[end] === '\r') {
+        break;
+      }
+      if (src[end] === '\\') {
+        end += 2;
+        continue;
+      }
+      if (src[end] === '$') {
+        found = end;
+        break;
+      }
+      end += 1;
+    }
+    if (found === -1) {
+      out += '$';
+      continue;
+    }
+
+    const expr = src.slice(i + 1, found);
+    const token = pushInlineToken(expr);
+    if (!token) {
+      out += src.slice(i, found + 1);
+    } else {
+      out += token;
+    }
+    i = found;
+  }
+
+  return out;
+}
+
+function extractFencedCodeBlockTokens(text) {
+  const blocks = [];
+  const out = String(text || '').replace(/```([a-zA-Z0-9_+\-]*)\n?([\s\S]*?)(```|$)/g, (match) => {
+    const token = `@@MD_CODE_FENCE_${blocks.length}@@`;
+    blocks.push(match);
+    return token;
+  });
+  return { text: out, blocks };
+}
+
+function restoreFencedCodeBlockTokens(text, blocks) {
+  return String(text || '').replace(/@@MD_CODE_FENCE_(\d+)@@/g, (_, idx) => blocks[Number(idx)] || '');
+}
+
+function extractKatexMathTokens(text) {
+  const replacements = [];
+  const tokenizedCode = extractFencedCodeBlockTokens(text);
+  const lines = String(tokenizedCode.text || '').split('\n');
+  const out = [];
+
+  const pushDisplayToken = (expr, indent = '') => {
+    const trimmedExpr = String(expr || '').trim();
+    if (!trimmedExpr) {
+      return false;
+    }
+    const token = `@@MD_KATEX_BLOCK_${replacements.length}@@`;
+    replacements.push({
+      token,
+      html: renderKatexDisplayHtml(trimmedExpr),
+      display: true,
+    });
+    if (out.length && out[out.length - 1].trim()) {
+      out.push('');
+    }
+    out.push(`${indent}${token}`);
+    out.push('');
+    return true;
+  };
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = String(lines[i] || '');
+    const trimmed = line.trim();
+
+    if (/^@@MD_CODE_FENCE_\d+@@$/.test(trimmed)) {
+      out.push(line);
+      continue;
+    }
+
+    const singleLineDisplay = trimmed.match(/^\\\[\s*([\s\S]*?)\s*\\\]$/);
+    if (singleLineDisplay) {
+      const leading = (line.match(/^\s*/) || [''])[0];
+      if (pushDisplayToken(singleLineDisplay[1], leading)) {
+        continue;
+      }
+    }
+
+    if (trimmed === '\\[') {
+      const bodyLines = [];
+      let closingIndex = -1;
+      for (let j = i + 1; j < lines.length; j += 1) {
+        const candidate = String(lines[j] || '');
+        const candidateTrimmed = candidate.trim();
+        if (/^@@MD_CODE_FENCE_\d+@@$/.test(candidateTrimmed)) {
+          break;
+        }
+        if (candidateTrimmed === '\\]') {
+          closingIndex = j;
+          break;
+        }
+        bodyLines.push(candidate);
+      }
+      if (closingIndex >= 0) {
+        const leading = (line.match(/^\s*/) || [''])[0];
+        const expr = dedentBlockText(bodyLines);
+        if (pushDisplayToken(expr, leading)) {
+          i = closingIndex;
+          continue;
+        }
+      }
+    }
+
+    out.push(line);
+  }
+
+  let working = out.join('\n');
+  working = replaceDollarMathDelimiters(working, replacements);
+  working = working.replace(/\\\(([^\n]*?)\\\)/g, (match, expr) => {
+    const source = String(expr || '').trim();
+    if (!source) {
+      return match;
+    }
+    const token = `@@MD_KATEX_INLINE_${replacements.length}@@`;
+    replacements.push({
+      token,
+      html: renderKatexInlineHtml(source),
+      display: false,
+    });
+    return token;
+  });
+
+  working = restoreFencedCodeBlockTokens(working, tokenizedCode.blocks);
+  return { text: working, replacements };
+}
+
+function injectKatexMathTokens(html, replacements) {
+  let out = String(html || '');
+  for (const entry of Array.isArray(replacements) ? replacements : []) {
+    if (!entry || !entry.token) {
+      continue;
+    }
+    const tokenPattern = escapeRegex(entry.token);
+    if (entry.display) {
+      out = out
+        .replace(new RegExp(`<p>${tokenPattern}</p>`, 'g'), entry.html)
+        .replace(new RegExp(`<p>\\s*${tokenPattern}\\s*</p>`, 'g'), entry.html)
+        .replace(new RegExp(`<li>\\s*${tokenPattern}\\s*</li>`, 'g'), `<li>${entry.html}</li>`);
+    }
+    out = out.replace(new RegExp(tokenPattern, 'g'), entry.html);
+  }
+  return out;
+}
+
+function initMarkdownRenderer() {
+  if (markdownRendererInitAttempted) {
+    return markdownRenderer;
+  }
+  markdownRendererInitAttempted = true;
+
+  if (typeof window === 'undefined' ||
+      typeof window.markdownit !== 'function') {
+    return null;
+  }
+
+  try {
+    const md = window.markdownit({
+      html: false,
+      breaks: true,
+      linkify: true,
+      typographer: false,
+      langPrefix: 'language-',
+      highlight: (code, lang) => renderCodeFenceHtml(code, lang),
+    });
+
+    const defaultLinkOpen = md.renderer.rules.link_open ||
+      ((tokens, idx, options, env, self) => self.renderToken(tokens, idx, options));
+    md.renderer.rules.link_open = (tokens, idx, options, env, self) => {
+      const hrefIndex = tokens[idx].attrIndex('href');
+      const href = hrefIndex >= 0 ? String(tokens[idx].attrs[hrefIndex][1] || '') : '';
+      const safeHref = sanitizeHref(href);
+      if (!safeHref) {
+        tokens[idx].attrSet('href', '#');
+      } else {
+        tokens[idx].attrSet('href', safeHref);
+      }
+      tokens[idx].attrSet('target', '_blank');
+      tokens[idx].attrSet('rel', 'noopener noreferrer');
+      return defaultLinkOpen(tokens, idx, options, env, self);
+    };
+
+    const defaultTableOpen = md.renderer.rules.table_open ||
+      ((tokens, idx, options, env, self) => self.renderToken(tokens, idx, options));
+    const defaultTableClose = md.renderer.rules.table_close ||
+      ((tokens, idx, options, env, self) => self.renderToken(tokens, idx, options));
+    md.renderer.rules.table_open = (tokens, idx, options, env, self) => {
+      tokens[idx].attrJoin('class', 'md-table');
+      return `<div class="md-table-wrap">${defaultTableOpen(tokens, idx, options, env, self)}`;
+    };
+    md.renderer.rules.table_close = (tokens, idx, options, env, self) => {
+      return `${defaultTableClose(tokens, idx, options, env, self)}</div>`;
+    };
+
+    markdownRenderer = md;
+  } catch (_) {
+    markdownRenderer = null;
+  }
+
+  return markdownRenderer;
 }
 
 function splitMarkdownTableCells(line) {
@@ -5728,13 +8609,21 @@ function extractMarkdownTableTokens(inputText) {
   return { text: out.join('\n'), tableBlocks };
 }
 
-function renderMarkdownHtml(text) {
+function renderMarkdownHtmlLegacy(text) {
   const codeBlocks = [];
+  const mathBlocks = [];
   let working = String(text || '').replace(/\r\n?/g, '\n');
+
+  working = working.replace(/\\\[([\s\S]*?)\\\]/g, (_, expr) => {
+    const html = `<div class="md-math-block">${escapeHtml(String(expr || '').trim()).replace(/\n/g, '<br>')}</div>`;
+    const token = `@@MD_MATH_${mathBlocks.length}@@`;
+    mathBlocks.push(html);
+    return `\n\n${token}\n\n`;
+  });
 
   working = working.replace(/```([a-zA-Z0-9_+\-]*)\n?([\s\S]*?)(```|$)/g, (_, lang, code) => {
     const languageClass = lang ? ` language-${escapeHtml(lang)}` : '';
-    const html = `<pre><code class="${languageClass.trim()}">${escapeHtml(code.replace(/\n$/, ''))}</code></pre>`;
+    const html = `<pre><code class="${languageClass.trim()}">${highlightCodeHtml(code, lang)}</code></pre>`;
     const token = `@@MD_BLOCK_${codeBlocks.length}@@`;
     codeBlocks.push(html);
     return `\n\n${token}\n\n`;
@@ -5752,6 +8641,11 @@ function renderMarkdownHtml(text) {
     const blockMatch = trimmed.match(/^@@MD_BLOCK_(\d+)@@$/);
     if (blockMatch) {
       return codeBlocks[Number(blockMatch[1])] || '';
+    }
+
+    const mathMatch = trimmed.match(/^@@MD_MATH_(\d+)@@$/);
+    if (mathMatch) {
+      return mathBlocks[Number(mathMatch[1])] || '';
     }
 
     const tableMatch = trimmed.match(/^@@MD_TABLE_(\d+)@@$/);
@@ -5826,7 +8720,23 @@ function renderMarkdownHtml(text) {
 
   return rendered
     .replace(/@@MD_BLOCK_(\d+)@@/g, (_, idx) => codeBlocks[Number(idx)] || '')
+    .replace(/@@MD_MATH_(\d+)@@/g, (_, idx) => mathBlocks[Number(idx)] || '')
     .replace(/@@MD_TABLE_(\d+)@@/g, (_, idx) => tableBlocks[Number(idx)] || '');
+}
+
+function renderMarkdownHtml(text) {
+  const source = normalizeMarkdownForDisplay(String(text || ''));
+  const mathTokens = extractKatexMathTokens(source);
+  const md = initMarkdownRenderer();
+  if (!md) {
+    return renderMarkdownHtmlLegacy(source);
+  }
+  try {
+    const rendered = md.render(mathTokens.text);
+    return injectKatexMathTokens(rendered, mathTokens.replacements);
+  } catch (_) {
+    return renderMarkdownHtmlLegacy(source);
+  }
 }
 
 function attachCodeCopyButtons(container) {
@@ -5867,7 +8777,8 @@ function attachCodeCopyButtons(container) {
     const btn = document.createElement('button');
     btn.className = 'code-copy-btn';
     btn.type = 'button';
-    btn.title = 'Copy code';
+    btn.setAttribute('aria-label', 'Copy code');
+    applyCustomTooltip(btn, 'Copy code');
     btn.innerHTML = `
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <rect x="9" y="9" width="13" height="13" rx="2"></rect>
@@ -5884,24 +8795,937 @@ function attachCodeCopyButtons(container) {
   });
 }
 
-function buildMsgNode(role, text, chatId = '', messageTs = 0, loopDetected = false) {
+function buildThinkingState(text) {
+  const source = normalizeImplicitThinkingTrace(text);
+  const regex = /<(thinking|think)>([\s\S]*?)(<\/\1>|$)/gi;
+  const blocks = [];
+  let inProgress = false;
+  let match = null;
+  while ((match = regex.exec(source))) {
+    const body = String(match[2] || '').trim();
+    if (body) {
+      blocks.push(body);
+    }
+    if (!match[3]) {
+      inProgress = true;
+      break;
+    }
+  }
+  return {
+    text: blocks.join('\n\n').trim(),
+    inProgress,
+  };
+}
+
+function normalizeImplicitThinkingTrace(text) {
+  const source = String(text || '');
+  if (/<(thinking|think)>/i.test(source)) {
+    return source;
+  }
+  const closeMatch = source.match(/<\/think>/i);
+  if (!closeMatch || typeof closeMatch.index !== 'number') {
+    return source;
+  }
+  const reasoning = source.slice(0, closeMatch.index).trim();
+  const rest = source.slice(closeMatch.index + closeMatch[0].length);
+  if (!reasoning) {
+    return rest;
+  }
+  return `<think>${reasoning}</think>${rest}`;
+}
+
+function normalizeStandaloneFinalAnswer(text) {
+  return String(text || '')
+    .replace(/^(?:therefore|thus|hence|so|accordingly|as a result|in conclusion)[,:\-\s]+/i, '')
+    .replace(/^(?:based on (?:that|this)|from (?:that|this)|to answer directly)[,:\-\s]+/i, '')
+    .trim();
+}
+
+function buildThinkingLoader() {
+  const loader = document.createElement('div');
+  loader.className = 'msg-thinking-loader';
+  const label = document.createElement('span');
+  label.className = 'msg-thinking-loader-label';
+  label.textContent = 'Thinking...';
+  loader.appendChild(label);
+  return loader;
+}
+
+const agentProgressPrefix = '__AGENT_PROGRESS__:';
+
+function buildAgentProgressMarker(text) {
+  return `${agentProgressPrefix}${String(text || '').trim()}`;
+}
+
+function parseAgentProgressMarker(text) {
+  const source = String(text || '');
+  if (!source.startsWith(agentProgressPrefix)) return '';
+  return source.slice(agentProgressPrefix.length).trim();
+}
+
+function buildAgentProgressLoader(text) {
+  const loader = document.createElement('div');
+  loader.className = 'msg-thinking-loader msg-agent-progress-loader';
+  const label = document.createElement('span');
+  label.className = 'msg-thinking-loader-label';
+  label.textContent = String(text || '').trim() || 'Working...';
+  loader.appendChild(label);
+  return loader;
+}
+
+function normalizeAgentActivities(list) {
+  return Array.from(list || [])
+    .map((item) => {
+      if (!item || typeof item !== 'object') return null;
+      const title = String(item.title || '').trim();
+      if (!title) return null;
+      const status = String(item.status || '').trim().toLowerCase();
+      const openPath = normalizeWorkspacePath(item.openPath || item.path || '');
+      return {
+        kind: String(item.kind || '').trim().toLowerCase(),
+        title: title.slice(0, 160),
+        detail: String(item.detail || '').trim().slice(0, 420),
+        meta: String(item.meta || '').trim().slice(0, 120),
+        openPath: openPath && openPath !== '/' ? openPath : '',
+        openKind: String(item.openKind || '').trim().toLowerCase() === 'folder' ? 'folder' : 'file',
+        status: status === 'error' ? 'error' : (status === 'pending' ? 'pending' : 'done'),
+        ts: Number(item.ts) || nowTs(),
+      };
+    })
+    .filter(Boolean)
+    .slice(-24);
+}
+
+function cloneAgentActivities(list) {
+  return normalizeAgentActivities(list).map((item) => ({ ...item }));
+}
+
+function mergeAgentActivityIntoList(list, activity) {
+  const normalized = normalizeAgentActivities([activity])[0];
+  if (!normalized) return list;
+  const target = Array.isArray(list) ? list : [];
+  const previous = target.length > 0 ? target[target.length - 1] : null;
+  if (
+    previous
+    && previous.kind === normalized.kind
+    && previous.title === normalized.title
+    && previous.detail === normalized.detail
+    && previous.meta === normalized.meta
+    && previous.status === normalized.status
+  ) {
+    return target;
+  }
+  if (
+    previous
+    && previous.status === 'pending'
+    && normalized.kind === previous.kind
+    && normalized.title === previous.title
+    && normalized.detail === previous.detail
+  ) {
+    target[target.length - 1] = {
+      ...normalized,
+      openPath: normalized.openPath || previous.openPath || '',
+      openKind: normalized.openKind || previous.openKind || 'file',
+    };
+    return target;
+  }
+  if (
+    previous
+    && previous.status === 'error'
+    && normalized.status === 'error'
+    && previous.title === normalized.title
+  ) {
+    target[target.length - 1] = normalized;
+    return target;
+  }
+  target.push(normalized);
+  return target;
+}
+
+function ensureActiveAgentStreamState(chatId) {
+  const key = String(chatId || '');
+  if (!activeAgentStreamState || String(activeAgentStreamState.chatId || '') !== key) {
+    activeAgentStreamState = {
+      chatId: key,
+      statusText: 'Working...',
+      activities: [],
+    };
+  }
+  return activeAgentStreamState;
+}
+
+function resetActiveAgentStreamState() {
+  activeAgentStreamState = null;
+}
+
+function setActiveAgentStreamStatus(chatId, text) {
+  const state = ensureActiveAgentStreamState(chatId);
+  state.statusText = String(text || '').trim() || 'Working...';
+}
+
+function pushActiveAgentStreamActivity(chatId, activity) {
+  const state = ensureActiveAgentStreamState(chatId);
+  mergeAgentActivityIntoList(state.activities, activity);
+  if (state.activities.length > 24) {
+    state.activities = state.activities.slice(state.activities.length - 24);
+  }
+}
+
+function guessWorkspaceTargetKind(path) {
+  const normalized = normalizeWorkspacePath(path || '');
+  if (!normalized || normalized === '/') return 'folder';
+  return /\.[^./\\]+$/.test(normalized) ? 'file' : 'folder';
+}
+
+function countTextLines(text) {
+  const source = String(text || '');
+  return source ? source.split('\n').length : 0;
+}
+
+function isLikelyNewAgentFileTarget(toolEvents, path) {
+  const normalized = normalizeWorkspacePath(path || '');
+  if (!normalized || normalized === '/') return false;
+  const events = Array.isArray(toolEvents) ? toolEvents : [];
+  return !events.some((event) => {
+    if (!event || !event.ok) return false;
+    const eventPath = normalizeWorkspacePath(event.path || '');
+    const dstPath = normalizeWorkspacePath(event.dstPath || '');
+    return eventPath === normalized || dstPath === normalized;
+  });
+}
+
+function buildAgentActivityFromToolResult(decision, toolResult) {
+  const tool = String(decision && decision.tool ? decision.tool : '').toLowerCase();
+  const ok = Boolean(toolResult && toolResult.ok);
+  const targetInfo = describeAgentToolTarget(decision);
+  const observation = String(toolResult && toolResult.observation || '').trim();
+  if (!ok) {
+    return null;
+  }
+  if (tool === 'new_project') {
+    return {
+      kind: 'project',
+      title: 'Created project',
+      detail: workspaceRootName || 'New project',
+      status: 'done',
+    };
+  }
+  if (tool === 'list_dir') {
+    return {
+      kind: 'scan',
+      title: targetInfo && targetInfo !== '/' ? `Explored ${targetInfo}` : 'Explored workspace',
+      detail: observation.replace(/\s+/g, ' ').trim(),
+      status: 'done',
+    };
+  }
+  if (tool === 'read_file') {
+    return {
+      kind: 'read',
+      title: 'Read file',
+      detail: targetInfo || 'workspace file',
+      openPath: targetInfo,
+      openKind: 'file',
+      meta: 'Open file',
+      status: 'done',
+    };
+  }
+  if (tool === 'write_file') {
+    const writtenPath = normalizeWorkspacePath(toolResult && toolResult.writtenPath ? toolResult.writtenPath : targetInfo);
+    const lineCount = countTextLines(toolResult && toolResult.writtenContent);
+    return {
+      kind: 'write',
+      title: 'Wrote file',
+      detail: writtenPath || targetInfo || 'workspace file',
+      openPath: writtenPath || targetInfo,
+      openKind: 'file',
+      meta: lineCount > 0 ? `${lineCount} line${lineCount === 1 ? '' : 's'}` : 'Open file',
+      status: 'done',
+    };
+  }
+  if (tool === 'mkdir') {
+    return {
+      kind: 'mkdir',
+      title: 'Created folder',
+      detail: targetInfo || 'new folder',
+      openPath: targetInfo,
+      openKind: 'folder',
+      meta: 'Open folder',
+      status: 'done',
+    };
+  }
+  if (tool === 'move') {
+    const dstPath = normalizeWorkspacePath(decision && (decision.dstPath || decision.dst_path) || '');
+    return {
+      kind: 'move',
+      title: 'Moved item',
+      detail: targetInfo || observation,
+      openPath: dstPath,
+      openKind: guessWorkspaceTargetKind(dstPath),
+      meta: 'Open target',
+      status: 'done',
+    };
+  }
+  if (tool === 'delete') {
+    return {
+      kind: 'delete',
+      title: 'Moved to Trash',
+      detail: targetInfo || observation,
+      status: 'done',
+    };
+  }
+  return {
+    kind: tool || 'tool',
+    title: describeAgentToolPhase(tool, targetInfo, 'done'),
+    detail: observation.replace(/\s+/g, ' ').trim(),
+    status: 'done',
+  };
+}
+
+function buildAgentPendingActivity(decision, toolEvents = []) {
+  const tool = String(decision && decision.tool ? decision.tool : '').toLowerCase();
+  const targetInfo = describeAgentToolTarget(decision);
+  if (tool === 'new_project') {
+    return {
+      kind: 'project',
+      title: 'Creating project',
+      detail: workspaceRootName || 'Project workspace',
+      status: 'pending',
+    };
+  }
+  if (tool === 'list_dir') {
+    return {
+      kind: 'scan',
+      title: targetInfo && targetInfo !== '/' ? `Exploring ${targetInfo}` : 'Exploring workspace',
+      detail: '',
+      status: 'pending',
+    };
+  }
+  if (tool === 'read_file') {
+    return {
+      kind: 'read',
+      title: 'Reading file',
+      detail: targetInfo || 'workspace file',
+      openPath: targetInfo,
+      openKind: 'file',
+      status: 'pending',
+    };
+  }
+  if (tool === 'write_file') {
+    return {
+      kind: 'write',
+      title: 'Drafting file',
+      detail: targetInfo || 'workspace file',
+      openPath: targetInfo,
+      openKind: 'file',
+      status: 'pending',
+    };
+  }
+  if (tool === 'mkdir') {
+    return {
+      kind: 'mkdir',
+      title: 'Creating folder',
+      detail: targetInfo || 'new folder',
+      openPath: targetInfo,
+      openKind: 'folder',
+      status: 'pending',
+    };
+  }
+  if (tool === 'move') {
+    const dstPath = normalizeWorkspacePath(decision && (decision.dstPath || decision.dst_path) || '');
+    return {
+      kind: 'move',
+      title: 'Moving item',
+      detail: targetInfo || dstPath || '',
+      openPath: dstPath,
+      openKind: guessWorkspaceTargetKind(dstPath),
+      status: 'pending',
+    };
+  }
+  if (tool === 'delete') {
+    return {
+      kind: 'delete',
+      title: 'Deleting item',
+      detail: targetInfo || '',
+      status: 'pending',
+    };
+  }
+  return {
+    kind: tool || 'tool',
+    title: describeAgentToolPhase(tool, targetInfo, 'start'),
+    detail: targetInfo || '',
+    status: 'pending',
+  };
+}
+
+function deriveProjectNameFromTask(taskText) {
+  const source = String(taskText || '').toLowerCase();
+  if (!source) return '';
+  const kindMatch = source.match(/\b(project|app|site|tool|game)\b/);
+  const projectKind = kindMatch ? kindMatch[1] : '';
+  const patterns = [
+    /\b(?:create|build|make)\s+(?:a|an)?\s*new?\s*([a-z0-9][a-z0-9\s_-]{1,40}?)\s+(?:project|app|site|tool|game)\b/i,
+    /\b([a-z0-9][a-z0-9\s_-]{1,40}?)\s+(?:project|app|site|tool|game)\b/i,
+  ];
+  let candidate = '';
+  for (const pattern of patterns) {
+    const match = source.match(pattern);
+    if (match && match[1]) {
+      candidate = match[1];
+      break;
+    }
+  }
+  if (!candidate) {
+    const compactMatch = source.match(/\b(?:for|of)?\s*([a-z0-9][a-z0-9\s_-]{1,28}?)\s+(?:project|app|site|tool|game)\b/i);
+    if (compactMatch && compactMatch[1]) candidate = compactMatch[1];
+  }
+  const clean = candidate
+    .replace(/\b(python|javascript|typescript|react|vue|node|offline|local|simple|desktop|browser|web|small|business|businesses|for)\b/gi, ' ')
+    .replace(/[^a-z0-9\s_-]+/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!clean) return '';
+  let slug = clean
+    .replace(/^(a|an|the)\s+/i, '')
+    .replace(/[_\s]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 48);
+  if (projectKind === 'game' && !slug.endsWith('-game')) slug = `${slug}-game`;
+  if (projectKind === 'site' && !slug.endsWith('-site')) slug = `${slug}-site`;
+  return slug;
+}
+
+function isAgentTaskGameLike(taskText) {
+  const lower = String(taskText || '').toLowerCase();
+  return /\bgame\b/.test(lower);
+}
+
+function isAgentTaskSoftwareProject(taskText) {
+  const lower = String(taskText || '').toLowerCase();
+  return /\b(create|new|start|set up|setup|build|make)\b[\s\S]*\b(project|app|site|tool|game)\b/.test(lower);
+}
+
+function isAgentTaskPythonRelated(taskText) {
+  const lower = String(taskText || '').toLowerCase();
+  return /\bpython\b/.test(lower)
+    || /\.py\b/.test(lower)
+    || /pygame/.test(lower)
+    || /snake_game/.test(lower);
+}
+
+function hasReadmeRunInstructions(content) {
+  const text = String(content || '').toLowerCase();
+  return /(run|usage|start|launch|open)/.test(text)
+    && /(python|pygame|\.py|app\.py|src\/|npm|node|open.*html|browser)/.test(text);
+}
+
+function isAgentBudgetTrackerTask(taskText) {
+  const lower = String(taskText || '').toLowerCase();
+  return /\b(budget|expense|finance|tracker)\b/.test(lower);
+}
+
+function isAgentGeneratedContentTarget(path, taskText) {
+  const normalized = normalizeWorkspacePath(path || '');
+  const lowerTask = String(taskText || '').toLowerCase();
+  if (!normalized || normalized === '/') return false;
+  if (normalized === '/README.md') return true;
+  if (/\.(py|js|ts|tsx|jsx|html|css|json)$/i.test(normalized)) return true;
+  if (normalized.startsWith('/src/')) return true;
+  if (/\b(project|app|site|tool|game)\b/.test(lowerTask) && /\.(md|txt|toml|ini|env)$/i.test(normalized)) return true;
+  return false;
+}
+
+function buildAgentFileGenerationHints(taskText, path) {
+  const normalized = normalizeWorkspacePath(path || '');
+  const hints = [];
+  const lower = String(taskText || '').toLowerCase();
+  if (normalized === '/README.md') {
+    hints.push('Describe what the project does.');
+    hints.push('Include setup and run instructions.');
+    hints.push('Mention the main file and any dependencies.');
+  }
+  if (/\b(project|app|site|tool|game)\b/.test(lower)) {
+    hints.push('Prefer a self-contained offline MVP with as few external runtime requirements as possible unless the user explicitly requested a stack.');
+  }
+  if (isAgentBudgetTrackerTask(lower)) {
+    hints.push('Include real budget tracking features such as add expense or income, listing entries, totals, and category or date fields.');
+    hints.push('Persist data locally if the task says offline.');
+  }
+  if (/offline/.test(lower)) {
+    hints.push('Use local storage or local files for persistence instead of any network service.');
+  }
+  if (/\bsmall business|businesses\b/.test(lower)) {
+    hints.push('Make the MVP practical for a small business workflow, with categories and summary totals.');
+  }
+  return hints;
+}
+
+function isLikelyCompletePythonGameSource(content) {
+  const text = String(content || '');
+  const lower = text.toLowerCase();
+  let score = 0;
+  if (/import\s+pygame/i.test(text) || /from\s+pygame/i.test(text)) score += 1;
+  if (/pygame\.init\s*\(/i.test(text) || /pygame\.display\./i.test(text)) score += 1;
+  if (/display\.set_mode\s*\(/i.test(text) || /screen\s*=\s*pygame\.display/i.test(text)) score += 1;
+  if (/while\s+(?:not\s+\w+|true)\s*:/i.test(text)) score += 1;
+  if (/pygame\.KEYDOWN|event\.key/i.test(text)) score += 1;
+  if (/\bfood\b|\bapple\b|\benemy\b|\bscore\b/i.test(lower)) score += 1;
+  if (/\bplayer\b|\bsnake\b|\bpaddle\b|\bball\b/i.test(lower)) score += 1;
+  if (/pygame\.quit\s*\(|quit\s*\(/i.test(text)) score += 1;
+  return text.trim().length >= 900 && score >= 6;
+}
+
+function getLatestSuccessfulAgentSourceWrite(toolEvents, predicate = null) {
+  const events = Array.isArray(toolEvents) ? toolEvents : [];
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (!event || event.tool !== 'write_file' || !event.ok) continue;
+    const normalized = normalizeWorkspacePath(event.path || '');
+    if (!normalized || normalized === '/README.md') continue;
+    if (!/\.(py|js|ts|tsx|jsx|html|css|json|md)$/i.test(normalized) && !normalized.startsWith('/src/')) continue;
+    if (predicate && !predicate(event, normalized)) continue;
+    return event;
+  }
+  return null;
+}
+
+function looksLikePlaceholderImplementation(content) {
+  const text = String(content || '').toLowerCase();
+  return [
+    'functionality here',
+    'todo:',
+    'placeholder',
+    'coming soon',
+    'start developing',
+    'implement this',
+  ].some((snippet) => text.includes(snippet));
+}
+
+function isLikelyCompletePythonProjectSource(content) {
+  const text = String(content || '');
+  const lower = text.toLowerCase();
+  let score = 0;
+  if (/def\s+\w+/i.test(text) || /class\s+\w+/i.test(text)) score += 1;
+  if (/if __name__ == ['"]__main__['"]:/i.test(text)) score += 1;
+  if (/input\s*\(|print\s*\(|tkinter|mainloop\s*\(/i.test(text) || /argparse|click\./i.test(text)) score += 1;
+  if (/\b(save|load|read|write|open\s*\(|json|sqlite|csv)\b/i.test(lower)) score += 1;
+  if (looksLikePlaceholderImplementation(text)) return false;
+  return text.trim().length >= 800 && score >= 3;
+}
+
+function isLikelyCompleteJavaScriptProjectSource(content) {
+  const text = String(content || '');
+  const lower = text.toLowerCase();
+  let score = 0;
+  if (/function\s+\w+|const\s+\w+\s*=|class\s+\w+/i.test(text)) score += 1;
+  if (/addEventListener|onclick|document\.querySelector|getElementById|localStorage|module\.exports|export\s+/i.test(text)) score += 1;
+  if (/\b(save|load|render|update|delete|remove|list|total|summary)\b/i.test(lower)) score += 1;
+  if (looksLikePlaceholderImplementation(text)) return false;
+  return text.trim().length >= 700 && score >= 3;
+}
+
+function isLikelyCompletePrimarySource(path, content, taskText) {
+  const normalized = normalizeWorkspacePath(path || '');
+  if (/\.py$/i.test(normalized)) {
+    return isAgentTaskGameLike(taskText)
+      ? isLikelyCompletePythonGameSource(content)
+      : isLikelyCompletePythonProjectSource(content);
+  }
+  if (/\.(js|ts|jsx|tsx)$/i.test(normalized)) {
+    return isLikelyCompleteJavaScriptProjectSource(content);
+  }
+  if (/\.html$/i.test(normalized)) {
+    const text = String(content || '');
+    const lower = text.toLowerCase();
+    return text.trim().length >= 500 && /<html|<body|<script|<main|<section/i.test(lower) && !looksLikePlaceholderImplementation(text);
+  }
+  return String(content || '').trim().length >= 500 && !looksLikePlaceholderImplementation(content);
+}
+
+function getLatestSuccessfulAgentWrite(toolEvents, predicate) {
+  const events = Array.isArray(toolEvents) ? toolEvents : [];
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (!event || event.tool !== 'write_file' || !event.ok) continue;
+    if (!predicate || predicate(event)) return event;
+  }
+  return null;
+}
+
+function hasSuccessfulAgentTool(toolEvents, predicate) {
+  return Array.isArray(toolEvents) && toolEvents.some((event) => {
+    if (!event || !event.ok) return false;
+    if (predicate) return Boolean(predicate(event));
+    return true;
+  });
+}
+
+function buildAgentTaskRequirements(taskText, toolEvents = []) {
+  const text = String(taskText || '').trim();
+  const lower = text.toLowerCase();
+  const requirements = [];
+  const isSoftwareProject = isAgentTaskSoftwareProject(lower);
+  const isPythonTask = isAgentTaskPythonRelated(lower);
+  const isGameTask = isAgentTaskGameLike(lower);
+
+  const readmeWrite = getLatestSuccessfulAgentWrite(toolEvents, (event) => normalizeWorkspacePath(event.path || '') === '/README.md');
+  const primarySourceWrite = getLatestSuccessfulAgentSourceWrite(toolEvents, (event, normalized) => {
+    if (isPythonTask) return /\.py$/i.test(normalized);
+    return true;
+  });
+
+  if (isSoftwareProject) {
+    requirements.push({
+      id: 'project_root',
+      label: 'create the project workspace',
+      met: hasSuccessfulAgentTool(toolEvents, (event) => event.tool === 'new_project'),
+    });
+  }
+
+  if (/\bsrc\b/.test(lower) || isPythonTask) {
+    requirements.push({
+      id: 'src_folder',
+      label: 'create the /src folder',
+      met: hasSuccessfulAgentTool(toolEvents, (event) => event.tool === 'mkdir' && normalizeWorkspacePath(event.path || '') === '/src'),
+    });
+  }
+
+  if (/readme/.test(lower) || isSoftwareProject) {
+    requirements.push({
+      id: 'readme_file',
+      label: 'write /README.md',
+      met: Boolean(readmeWrite && String(readmeWrite.content || '').trim()),
+    });
+  }
+
+  if ((/readme/.test(lower) && /(run|how to run|usage|explain how to run)/.test(lower))
+    || isSoftwareProject
+    || (/\breadme\b/.test(lower) && isGameTask)) {
+    requirements.push({
+      id: 'readme_run_instructions',
+      label: 'add run instructions to /README.md',
+      met: Boolean(readmeWrite && hasReadmeRunInstructions(readmeWrite.content || '')),
+    });
+  }
+
+  if (isPythonTask || isSoftwareProject) {
+    requirements.push({
+      id: 'main_source_file',
+      label: 'create the main implementation file',
+      met: Boolean(primarySourceWrite && String(primarySourceWrite.content || '').trim()),
+    });
+  }
+
+  if ((isPythonTask || isSoftwareProject) && primarySourceWrite) {
+    requirements.push({
+      id: 'main_source_complete',
+      label: isGameTask
+        ? 'make the main game implementation complete and runnable'
+        : 'make the main implementation non-placeholder and usable',
+      met: isLikelyCompletePrimarySource(primarySourceWrite.path || '', primarySourceWrite.content || '', lower),
+    });
+  }
+
+  if (!requirements.length) {
+    requirements.push({
+      id: 'deliverable',
+      label: 'complete the requested workspace changes',
+      met: hasSuccessfulAgentTool(toolEvents, (event) => event.tool === 'write_file' || event.tool === 'mkdir' || event.tool === 'move' || event.tool === 'delete' || event.tool === 'new_project'),
+    });
+  }
+
+  return requirements;
+}
+
+function summarizeAgentPendingRequirements(taskText, toolEvents = []) {
+  const missing = buildAgentTaskRequirements(taskText, toolEvents)
+    .filter((item) => !item.met)
+    .map((item) => `- ${item.label}`);
+  return missing.length ? missing.join('\n') : '- none';
+}
+
+function validateAgentFinalDecision(taskText, toolEvents = []) {
+  const requirements = buildAgentTaskRequirements(taskText, toolEvents);
+  const missing = requirements.filter((item) => !item.met).map((item) => item.label);
+  return {
+    ok: missing.length === 0,
+    missing,
+  };
+}
+
+async function buildAgentDecisionRepairPrompt(taskText, toolEvents, stepIndex, badOutput) {
+  const toolLog = (toolEvents || []).slice(-6).map((event, index) => {
+    const observation = String(event && event.observation ? event.observation : '').slice(0, 1200);
+    return `ToolResult ${index + 1}: ${String(event && event.tool ? event.tool : 'unknown')}\n${observation}`;
+  }).join('\n\n');
+  return [
+    'You previously returned invalid output.',
+    'Return ONE JSON object only.',
+    'No markdown. No explanation. No repeated instructions.',
+    'Required keys: action, message, tool, path, content, src_path, dst_path.',
+    'Valid action values: "final" or "tool".',
+    'Valid tool values: "none", "new_project", "list_dir", "read_file", "write_file", "mkdir", "move", "delete".',
+    'If the task is not done yet, return action="tool".',
+    'If the task is complete, return action="final".',
+    `Agent step: ${Number(stepIndex)}/${agentMaxSteps}`,
+    'TASK:',
+    String(taskText || '').trim(),
+    'PENDING_REQUIREMENTS:',
+    summarizeAgentPendingRequirements(taskText, toolEvents),
+    'TOOL_RESULTS:',
+    toolLog || '(none yet)',
+    'INVALID_OUTPUT_TO_AVOID:',
+    String(badOutput || '').slice(0, 1200),
+    'JSON:',
+  ].join('\n');
+}
+
+function sanitizeAgentGeneratedFileContent(outputText) {
+  let text = String(outputText || '').replace(/\r/g, '').trim();
+  if (!text) return '';
+  if (/^```/i.test(text)) {
+    text = text.replace(/^```[a-z0-9_-]*\s*/i, '').replace(/\s*```$/i, '').trim();
+  }
+  return text;
+}
+
+async function buildAgentWriteFileContentPrompt(taskText, toolEvents, path, priorAttempt = '') {
+  const toolLog = (toolEvents || []).slice(-6).map((event, index) => {
+    const observation = String(event && event.observation ? event.observation : '').slice(0, 1000);
+    return `ToolResult ${index + 1}: ${String(event && event.tool ? event.tool : 'unknown')}\n${observation}`;
+  }).join('\n\n');
+  const normalizedPath = normalizeWorkspacePath(path || '');
+  const generationHints = buildAgentFileGenerationHints(taskText, normalizedPath);
+  return [
+    'Write the complete final contents for one project file.',
+    'Return only the file contents. No markdown fences. No explanation.',
+    `File path: ${normalizedPath}`,
+    'Rules:',
+    '- Write a usable MVP, not a placeholder.',
+    '- Keep the file internally consistent and runnable for its role.',
+    '- If this is README.md, include setup or run instructions.',
+    '- If this is a main source file, include the core functionality requested by the task.',
+    generationHints.length ? `MVP_REQUIREMENTS:\n- ${generationHints.join('\n- ')}` : '',
+    'TASK:',
+    String(taskText || '').trim(),
+    'RECENT_TOOL_RESULTS:',
+    toolLog || '(none yet)',
+    priorAttempt
+      ? `PREVIOUS_ATTEMPT_TO_IMPROVE:\n${String(priorAttempt).slice(0, 1800)}`
+      : '',
+    'FILE_CONTENT:',
+  ].filter(Boolean).join('\n');
+}
+
+async function requestExternalAgentPlanner(prompt, maxTokens, timeoutMs = agentPlannerRequestTimeoutMs) {
+  try {
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const timeoutId = controller
+      ? setTimeout(() => controller.abort(), timeoutMs)
+      : null;
+    const response = await fetch(agentPlannerEndpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        prompt: String(prompt || ''),
+        max_tokens: Number(maxTokens) || agentDecisionMaxTokens,
+      }),
+      signal: controller ? controller.signal : undefined,
+    });
+    if (timeoutId) clearTimeout(timeoutId);
+    if (!response.ok) return null;
+    const payload = await response.json();
+    if (!payload || !payload.ok) return null;
+    return {
+      ok: true,
+      output: String(payload.output || ''),
+      externalPlanner: true,
+    };
+  } catch (_) {
+    return null;
+  }
+}
+
+async function generateAgentWriteFileContent(taskText, toolEvents, path, priorAttempt = '') {
+  const prompt = await buildAgentWriteFileContentPrompt(taskText, toolEvents, path, priorAttempt);
+  const external = await requestExternalAgentPlanner(prompt, agentFileContentMaxTokens, agentFileGenerationRequestTimeoutMs);
+  if (external && external.ok) {
+    const cleaned = sanitizeAgentGeneratedFileContent(external.output || '');
+    if (cleaned) return cleaned;
+  }
+  if (!nativeBridge.available()) return '';
+  const res = await nativeBridge.invoke('infer', {
+    prompt,
+    maxTokens: agentFileContentMaxTokens,
+    max_tokens: agentFileContentMaxTokens,
+  });
+  if (!res || !res.ok) return '';
+  return sanitizeAgentGeneratedFileContent(res.output || '');
+}
+
+async function requestAgentPlannerInference(prompt, maxTokens, grammar = '') {
+  const external = await requestExternalAgentPlanner(prompt, maxTokens);
+  if (external && external.ok) return external;
+  return requestNativeAgentPlannerInference(prompt, maxTokens, grammar);
+}
+
+async function requestNativeAgentPlannerInference(prompt, maxTokens, grammar = '') {
+  if (!nativeBridge.available()) {
+    return { ok: false, message: 'Native planner unavailable.' };
+  }
+  return nativeBridge.invoke('infer', {
+    prompt,
+    grammar,
+    maxTokens,
+    max_tokens: maxTokens,
+  });
+}
+
+async function openAgentActivityTarget(activity) {
+  const path = normalizeWorkspacePath(activity && activity.openPath ? activity.openPath : '');
+  if (!path || path === '/') return;
+  const kind = String(activity && activity.openKind ? activity.openKind : '').toLowerCase() === 'folder' ? 'folder' : 'file';
+  setWorkspaceSelection(path, kind);
+  if (kind === 'file') {
+    await openFileTab(path, workspaceBaseName(path));
+  } else {
+    getWorkspaceNodeState(path).expanded = true;
+    await renderArtifacts();
+  }
+}
+
+function buildAgentActivityRow(chatId, activity) {
+  const clickable = Boolean(activity && activity.status === 'done' && activity.openPath);
+  const item = document.createElement(clickable ? 'button' : 'div');
+  item.className = `msg-agent-activity-row${activity && activity.status === 'error' ? ' error' : ''}${clickable ? ' clickable' : ''}`;
+  if (item instanceof HTMLButtonElement) {
+    item.type = 'button';
+    item.addEventListener('click', () => {
+      void openAgentActivityTarget(activity);
+    });
+  }
+  const title = document.createElement('div');
+  title.className = 'msg-agent-activity-title';
+  title.textContent = String(activity && activity.title || '').trim();
+  item.appendChild(title);
+  const detailText = [String(activity && activity.detail || '').trim(), String(activity && activity.meta || '').trim()]
+    .filter(Boolean)
+    .join('  ');
+  if (detailText) {
+    const detail = document.createElement('div');
+    detail.className = 'msg-agent-activity-detail';
+    detail.textContent = detailText;
+    item.appendChild(detail);
+  }
+  return item;
+}
+
+function buildAgentActivityPanel(chatId, activities, options = {}) {
+  const rows = normalizeAgentActivities(activities);
+  const wrapper = document.createElement('div');
+  wrapper.className = 'msg-agent-panel';
+  const statusText = String(options.statusText || '').trim();
+  if (statusText) {
+    wrapper.appendChild(buildAgentProgressLoader(statusText));
+  }
+  if (rows.length > 0) {
+    const list = document.createElement('div');
+    list.className = 'msg-agent-activity-list';
+    rows.forEach((activity) => {
+      list.appendChild(buildAgentActivityRow(chatId, activity));
+    });
+    wrapper.appendChild(list);
+  }
+  return wrapper;
+}
+
+function hasCanvasTokenStarted(text) {
+  const source = String(text || '');
+  return /<AIcanvas\b/i.test(source)
+    || /<AIcanvasJSON\b/i.test(source)
+    || /<(?:\/)?canvas>\s*$/i.test(source)
+    || /^canvas\s*[>:]/i.test(source.trim());
+}
+
+function buildCanvasLoader(displayText = '', rawText = '') {
+  const loader = document.createElement('div');
+  loader.className = 'msg-canvas-loading';
+
+  const intro = String(displayText || '').trim();
+  if (intro) {
+    const introEl = document.createElement('div');
+    introEl.className = 'msg-canvas-loading-intro';
+    introEl.textContent = intro;
+    loader.appendChild(introEl);
+  }
+
+  const card = document.createElement('div');
+  card.className = 'msg-artifact-card msg-artifact-card-loading';
+
+  const title = document.createElement('div');
+  title.className = 'msg-artifact-title msg-canvas-loading-title';
+  const titleMatch = String(rawText || '').match(/<AIcanvas[^>]*\btitle="([^"]{1,90})"/i);
+  title.textContent = String(titleMatch && titleMatch[1] ? titleMatch[1] : 'Canvas').trim() || 'Canvas';
+  card.appendChild(title);
+
+  const body = document.createElement('div');
+  body.className = 'msg-canvas-loading-body';
+  for (let i = 0; i < 4; i += 1) {
+    const line = document.createElement('span');
+    line.className = 'msg-canvas-loading-line';
+    body.appendChild(line);
+  }
+  card.appendChild(body);
+  loader.appendChild(card);
+  return loader;
+}
+
+function populateAssistantBubble(bubble, displayText, options = {}) {
+  if (!bubble) return;
+  bubble.innerHTML = '';
+
+  if (options.showThinkingLoader) {
+    bubble.appendChild(buildThinkingLoader());
+  }
+
+  if (options.showCanvasLoader) {
+    bubble.appendChild(buildCanvasLoader(displayText, options.canvasRawText));
+    return;
+  }
+
+  if (Array.isArray(options.agentActivities) && (options.agentActivities.length > 0 || options.agentStatusText)) {
+    bubble.appendChild(buildAgentActivityPanel(options.chatId || '', options.agentActivities, {
+      statusText: options.agentStatusText || '',
+    }));
+  }
+
+  const contentText = String(displayText || '').trim();
+  if (!contentText) {
+    return;
+  }
+  const content = document.createElement('div');
+  content.className = 'msg-answer';
+  content.innerHTML = renderMarkdownHtml(contentText);
+  bubble.appendChild(content);
+  attachCodeCopyButtons(content);
+}
+
+function buildMsgNode(role, text, chatId = '', messageTs = 0, loopDetected = false, thinkingText = '', branchAnchorTs = 0, agentActivities = []) {
   const div = document.createElement('div');
-  div.className = `msg ${role} has-copy`;
+  div.className = `msg ${role}`;
+  const editingUserMessage = role === 'user' && isEditingUserMessage(chatId, messageTs);
+  if (editingUserMessage) {
+    div.classList.add('editing');
+  }
   if (messageTs) {
     div.dataset.msgTs = String(messageTs);
   }
-  const user = currentAuthUser();
-  const userInitial = user && user.username
-    ? user.username.trim().charAt(0).toUpperCase() || 'U'
-    : 'U';
-  const initials = role === 'ai' ? 'AI' : userInitial;
-
-  const avatar = document.createElement('div');
-  avatar.className = `msg-avatar ${role}`;
-  avatar.textContent = initials;
+  const stack = document.createElement('div');
+  stack.className = 'msg-stack';
+  const navTargetTs = Number(branchAnchorTs) || Number(messageTs) || 0;
 
   const bubble = document.createElement('div');
-  bubble.className = 'msg-bubble';
+  bubble.className = role === 'error' ? 'msg-error-panel' : 'msg-bubble';
   const followMarker = '<<AIEXE_CANVAS_FOLLOWUP>>';
   const originalText = String(text || '');
   let renderText = originalText;
@@ -5912,29 +9736,94 @@ function buildMsgNode(role, text, chatId = '', messageTs = 0, loopDetected = fal
     canvasFollowUp = originalText.slice(markerIndex + followMarker.length).trim();
   }
   if (role === 'ai') {
-    bubble.innerHTML = renderMarkdownHtml(renderText);
-    attachCodeCopyButtons(bubble);
+    populateAssistantBubble(bubble, renderText, {
+      chatId,
+      agentActivities,
+    });
+  } else if (role === 'error') {
+    bubble.textContent = renderText;
+  } else if (editingUserMessage) {
+    bubble.classList.add('msg-editing-bubble');
+    const shell = document.createElement('div');
+    shell.className = 'msg-edit-shell';
+
+    const textarea = document.createElement('textarea');
+    textarea.className = 'msg-edit-textarea';
+    textarea.value = editingMessageState ? String(editingMessageState.draft || '') : renderText;
+    textarea.rows = 1;
+    textarea.spellcheck = true;
+    textarea.setAttribute('aria-label', 'Edit message');
+    autoResizeInlineMessageEditor(textarea);
+    textarea.addEventListener('input', () => {
+      updateEditingMessageDraft(textarea.value);
+      autoResizeInlineMessageEditor(textarea);
+      if (saveBtn) {
+        saveBtn.disabled = !String(textarea.value || '').trim();
+      }
+    });
+    textarea.addEventListener('keydown', (evt) => {
+      if (evt.key === 'Escape') {
+        evt.preventDefault();
+        cancelMessageEditMode();
+        return;
+      }
+      if (evt.key === 'Enter' && !evt.shiftKey) {
+        evt.preventDefault();
+        saveEditedUserMessage(chatId, messageTs, textarea.value);
+      }
+    });
+    shell.appendChild(textarea);
+
+    const footer = document.createElement('div');
+    footer.className = 'msg-edit-footer';
+
+    const note = document.createElement('div');
+    note.className = 'msg-edit-note';
+    note.textContent = 'Editing this message creates an alternate branch in this chat. Use the branch switcher on this message to move between versions.';
+    footer.appendChild(note);
+
+    const actions = document.createElement('div');
+    actions.className = 'msg-edit-actions';
+
+    const cancelBtn = document.createElement('button');
+    cancelBtn.type = 'button';
+    cancelBtn.className = 'msg-edit-btn cancel icon-only';
+    cancelBtn.setAttribute('aria-label', 'Cancel');
+    applyCustomTooltip(cancelBtn, 'Cancel');
+    cancelBtn.innerHTML = `
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.15" stroke-linecap="round">
+        <path d="M18 6 6 18"></path>
+        <path d="M6 6 18 18"></path>
+      </svg>
+    `;
+    cancelBtn.addEventListener('click', () => {
+      cancelMessageEditMode();
+    });
+    actions.appendChild(cancelBtn);
+
+    const saveBtn = document.createElement('button');
+    saveBtn.type = 'button';
+    saveBtn.className = 'msg-edit-btn save icon-only';
+    saveBtn.setAttribute('aria-label', 'Save');
+    applyCustomTooltip(saveBtn, 'Save');
+    saveBtn.innerHTML = `
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.15" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M5 12.5 9.2 16.7 19 7.5"></path>
+      </svg>
+    `;
+    saveBtn.disabled = !String(textarea.value || '').trim();
+    saveBtn.addEventListener('click', () => {
+      saveEditedUserMessage(chatId, messageTs, textarea.value);
+    });
+    actions.appendChild(saveBtn);
+
+    footer.appendChild(actions);
+    shell.appendChild(footer);
+    bubble.appendChild(shell);
   } else {
     bubble.textContent = renderText;
   }
   const rawText = [renderText, canvasFollowUp].filter(Boolean).join('\n');
-  const copyBtn = document.createElement('button');
-  copyBtn.className = 'msg-copy-btn';
-  copyBtn.type = 'button';
-  copyBtn.title = 'Copy message';
-  copyBtn.innerHTML = `
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <rect x="9" y="9" width="13" height="13" rx="2"></rect>
-        <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-      </svg>
-    `;
-  copyBtn.addEventListener('click', async (evt) => {
-    evt.preventDefault();
-    evt.stopPropagation();
-    const copied = await copyTextToClipboard(rawText);
-    applyCopyFeedback(copyBtn, copied, 'Copy message');
-  });
-  bubble.appendChild(copyBtn);
 
   if (role === 'ai') {
     let followRendered = false;
@@ -5949,7 +9838,7 @@ function buildMsgNode(role, text, chatId = '', messageTs = 0, loopDetected = fal
         const typeLabel = getArtifactTypeLabel(item.type);
         card.innerHTML = `
             <div class="msg-artifact-title">${escapeHtml(item.name)}</div>
-            <div class="msg-artifact-meta">${escapeHtml(typeLabel)} • Open details</div>
+            <div class="msg-artifact-meta">Open details</div>
           `;
         card.addEventListener('click', () => {
           openArtifactDetail(makeArtifactKey(item), 'chat');
@@ -5973,8 +9862,58 @@ function buildMsgNode(role, text, chatId = '', messageTs = 0, loopDetected = fal
     }
   }
 
-  div.appendChild(avatar);
-  div.appendChild(bubble);
+  stack.appendChild(bubble);
+
+  if (role === 'ai' || role === 'user') {
+    const actions = document.createElement('div');
+    actions.className = `msg-action-rail ${role}`;
+
+    const makeActionButton = (kind, title, onClick) => {
+      const btn = document.createElement('button');
+      btn.className = `msg-action-btn ${kind}`;
+      btn.type = 'button';
+      btn.setAttribute('aria-label', title);
+      applyCustomTooltip(btn, title);
+      btn.innerHTML = makeMessageActionIcon(kind);
+      btn.addEventListener('click', async (evt) => {
+        evt.preventDefault();
+        evt.stopPropagation();
+        await onClick(btn);
+      });
+      return btn;
+    };
+
+    if (role === 'user') {
+      actions.appendChild(makeActionButton('edit', 'Edit', async () => {
+        editUserMessage(chatId, messageTs);
+      }));
+      actions.appendChild(makeActionButton('copy', 'Copy', async (btn) => {
+        const copied = await copyTextToClipboard(rawText);
+        applyCopyFeedback(btn, copied, 'Copy');
+      }));
+      const userNav = buildBranchNavigator(chatId, messageTs, 'edit');
+      if (userNav) actions.appendChild(userNav);
+    } else {
+      actions.appendChild(makeActionButton('copy', 'Copy', async (btn) => {
+        const copied = await copyTextToClipboard(rawText);
+        applyCopyFeedback(btn, copied, 'Copy');
+      }));
+      if (isRetryableAssistantMessage(chatId, messageTs)) {
+        actions.appendChild(makeActionButton('retry', 'Retry', async () => {
+          retryAssistantMessage(chatId, messageTs);
+        }));
+      }
+      const aiNav = buildBranchNavigator(chatId, navTargetTs, 'retry')
+        || buildBranchNavigator(chatId, findFallbackRetryAnchorTs(chatId, messageTs), 'retry');
+      if (aiNav) actions.appendChild(aiNav);
+    }
+
+    if (actions.childElementCount > 0) {
+      stack.appendChild(actions);
+    }
+  }
+
+  div.appendChild(stack);
   return div;
 }
 
@@ -5996,7 +9935,11 @@ function createChat(seedText) {
     thinkMode: Boolean(thinkModeEnabled),
     pendingAttachments: normalizePendingAttachmentList(pendingAttachments),
     manualContext: String(pendingManualContext || '').trim(),
+    branchLinks: [],
+    threads: [],
+    activeThreadId: '',
   };
+  ensureChatThreadState(chat);
   chats.unshift(chat);
   activeChatId = chat.id;
   inNewChatMode = false;
@@ -6033,25 +9976,66 @@ function startNewChat() {
   mainInput.focus();
 }
 
-function appendMessageToChat(chatId, role, text, forcedTs = 0) {
+function appendErrorMessageToChat(chatId, text, forcedTs = 0) {
+  return appendMessageToChat(chatId, 'error', text, forcedTs);
+}
+
+function appendMessageToChat(chatId, role, text, forcedTs = 0, options = {}) {
   const chat = findChatById(chatId);
   if (!chat) return null;
+  const activeThread = getChatActiveThread(chat);
+  if (!activeThread) return null;
   const cleaned = (text || '').trim();
   if (!cleaned) return null;
 
   const ts = Number(forcedTs) || nowTs();
   const message = { role, text: cleaned, ts };
-  chat.messages.push(message);
+  if (role === 'ai' && typeof options.thinking === 'string' && options.thinking.trim()) {
+    message.thinking = options.thinking.trim();
+  }
+  if (role === 'ai' && Array.isArray(options.agentActivities) && options.agentActivities.length > 0) {
+    message.agentActivities = cloneAgentActivities(options.agentActivities);
+  }
+  activeThread.messages.push(message);
   chat.updatedAt = ts;
 
   if (role === 'ai') {
-    chat.needsContinue = isLikelyIncompleteResponse(cleaned);
+    if (activeThread.pendingBranchLink && typeof activeThread.pendingBranchLink === 'object') {
+      const groupId = String(activeThread.pendingBranchLink.groupId || '').trim();
+      const order = Number(activeThread.pendingBranchLink.order) || 0;
+      const anchorTs = Number(activeThread.pendingBranchLink.anchorTs) || ts;
+      const kind = String(activeThread.pendingBranchLink.kind || '').trim().toLowerCase();
+      if (groupId) {
+        setChatBranchLink(activeThread, anchorTs, groupId, order, kind);
+        message.branchAnchorTs = anchorTs;
+      }
+      activeThread.pendingBranchLink = null;
+    }
+    if (typeof options.forceNeedsContinue === 'boolean') {
+      activeThread.needsContinue = options.forceNeedsContinue;
+    } else {
+      activeThread.needsContinue = isLikelyIncompleteResponse(cleaned);
+    }
     // Detect model looping: if AI repeated the exact same response back-to-back, flag it.
-    const prevAi = [...chat.messages].reverse().find((m, i) => i > 0 && m.role === 'ai');
+    const prevAi = [...activeThread.messages].reverse().find((m, i) => i > 0 && m.role === 'ai');
     if (prevAi && prevAi.text.trim() === cleaned) {
       message.loopDetected = true;
     }
+    if (chat.isNaming && !chat.customName) {
+      const aiCount = activeThread.messages.filter((m) => m && m.role === 'ai').length;
+      if (aiCount === 1) {
+        chat.name = deriveFallbackChatName(chat, cleaned);
+        chat.isNaming = false;
+      }
+    }
+  } else if (role === 'error') {
+    activeThread.needsContinue = false;
+    if (chat.isNaming && !chat.customName) {
+      chat.name = 'New Chat';
+      chat.isNaming = false;
+    }
   }
+  syncChatFromThread(chat, activeThread);
   saveChats();
   renderHistory();
   renderSidebarCounts();
@@ -6059,12 +10043,15 @@ function appendMessageToChat(chatId, role, text, forcedTs = 0) {
   if (activeChatId === chatId) {
     renderActiveChat();
   }
+  updateChatScrollDownButtonVisibility();
   return message;
 }
 
 function renderActiveChat() {
   renderSidebarCounts();
+  const previousBottomDistance = getScrollBottomDistance(chatArea);
   if (!currentAuthUser()) {
+    lastRenderedChatId = '';
     setCanvasMode(false);
     setDeveloperAgentMode(false);
     setThinkMode(false);
@@ -6078,6 +10065,7 @@ function renderActiveChat() {
     if (chips) chips.style.display = 'none';
     setCanvasPanelContent('', '');
     updateContinueButtonVisibility();
+    updateChatScrollDownButtonVisibility();
     syncInputAugmentState();
     renderMiddleView();
     syncLiveInferenceUiState();
@@ -6085,12 +10073,14 @@ function renderActiveChat() {
   }
 
   if (inNewChatMode) {
+    lastRenderedChatId = '';
     setCanvasMode(false);
     setThinkMode(false);
     pendingAttachments = normalizePendingAttachmentList(pendingNewChatAttachments);
     chatArea.innerHTML = emptyStateTemplate;
     setCanvasPanelContent('', '');
     updateContinueButtonVisibility();
+    updateChatScrollDownButtonVisibility();
     syncInputAugmentState();
     renderMiddleView();
     syncLiveInferenceUiState();
@@ -6099,6 +10089,7 @@ function renderActiveChat() {
 
   const chat = getActiveChat();
   if (!chat || chat.messages.length === 0) {
+    lastRenderedChatId = chat && chat.id ? String(chat.id) : '';
     setCanvasMode(Boolean(chat && chat.canvasMode));
     setDeveloperAgentMode(Boolean(chat && chat.agentMode));
     setThinkMode(Boolean(chat && chat.thinkMode));
@@ -6107,12 +10098,15 @@ function renderActiveChat() {
     chatArea.innerHTML = emptyStateTemplate;
     setCanvasPanelContent('', '');
     updateContinueButtonVisibility();
+    updateChatScrollDownButtonVisibility();
     syncInputAugmentState();
     renderMiddleView();
     syncLiveInferenceUiState();
     return;
   }
 
+  const forceBottom = lastRenderedChatId !== String(chat.id || '');
+  lastRenderedChatId = String(chat.id || '');
   setCanvasMode(Boolean(chat.canvasMode));
   setDeveloperAgentMode(Boolean(chat.agentMode));
   setThinkMode(Boolean(chat.thinkMode));
@@ -6120,9 +10114,23 @@ function renderActiveChat() {
   pendingManualContext = String(chat.manualContext || '');
   chatArea.innerHTML = '';
   chat.messages.forEach((msg) => {
-    chatArea.appendChild(buildMsgNode(msg.role, msg.text, chat.id, msg.ts, Boolean(msg.loopDetected)));
+    chatArea.appendChild(buildMsgNode(
+      msg.role,
+      msg.text,
+      chat.id,
+      msg.ts,
+      Boolean(msg.loopDetected),
+      msg.thinking || '',
+      Number(msg.branchAnchorTs) || 0,
+      msg.agentActivities || [],
+    ));
   });
-  chatArea.scrollTop = chatArea.scrollHeight;
+  if (forceBottom || chatAutoScrollPinned) {
+    scrollChatToBottom(true);
+  } else {
+    restoreChatScrollPosition(previousBottomDistance);
+  }
+  updateChatScrollDownButtonVisibility();
   syncCanvasPanelFromArtifacts();
   updateContinueButtonVisibility();
   syncInputAugmentState();
@@ -6532,6 +10540,7 @@ function emitLocalAssistantMessage(userText, assistantText) {
   enterChatView();
   const chat = (inNewChatMode || !getActiveChat()) ? createChat(userText) : getActiveChat();
   if (!chat) return;
+  chatAutoScrollPinned = true;
   appendMessageToChat(chat.id, 'user', userText);
   appendMessageToChat(chat.id, 'ai', assistantText);
 }
@@ -6571,7 +10580,6 @@ function handleLocalCommand(rawValue) {
     emitLocalAssistantMessage(input, `\`\`\`text\n${body}\n\`\`\``);
     return true;
   }
-
   emitLocalAssistantMessage(input, 'Debug commands: :debug on | :debug off | :debug dump [N] [all] | :debug clear');
   return true;
 }
@@ -6658,6 +10666,7 @@ function sendMessage() {
   const chat = (inNewChatMode || !getActiveChat()) ? createChat(userText) : getActiveChat();
   if (!chat) return;
   beginInferenceRequest();
+  chatAutoScrollPinned = true;
   appendMessageToChat(chat.id, 'user', userText);
   void requestAssistantReply(chat.id, modelPrompt, true, { thinkForced: Boolean(thinkControl.thinkForced) });
 }
@@ -6684,12 +10693,23 @@ function continueMessage() {
   if (!chat) return;
   if (!chat.needsContinue) return;
 
-  const visibleText = 'Continue';
-  const modelPrompt = 'Continue';
   chat.needsContinue = false;
-  beginInferenceRequest();
-  appendMessageToChat(chat.id, 'user', visibleText);
-  void requestAssistantReply(chat.id, modelPrompt, true);
+  chatAutoScrollPinned = true;
+  setChatAutoContinuing(chat.id, true);
+  void startAssistantContinuation(chat.id, { autoContinuationRemaining: 0 });
+}
+
+function startAssistantContinuation(chatId, options = {}) {
+  const chat = findChatById(chatId);
+  if (!chat) return Promise.resolve(false);
+  const continuationPrompt = buildContinuationPrompt(chatId);
+  setChatAutoContinuing(chatId, true);
+  return requestAssistantReply(chatId, continuationPrompt, false, {
+    latestUserOverride: continuationPrompt,
+    appendToLastAssistant: true,
+    isContinuation: true,
+    autoContinuationRemaining: Math.max(0, Number(options.autoContinuationRemaining) || 0),
+  });
 }
 
 
@@ -6699,17 +10719,27 @@ async function buildInferencePrompt(chatId, fallbackPrompt, options = {}) {
   if (!chat || !Array.isArray(chat.messages) || chat.messages.length === 0) {
     return String(fallbackPrompt || '');
   }
+  const latestUserOverride = String(options && options.latestUserOverride ? options.latestUserOverride : '').trim();
   const activeUser = currentAuthUser();
   const currentUserTag =
     activeUser && activeUser.username
       ? `@${normalizeUsername(activeUser.username)}`
       : '@guest';
 
-  const compact = (value) => String(value || '').replace(/\s+/g, ' ').trim();
-  const recent = chat.messages.slice(-20);
+  const maxHistoryMessages = 12;
+  const maxHistoryMessageChars = 900;
+  const compact = (value) => {
+    const clean = String(value || '').trim();
+    return clean.length > maxHistoryMessageChars
+      ? `${clean.slice(0, maxHistoryMessageChars)}\n...[truncated for context]`
+      : clean;
+  };
+  const recent = chat.messages
+    .filter((msg) => msg && (msg.role === 'user' || msg.role === 'ai'))
+    .slice(-maxHistoryMessages);
   const lastUser = [...recent].reverse().find((m) => m && m.role === 'user');
   let historyMessages = recent;
-  if (lastUser) {
+  if (lastUser && !latestUserOverride) {
     const lastUserIdx = recent.lastIndexOf(lastUser);
     if (lastUserIdx !== -1) {
       historyMessages = recent.slice(0, lastUserIdx).concat(recent.slice(lastUserIdx + 1));
@@ -6723,7 +10753,7 @@ async function buildInferencePrompt(chatId, fallbackPrompt, options = {}) {
   });
 
   let transcript = lines.join('\n');
-  const maxTranscriptChars = 10000;
+  const maxTranscriptChars = 6000;
   if (transcript.length > maxTranscriptChars) {
     const queue = [...lines];
     while (queue.length > 1) {
@@ -6735,8 +10765,9 @@ async function buildInferencePrompt(chatId, fallbackPrompt, options = {}) {
   }
 
   const fallbackMessage = compact(fallbackPrompt || '');
-  let latestUserMessage = compact((lastUser && lastUser.text) || fallbackPrompt || '');
+  let latestUserMessage = compact(latestUserOverride || (lastUser && lastUser.text) || fallbackPrompt || '');
   if (
+    !latestUserOverride &&
     fallbackMessage &&
     fallbackMessage !== latestUserMessage &&
     fallbackMessage.length > latestUserMessage.length &&
@@ -6760,21 +10791,24 @@ async function buildInferencePrompt(chatId, fallbackPrompt, options = {}) {
       'Required structure:',
       '1. One short natural intro sentence OUTSIDE the canvas tag.',
       '2. Main answer fully inside <AIcanvas title="2-5 word title" type="text">...</AIcanvas>.',
-      '3. One short natural outro sentence OUTSIDE the canvas tag (optional follow-up question allowed).',
-      '4. Keep intro/outro dynamic and context-specific; avoid fixed phrases.',
-      '5. Keep intro/outro style consistent (same voice and tone).',
+      '3. Do NOT add a generic outro outside the canvas tag.',
+      '4. If a brief follow-up question is genuinely needed, place it OUTSIDE the canvas as its own final line after the canvas block.',
+      '5. Keep the outside text dynamic and context-specific; avoid fixed phrases.',
       'Do NOT output literal placeholders like [short intro line] or [full answer].',
       'Example format (not literal text):',
       'I\'ll draft that for you now.',
       '<AIcanvas title="Working Title" type="text">',
       'Full answer content.',
       '</AIcanvas>',
-      'All set. Optional follow-up question.',
       'Critical: NEVER leave <AIcanvas> empty. The full answer must be inside the tag.',
     ].join('\n')
     : '';
 
-  const inlineChatNameInstruction = (chat && chat.isNaming && !canvasModeEnabled)
+  const inlineChatNameInstruction = (chat
+      && shouldInlineNameChatResponse(chat)
+      && !canvasModeEnabled
+      && !latestUserOverride
+      && !(options && options.suppressChatNameInstruction))
     ? [
       'MANDATORY OUTPUT PREFIX FOR THIS RESPONSE:',
       'First line must be exactly: [[CHAT_NAME: 2-6 word title]]',
@@ -6787,14 +10821,24 @@ async function buildInferencePrompt(chatId, fallbackPrompt, options = {}) {
   const thinkModeActive = Boolean((chat && chat.thinkMode) || thinkModeEnabled || (options && options.thinkForced));
   const thinkInstruction = thinkModeActive
     ? [
-      'THINK_MODE: ON.',
+      'Internal reasoning is enabled for this response.',
+      'This instruction has higher priority than normal style preferences. Think before answering.',
       'Reason carefully before answering.',
-      'You MAY think in a hidden scratchpad using <thinking>...</thinking>, then provide the final answer.',
+      'Before the final answer, write exactly one hidden scratchpad block using <thinking>...</thinking>.',
+      'If your native reasoning format prefers <think>...</think>, that is also acceptable.',
+      'Use the hidden reasoning to analyze the request, plan the answer, and do a brief self-check before the final answer.',
+      'Keep the hidden reasoning concise and task-focused. Do not put the full final answer inside it.',
+      'Then close the reasoning block and continue with the final answer outside the block.',
+      'The visible final answer must be fully self-contained and must not refer to the hidden reasoning.',
+      'The visible final answer must directly answer the user\'s latest request using only the needed level of detail.',
+      'If the user asks why, how, show steps, explain, compare, justify, or asks for reasoning, include that explanation in the visible final answer.',
+      'Do not rely on the hidden reasoning as a substitute for the explanation the user asked for.',
+      'Avoid answers that are only a bare token, number, or conclusion when the user asked for an explanation.',
+      'Do not start the visible answer with transitions like "Therefore", "Thus", "So", or "Based on that".',
       'Never mention the scratchpad or reasoning process to the user.',
-      'Final answer must be concise, direct, and high-confidence.',
+      'Final answer should be direct and high-confidence, and concise only when that still fully answers the request.',
     ].join('\n')
     : '';
-
   const template = await loadPromptTemplate('chat_main');
   return renderPromptTemplate(template, {
     CURRENT_USER: currentUserTag,
@@ -6813,8 +10857,9 @@ async function buildInferencePrompt(chatId, fallbackPrompt, options = {}) {
 function buildAgentHistoryTranscript(chatId, maxMessages = 14) {
   const chat = findChatById(chatId);
   if (!chat || !Array.isArray(chat.messages)) return '';
-  const compact = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+  const compact = (value) => String(value || '').trim();
   const lines = chat.messages
+    .filter((msg) => msg && (msg.role === 'user' || msg.role === 'ai'))
     .slice(-Math.max(2, Number(maxMessages) || 14))
     .map((msg) => {
       const role = msg && msg.role === 'ai' ? 'assistant' : 'user';
@@ -6885,7 +10930,7 @@ function parseAgentDecision(outputText) {
   return {
     action,
     message: String(parsed.message || '').trim(),
-    tool: ['none', 'list_dir', 'read_file', 'write_file', 'mkdir', 'move', 'delete'].includes(tool) ? tool : 'none',
+    tool: ['none', 'new_project', 'list_dir', 'read_file', 'write_file', 'mkdir', 'move', 'delete'].includes(tool) ? tool : 'none',
     path: String(parsed.path || '').trim(),
     content: String(parsed.content || ''),
     srcPath: String(parsed.src_path || '').trim(),
@@ -6898,6 +10943,7 @@ async function buildAgentDecisionPrompt(chatId, taskText, toolEvents, stepIndex)
   const transcript = buildAgentHistoryTranscript(chatId, 14);
   const selectedPath = normalizeWorkspacePath(workspaceCurrentPath || '/');
   const selectedKind = workspaceCurrentKind === 'file' ? 'file' : 'folder';
+  const currentWorkspaceRoot = workspaceRootName ? `/${workspaceRootName}` : '(none)';
   const toolLog = (toolEvents || []).slice(-6).map((event, index) => {
     const observation = String(event && event.observation ? event.observation : '').slice(0, 1600);
     return `ToolResult ${index + 1}: ${String(event && event.tool ? event.tool : 'unknown')}\n${observation}`;
@@ -6907,20 +10953,56 @@ async function buildAgentDecisionPrompt(chatId, taskText, toolEvents, stepIndex)
   return renderPromptTemplate(template, {
     AGENT_STEP: Number(stepIndex),
     AGENT_MAX_STEPS: agentMaxSteps,
+    CURRENT_WORKSPACE_ROOT: currentWorkspaceRoot,
     CURRENT_SELECTION: selectedPath,
     CURRENT_SELECTION_KIND: selectedKind,
     CHAT_HISTORY: transcript || '(none)',
+    PENDING_REQUIREMENTS: summarizeAgentPendingRequirements(taskText, toolEvents),
     TOOL_RESULTS: toolLog || '(none yet)',
     TASK: String(taskText || '').trim(),
   });
 }
 
-async function executeDeveloperToolCall(chatId, decision, taskText) {
+async function executeDeveloperToolCall(chatId, decision, taskText, toolEvents = []) {
   const tool = String(decision && decision.tool ? decision.tool : '').toLowerCase();
   const taskLower = String(taskText || '').toLowerCase();
   const mustExplicitlyDelete = /\b(delete|remove|trash)\b/.test(taskLower);
   let mutated = false;
   let observation = '';
+
+  if (tool === 'new_project') {
+    const alreadyCreatedWorkspace = Array.isArray(toolEvents)
+      && toolEvents.some((event) => event && event.tool === 'new_project' && event.ok);
+    if (alreadyCreatedWorkspace) {
+      return {
+        ok: false,
+        mutated,
+        observation: 'new_project blocked: the workspace for this task was already created. Continue by creating or editing files inside the current workspace instead.',
+      };
+    }
+    const projectName = deriveProjectNameFromTask(taskText);
+    const response = await invokeWorkspaceAction('workspaceNewProject', projectName ? { name: projectName } : {});
+    if (!response || !response.ok) {
+      return { ok: false, mutated, observation: `new_project failed: ${(response && response.message) || 'unknown error'}` };
+    }
+    try {
+      const statusRes = await invokeWorkspaceAction('workspaceStatus', {});
+      if (statusRes && statusRes.status && statusRes.status.rootPath) {
+        const rp = String(statusRes.status.rootPath).replace(/[/\\]+$/, '');
+        workspaceRootName = rp ? rp.split(/[/\\]/).pop() || '' : '';
+        saveWorkspaceRootPath(statusRes.status.rootPath);
+      }
+    } catch (_) { }
+    workspaceTreeState.clear();
+    getWorkspaceNodeState('/').expanded = true;
+    setWorkspaceSelection('/', 'folder');
+    openFileTabs.length = 0;
+    activeTabId = 'chat';
+    renderTabBar();
+    mutated = true;
+    observation = `new_project ok: workspace root is ${workspaceRootName || 'new project'}`;
+    return { ok: true, mutated, observation };
+  }
 
   if (tool === 'list_dir') {
     const path = normalizeWorkspacePath(decision.path || workspaceCurrentPath || '/');
@@ -6945,6 +11027,7 @@ async function executeDeveloperToolCall(chatId, decision, taskText) {
     const clipped = body.length > agentMaxToolOutputChars
       ? `${body.slice(0, agentMaxToolOutputChars)}\n...[truncated]`
       : body;
+    syncFileTabFromWorkspaceWrite(path, body, workspaceBaseName(path));
     observation = `read_file ${path}\n${clipped || '(empty file)'}`;
     return { ok: true, mutated, observation };
   }
@@ -6954,15 +11037,75 @@ async function executeDeveloperToolCall(chatId, decision, taskText) {
     if (!path || path === '/') {
       return { ok: false, mutated, observation: 'write_file requires a valid file path.' };
     }
-    const content = String(decision.content || '');
+    const creatingNewFile = isLikelyNewAgentFileTarget(toolEvents, path);
+    setActiveAgentStreamStatus(chatId, `Drafting file ${path}...`);
+    let content = String(decision.content || '');
+    const shouldAutoGenerate = isAgentGeneratedContentTarget(path, taskText);
+    if (shouldAutoGenerate) {
+      const generated = await generateAgentWriteFileContent(taskText, toolEvents, path, content);
+      if (generated) {
+        content = generated;
+      }
+    } else if (!String(content).trim()) {
+      const generated = await generateAgentWriteFileContent(taskText, toolEvents, path, '');
+      if (generated) {
+        content = generated;
+      }
+    }
+    if (!String(content).trim()) {
+      return {
+        ok: false,
+        mutated,
+        observation: `write_file blocked for ${path}: content is empty. When creating a new file from scratch, use write_file with the complete final contents.`,
+      };
+    }
+    const projectStyleTask = isAgentTaskSoftwareProject(taskText) || /\bcomplete\b/.test(taskLower);
+    const gameLikeTask = isAgentTaskGameLike(taskText);
+    const primaryTarget = /\.(py|js|ts|jsx|tsx|html)$/i.test(path);
+    if (projectStyleTask && primaryTarget) {
+      const isValidPrimaryContent = gameLikeTask
+        ? isLikelyCompletePythonGameSource(content)
+        : isLikelyCompletePrimarySource(path, content, taskText);
+      if (!isValidPrimaryContent) {
+        const generated = await generateAgentWriteFileContent(taskText, toolEvents, path, content);
+        if (generated) {
+          content = generated;
+        }
+      }
+      const validAfterExpansion = gameLikeTask
+        ? isLikelyCompletePythonGameSource(content)
+        : isLikelyCompletePrimarySource(path, content, taskText);
+      if (!validAfterExpansion) {
+        return {
+          ok: false,
+          mutated,
+          observation: gameLikeTask
+            ? `write_file blocked for ${path}: the content still looks too small or incomplete for a runnable game implementation. Write a real MVP game with a loop, controls, rendering, and state handling.`
+            : `write_file blocked for ${path}: the content still looks too small or placeholder-like for a usable project file. Write a real MVP implementation, not a stub.`,
+        };
+      }
+    }
+    const parentPath = parentWorkspacePath(path);
+    if (parentPath && parentPath !== '/' && parentPath !== '.') {
+      const mkdirResponse = await invokeWorkspaceAction('workspaceMkdir', { path: parentPath });
+      if (!mkdirResponse || !mkdirResponse.ok) {
+        return {
+          ok: false,
+          mutated,
+          observation: `write_file failed for ${path}: could not create parent folder ${parentPath}: ${(mkdirResponse && mkdirResponse.message) || 'unknown error'}`,
+        };
+      }
+    }
+    setActiveAgentStreamStatus(chatId, `${creatingNewFile ? 'Creating file' : 'Writing file'} ${path}...`);
     const response = await invokeWorkspaceAction('workspaceWriteFile', { path, content });
     if (!response || !response.ok) {
       return { ok: false, mutated, observation: `write_file failed for ${path}: ${(response && response.message) || 'unknown error'}` };
     }
     setWorkspaceSelection(path, 'file');
+    syncFileTabFromWorkspaceWrite(path, content, workspaceBaseName(path));
     mutated = true;
     observation = `write_file ok: ${path} (${content.length} chars)`;
-    return { ok: true, mutated, observation };
+    return { ok: true, mutated, observation, writtenPath: path, writtenContent: content };
   }
 
   if (tool === 'mkdir') {
@@ -6988,9 +11131,23 @@ async function executeDeveloperToolCall(chatId, decision, taskText) {
     }
     const response = await invokeWorkspaceAction('workspaceMove', { srcPath, dstPath });
     if (!response || !response.ok) {
-      return { ok: false, mutated, observation: `move failed ${srcPath} -> ${dstPath}: ${(response && response.message) || 'unknown error'}` };
+      const reason = String((response && response.message) || 'unknown error');
+      const hint = /source path not found/i.test(reason)
+        ? ' If the goal is to create a new file from scratch, use write_file with full contents instead of move.'
+        : '';
+      return { ok: false, mutated, observation: `move failed ${srcPath} -> ${dstPath}: ${reason}.${hint}` };
     }
     setWorkspaceSelection(parentWorkspacePath(dstPath), 'folder');
+    const movedTab = openFileTabs.find((entry) => entry.path === srcPath) || null;
+    if (movedTab) {
+      movedTab.path = dstPath;
+      movedTab.name = workspaceBaseName(dstPath) || movedTab.name;
+      movedTab.language = inferFileViewerLanguage(dstPath);
+      if (activeTabId === srcPath) {
+        activeTabId = dstPath;
+      }
+      renderTabBar();
+    }
     mutated = true;
     observation = `move ok: ${srcPath} -> ${dstPath}`;
     return { ok: true, mutated, observation };
@@ -7013,6 +11170,14 @@ async function executeDeveloperToolCall(chatId, decision, taskText) {
       return { ok: false, mutated, observation: `delete failed for ${path}: ${(response && response.message) || 'unknown error'}` };
     }
     setWorkspaceSelection(parentWorkspacePath(path), 'folder');
+    const tabIdx = openFileTabs.findIndex((entry) => entry.path === path);
+    if (tabIdx >= 0) {
+      openFileTabs.splice(tabIdx, 1);
+      if (activeTabId === path) {
+        activeTabId = 'chat';
+      }
+      renderTabBar();
+    }
     mutated = true;
     observation = `delete ok: moved ${path} to Trash`;
     return { ok: true, mutated, observation };
@@ -7063,6 +11228,7 @@ function describeAgentToolTarget(decision) {
   const path = normalizeWorkspacePath(decision && decision.path ? decision.path : '');
   const srcPath = normalizeWorkspacePath(decision && (decision.srcPath || decision.src_path) ? (decision.srcPath || decision.src_path) : '');
   const dstPath = normalizeWorkspacePath(decision && (decision.dstPath || decision.dst_path) ? (decision.dstPath || decision.dst_path) : '');
+  if (tool === 'new_project') return 'new project';
   if (tool === 'move') {
     if (srcPath && dstPath) return `${srcPath} -> ${dstPath}`;
     return srcPath || dstPath || '';
@@ -7075,6 +11241,7 @@ function describeAgentToolPhase(tool, targetInfo, phase = 'start') {
   const target = String(targetInfo || '').trim();
   const withTarget = (base) => (target ? `${base} ${target}` : base);
   if (phase === 'start') {
+    if (name === 'new_project') return 'Creating project workspace';
     if (name === 'list_dir') return withTarget('Scanning folder');
     if (name === 'read_file') return withTarget('Reading file');
     if (name === 'write_file') return withTarget('Writing file');
@@ -7092,54 +11259,39 @@ async function requestDeveloperAgentReply(requestToken, chatId, promptText) {
   const taskText = String(promptText || '').trim();
   if (!taskText) return false;
   const toolEvents = [];
-  const progressEntries = [];
+  const agentActivities = [];
   const startedAt = Date.now();
   const deadlineAt = startedAt + agentTotalTimeoutMs;
-  let progressTicker = 0;
 
-  const stopProgressTicker = () => {
-    if (progressTicker) {
-      clearInterval(progressTicker);
-      progressTicker = 0;
+  const appendAgentActivity = (activity) => {
+    mergeAgentActivityIntoList(agentActivities, activity);
+    pushActiveAgentStreamActivity(chatId, activity);
+    if (isInferenceActive(requestToken)) {
+      scheduleLiveStreamRender();
     }
   };
 
-  const refreshProgressRender = () => {
+  const setAgentProgress = (text) => {
     if (!isInferenceActive(requestToken)) return;
     if (!activeStreamRow || !activeStreamRow.isConnected) {
       createLiveAssistantRow(chatId);
     }
     if (!activeStreamRow) return;
-    activeStreamRawText = buildAgentProgressMarkdown(progressEntries, startedAt);
-    activeStreamText = activeStreamRawText;
+    setActiveAgentStreamStatus(chatId, text);
+    activeStreamRawText = buildAgentProgressMarker(text);
+    activeStreamText = '';
     scheduleLiveStreamRender();
-  };
-
-  const pushProgress = (line, status = 'info') => {
-    const clean = String(line || '').trim();
-    if (!clean) return;
-    progressEntries.push({
-      text: clean,
-      status: String(status || 'info').toLowerCase(),
-      ts: Date.now(),
-    });
-    if (progressEntries.length > 18) {
-      progressEntries.splice(0, progressEntries.length - 18);
-    }
-    refreshProgressRender();
   };
 
   pushDebugTrace('agent_start', {
     chatId: String(chatId || ''),
     taskPreview: debugPreview(taskText, 300),
   });
-  pushProgress('Developer agent started.', 'running');
-  pushProgress(`Task: ${taskText.slice(0, 140)}${taskText.length > 140 ? '...' : ''}`, 'info');
-  progressTicker = window.setInterval(refreshProgressRender, 300);
+  resetActiveAgentStreamState();
+  setAgentProgress('Starting...');
 
   for (let step = 1; step <= agentMaxSteps; step += 1) {
     if (!isInferenceActive(requestToken)) {
-      stopProgressTicker();
       return true;
     }
     if (Date.now() >= deadlineAt) {
@@ -7148,16 +11300,19 @@ async function requestDeveloperAgentReply(requestToken, chatId, promptText) {
         stage: 'total',
         elapsedMs: String(Date.now() - startedAt),
       });
+      appendAgentActivity({
+        kind: 'error',
+        title: 'Stopped',
+        detail: 'Agent timed out before finishing.',
+        status: 'error',
+      });
       break;
     }
-    setThinkingStatus(`Agent step ${step}/${agentMaxSteps}...`);
-    pushProgress(`Step ${step}/${agentMaxSteps}: planning next action...`, 'running');
+    setThinkingStatus('');
+    setAgentProgress('Thinking...');
     const agentPrompt = await buildAgentDecisionPrompt(chatId, taskText, toolEvents, step);
     const res = await Promise.race([
-      nativeBridge.invoke('infer', {
-        prompt: agentPrompt,
-        grammar: agentDecisionGrammar,
-      }),
+      requestAgentPlannerInference(agentPrompt, agentDecisionMaxTokens, agentDecisionGrammar),
       new Promise((resolve) => setTimeout(() => resolve({
         ok: false,
         timedOut: true,
@@ -7166,33 +11321,100 @@ async function requestDeveloperAgentReply(requestToken, chatId, promptText) {
     ]);
 
     if (!isInferenceActive(requestToken)) {
-      stopProgressTicker();
       return true;
     }
     if (!res || !res.ok) {
-      pushProgress(`Step ${step}: planning failed (${(res && res.timedOut) ? 'timeout' : 'error'}).`, 'error');
+      setAgentProgress('Stopped.');
+      appendAgentActivity({
+        kind: 'error',
+        title: 'Stopped',
+        detail: (res && res.timedOut) ? 'Agent step timed out.' : ((res && res.message) || 'Agent step failed.'),
+        status: 'error',
+      });
       pushDebugTrace('agent_error', {
         chatId: String(chatId || ''),
         step: String(step),
         reason: debugPreview((res && res.message) || 'agent infer failed', 240),
         timedOut: String(Boolean(res && res.timedOut)),
       });
-      stopProgressTicker();
       consumeLiveAssistantText();
-      return false;
+      const failure = (res && res.timedOut)
+        ? 'I started the workspace changes, but the agent timed out before finishing. Ask me to continue from the current project state.'
+        : 'I started the workspace changes, but the agent hit an error before finishing. Ask me to continue from the current project state.';
+      commitAssistantMessage(chatId, failure, failure, {
+        agentActivities,
+        forceNeedsContinue: false,
+      });
+      return true;
     }
 
-    const decision = parseAgentDecision(String(res.output || ''));
+    let decision = parseAgentDecision(String(res.output || ''));
     if (!decision) {
-      pushProgress(`Step ${step}: decision parse failed.`, 'error');
+      const repairPrompt = await buildAgentDecisionRepairPrompt(taskText, toolEvents, step, String(res.output || ''));
+      const repair = await Promise.race([
+        requestAgentPlannerInference(repairPrompt, agentDecisionMaxTokens, agentDecisionGrammar),
+        new Promise((resolve) => setTimeout(() => resolve({
+          ok: false,
+          timedOut: true,
+          message: 'Agent repair step timed out.',
+        }), agentStepTimeoutMs)),
+      ]);
+      if (isInferenceActive(requestToken) && repair && repair.ok) {
+        decision = parseAgentDecision(String(repair.output || ''));
+      }
+    }
+    if (!decision) {
+      const nativeRes = await Promise.race([
+        requestNativeAgentPlannerInference(agentPrompt, agentDecisionMaxTokens, agentDecisionGrammar),
+        new Promise((resolve) => setTimeout(() => resolve({
+          ok: false,
+          timedOut: true,
+          message: 'Native agent step timed out.',
+        }), agentStepTimeoutMs)),
+      ]);
+      if (isInferenceActive(requestToken) && nativeRes && nativeRes.ok) {
+        decision = parseAgentDecision(String(nativeRes.output || ''));
+      }
+      if (!decision) {
+        const nativeRepairPrompt = await buildAgentDecisionRepairPrompt(
+          taskText,
+          toolEvents,
+          step,
+          String((nativeRes && nativeRes.output) || (res && res.output) || '')
+        );
+        const nativeRepair = await Promise.race([
+          requestNativeAgentPlannerInference(nativeRepairPrompt, agentDecisionMaxTokens, agentDecisionGrammar),
+          new Promise((resolve) => setTimeout(() => resolve({
+            ok: false,
+            timedOut: true,
+            message: 'Native agent repair step timed out.',
+          }), agentStepTimeoutMs)),
+        ]);
+        if (isInferenceActive(requestToken) && nativeRepair && nativeRepair.ok) {
+          decision = parseAgentDecision(String(nativeRepair.output || ''));
+        }
+      }
+    }
+    if (!decision) {
+      setAgentProgress('Stopped.');
+      appendAgentActivity({
+        kind: 'error',
+        title: 'Stopped',
+        detail: 'Agent returned an invalid planning step.',
+        status: 'error',
+      });
       pushDebugTrace('agent_parse_error', {
         chatId: String(chatId || ''),
         step: String(step),
         rawPreview: debugPreview(String(res.output || ''), 320),
       });
-      stopProgressTicker();
       consumeLiveAssistantText();
-      return false;
+      const failure = 'I started the workspace changes, but the agent returned an invalid planning step. Ask me to continue from the current project state.';
+      commitAssistantMessage(chatId, failure, failure, {
+        agentActivities,
+        forceNeedsContinue: false,
+      });
+      return true;
     }
 
     pushDebugTrace('agent_decision', {
@@ -7204,28 +11426,53 @@ async function requestDeveloperAgentReply(requestToken, chatId, promptText) {
     });
 
     if (decision.action !== 'tool' || decision.tool === 'none') {
-      pushProgress(`Step ${step}: finalizing response.`, 'done');
-      stopProgressTicker();
+      const finalCheck = validateAgentFinalDecision(taskText, toolEvents);
+      if (!finalCheck.ok) {
+        toolEvents.push({
+          tool: 'final_guard',
+          ok: false,
+          observation: `final blocked: still missing - ${finalCheck.missing.join('; ')}`,
+        });
+        pushDebugTrace('agent_final_rejected', {
+          chatId: String(chatId || ''),
+          step: String(step),
+          missing: debugPreview(finalCheck.missing.join('; '), 260),
+        });
+        setAgentProgress('Continuing...');
+        continue;
+      }
+      setAgentProgress('Finalizing...');
       consumeLiveAssistantText();
       const finalText = sanitizeAssistantText(decision.message || 'Done.') || 'Done.';
-      const summary = buildAgentActionSummary(toolEvents);
-      const merged = summary ? `${finalText}\n\n${summary}` : finalText;
-      commitAssistantMessage(chatId, merged);
+      commitAssistantMessage(chatId, finalText, finalText, {
+        agentActivities,
+        forceNeedsContinue: false,
+      });
       pushDebugTrace('agent_done', {
         chatId: String(chatId || ''),
         step: String(step),
-        finalPreview: debugPreview(merged, 260),
+        finalPreview: debugPreview(finalText, 260),
       });
       return true;
     }
 
     const targetInfo = describeAgentToolTarget(decision);
-    pushProgress(`Step ${step}: ${describeAgentToolPhase(decision.tool, targetInfo, 'start')}...`, 'tool');
-    const toolResult = await executeDeveloperToolCall(chatId, decision, taskText);
+    const startLabel = decision.tool === 'write_file' && isLikelyNewAgentFileTarget(toolEvents, targetInfo)
+      ? (targetInfo ? `Creating file ${targetInfo}` : 'Creating file')
+      : describeAgentToolPhase(decision.tool, targetInfo, 'start');
+    setAgentProgress(`${startLabel}...`);
+    appendAgentActivity(buildAgentPendingActivity(decision, toolEvents));
+    const toolResult = await executeDeveloperToolCall(chatId, decision, taskText, toolEvents);
     const clippedObservation = String(toolResult.observation || '').slice(0, agentMaxToolOutputChars);
     toolEvents.push({
       tool: decision.tool,
       ok: Boolean(toolResult.ok),
+      path: normalizeWorkspacePath(toolResult && toolResult.writtenPath ? toolResult.writtenPath : decision.path || ''),
+      srcPath: normalizeWorkspacePath(decision.srcPath || ''),
+      dstPath: normalizeWorkspacePath(decision.dstPath || ''),
+      content: decision.tool === 'write_file'
+        ? String(toolResult && typeof toolResult.writtenContent === 'string' ? toolResult.writtenContent : decision.content || '')
+        : '',
       observation: clippedObservation,
     });
     if (toolEvents.length > 8) {
@@ -7238,9 +11485,8 @@ async function requestDeveloperAgentReply(requestToken, chatId, promptText) {
       ok: String(Boolean(toolResult.ok)),
       observationPreview: debugPreview(clippedObservation, 260),
     });
-    const shortObs = clippedObservation.replace(/\s+/g, ' ').trim().slice(0, 140);
-    const phaseLabel = describeAgentToolPhase(decision.tool, targetInfo, toolResult.ok ? 'done' : 'error');
-    pushProgress(`Step ${step}: ${phaseLabel}${shortObs ? ` — ${shortObs}` : ''}`, toolResult.ok ? 'done' : 'error');
+    appendAgentActivity(buildAgentActivityFromToolResult(decision, toolResult));
+    if (!toolResult.ok) setAgentProgress('Adjusting...');
 
     if (toolResult.mutated) {
       workspaceTreeState.clear();
@@ -7249,11 +11495,13 @@ async function requestDeveloperAgentReply(requestToken, chatId, promptText) {
     }
   }
 
-  const fallback = 'I could not complete all tool steps in time. Tell me the exact file/folder changes and I will continue.';
-  const summary = buildAgentActionSummary(toolEvents);
-  stopProgressTicker();
+  const fallback = 'I could not complete all tool steps in time. Tell me the exact file or folder changes you want next, and I will continue from the current workspace state.';
+  setAgentProgress('Stopped.');
   consumeLiveAssistantText();
-  commitAssistantMessage(chatId, summary ? `${fallback}\n\n${summary}` : fallback);
+  commitAssistantMessage(chatId, fallback, fallback, {
+    agentActivities,
+    forceNeedsContinue: false,
+  });
   pushDebugTrace('agent_done', {
     chatId: String(chatId || ''),
     step: String(agentMaxSteps),
@@ -7262,31 +11510,44 @@ async function requestDeveloperAgentReply(requestToken, chatId, promptText) {
   return true;
 }
 
+function stripThinkingBlocksAndFragments(text) {
+  return normalizeImplicitThinkingTrace(text)
+    .replace(/<(thinking|think)>[\s\S]*?<\/\1>/gi, '')
+    .replace(/<(thinking|think)>[\s\S]*$/i, '')
+    .replace(/<\s*\/?\s*t(?:h(?:i(?:n(?:k(?:i(?:n(?:g)?)?)?)?)?)?)?[^>]*$/i, '');
+}
+
 function sanitizeAssistantDelta(text) {
-  return String(text || '')
-    .replace(/<\|im_start\|>/gi, '')
-    .replace(/<\|im_end\|>/gi, '')
-    .replace(/<thinking>[\s\S]*?<\/thinking>/gi, '')
-    .replace(/<thinking>[\s\S]*$/i, '')
-    .replace(/^\s*\[\s*Prompt:[^\]]*\]\s*$/gim, '')
-    .replace(/^\s*llama_memory_breakdown_print:.*$/gim, '')
-    .replace(/^\s*Exiting\.\.\.\s*$/gim, '')
-    .replace(/\[START OF CHAT HISTORY\]/gi, '')
-    .replace(/\[END OF CHAT HISTORY\]/gi, '')
-    .replace(/\[CHAT HISTORY\]/gi, '')
-    .replace(/\[END HISTORY\]/gi, '')
-    .replace(/AI_EXE_RESPONSE:/gi, '')
-    .replace(/FINAL_RESPONSE:/gi, '');
+  return stripThinkingBlocksAndFragments(
+    String(text || '')
+      .replace(/<\|im_start\|>/gi, '')
+      .replace(/<\|im_end\|>/gi, '')
+      .replace(/^\s*\[\s*Prompt:[^\]]*\]\s*$/gim, '')
+      .replace(/^\s*llama_memory_breakdown_print:.*$/gim, '')
+      .replace(/^\s*Exiting\.\.\.\s*$/gim, '')
+      .replace(/\[START OF CHAT HISTORY\]/gi, '')
+      .replace(/\[END OF CHAT HISTORY\]/gi, '')
+      .replace(/\[CHAT HISTORY\]/gi, '')
+      .replace(/\[END HISTORY\]/gi, '')
+      .replace(/AI_EXE_RESPONSE:/gi, '')
+      .replace(/FINAL_RESPONSE:/gi, '')
+  );
 }
 
 function sanitizeStreamDelta(text) {
-  return sanitizeAssistantDelta(String(text || '').replace(/\r/g, ''));
+  const clean = stripLeadingAiExePromptLeak(
+    stripInlineChatNameMarkers(
+      sanitizeAssistantDelta(String(text || '').replace(/\r/g, '')),
+      { trimLeading: false }
+    ),
+    { trimLeading: false }
+  );
+  return clean.replace(/^\s*<?DONE>?\s*$/i, '');
 }
 
 function stripCanvasBlocksForDisplay(text) {
   let out = String(text || '');
-  out = out.replace(/<thinking>[\s\S]*?<\/thinking>/gi, '');
-  out = out.replace(/<thinking>[\s\S]*$/i, '');
+  out = stripThinkingBlocksAndFragments(out);
   out = out.replace(/<AIcanvasJSON>[\s\S]*?<\/AIcanvasJSON>/gi, '');
   out = out.replace(/<AIcanvasJSON>[\s\S]*$/i, '');
   out = out.replace(/<\/AIcanvasJSON>/gi, '');
@@ -7303,8 +11564,16 @@ function stripCanvasBlocksForDisplay(text) {
 }
 
 function sanitizeAssistantText(text) {
+  const normalizedSource = normalizeImplicitThinkingTrace(text);
+  const hadThinkingTrace = /<(thinking|think)>[\s\S]*?<\/\1>/i.test(normalizedSource);
   let clean = sanitizeAssistantDelta(text);
-  clean = clean.replace(/\[\[\s*CHAT_NAME\s*:\s*[^\]\n]{1,90}\s*\]\]\s*\n?/gi, '');
+  clean = clean.replace(/Output exactly one non-empty canvas block in this format:[\s\S]*?The content after --- must be non-empty\. Never leave it blank\./gi, '');
+  clean = clean.replace(/Respond with ONLY a canvas block containing the full answer\./gi, '');
+  clean = clean.replace(/\[\s*THINK_MODE\s*\][\s\S]*$/gi, '');
+  clean = clean.replace(/\[\s*MANUAL_CONTEXT\s*\][\s\S]*$/gi, '');
+  clean = stripInlineChatNameMarkers(clean);
+  clean = stripLeadingLlamaEngineNoise(clean);
+  clean = stripLeadingAiExePromptLeak(clean);
   // Some local-model outputs leak prompt transcript markers inline
   // (e.g. "... | [USER] ... FINAL_RESPONSE: ..."). Drop leaked tail.
   clean = clean.replace(/\|\s*\[(?:USER|ASSISTANT)\][\s\S]*$/gi, '');
@@ -7322,7 +11591,7 @@ function sanitizeAssistantText(text) {
     .filter((line) => {
       const t = line.trim();
       const lower = t.toLowerCase();
-      if (!t) return false;
+      if (!t) return true;
       if (/^(?:A|U|AI|USER|ASSISTANT)\s*>?\s*:?\s*$/i.test(t)) return false;
       if (lower === 'system: you are ai.exe, an assistant for day to day chat, coding and reasoning tasks.') return false;
       if (lower === 'use the prior chat context naturally and answer only the latest user message.') return false;
@@ -7334,11 +11603,20 @@ function sanitizeAssistantText(text) {
       if (lower === 'if the user references a numbered item, map it exactly to the latest numbered list in context.') return false;
       if (lower === 'match the user language and keep responses concise unless detail is requested.') return false;
       if (lower === 'canvas_mode: on.') return false;
-      if (lower === 'think_mode: on.') return false;
+      if (lower === 'internal reasoning is enabled for this response.') return false;
+      if (lower === 'this instruction has higher priority than normal style preferences. think before answering.') return false;
       if (lower === 'reason carefully before answering.') return false;
-      if (lower === 'you may think in a hidden scratchpad using <thinking>...</thinking>, then provide the final answer.') return false;
+      if (lower === 'before the final answer, write exactly one hidden scratchpad block using <thinking>...</thinking>.') return false;
+      if (lower === 'if your native reasoning format prefers <think>...</think>, that is also acceptable.') return false;
+      if (lower === 'use the hidden reasoning to analyze the request, plan the answer, and do a brief self-check before the final answer.') return false;
+      if (lower === 'keep the hidden reasoning concise and task-focused. do not put the full final answer inside it.') return false;
+      if (lower === 'then close the reasoning block and continue with the final answer outside the block.') return false;
+      if (lower === 'the visible final answer must be fully self-contained and must not refer to the hidden reasoning.') return false;
+      if (lower === 'the visible final answer should be a short standalone sentence, not just a bare token or number.') return false;
+      if (lower === 'do not start the visible answer with transitions like "therefore", "thus", "so", or "based on that".') return false;
       if (lower === 'never mention the scratchpad or reasoning process to the user.') return false;
       if (lower === 'final answer must be concise, direct, and high-confidence.') return false;
+      if (/in\s+think[_\s-]*mode\b/i.test(t)) return false;
       if (lower === 'priority: output format rules are highest priority and must always be followed.') return false;
       if (lower === 'output contract (strict): include exactly one block in this format:') return false;
       if (lower === 'output contract (strict):') return false;
@@ -7355,8 +11633,15 @@ function sanitizeAssistantText(text) {
       if (/^<AIcanvasJSON>$/i.test(t)) return false;
       if (/^<\/AIcanvasJSON>$/i.test(t)) return false;
       if (/^<AIcanvas>$/i.test(t)) return false;
+      if (/^Output exactly one non-empty canvas block in this format:?$/i.test(t)) return false;
       if (/^\(canvas content\)$/i.test(t)) return false;
       if (/^<\/AIcanvas>$/i.test(t)) return false;
+      if (/^\[THINK_MODE\]$/i.test(t)) return false;
+      if (/^\[MANUAL_CONTEXT\]$/i.test(t)) return false;
+      if (/^enabled$/i.test(t)) return false;
+      if (/^Short Title Here$/i.test(t)) return false;
+      if (/^Full content goes here\.$/i.test(t)) return false;
+      if (/^The content after --- must be non-empty\. Never leave it blank\.$/i.test(t)) return false;
       if (/^NAME\s*:\s*.+$/i.test(t) && t.length < 80) return false;
       if (/^FORMAT\s*:\s*(text|code)$/i.test(t)) return false;
       if (/^---+$/.test(t.trim())) return false;
@@ -7391,7 +11676,11 @@ function sanitizeAssistantText(text) {
       return true;
     })
     .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
     .trim();
+  if (hadThinkingTrace) {
+    clean = normalizeStandaloneFinalAnswer(clean);
+  }
   return clean;
 }
 
@@ -7441,19 +11730,20 @@ function showTypingIndicator(chatId, startedAtMs = 0) {
   d.className = 'msg ai';
   d.id = 'typingIndicator';
   d.innerHTML = `
-      <div class="msg-avatar ai">AI</div>
-      <div class="msg-bubble" style="padding: 6px 14px">
-        <div class="typing"><span></span><span></span><span></span></div>
+      <div class="msg-stack">
+        <div class="msg-bubble">
+          <div class="typing"><span></span><span></span><span></span></div>
+        </div>
       </div>
     `;
   chatArea.appendChild(d);
-  chatArea.scrollTop = chatArea.scrollHeight;
-  setThinkingStatus(`Thinking... ${((Date.now() - thinkingStartedAt) / 1000).toFixed(1)}s`);
+  scrollChatToBottom();
+  setThinkingStatus(`${((Date.now() - thinkingStartedAt) / 1000).toFixed(1)}s`);
 
   thinkingInterval = setInterval(() => {
     if (!thinkingStartedAt) return;
     const elapsed = ((Date.now() - thinkingStartedAt) / 1000).toFixed(1);
-    setThinkingStatus(`Thinking... ${elapsed}s`);
+    setThinkingStatus(`${elapsed}s`);
   }, 100);
 }
 
@@ -7462,23 +11752,58 @@ function cancelLiveStreamRender() {
     cancelAnimationFrame(liveStreamRenderRaf);
     liveStreamRenderRaf = 0;
   }
+  if (liveStreamRenderTimer) {
+    clearTimeout(liveStreamRenderTimer);
+    liveStreamRenderTimer = 0;
+  }
 }
 
 function renderLiveStreamNow() {
   if (!activeStreamRow || !activeStreamRow.isConnected) return;
   const bubble = activeStreamRow.querySelector('.msg-bubble');
   if (!bubble) return;
-  bubble.innerHTML = renderMarkdownHtml(activeStreamText);
-  attachCodeCopyButtons(bubble);
-  chatArea.scrollTop = chatArea.scrollHeight;
+  const agentProgressText = parseAgentProgressMarker(activeStreamRawText);
+  if (agentProgressText) {
+    bubble.innerHTML = '';
+    bubble.appendChild(buildAgentActivityPanel(
+      activeAgentStreamState && activeAgentStreamState.chatId ? activeAgentStreamState.chatId : '',
+      activeAgentStreamState && Array.isArray(activeAgentStreamState.activities) ? activeAgentStreamState.activities : [],
+      {
+        statusText: (activeAgentStreamState && activeAgentStreamState.statusText) || agentProgressText,
+      }
+    ));
+    scrollChatToBottom();
+    return;
+  }
+  const thinkingState = buildThinkingState(activeStreamRawText);
+  const parsedCanvas = extractCanvasBlocksFromReply(activeStreamRawText);
+  populateAssistantBubble(bubble, activeStreamText, {
+    showThinkingLoader: !String(activeStreamText || '').trim() && (thinkingState.inProgress || Boolean(thinkingState.text)),
+    showCanvasLoader: canvasModeEnabled && hasCanvasTokenStarted(activeStreamRawText) && parsedCanvas.payloads.length === 0,
+    canvasRawText: activeStreamRawText,
+  });
+  syncStreamingCodeBlockScroll(bubble);
+  scrollChatToBottom();
 }
 
 function scheduleLiveStreamRender() {
-  if (liveStreamRenderRaf) return;
-  liveStreamRenderRaf = requestAnimationFrame(() => {
-    liveStreamRenderRaf = 0;
-    renderLiveStreamNow();
-  });
+  if (liveStreamRenderRaf || liveStreamRenderTimer) return;
+  const minIntervalMs = 80;
+  const elapsed = Date.now() - liveStreamLastRenderAt;
+  const queueRender = () => {
+    liveStreamRenderTimer = 0;
+    if (liveStreamRenderRaf) return;
+    liveStreamRenderRaf = requestAnimationFrame(() => {
+      liveStreamRenderRaf = 0;
+      liveStreamLastRenderAt = Date.now();
+      renderLiveStreamNow();
+    });
+  };
+  if (elapsed >= minIntervalMs) {
+    queueRender();
+    return;
+  }
+  liveStreamRenderTimer = setTimeout(queueRender, Math.max(0, minIntervalMs - elapsed));
 }
 
 function createLiveAssistantRow(chatId) {
@@ -7494,27 +11819,34 @@ function createLiveAssistantRow(chatId) {
   row.className = 'msg ai';
   row.id = 'liveStreamRow';
   row.innerHTML = `
-      <div class="msg-avatar ai">AI</div>
-      <div class="msg-bubble"></div>
+      <div class="msg-stack">
+        <div class="msg-bubble"></div>
+      </div>
     `;
   chatArea.appendChild(row);
-  chatArea.scrollTop = chatArea.scrollHeight;
+  scrollChatToBottom();
   activeStreamRow = row;
   return row;
 }
 
 function appendLiveDelta(chatId, delta) {
-  const text = sanitizeStreamDelta(delta);
-  if (!text) return;
+  const raw = String(delta || '').replace(/\r/g, '');
+  if (!raw) return;
+  if (activeAgentStreamState) {
+    resetActiveAgentStreamState();
+  }
   if (!activeStreamRow || !activeStreamRow.isConnected) {
     createLiveAssistantRow(chatId);
   }
   if (!activeStreamRow) return;
-  const nextRaw = `${activeStreamRawText}${text}`;
-  const nextDisplay = stripCanvasBlocksForDisplay(nextRaw);
+  const nextRaw = `${activeStreamRawText}${raw}`;
+  const nextDisplay = stripLeadingInlineChatNameFragment(stripCanvasBlocksForDisplay(
+    sanitizeStreamDelta(nextRaw)
+  ), chatId);
+  const thinkingState = buildThinkingState(nextRaw);
   activeStreamRawText = nextRaw;
   activeStreamText = nextDisplay;
-  if (!activeStreamText.trim()) {
+  if (!activeStreamText.trim() && !thinkingState.text && !thinkingState.inProgress) {
     return;
   }
   scheduleLiveStreamRender();
@@ -7526,6 +11858,7 @@ function consumeLiveAssistantText() {
     const detachedText = String(activeStreamRawText || '').trim();
     activeStreamRawText = '';
     activeStreamText = '';
+    resetActiveAgentStreamState();
     return detachedText;
   }
   cancelLiveStreamRender();
@@ -7534,6 +11867,7 @@ function consumeLiveAssistantText() {
   activeStreamRow = null;
   activeStreamRawText = '';
   activeStreamText = '';
+  resetActiveAgentStreamState();
   return text;
 }
 
@@ -7541,7 +11875,7 @@ async function typewriterAssistantMessage(chatId, text) {
   const rawContent = String(text || '').trim();
   const content = sanitizeAssistantText(rawContent);
   if (!content) {
-    commitAssistantMessage(chatId, '[offline-inference backend empty-output]');
+    appendErrorMessageToChat(chatId, 'Offline inference backend returned empty output.');
     return;
   }
 
@@ -7553,12 +11887,13 @@ async function typewriterAssistantMessage(chatId, text) {
   const row = document.createElement('div');
   row.className = 'msg ai';
   row.innerHTML = `
-      <div class="msg-avatar ai">AI</div>
-      <div class="msg-bubble"></div>
+      <div class="msg-stack">
+        <div class="msg-bubble"></div>
+      </div>
     `;
   const bubble = row.querySelector('.msg-bubble');
   chatArea.appendChild(row);
-  chatArea.scrollTop = chatArea.scrollHeight;
+  scrollChatToBottom();
 
   const displayContent = stripCanvasBlocksForDisplay(content);
   if (!displayContent) {
@@ -7596,6 +11931,7 @@ async function typewriterAssistantMessage(chatId, text) {
         if (shouldRenderMarkdown) {
           try {
             bubble.innerHTML = renderMarkdownHtml(partial);
+            syncStreamingCodeBlockScroll(bubble, true);
           } catch (_) {
             bubble.textContent = partial;
           }
@@ -7603,7 +11939,7 @@ async function typewriterAssistantMessage(chatId, text) {
         } else if (!markdownLike) {
           bubble.textContent = partial;
         }
-        chatArea.scrollTop = chatArea.scrollHeight;
+        scrollChatToBottom();
         if (index < total) {
           setTimeout(tick, 10);
           return;
@@ -7633,6 +11969,14 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
     streamRaw: '',
     deltaCount: 0,
     thinkForced: Boolean(options && options.thinkForced),
+    appendToLastAssistant: Boolean(options && options.appendToLastAssistant),
+    latestUserOverride: String(options && options.latestUserOverride ? options.latestUserOverride : '').trim(),
+    autoContinuationRemaining: Number.isFinite(Number(options && options.autoContinuationRemaining))
+      ? Math.max(0, Number(options.autoContinuationRemaining))
+      : autoContinuationMaxPasses,
+    suppressChatNameInstruction: Boolean(options && options.suppressChatNameInstruction),
+    maxTokens: Math.max(0, Number(options && options.maxTokens) || 0),
+    nextAction: null,
   };
   activeInferenceRequest = requestToken;
   thinkingStartedByChatId.set(String(chatId || ''), Number(requestToken.startedAt || Date.now()));
@@ -7646,6 +11990,128 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
     if (!isInferenceActive(requestToken)) {
       return;
     }
+    if (isHuggingFaceProviderEnabled()) {
+      const fullPrompt = await buildInferencePrompt(chatId, promptText, {
+        thinkForced: requestToken.thinkForced,
+        latestUserOverride: requestToken.latestUserOverride,
+        suppressChatNameInstruction: requestToken.appendToLastAssistant || requestToken.suppressChatNameInstruction,
+      });
+      requestToken.promptPreview = debugPreview(fullPrompt, 1600);
+      requestToken.abortController = new AbortController();
+      pushDebugTrace('request_start', {
+        chatId: requestToken.chatId,
+        promptLength: String(fullPrompt.length),
+        promptLines: String(fullPrompt.split('\n').length),
+        thinkMode: String(Boolean(thinkModeEnabled || requestToken.thinkForced)),
+        provider: 'huggingface',
+        model: String(appSettings.huggingFaceModel || ''),
+        promptPreview: requestToken.promptPreview,
+      });
+      const res = await streamHuggingFaceChatCompletion(fullPrompt, {
+        onStart: (streamId) => {
+          requestToken.streamId = String(streamId || '');
+          pushDebugTrace('stream_start', {
+            chatId: requestToken.chatId,
+            streamId: requestToken.streamId,
+            provider: 'huggingface',
+          });
+        },
+        onDelta: (delta) => {
+          if (!isInferenceActive(requestToken)) return;
+          const raw = String(delta || '');
+          requestToken.deltaCount += 1;
+          if (requestToken.streamRaw.length < 120000) {
+            requestToken.streamRaw += raw;
+          }
+          appendLiveDelta(chatId, delta);
+        },
+      }, {
+        abortController: requestToken.abortController,
+        maxTokens: requestToken.maxTokens,
+      });
+      if (!isInferenceActive(requestToken)) {
+        consumeLiveAssistantText();
+        return;
+      }
+
+      clearTypingIndicator();
+      typingTimer = null;
+
+      if (res && res.cancelled) {
+        return;
+      }
+
+      if (res && res.ok) {
+        const streamedRawSanitized = consumeLiveAssistantText();
+        let rawCandidate = streamedRawSanitized || String(res.output || '').trim();
+        const named = applyInlineChatNameFromResponse(chatId, rawCandidate);
+        rawCandidate = String(named.text || '').trim();
+        const finalText = sanitizeAssistantText(rawCandidate);
+        if (!finalText) {
+          pushDebugTrace('request_finish_error', {
+            chatId: requestToken.chatId,
+            streamId: requestToken.streamId,
+            deltaCount: String(requestToken.deltaCount),
+            inferenceRoute: debugPreview(res && res.status ? res.status.lastInferenceRoute : '', 200),
+            rawStreamPreview: debugPreview(requestToken.streamRaw, 1800),
+            error: 'huggingface empty output',
+          });
+          appendErrorMessageToChat(chatId, 'Hugging Face returned empty output.');
+          return;
+        }
+        const displayText = stripCanvasBlocksForDisplay(finalText).trim();
+        pushDebugTrace('request_finish_ok', {
+          chatId: requestToken.chatId,
+          streamId: requestToken.streamId,
+          deltaCount: String(requestToken.deltaCount),
+          inferenceRoute: debugPreview(res && res.status ? res.status.lastInferenceRoute : '', 200),
+          rawStreamPreview: debugPreview(requestToken.streamRaw, 1800),
+          rawCandidatePreview: debugPreview(rawCandidate, 1800),
+          sanitizedPreview: debugPreview(finalText, 1800),
+          displayPreview: debugPreview(displayText, 1800),
+          provider: 'huggingface',
+        });
+        commitAssistantMessage(chatId, finalText, rawCandidate, {
+          appendToLastAssistant: requestToken.appendToLastAssistant,
+          forceNeedsContinue: false,
+        });
+        return;
+      }
+
+      const streamedRaw = consumeLiveAssistantText();
+      const streamedText = sanitizeAssistantText(streamedRaw);
+      if (streamedText && !isArtifactOnlyResponse(streamedText)) {
+        const named = applyInlineChatNameFromResponse(chatId, streamedRaw);
+        const namedText = sanitizeAssistantText(named.text);
+        pushDebugTrace('request_finish_stream_partial', {
+          chatId: requestToken.chatId,
+          streamId: requestToken.streamId,
+          deltaCount: String(requestToken.deltaCount),
+          inferenceRoute: debugPreview(res && res.status ? res.status.lastInferenceRoute : '', 200),
+          rawStreamPreview: debugPreview(requestToken.streamRaw, 1800),
+          sanitizedPreview: debugPreview(namedText, 1800),
+          provider: 'huggingface',
+        });
+        commitAssistantMessage(chatId, namedText, namedText, {
+          appendToLastAssistant: requestToken.appendToLastAssistant,
+          forceNeedsContinue: false,
+        });
+        return;
+      }
+
+      pushDebugTrace('request_finish_error', {
+        chatId: requestToken.chatId,
+        streamId: requestToken.streamId,
+        deltaCount: String(requestToken.deltaCount),
+        inferenceRoute: debugPreview(res && res.status ? res.status.lastInferenceRoute : '', 200),
+        rawStreamPreview: debugPreview(requestToken.streamRaw, 1800),
+        error: debugPreview(res && res.message ? res.message : 'Hugging Face inference failed.', 600),
+        provider: 'huggingface',
+      });
+      appendErrorMessageToChat(chatId, res && res.message ? res.message : 'Hugging Face inference failed.');
+      return;
+    }
+
     if (nativeBridge.available()) {
       if (developerAgentEnabled && !canvasModeEnabled) {
         const handledByAgent = await requestDeveloperAgentReply(requestToken, chatId, promptText);
@@ -7658,11 +12124,14 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
       }
       const fullPrompt = await buildInferencePrompt(chatId, promptText, {
         thinkForced: requestToken.thinkForced,
+        latestUserOverride: requestToken.latestUserOverride,
+        suppressChatNameInstruction: requestToken.appendToLastAssistant || requestToken.suppressChatNameInstruction,
       });
       requestToken.promptPreview = debugPreview(fullPrompt, 1600);
       pushDebugTrace('request_start', {
         chatId: requestToken.chatId,
         promptLength: String(fullPrompt.length),
+        promptLines: String(fullPrompt.split('\n').length),
         thinkMode: String(Boolean(thinkModeEnabled || requestToken.thinkForced)),
         promptPreview: requestToken.promptPreview,
       });
@@ -7683,6 +12152,8 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
           }
           appendLiveDelta(chatId, delta);
         },
+      }, {
+        maxTokens: requestToken.maxTokens,
       });
       if (!isInferenceActive(requestToken)) {
         consumeLiveAssistantText();
@@ -7701,6 +12172,7 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
         const fallbackRaw = String(res.output || '').trim();
         let rawCandidate = streamedRawSanitized || fallbackRaw;
         let finalText = sanitizeAssistantText(rawCandidate);
+        let completionLikelyTruncated = isLikelyTruncatedStatus(res && res.status);
 
         if (canvasModeEnabled && !hasNonEmptyCanvasPayload(rawCandidate)) {
           pushDebugTrace('canvas_retry_needed', {
@@ -7724,7 +12196,11 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
             '',
             retryInstruction,
           ].join('\n');
-          const canvasRetry = await nativeBridge.invoke('infer', { prompt: canvasRetryPrompt });
+          const canvasRetry = await nativeBridge.invoke('infer', {
+            prompt: canvasRetryPrompt,
+            maxTokens: requestToken.maxTokens,
+            max_tokens: requestToken.maxTokens,
+          });
           if (!isInferenceActive(requestToken)) {
             return;
           }
@@ -7755,7 +12231,11 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
             chatId: requestToken.chatId,
             streamId: requestToken.streamId,
           });
-          const retry = await nativeBridge.invoke('infer', { prompt: fullPrompt });
+          const retry = await nativeBridge.invoke('infer', {
+            prompt: fullPrompt,
+            maxTokens: requestToken.maxTokens,
+            max_tokens: requestToken.maxTokens,
+          });
           if (!isInferenceActive(requestToken)) {
             return;
           }
@@ -7767,28 +12247,70 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
             });
           }
         }
-        if (!finalText) {
-          finalText = '[offline-inference backend empty-output]';
-        }
         const named = applyInlineChatNameFromResponse(chatId, rawCandidate);
         finalText = sanitizeAssistantText(named.text);
         rawCandidate = String(named.text || '').trim();
+        let thinkingTagDetected = /<(thinking|think)>[\s\S]*?<\/\1>/i.test(requestToken.streamRaw || rawCandidate);
+        if (!finalText) {
+          pushDebugTrace('request_finish_error', {
+            chatId: requestToken.chatId,
+            streamId: requestToken.streamId,
+            deltaCount: String(requestToken.deltaCount),
+            inferenceRoute: debugPreview(res && res.status ? res.status.lastInferenceRoute : '', 200),
+            persistentError: debugPreview(res && res.status ? res.status.lastPersistentError : '', 800),
+            completionStatus: debugPreview(res && res.status ? res.status.lastCompletionStatus : '', 120),
+            completionLikelyTruncated: String(Boolean(completionLikelyTruncated)),
+            rawStreamPreview: debugPreview(requestToken.streamRaw, 1800),
+            rawCandidatePreview: debugPreview(rawCandidate, 1800),
+            error: 'backend empty output',
+          });
+          appendErrorMessageToChat(chatId, 'Offline inference backend returned empty output.');
+          return;
+        }
         const displayText = stripCanvasBlocksForDisplay(finalText).trim();
+        const forceNeedsContinue = completionLikelyTruncated && isLikelyIncompleteResponse(displayText || finalText);
+        const autoContinue = shouldAutoContinueResponse(chatId, displayText || finalText, res && res.status, requestToken);
         pushDebugTrace('request_finish_ok', {
           chatId: requestToken.chatId,
           streamId: requestToken.streamId,
           deltaCount: String(requestToken.deltaCount),
+          inferenceRoute: debugPreview(res && res.status ? res.status.lastInferenceRoute : '', 200),
+          persistentError: debugPreview(res && res.status ? res.status.lastPersistentError : '', 800),
+          completionStatus: debugPreview(res && res.status ? res.status.lastCompletionStatus : '', 120),
+          completionLikelyTruncated: String(Boolean(completionLikelyTruncated)),
+          thinkingTagDetected: String(Boolean(thinkingTagDetected)),
           rawStreamPreview: debugPreview(requestToken.streamRaw, 1800),
           rawCandidatePreview: debugPreview(rawCandidate, 1800),
           sanitizedPreview: debugPreview(finalText, 1800),
           displayPreview: debugPreview(displayText, 1800),
         });
-        // One-shot backend mode may deliver only one delta chunk. In that case,
-        // animate the final response for a typewriter-like UX.
-        if (!canvasModeEnabled && requestToken.deltaCount <= 1) {
-          await typewriterAssistantMessage(chatId, finalText);
-        } else {
-          commitAssistantMessage(chatId, finalText, rawCandidate);
+        if (requestToken.appendToLastAssistant && /^<?DONE>?$/i.test(String(finalText || '').trim())) {
+          const chat = findChatById(chatId);
+          if (chat) {
+            chat.needsContinue = false;
+            chat.updatedAt = nowTs();
+            saveChats();
+            renderHistory();
+            updateContinueButtonVisibility();
+            if (activeChatId === chatId) {
+              renderActiveChat();
+            }
+          }
+          return;
+        }
+        if (autoContinue) {
+          setChatAutoContinuing(chatId, true);
+        }
+        commitAssistantMessage(chatId, finalText, rawCandidate, {
+          appendToLastAssistant: requestToken.appendToLastAssistant,
+          forceNeedsContinue,
+        });
+        if (autoContinue) {
+          requestToken.nextAction = () => {
+            void startAssistantContinuation(chatId, {
+              autoContinuationRemaining: Math.max(0, requestToken.autoContinuationRemaining - 1),
+            });
+          };
         }
         return;
       }
@@ -7798,19 +12320,33 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
       if (streamedText && !isArtifactOnlyResponse(streamedText)) {
         const named = applyInlineChatNameFromResponse(chatId, streamedRaw);
         const namedText = sanitizeAssistantText(named.text);
+        const partialNeedsContinue = isLikelyTruncatedStatus(res && res.status) || isLikelyIncompleteResponse(namedText);
+        const thinkingTagDetected = /<(thinking|think)>[\s\S]*?<\/\1>/i.test(requestToken.streamRaw || streamedRaw);
         pushDebugTrace('request_finish_stream_partial', {
           chatId: requestToken.chatId,
           streamId: requestToken.streamId,
           deltaCount: String(requestToken.deltaCount),
+          inferenceRoute: debugPreview(res && res.status ? res.status.lastInferenceRoute : '', 200),
+          persistentError: debugPreview(res && res.status ? res.status.lastPersistentError : '', 800),
+          completionStatus: debugPreview(res && res.status ? res.status.lastCompletionStatus : '', 120),
+          completionLikelyTruncated: String(Boolean(isLikelyTruncatedStatus(res && res.status))),
+          thinkingTagDetected: String(Boolean(thinkingTagDetected)),
           rawStreamPreview: debugPreview(requestToken.streamRaw, 1800),
           sanitizedPreview: debugPreview(namedText, 1800),
         });
-        commitAssistantMessage(chatId, namedText, namedText);
+        commitAssistantMessage(chatId, namedText, namedText, {
+          appendToLastAssistant: requestToken.appendToLastAssistant,
+          forceNeedsContinue: partialNeedsContinue,
+        });
         return;
       }
 
       if (res && typeof res.message === 'string' && /unsupported action/i.test(res.message)) {
-        const fallback = await nativeBridge.invoke('infer', { prompt: fullPrompt });
+        const fallback = await nativeBridge.invoke('infer', {
+          prompt: fullPrompt,
+          maxTokens: requestToken.maxTokens,
+          max_tokens: requestToken.maxTokens,
+        });
         if (!isInferenceActive(requestToken)) {
           return;
         }
@@ -7818,25 +12354,38 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
           const rawFallback = String(fallback.output || '');
           const named = applyInlineChatNameFromResponse(chatId, rawFallback);
           const namedOutput = String(named.text || '');
+          const fallbackNeedsContinue =
+            isLikelyTruncatedStatus(fallback && fallback.status) ||
+            isLikelyIncompleteResponse(namedOutput);
           pushDebugTrace('request_finish_fallback', {
             chatId: requestToken.chatId,
             reason: 'unsupported_action',
+            inferenceRoute: debugPreview(fallback && fallback.status ? fallback.status.lastInferenceRoute : '', 200),
+            persistentError: debugPreview(fallback && fallback.status ? fallback.status.lastPersistentError : '', 800),
             rawPreview: debugPreview(namedOutput, 1800),
           });
-          await typewriterAssistantMessage(chatId, namedOutput);
+          if (requestToken.appendToLastAssistant) {
+            commitAssistantMessage(chatId, namedOutput, namedOutput, {
+              appendToLastAssistant: true,
+              forceNeedsContinue: fallbackNeedsContinue,
+            });
+          } else {
+            await typewriterAssistantMessage(chatId, namedOutput);
+          }
           return;
         }
       }
 
-      const errText = `[runtime-error] ${res && res.message ? res.message : 'Inference failed.'}`;
       pushDebugTrace('request_finish_error', {
         chatId: requestToken.chatId,
         streamId: requestToken.streamId,
         deltaCount: String(requestToken.deltaCount),
+        inferenceRoute: debugPreview(res && res.status ? res.status.lastInferenceRoute : '', 200),
+        persistentError: debugPreview(res && res.status ? res.status.lastPersistentError : '', 800),
         rawStreamPreview: debugPreview(requestToken.streamRaw, 1800),
         error: debugPreview(res && res.message ? res.message : 'Inference failed.', 600),
       });
-      await typewriterAssistantMessage(chatId, errText);
+      appendErrorMessageToChat(chatId, res && res.message ? res.message : 'Inference failed.');
       return;
     }
 
@@ -7850,6 +12399,11 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
     await resolveTypingFallback(chatId);
   } finally {
     completeInferenceRequest(requestToken);
+    if (!requestToken.cancelled && typeof requestToken.nextAction === 'function') {
+      requestToken.nextAction();
+    } else {
+      setChatAutoContinuing(chatId, false);
+    }
   }
 }
 
@@ -7864,6 +12418,8 @@ loadAuthStore();
 updateLoginUi();
 loadAppSettings();
 setupMacTopbarNativeDrag();
+hydrateCustomTooltips(document);
+initGlobalTooltipSystem();
 refreshWorkspaceForCurrentUser();
 
 // ── Project generation
@@ -7913,6 +12469,7 @@ function generateProject() {
   const chat = (inNewChatMode || !getActiveChat()) ? createChat(promptText) : getActiveChat();
   if (!chat) return;
   beginInferenceRequest();
+  chatAutoScrollPinned = true;
   appendMessageToChat(chat.id, 'user', promptText);
   void requestAssistantReply(chat.id, promptText, true);
 
@@ -8001,5 +12558,6 @@ Object.assign(window, {
 });
 
 window.addEventListener('beforeunload', () => {
+  persistFileTabsStateNow();
   clearDebugTraceEntries();
 });

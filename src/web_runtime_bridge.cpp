@@ -36,6 +36,56 @@ bool StartsWith(const std::string& text, const std::string& prefix) {
   return text.size() >= prefix.size() && text.compare(0, prefix.size(), prefix) == 0;
 }
 
+std::string TrimAsciiWhitespace(const std::string& text) {
+  std::size_t start = 0;
+  while (start < text.size() &&
+         std::isspace(static_cast<unsigned char>(text[start])) != 0) {
+    start += 1;
+  }
+
+  std::size_t end = text.size();
+  while (end > start &&
+         std::isspace(static_cast<unsigned char>(text[end - 1])) != 0) {
+    end -= 1;
+  }
+  return text.substr(start, end - start);
+}
+
+bool HasTerminalAsciiPunctuation(const std::string& text) {
+  if (text.empty()) return false;
+  const char last = text.back();
+  return last == '.' || last == '!' || last == '?' || last == '\'' ||
+         last == '"' || last == '`' || last == ')' || last == ']' ||
+         last == '}';
+}
+
+bool EndsWithOpenDelimiter(const std::string& text) {
+  if (text.empty()) return false;
+  const char last = text.back();
+  return last == ',' || last == ':' || last == ';' || last == '(' ||
+         last == '[' || last == '{' || last == '`' || last == '"';
+}
+
+bool LikelyIncompleteResponse(const std::string& text) {
+  const std::string clean = TrimAsciiWhitespace(text);
+  if (clean.empty() || clean == "<DONE>" || clean == "DONE") return false;
+
+  std::size_t fence_count = 0;
+  std::size_t pos = 0;
+  while ((pos = clean.find("```", pos)) != std::string::npos) {
+    fence_count += 1;
+    pos += 3;
+  }
+  if ((fence_count % 2u) != 0u) return true;
+  if (EndsWithOpenDelimiter(clean)) return true;
+  if (!HasTerminalAsciiPunctuation(clean) && clean.size() >= 320) return true;
+  return false;
+}
+
+int EffectiveMaxTokens(int requested_max_tokens) {
+  return requested_max_tokens > 0 ? std::min(requested_max_tokens, 4096) : 3072;
+}
+
 }  // namespace
 
 bool WebRuntimeBridge::Initialize(const std::filesystem::path& root_hint, bool force_cpu, std::string* err) {
@@ -116,9 +166,24 @@ std::string WebRuntimeBridge::Generate(const std::string& prompt,
                                        int max_tokens,
                                        const std::string& grammar) {
   std::lock_guard<std::mutex> lock(mu_);
+  const int effective_max_tokens = EffectiveMaxTokens(max_tokens);
+  auto capture_inference_telemetry = [&]() {
+    status_.last_inference_route = inference_.LastInferenceRoute();
+    status_.last_persistent_error = inference_.LastPersistentError();
+  };
+  auto set_completion_status = [&](const std::string& output, bool ok) {
+    status_.last_completion_max_tokens = effective_max_tokens;
+    status_.last_completion_likely_truncated =
+        ok ? LikelyIncompleteResponse(output) : false;
+    status_.last_completion_status =
+        ok ? (status_.last_completion_likely_truncated ? "likely_truncated"
+                                                       : "completed")
+           : "error";
+  };
 
   const std::string trimmed = prompt;
   if (trimmed.empty()) {
+    set_completion_status(std::string(), false);
     if (err) {
       *err = "Prompt is empty.";
     }
@@ -126,6 +191,7 @@ std::string WebRuntimeBridge::Generate(const std::string& prompt,
   }
 
   if (!status_.model_loaded) {
+    set_completion_status(std::string(), false);
     if (err) {
       *err = "Model not loaded (" + cfg_.model_path.string() + ").";
     }
@@ -133,7 +199,9 @@ std::string WebRuntimeBridge::Generate(const std::string& prompt,
   }
 
   const std::string output = inference_.Generate(trimmed, max_tokens, grammar);
+  capture_inference_telemetry();
   if (output.empty()) {
+    set_completion_status(std::string(), false);
     if (err) {
       *err = "Inference returned empty output.";
     }
@@ -145,12 +213,14 @@ std::string WebRuntimeBridge::Generate(const std::string& prompt,
       StartsWith(output, "[offline-inference backend error]") ||
       StartsWith(output, "[offline-inference backend empty-output]") ||
       StartsWith(output, "[offline-inference placeholder]")) {
+    set_completion_status(std::string(), false);
     if (err) {
       *err = output;
     }
     return std::string();
   }
 
+  set_completion_status(output, true);
   return output;
 }
 
@@ -161,8 +231,23 @@ bool WebRuntimeBridge::GenerateStream(const std::string& prompt,
                                       int max_tokens,
                                       const std::string& grammar) {
   std::lock_guard<std::mutex> lock(mu_);
+  const int effective_max_tokens = EffectiveMaxTokens(max_tokens);
+  auto capture_inference_telemetry = [&]() {
+    status_.last_inference_route = inference_.LastInferenceRoute();
+    status_.last_persistent_error = inference_.LastPersistentError();
+  };
+  auto set_completion_status = [&](const std::string& output_text, bool ok) {
+    status_.last_completion_max_tokens = effective_max_tokens;
+    status_.last_completion_likely_truncated =
+        ok ? LikelyIncompleteResponse(output_text) : false;
+    status_.last_completion_status =
+        ok ? (status_.last_completion_likely_truncated ? "likely_truncated"
+                                                       : "completed")
+           : "error";
+  };
 
   if (prompt.empty()) {
+    set_completion_status(std::string(), false);
     if (err) {
       *err = "Prompt is empty.";
     }
@@ -170,6 +255,7 @@ bool WebRuntimeBridge::GenerateStream(const std::string& prompt,
   }
 
   if (!status_.model_loaded) {
+    set_completion_status(std::string(), false);
     if (err) {
       *err = "Model not loaded (" + cfg_.model_path.string() + ").";
     }
@@ -179,11 +265,15 @@ bool WebRuntimeBridge::GenerateStream(const std::string& prompt,
   std::string local_output;
   std::string local_err;
   if (!inference_.GenerateStream(prompt, on_delta, &local_output, &local_err, max_tokens, grammar)) {
+    capture_inference_telemetry();
+    set_completion_status(std::string(), false);
     if (err) {
       *err = local_err.empty() ? "Inference failed." : local_err;
     }
     return false;
   }
+  capture_inference_telemetry();
+  set_completion_status(local_output, true);
 
   if (output) {
     *output = local_output;
@@ -256,6 +346,8 @@ bool WebRuntimeBridge::RefreshLocked(std::string* err) {
   if (err) {
     *err = status_.last_error;
   }
+  status_.last_inference_route = inference_.LastInferenceRoute();
+  status_.last_persistent_error = inference_.LastPersistentError();
   return status_.model_loaded;
 }
 

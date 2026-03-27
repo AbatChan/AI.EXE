@@ -25,6 +25,11 @@ struct WebRuntimeStatus {
   std::string backend_version;
 
   std::string last_error;
+  std::string last_inference_route;
+  std::string last_persistent_error;
+  std::string last_completion_status;
+  bool last_completion_likely_truncated = false;
+  int last_completion_max_tokens = 0;
 };
 
 class WebRuntimeBridge {

@@ -61,6 +61,47 @@ bool IsTruthyEnv(const char *value) {
          normalized == "on";
 }
 
+bool OutputIndicatesAccelerator(const std::string &output) {
+  std::string normalized(output);
+  for (char &c : normalized) {
+    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  }
+
+  static const std::vector<std::string> markers = {
+      "cuda", "metal", "vulkan", "sycl", "hip", "musa", "cann"};
+  for (const auto &marker : markers) {
+    if (normalized.find(marker) != std::string::npos) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool EngineHasAccelerator(const std::filesystem::path &engine) {
+  if (engine.empty()) {
+    return true;
+  }
+
+  ProcessLimits limits;
+  limits.timeout_seconds = 5;
+  limits.memory_limit_bytes = 256ULL * 1024ULL * 1024ULL;
+  limits.output_limit_bytes = 32 * 1024;
+  limits.max_active_processes = 1;
+  limits.cpu_rate_percent = 0;
+  limits.try_restricted_token = true;
+
+  ProcessResult result;
+  std::string err;
+  if (!ProcessRunner::RunExe(engine, {"--list-devices"}, engine.parent_path(),
+                             limits, &result, nullptr, &err)) {
+    return true;
+  }
+  if (result.timed_out || result.exit_code != 0) {
+    return true;
+  }
+  return OutputIndicatesAccelerator(result.output);
+}
+
 std::filesystem::path
 ResolveLocalEnginePath(const std::filesystem::path &backend_exe) {
   const char *override_path = std::getenv("AI_EXE_LLM_ENGINE_PATH");
@@ -240,6 +281,39 @@ std::string NormalizeLlamaPreview(std::string raw, const std::string &prompt) {
   return raw;
 }
 
+// llama-cli interactive stdin is line-oriented. Our prompts are multiline
+// ChatML blocks, so send escaped newlines to preserve full prompt structure in
+// one interactive turn.
+std::string EncodeInteractivePrompt(const std::string &prompt) {
+  std::string encoded;
+  encoded.reserve(prompt.size() + 64);
+
+  for (std::size_t i = 0; i < prompt.size(); ++i) {
+    const char ch = prompt[i];
+    switch (ch) {
+    case '\\':
+      encoded += "\\\\";
+      break;
+    case '\n':
+      encoded += "\\n";
+      break;
+    case '\r':
+      if (i + 1 >= prompt.size() || prompt[i + 1] != '\n') {
+        encoded += "\\n";
+      }
+      break;
+    case '\t':
+      encoded += "\\t";
+      break;
+    default:
+      encoded.push_back(ch);
+      break;
+    }
+  }
+
+  return encoded;
+}
+
 class LlamaPersistentSession {
 public:
   ~LlamaPersistentSession() { Stop(); }
@@ -336,9 +410,8 @@ public:
     }
 
     // We provide full ChatML prompt text from UI, so do not enable
-    // --conversation wrapping here. Keep moderate creativity (user requested
-    // ~0.5-0.7 temperature range).
-    // --presence-penalty 1.0 helps reduce repetition loops.
+    // --conversation wrapping here. Keep moderate creativity and mild
+    // anti-repetition defaults for chat UX.
     std::vector<std::string> args = {
         "-m",
         model.string(),
@@ -357,11 +430,19 @@ public:
         "--presence-penalty",
         "0.2",
         "--flash-attn",
+        "auto",
+        "--escape",
+        "--no-show-timings",
+        "--no-display-prompt",
         "--simple-io",
         "--offline",
+        "--no-warmup",
     };
 
-    if (IsTruthyEnv(std::getenv("AI_EXE_FORCE_CPU"))) {
+    const bool force_cpu =
+        IsTruthyEnv(std::getenv("AI_EXE_FORCE_CPU")) ||
+        !EngineHasAccelerator(engine);
+    if (force_cpu) {
       args.push_back("--device");
       args.push_back("none");
       args.push_back("--n-gpu-layers");
@@ -445,7 +526,8 @@ public:
       return false;
     }
 
-    if (!WriteLine(prompt, err)) {
+    const std::string encoded_prompt = EncodeInteractivePrompt(prompt);
+    if (!WriteLine(encoded_prompt, err)) {
       return false;
     }
 
@@ -1140,6 +1222,23 @@ std::string InferenceEngine::BackendPath() const {
 
 std::string InferenceEngine::BackendVersion() const { return backend_version_; }
 
+std::string InferenceEngine::LastInferenceRoute() const {
+  std::lock_guard<std::mutex> lock(telemetry_mu_);
+  return last_inference_route_;
+}
+
+std::string InferenceEngine::LastPersistentError() const {
+  std::lock_guard<std::mutex> lock(telemetry_mu_);
+  return last_persistent_error_;
+}
+
+void InferenceEngine::UpdateLastInferenceTelemetry(
+    const std::string &route, const std::string &persistent_error) const {
+  std::lock_guard<std::mutex> lock(telemetry_mu_);
+  last_inference_route_ = route;
+  last_persistent_error_ = persistent_error;
+}
+
 ModelInfo InferenceEngine::GetModelInfo() const {
   return ModelInfo{loaded_model_, model_size_bytes_, model_format_};
 }
@@ -1268,6 +1367,9 @@ bool InferenceEngine::GenerateWithBackendStream(
     const std::function<void(const std::string &)> *on_delta,
     std::string *output, std::string *err, int max_tokens,
     const std::string &grammar) const {
+  std::string persistent_failure_reason;
+  bool persistent_attempted = false;
+
   if (output) {
     output->clear();
   }
@@ -1276,20 +1378,21 @@ bool InferenceEngine::GenerateWithBackendStream(
   }
   if (prompt.empty()) {
     *err = "prompt is empty";
+    UpdateLastInferenceTelemetry("error_prompt_empty", persistent_failure_reason);
     return false;
   }
 
   const int capped_max_tokens =
-      (max_tokens > 0) ? std::min(max_tokens, 4096) : 2048;
-  // Persistent session keeps the model warm in memory between queries, avoiding
-  // 10-30s reload overhead per request. Enabled by default; disable with
-  // AI_EXE_DISABLE_PERSISTENT_SESSION=1.
-  const bool persistent_disabled =
-      IsTruthyEnv(std::getenv("AI_EXE_DISABLE_PERSISTENT_SESSION"));
+      (max_tokens > 0) ? std::min(max_tokens, 4096) : 3072;
+  // The current persistent stdin-driven llama-cli session is not truly
+  // stateless between prompts, so keep it opt-in until a safe context-reset
+  // strategy is implemented.
+  const bool persistent_enabled =
+      IsTruthyEnv(std::getenv("AI_EXE_ENABLE_PERSISTENT_SESSION"));
   // Explicit max_tokens requests (e.g. chat-title generation) must bypass
   // persistent mode so per-request caps/grammar remain strict.
   const bool force_one_shot =
-      persistent_disabled || max_tokens > 0 || !grammar.empty();
+      !persistent_enabled || max_tokens > 0 || !grammar.empty();
 
   if (!force_one_shot) {
     const auto engine_path = ResolveLocalEnginePath(backend_config_.executable);
@@ -1298,6 +1401,7 @@ bool InferenceEngine::GenerateWithBackendStream(
       std::lock_guard<std::mutex> lock(state.mu);
 
       std::string persistent_err;
+      persistent_attempted = true;
       const bool same_session = state.session.IsRunning() &&
                                 state.session.EnginePath() == engine_path &&
                                 state.session.ModelPath() == loaded_model_;
@@ -1319,10 +1423,14 @@ bool InferenceEngine::GenerateWithBackendStream(
               *output = out;
             }
             err->clear();
+            UpdateLastInferenceTelemetry("persistent", std::string());
             return true;
           }
         }
+        persistent_failure_reason = persistent_err;
         state.session.Stop();
+      } else {
+        persistent_failure_reason = persistent_err;
       }
     }
   }
@@ -1347,6 +1455,7 @@ bool InferenceEngine::GenerateWithBackendStream(
       "--presence-penalty",
       "0.2",
       "--flash-attn",
+      "auto",
   };
   std::vector<std::string> runtime_args = args;
   if (!grammar.empty()) {
@@ -1373,11 +1482,16 @@ bool InferenceEngine::GenerateWithBackendStream(
   if (!InvokeBackend(runtime_args, &result, &invoke_err,
                      output_chunk_handler ? &output_chunk_handler : nullptr)) {
     *err = invoke_err;
+    if (persistent_attempted && persistent_failure_reason.empty()) {
+      persistent_failure_reason = invoke_err;
+    }
+    UpdateLastInferenceTelemetry("error_backend_invoke", persistent_failure_reason);
     return false;
   }
 
   if (result.timed_out) {
     *err = "execution exceeded time limit";
+    UpdateLastInferenceTelemetry("error_backend_timeout", persistent_failure_reason);
     return false;
   }
 
@@ -1388,12 +1502,14 @@ bool InferenceEngine::GenerateWithBackendStream(
       msg += " output=" + trimmed_output;
     }
     *err = msg;
+    UpdateLastInferenceTelemetry("error_backend_exit", persistent_failure_reason);
     return false;
   }
 
   const std::string out = NormalizeLlamaResponse(result.output, prompt);
   if (out.empty()) {
     *err = "backend empty output";
+    UpdateLastInferenceTelemetry("error_backend_empty_output", persistent_failure_reason);
     return false;
   }
 
@@ -1406,5 +1522,8 @@ bool InferenceEngine::GenerateWithBackendStream(
     *output = out;
   }
   err->clear();
+  UpdateLastInferenceTelemetry(
+      persistent_attempted ? "one_shot_after_persistent_fallback" : "one_shot",
+      persistent_failure_reason);
   return true;
 }

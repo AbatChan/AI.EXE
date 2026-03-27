@@ -874,7 +874,16 @@ std::string StatusToJson(const WebRuntimeStatus &s) {
       << "\"backendSelfTest\":\"" << EscapeJson(s.backend_selftest_details)
       << "\","
       << "\"backendVersion\":\"" << EscapeJson(s.backend_version) << "\","
-      << "\"lastError\":\"" << EscapeJson(s.last_error) << "\""
+      << "\"lastError\":\"" << EscapeJson(s.last_error) << "\","
+      << "\"lastInferenceRoute\":\"" << EscapeJson(s.last_inference_route)
+      << "\","
+      << "\"lastPersistentError\":\"" << EscapeJson(s.last_persistent_error)
+      << "\","
+      << "\"lastCompletionStatus\":\"" << EscapeJson(s.last_completion_status)
+      << "\","
+      << "\"lastCompletionLikelyTruncated\":"
+      << (s.last_completion_likely_truncated ? "true" : "false") << ","
+      << "\"lastCompletionMaxTokens\":" << s.last_completion_max_tokens
       << "}";
   return oss.str();
 }
@@ -1288,6 +1297,7 @@ private:
       }
     } else if (action == "workspaceNewProject") {
       // Create a new project folder in the Downloads directory and set as root.
+      std::string requested_name = ExtractJsonStringField(request_json, "name");
       wchar_t *downloads_path = nullptr;
       HRESULT shr =
           SHGetKnownFolderPath(FOLDERID_Downloads, 0, nullptr, &downloads_path);
@@ -1306,7 +1316,32 @@ private:
         localtime_s(&tm_buf, &tt);
         char datebuf[32];
         strftime(datebuf, sizeof(datebuf), "%Y-%m-%d", &tm_buf);
-        std::string base_name = std::string("New Project ") + datebuf;
+        auto sanitize_name = [](std::string value) {
+          std::string out;
+          out.reserve(value.size());
+          bool last_was_sep = false;
+          for (char ch : value) {
+            const unsigned char uch = static_cast<unsigned char>(ch);
+            if (std::isalnum(uch)) {
+              out.push_back(ch);
+              last_was_sep = false;
+            } else if (ch == ' ' || ch == '-' || ch == '_') {
+              if (!out.empty() && !last_was_sep) {
+                out.push_back(' ');
+                last_was_sep = true;
+              }
+            }
+          }
+          while (!out.empty() && out.back() == ' ') out.pop_back();
+          while (!out.empty() && out.front() == ' ') out.erase(out.begin());
+          if (out.size() > 48) out.resize(48);
+          while (!out.empty() && out.back() == ' ') out.pop_back();
+          return out;
+        };
+        const std::string clean_name = sanitize_name(requested_name);
+        std::string base_name = clean_name.empty()
+            ? std::string("New Project ") + datebuf
+            : clean_name;
         std::filesystem::path folder_path = dl_dir / base_name;
         int counter = 1;
         while (std::filesystem::exists(folder_path)) {

@@ -80,6 +80,7 @@ if(WIN32)
   set(WIN_UI_CONFIG_JS "${CMAKE_BINARY_DIR}/generated/ui/ui-config.js")
   set(WIN_UI_PROMPT_CHAT_MAIN "${CMAKE_SOURCE_DIR}/ui/prompts/chat_main.md")
   set(WIN_UI_PROMPT_AGENT "${CMAKE_SOURCE_DIR}/ui/prompts/developer_agent_decision.md")
+  set(WIN_UI_VENDOR_DIR "${CMAKE_SOURCE_DIR}/ui/vendor")
 
   add_executable(ai_exe_gui WIN32
     src/gui_main_win_webview.cpp
@@ -95,6 +96,7 @@ if(WIN32)
   add_custom_command(TARGET ai_exe_gui POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:ai_exe_gui>/ui"
     COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:ai_exe_gui>/ui/prompts"
+    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:ai_exe_gui>/ui/vendor"
     COMMAND ${CMAKE_COMMAND} -E rm -f "$<TARGET_FILE_DIR:ai_exe_gui>/ui/prompts/chat_namer.md"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
       "${WIN_UI_HTML}"
@@ -114,6 +116,9 @@ if(WIN32)
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
       "${WIN_UI_PROMPT_AGENT}"
       "$<TARGET_FILE_DIR:ai_exe_gui>/ui/prompts/developer_agent_decision.md"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+      "${WIN_UI_VENDOR_DIR}"
+      "$<TARGET_FILE_DIR:ai_exe_gui>/ui/vendor"
   )
 endif()
 
@@ -124,6 +129,7 @@ if(APPLE)
   set(MAC_UI_CONFIG_JS "${CMAKE_BINARY_DIR}/generated/ui/ui-config.js")
   set(MAC_UI_PROMPT_CHAT_MAIN ui/prompts/chat_main.md)
   set(MAC_UI_PROMPT_AGENT ui/prompts/developer_agent_decision.md)
+  set(MAC_UI_VENDOR_DIR ui/vendor)
   set_source_files_properties(${MAC_UI_HTML} PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
   set_source_files_properties(${MAC_UI_CSS} PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
   set_source_files_properties(${MAC_UI_JS} PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
@@ -160,6 +166,9 @@ if(APPLE)
   )
   add_custom_command(TARGET ai_exe_gui_mac POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E rm -f "$<TARGET_BUNDLE_CONTENT_DIR:ai_exe_gui_mac>/Resources/prompts/chat_namer.md"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+      "${CMAKE_SOURCE_DIR}/${MAC_UI_VENDOR_DIR}"
+      "$<TARGET_BUNDLE_CONTENT_DIR:ai_exe_gui_mac>/Resources/vendor"
   )
 endif()
 
