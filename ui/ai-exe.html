@@ -84,7 +84,7 @@
             <path d="M8 7V4h8v3" />
           </svg>
         </div>
-        <div class="col-icon" title="Code" onclick="setActive(codeBtn)">
+        <div class="col-icon" title="Code" onclick="openCodeArtifactsView(codeBtn)">
           <svg class="icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <polyline points="16 18 22 12 16 6" />
             <polyline points="8 6 2 12 8 18" />
@@ -112,7 +112,7 @@
             Artifacts
             <span class="snav-badge" id="artifactCount">0</span>
           </button>
-          <button class="snav-btn" id="codeBtn" onclick="setActive(this)">
+          <button class="snav-btn" id="codeBtn" onclick="openCodeArtifactsView(this)">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <polyline points="16 18 22 12 16 6" />
               <polyline points="8 6 2 12 8 18" />
@@ -321,6 +321,20 @@
             </button>
           </div>
           <div class="input-attachments" id="inputAttachments" aria-live="polite"></div>
+          <div class="composer-confirm hidden" id="composerConfirm" aria-hidden="true" tabindex="0" onkeydown="handleKey(event)">
+            <div class="composer-confirm-title" id="composerConfirmTitle"></div>
+            <div class="composer-confirm-options" id="composerConfirmOptions" role="listbox" aria-label="Scope confirmation options"></div>
+            <div class="composer-confirm-footer" id="composerConfirmFooter">
+              <button class="composer-confirm-dismiss" id="composerConfirmDismissBtn" type="button">
+                <span>Dismiss</span>
+                <span class="composer-confirm-keycap">ESC</span>
+              </button>
+              <button class="composer-confirm-submit" id="composerConfirmSubmitBtn" type="button">
+                <span>Submit</span>
+                <span class="composer-confirm-keycap enter">↵</span>
+              </button>
+            </div>
+          </div>
           <div class="input-text-line">
             <textarea class="chat-textarea" id="mainInput" rows="1" placeholder="Input command or query..."
               onkeydown="handleKey(event)" oninput="autoResize(this)"></textarea>
@@ -503,9 +517,9 @@
               <button class="exp-menu-item" type="button" onclick="refreshWorkspaceTree()">Refresh</button>
               <button class="exp-menu-item" type="button" onclick="revealWorkspaceInSystem()">Reveal in
                 Finder/Explorer</button>
-              <button class="exp-menu-item" type="button" onclick="closeWorkspaceProject()">Close Project</button>
+              <button class="exp-menu-item" id="expCloseProjectBtn" type="button" onclick="closeWorkspaceProject()">Close Project</button>
               <button class="exp-menu-item" type="button" onclick="collapseAllFolders()">Collapse All</button>
-              <button class="exp-menu-item danger" type="button" onclick="deleteSelectedWorkspaceItems()">Delete
+              <button class="exp-menu-item danger" id="expDeleteSelectedBtn" type="button" onclick="deleteSelectedWorkspaceItems()">Delete
                 Selected</button>
             </div>
           </div>
@@ -614,43 +628,88 @@
       </button>
       <div class="chat-modal-title">Runtime Settings</div>
 
-      <div class="chat-modal-label">Current Model Path</div>
-      <div class="settings-kv" id="settingsModelPath">(loading...)</div>
+      <div class="settings-section">
+        <div class="settings-section-title">Runtime</div>
+        <div class="settings-status-grid">
+          <div class="settings-field settings-field-span">
+            <div class="chat-modal-label">Current Model Path</div>
+            <div class="settings-kv" id="settingsModelPath">(loading...)</div>
+          </div>
 
-      <div class="chat-modal-label">Current Model Checksum (SHA-256)</div>
-      <div class="settings-kv" id="settingsModelHash">not verified</div>
+          <div class="settings-field">
+            <div class="chat-modal-label">Current Model Checksum</div>
+            <div class="settings-kv" id="settingsModelHash">not verified</div>
+          </div>
 
-      <div class="chat-modal-label">Backend Status</div>
-      <div class="settings-kv" id="settingsBackendStatus">unknown</div>
-
-      <div class="chat-modal-label">Inference Provider</div>
-      <select class="chat-modal-input" id="settingsProviderSelect">
-        <option value="local">Local Model</option>
-        <option value="huggingface">Hugging Face Test</option>
-      </select>
-
-      <div id="settingsHfFieldsWrap" style="display:none;">
-        <div class="chat-modal-label">Hugging Face Token</div>
-        <input class="chat-modal-input" id="settingsHfTokenInput" type="password" placeholder="hf_...">
-
-        <div class="chat-modal-label">Hugging Face Model</div>
-        <input class="chat-modal-input" id="settingsHfModelInput" type="text"
-          placeholder="Qwen/Qwen2.5-Coder-32B-Instruct:fastest">
+          <div class="settings-field">
+            <div class="chat-modal-label">Backend Status</div>
+            <div class="settings-kv" id="settingsBackendStatus">unknown</div>
+          </div>
+        </div>
       </div>
 
-      <div id="settingsModelUrlWrap">
-        <div class="chat-modal-label">Model Download URL (Optional)</div>
-        <input class="chat-modal-input" id="settingsModelUrlInput" type="text" placeholder="https://...">
+      <div class="settings-section">
+        <div class="settings-section-title">Inference</div>
+
+        <div class="settings-field">
+          <div class="chat-modal-label">Provider</div>
+          <select class="chat-modal-input" id="settingsProviderSelect">
+            <option value="local">Local Model</option>
+            <option value="huggingface">Hugging Face Test</option>
+            <option value="customopenai">Custom OpenAI-Compatible</option>
+            <option value="openai">OpenAI API</option>
+            <option value="anthropic">Claude API</option>
+            <option value="gemini">Gemini API</option>
+            <option value="deepseek">DeepSeek API</option>
+            <option value="venice">Venice API</option>
+          </select>
+        </div>
+
+        <div id="settingsRemoteFieldsWrap" class="settings-remote-grid" style="display:none;">
+          <div class="settings-field settings-field-span">
+            <div class="chat-modal-label" id="settingsApiKeyLabel">API Key</div>
+            <input class="chat-modal-input" id="settingsApiKeyInput" type="password" placeholder="sk-...">
+          </div>
+
+          <div class="settings-field settings-field-span" id="settingsApiEndpointWrap" style="display:none;">
+            <div class="chat-modal-label" id="settingsApiEndpointLabel">Endpoint URL</div>
+            <input class="chat-modal-input" id="settingsApiEndpointInput" type="text"
+              placeholder="https://example.com/v1/chat/completions">
+          </div>
+
+          <div class="settings-field">
+            <div class="chat-modal-label">Model Preset</div>
+            <select class="chat-modal-input" id="settingsApiModelPreset"></select>
+          </div>
+
+          <div class="settings-field">
+            <div class="chat-modal-label">Model ID</div>
+            <input class="chat-modal-input" id="settingsApiModelInput" type="text"
+              placeholder="model-id">
+          </div>
+
+          <div class="chat-modal-note visible auth-info settings-help-note settings-field-span" id="settingsProviderHelp"></div>
+        </div>
+
+        <div id="settingsModelUrlWrap" class="settings-field">
+          <div class="chat-modal-label">Model Download URL</div>
+          <input class="chat-modal-input" id="settingsModelUrlInput" type="text" placeholder="https://...">
+        </div>
       </div>
 
-      <label class="settings-inline" for="settingsKeepModelChk">
-        <input id="settingsKeepModelChk" type="checkbox">
-        Keep existing model on app update
-      </label>
-      <label class="settings-inline" for="settingsDebugTraceChk">
-        <input id="settingsDebugTraceChk" type="checkbox">
-        Enable inference debug trace
-      </label>
+      <div class="settings-section">
+        <div class="settings-section-title">Options</div>
+        <div class="settings-toggle-grid">
+          <label class="settings-inline" for="settingsKeepModelChk">
+            <input id="settingsKeepModelChk" type="checkbox">
+            Keep existing model on update
+          </label>
+          <label class="settings-inline" for="settingsDebugTraceChk">
+            <input id="settingsDebugTraceChk" type="checkbox">
+            Enable inference debug trace
+          </label>
+        </div>
+      </div>
 
       <div class="chat-modal-note" id="settingsNote"></div>
       <div class="chat-modal-actions">
@@ -745,6 +804,20 @@
   <script src="vendor/markdown-it/markdown-it.min.js"></script>
   <script src="vendor/katex/katex.min.js"></script>
   <script src="vendor/texmath/texmath.js"></script>
+  <script src="markdown-renderer.js"></script>
+  <script src="prompt-core.js"></script>
+  <script src="agent-core.js"></script>
+  <script src="agent-planner.js"></script>
+  <script src="agent-runtime.js"></script>
+  <script src="agent-executor.js"></script>
+  <script src="agent-loop.js"></script>
+  <script src="chat-shell.js"></script>
+  <script src="workspace-core.js"></script>
+  <script src="workspace-actions.js"></script>
+  <script src="workspace-renderer.js"></script>
+  <script src="chat-renderer.js"></script>
+  <script src="file-viewer.js"></script>
+  <script src="preflight-router.js"></script>
   <script src="ai-exe.js"></script>
 </body>
 

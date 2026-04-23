@@ -4,7 +4,9 @@
   "description": "Dev-only tooling to vendor offline UI libraries into app resources.",
   "license": "UNLICENSED",
   "scripts": {
-    "build:codemirror": "rollup -c rollup.codemirror.config.mjs"
+    "build:codemirror": "rollup -c rollup.codemirror.config.mjs",
+    "test:preflight-router": "node scripts/preflight_router_test.js",
+    "test:mode-priority": "node scripts/mode_priority_test.js"
   },
   "dependencies": {
     "@codemirror/commands": "^6.10.2",

@@ -7,6 +7,8 @@ cmake -S . -B build -G "Visual Studio 17 2022" -A x64
 cmake --build build --config Release
 ```
 
+Release builds default to offline-only UI behavior. Hosted/API inference provider controls are disabled unless CMake is configured with `-DAI_EXE_ENABLE_REMOTE_PROVIDERS=ON` for a development build. The localhost planner bridge is also disabled unless CMake is configured with `-DAI_EXE_ENABLE_DEV_PLANNER=ON`.
+
 ## Create bundle
 
 ```powershell
@@ -30,15 +32,20 @@ Output layout:
 pwsh ./scripts/validate_bundle.ps1 -BundleRoot dist/AI_EXE_Phase1
 ```
 
+Release validation is strict by default: `data/model/model.gguf`, `data/runtime/infer_backend.exe`, and `data/runtime/llama-cli.exe` must be present. For a demo-only bundle that intentionally has no real generation engine, pass `-AllowMissingInferenceEngine`.
+
 Validation checks:
 
 - required files and directories exist
+- GUI HTML script and stylesheet references resolve inside the bundle
+- required prompt templates and vendored UI libraries are present
+- packaged UI config keeps hosted/API providers disabled for offline release builds
 - manifest hashes match packaged files
 - executable starts and prints diagnostics
 - startup exits safely (exit code `0` or `1` accepted)
 - backend version handshake (`--version`) succeeds when backend is present
 - backend self-test executes when `data/runtime/infer_backend.exe` is present
-- if local inference engine is missing, validation warns and continues (UI/runtime still runs; generation is unavailable)
+- local model and inference engine are present unless demo validation explicitly allows them to be missing
 
 ## Run (non-technical demo)
 
@@ -57,5 +64,5 @@ Recommended process:
 2. Identify required DLLs with dependency tooling.
 3. Copy minimal required DLL set into bundle.
 4. For Windows GUI web preview, include `WebView2Loader.dll` next to `AI_GUI.exe` if target does not already provide WebView2 runtime.
-5. For real model generation, include `llama-cli.exe` next to `data/runtime/infer_backend.exe`.
-5. Re-run `validate_bundle.ps1`.
+5. Include `llama-cli.exe` next to `data/runtime/infer_backend.exe`.
+6. Re-run `validate_bundle.ps1`.

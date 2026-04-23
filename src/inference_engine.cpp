@@ -179,6 +179,28 @@ bool ExtractUntilPrompt(std::string *buffer, std::string *payload) {
   return true;
 }
 
+std::string StripTrailingInteractivePrompt(std::string text) {
+  while (!text.empty() &&
+         std::isspace(static_cast<unsigned char>(text.back()))) {
+    text.pop_back();
+  }
+
+  if (text == ">") {
+    return std::string();
+  }
+
+  if (text.size() >= 2 && text.back() == '>' &&
+      (text[text.size() - 2] == '\n' || text[text.size() - 2] == '\r')) {
+    text.resize(text.size() - 2);
+    while (!text.empty() &&
+           (text.back() == '\n' || text.back() == '\r')) {
+      text.pop_back();
+    }
+  }
+
+  return text;
+}
+
 std::string NormalizeLlamaResponse(std::string raw, const std::string &prompt) {
   raw = Trim(raw);
   if (raw.empty()) {
@@ -228,7 +250,7 @@ std::string NormalizeLlamaResponse(std::string raw, const std::string &prompt) {
     }
   }
 
-  return Trim(raw);
+  return Trim(StripTrailingInteractivePrompt(raw));
 }
 
 std::string NormalizeLlamaPreview(std::string raw, const std::string &prompt) {
@@ -278,7 +300,7 @@ std::string NormalizeLlamaPreview(std::string raw, const std::string &prompt) {
     }
   }
 
-  return raw;
+  return StripTrailingInteractivePrompt(raw);
 }
 
 // llama-cli interactive stdin is line-oriented. Our prompts are multiline
@@ -1384,11 +1406,11 @@ bool InferenceEngine::GenerateWithBackendStream(
 
   const int capped_max_tokens =
       (max_tokens > 0) ? std::min(max_tokens, 4096) : 3072;
-  // The current persistent stdin-driven llama-cli session is not truly
-  // stateless between prompts, so keep it opt-in until a safe context-reset
-  // strategy is implemented.
+  // Keep llama-cli warm for normal chat so every response does not pay full
+  // process/model startup cost. Utility calls with explicit token caps or
+  // grammars still use one-shot mode for tighter bounds.
   const bool persistent_enabled =
-      IsTruthyEnv(std::getenv("AI_EXE_ENABLE_PERSISTENT_SESSION"));
+      !IsTruthyEnv(std::getenv("AI_EXE_DISABLE_PERSISTENT_SESSION"));
   // Explicit max_tokens requests (e.g. chat-title generation) must bypass
   // persistent mode so per-request caps/grammar remain strict.
   const bool force_one_shot =

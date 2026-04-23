@@ -317,9 +317,6 @@ int ExtractJsonIntField(const std::string &line, const std::string &key,
   if (parsed <= 0) {
     return fallback;
   }
-  if (parsed > 4096L) {
-    return 4096;
-  }
   return static_cast<int>(parsed);
 }
 
@@ -335,6 +332,93 @@ std::string TrimCopy(const std::string &text) {
     --end;
   }
   return text.substr(start, end - start);
+}
+
+bool PostJsonHttp(const std::string &endpoint_url,
+                  const std::string &auth_header,
+                  const std::string &request_body, int timeout_ms,
+                  long *status_code, std::string *response_body,
+                  std::string *err) {
+  if (status_code) {
+    *status_code = 0;
+  }
+  if (response_body) {
+    response_body->clear();
+  }
+
+  NSString *url_string =
+      [NSString stringWithUTF8String:endpoint_url.c_str()];
+  if (!url_string || url_string.length == 0) {
+    if (err)
+      *err = "Endpoint URL is empty.";
+    return false;
+  }
+
+  NSURL *url = [NSURL URLWithString:url_string];
+  if (!url) {
+    if (err)
+      *err = "Invalid endpoint URL.";
+    return false;
+  }
+
+  NSMutableURLRequest *request =
+      [NSMutableURLRequest requestWithURL:url];
+  request.HTTPMethod = @"POST";
+  request.timeoutInterval =
+      std::max(1.0, static_cast<double>(timeout_ms > 0 ? timeout_ms : 120000) /
+                        1000.0);
+  [request setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+  [request setValue:@"application/json" forHTTPHeaderField:@"Accept"];
+  if (!auth_header.empty()) {
+    NSString *header_value =
+        [NSString stringWithUTF8String:auth_header.c_str()];
+    if (header_value) {
+      [request setValue:header_value forHTTPHeaderField:@"Authorization"];
+    }
+  }
+
+  NSData *body = [NSData dataWithBytes:request_body.data()
+                                length:request_body.size()];
+  request.HTTPBody = body;
+
+  dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+  __block NSData *resp_data = nil;
+  __block NSURLResponse *resp = nil;
+  __block NSError *ns_error = nil;
+
+  NSURLSessionDataTask *task = [[NSURLSession sharedSession]
+      dataTaskWithRequest:request
+        completionHandler:^(NSData *_Nullable data, NSURLResponse *_Nullable response,
+                            NSError *_Nullable error) {
+          resp_data = data;
+          resp = response;
+          ns_error = error;
+          dispatch_semaphore_signal(sem);
+        }];
+  [task resume];
+  dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
+
+  if (ns_error) {
+    if (err) {
+      NSString *desc = [ns_error localizedDescription];
+      *err = desc ? std::string([desc UTF8String]) : "Network request failed.";
+    }
+    return false;
+  }
+
+  if (resp_data && response_body) {
+    response_body->assign(static_cast<const char *>([resp_data bytes]),
+                          static_cast<std::size_t>([resp_data length]));
+  }
+
+  if ([resp isKindOfClass:[NSHTTPURLResponse class]]) {
+    NSHTTPURLResponse *http = (NSHTTPURLResponse *)resp;
+    if (status_code) {
+      *status_code = static_cast<long>(http.statusCode);
+    }
+  }
+
+  return true;
 }
 
 std::string NormalizeWorkspaceRelativePath(const std::string &raw,
@@ -1440,6 +1524,12 @@ std::string BuildStreamEvent(const std::string &id, bool done,
       ExtractJsonStringField(requestJson, "srcPath");
   const std::string workspace_dst_path =
       ExtractJsonStringField(requestJson, "dstPath");
+  const std::string endpoint_url =
+      ExtractJsonStringField(requestJson, "endpointUrl");
+  const std::string auth_header =
+      ExtractJsonStringField(requestJson, "authHeader");
+  const std::string request_body =
+      ExtractJsonStringField(requestJson, "requestBody");
   const std::string window_dx = ExtractJsonStringField(requestJson, "dx");
   const std::string window_dy = ExtractJsonStringField(requestJson, "dy");
   const std::string locale = ExtractJsonStringField(requestJson, "locale");
@@ -1485,6 +1575,33 @@ std::string BuildStreamEvent(const std::string &id, bool done,
         message = op_err;
       }
     }
+  } else if (action == "openAiCompatibleProxy") {
+    if (!IsTruthyEnv(std::getenv("AI_EXE_ENABLE_REMOTE_PROVIDERS"))) {
+      ok = false;
+      message = "Remote inference providers are disabled in this offline build.";
+    } else if (endpoint_url.empty()) {
+      ok = false;
+      message = "Endpoint URL is empty.";
+    } else if (request_body.empty()) {
+      ok = false;
+      message = "Request body is empty.";
+    } else {
+      long status_code = 0;
+      if (!PostJsonHttp(endpoint_url, auth_header, request_body, timeout_ms,
+                        &status_code, &output, &op_err)) {
+        ok = false;
+        message = op_err.empty() ? "Network request failed." : op_err;
+      } else if (status_code < 200 || status_code >= 300) {
+        ok = false;
+        std::ostringstream msg;
+        msg << "HTTP " << status_code;
+        const std::string trimmed = TrimCopy(output);
+        if (!trimmed.empty()) {
+          msg << ": " << trimmed;
+        }
+        message = msg.str();
+      }
+    }
   } else if (action == "dictateOffline") {
     if (!RunOfflineDictationOnMac(locale, timeout_ms, &output, &op_err)) {
       ok = false;
@@ -1526,6 +1643,17 @@ std::string BuildStreamEvent(const std::string &id, bool done,
       message = op_err.empty() ? "Failed to write file." : op_err;
     } else {
       message = "File saved.";
+    }
+  } else if (action == "appendDebugLog") {
+    const std::string channel =
+        ExtractJsonStringField(requestJson, "channel");
+    const std::string entry_json =
+        ExtractJsonStringField(requestJson, "entry");
+    if (!_runtime.AppendDebugLog(channel, entry_json, &op_err)) {
+      ok = false;
+      message = op_err.empty() ? "Failed to append debug log." : op_err;
+    } else {
+      message = "Debug log appended.";
     }
   } else if (action == "workspaceReadFile") {
     if (!WorkspaceReadFile(_runtime, workspace_path, &output, &op_err)) {

@@ -38,9 +38,35 @@ if (Test-Path $guiExe) {
   Copy-Item $guiExe (Join-Path $outDir "AI_GUI.exe")
 }
 
-$uiHtml = Join-Path $repoRoot "ui\ai-exe.html"
-if (Test-Path $uiHtml) {
-  Copy-Item $uiHtml (Join-Path $outDir "ui\ai-exe.html")
+$uiSourceDir = Join-Path $repoRoot "ui"
+$uiOutDir = Join-Path $outDir "ui"
+
+$uiRootFiles = @(
+  "ai-exe.html",
+  "ai-exe.css",
+  "ai-exe.js",
+  "markdown-renderer.js",
+  "prompt-core.js",
+  "agent-core.js",
+  "agent-planner.js",
+  "agent-runtime.js",
+  "agent-executor.js",
+  "agent-loop.js",
+  "chat-shell.js",
+  "chat-renderer.js",
+  "file-viewer.js",
+  "preflight-router.js",
+  "workspace-core.js",
+  "workspace-actions.js",
+  "workspace-renderer.js"
+)
+
+foreach ($uiFile in $uiRootFiles) {
+  $uiSrc = Join-Path $uiSourceDir $uiFile
+  if (-not (Test-Path $uiSrc)) {
+    throw "Missing UI source file: ui\$uiFile"
+  }
+  Copy-Item $uiSrc (Join-Path $uiOutDir $uiFile)
 }
 
 $uiConfigFromBuild = Join-Path $buildDir "ui\ui-config.js"
@@ -52,18 +78,25 @@ if (Test-Path $uiConfigFromBuild) {
   Copy-Item $uiConfigFromGenerated (Join-Path $outDir "ui\ui-config.js")
 } elseif (Test-Path $uiConfigFromSource) {
   Copy-Item $uiConfigFromSource (Join-Path $outDir "ui\ui-config.js")
+} else {
+  throw "Missing generated UI config. Build the project before packaging."
 }
 
-$promptFiles = @(
-  "chat_main.md",
-  "developer_agent_decision.md"
-)
-foreach ($promptFile in $promptFiles) {
-  $promptSrc = Join-Path $repoRoot (Join-Path "ui\prompts" $promptFile)
-  if (Test-Path $promptSrc) {
-    Copy-Item $promptSrc (Join-Path $outDir (Join-Path "ui\prompts" $promptFile))
-  }
+$promptSourceDir = Join-Path $uiSourceDir "prompts"
+if (-not (Test-Path $promptSourceDir)) {
+  throw "Missing UI prompts directory: ui\prompts"
 }
+Copy-Item (Join-Path $promptSourceDir "*.md") (Join-Path $uiOutDir "prompts")
+$obsoletePrompt = Join-Path $uiOutDir "prompts\chat_namer.md"
+if (Test-Path $obsoletePrompt) {
+  Remove-Item -Force $obsoletePrompt
+}
+
+$vendorSourceDir = Join-Path $uiSourceDir "vendor"
+if (-not (Test-Path $vendorSourceDir)) {
+  throw "Missing UI vendor directory: ui\vendor"
+}
+Copy-Item $vendorSourceDir (Join-Path $uiOutDir "vendor") -Recurse
 
 Get-ChildItem -Path $buildDir -Filter "*.dll" -File | ForEach-Object {
   Copy-Item $_.FullName (Join-Path $outDir $_.Name)
