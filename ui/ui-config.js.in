@@ -15,6 +15,8 @@ window.AI_EXE_UI_CONFIG = Object.freeze({
   ui: Object.freeze({
     resizerWidth: @AI_EXE_RESIZER_WIDTH@,
     animationsDefault: @AI_EXE_UI_ANIMATIONS_DEFAULT_JS@,
-    rememberLayout: @AI_EXE_UI_REMEMBER_LAYOUT_JS@
+    rememberLayout: @AI_EXE_UI_REMEMBER_LAYOUT_JS@,
+    remoteProvidersEnabled: @AI_EXE_ENABLE_REMOTE_PROVIDERS_JS@,
+    devPlannerEnabled: @AI_EXE_ENABLE_DEV_PLANNER_JS@
   })
 });

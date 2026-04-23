@@ -40,6 +40,9 @@ class WebRuntimeBridge {
   bool Refresh(std::string* err);
   bool VerifyModel(std::string* err);
   bool ImportModelFromPath(const std::filesystem::path& source_path, std::string* err);
+  bool AppendDebugLog(const std::string& channel,
+                      const std::string& entry_json,
+                      std::string* err);
 
   std::string Generate(const std::string& prompt,
                        std::string* err,

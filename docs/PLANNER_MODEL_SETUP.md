@@ -57,6 +57,7 @@ Notes
 - The app will try the local planner server first and fall back to the built-in planner if the server is not running.
 - Qwen models are open, so you typically do not need a gated-model token like Gemma.
 - This planner setup is for development/testing only.
+- Release builds disable this planner bridge. Configure CMake with `-DAI_EXE_ENABLE_DEV_PLANNER=ON` only when you intentionally want the UI to call the localhost planner during development.
 - The shipped client still needs to remain self-contained and zero-dependency.
 
 Official references

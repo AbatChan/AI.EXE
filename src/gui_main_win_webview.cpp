@@ -359,9 +359,6 @@ int ExtractJsonIntField(const std::string &line, const std::string &key,
   if (parsed <= 0) {
     return fallback;
   }
-  if (parsed > 4096L) {
-    return 4096;
-  }
   return static_cast<int>(parsed);
 }
 
@@ -1242,6 +1239,17 @@ private:
         message = op_err.empty() ? "Failed to write file." : op_err;
       } else {
         message = "File saved.";
+      }
+    } else if (action == "appendDebugLog") {
+      const std::string channel =
+          ExtractJsonStringField(request_json, "channel");
+      const std::string entry_json =
+          ExtractJsonStringField(request_json, "entry");
+      if (!runtime_.AppendDebugLog(channel, entry_json, &op_err)) {
+        ok = false;
+        message = op_err.empty() ? "Failed to append debug log." : op_err;
+      } else {
+        message = "Debug log appended.";
       }
     } else if (action == "workspaceReadFile") {
       if (!WorkspaceReadFile(runtime_, workspace_path, &output, &op_err)) {

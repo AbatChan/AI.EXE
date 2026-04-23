@@ -86,6 +86,18 @@ int EffectiveMaxTokens(int requested_max_tokens) {
   return requested_max_tokens > 0 ? std::min(requested_max_tokens, 4096) : 3072;
 }
 
+bool IsSafeDebugChannel(const std::string& channel) {
+  if (channel.empty()) {
+    return false;
+  }
+  for (const char c : channel) {
+    if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '-')) {
+      return false;
+    }
+  }
+  return true;
+}
+
 }  // namespace
 
 bool WebRuntimeBridge::Initialize(const std::filesystem::path& root_hint, bool force_cpu, std::string* err) {
@@ -159,6 +171,66 @@ bool WebRuntimeBridge::ImportModelFromPath(const std::filesystem::path& source_p
   }
 
   return RefreshLocked(err);
+}
+
+bool WebRuntimeBridge::AppendDebugLog(const std::string& channel,
+                                      const std::string& entry_json,
+                                      std::string* err) {
+  std::lock_guard<std::mutex> lock(mu_);
+  if (!initialized_) {
+    if (err) {
+      *err = "Runtime bridge not initialized.";
+    }
+    return false;
+  }
+
+  const std::string trimmed_channel = TrimAsciiWhitespace(channel);
+  if (!IsSafeDebugChannel(trimmed_channel)) {
+    if (err) {
+      *err = "Invalid debug log channel.";
+    }
+    return false;
+  }
+
+  const std::string trimmed_entry = TrimAsciiWhitespace(entry_json);
+  if (trimmed_entry.empty()) {
+    if (err) {
+      *err = "Debug log entry is empty.";
+    }
+    return false;
+  }
+
+  std::error_code ec;
+  const auto log_dir = cfg_.log_path.parent_path();
+  std::filesystem::create_directories(log_dir, ec);
+  if (ec) {
+    if (err) {
+      *err = "Failed to prepare debug log directory: " + ec.message();
+    }
+    return false;
+  }
+
+  const auto file_path = log_dir / (trimmed_channel + ".jsonl");
+  std::ofstream out(file_path, std::ios::app);
+  if (!out.good()) {
+    if (err) {
+      *err = "Failed to open debug log file.";
+    }
+    return false;
+  }
+
+  out << trimmed_entry << '\n';
+  if (!out.good()) {
+    if (err) {
+      *err = "Failed to append debug log entry.";
+    }
+    return false;
+  }
+
+  if (err) {
+    err->clear();
+  }
+  return true;
 }
 
 std::string WebRuntimeBridge::Generate(const std::string& prompt,

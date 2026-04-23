@@ -1,5 +1,6 @@
 # Build outputs
 /build/
+/dist/
 *.obj
 *.o
 *.exe
@@ -31,10 +32,17 @@ data/logs/
 data/memory/
 data/snapshots/
 data/sandbox/
+node_modules/
+__pycache__/
+scripts/__pycache__/
 
 # IDE
 .vscode/
 .idea/
+.cache/
 
 # Gemini
 .gemini/
+
+# Local agent/dev environments
+.agent-venv/
