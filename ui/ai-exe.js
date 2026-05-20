@@ -8274,6 +8274,82 @@ const {
   requestDeveloperAgentReply,
 } = agentLoop || {};
 
+const aiNativeAgentLoop = window.AIExeAiNativeAgentLoop && typeof window.AIExeAiNativeAgentLoop.createAiNativeAgentLoop === 'function'
+  ? window.AIExeAiNativeAgentLoop.createAiNativeAgentLoop({
+    nativeBridge,
+    agentTotalTimeoutMs,
+    agentMaxSteps,
+    agentDecisionMaxTokens,
+    agentMaxToolOutputChars,
+    mergeAgentActivityIntoList,
+    pushActiveAgentStreamActivity,
+    scheduleLiveStreamRender,
+    isInferenceActive,
+    hasLiveAssistantRow: hasConnectedLiveAssistantRow,
+    createLiveAssistantRow,
+    setActiveAgentStreamStatus,
+    setLiveAgentProgress: (value) => {
+      const text = String(value || '').trim();
+      if (activeAgentStreamState) {
+        activeAgentStreamState.statusText = text;
+      }
+      activeStreamRawText = buildAgentProgressMarker(text || 'Working...');
+      activeStreamText = '';
+    },
+    requestAgentPlannerInference,
+    executeDeveloperToolCall,
+    buildAgentActivityFromToolResult,
+    describeAgentToolTarget,
+    describeAgentToolPhase,
+    normalizeWorkspacePath,
+    getWorkspaceContext,
+    refreshWorkspaceTree,
+    commitAssistantMessage,
+    consumeLiveAssistantText,
+    sanitizeAssistantText,
+  })
+  : null;
+const {
+  requestAiNativeAgentReply,
+  buildAiNativePrompt,
+} = aiNativeAgentLoop || {};
+window.AIExeExperimentalAgent = {
+  requestAiNativeAgentReply,
+  buildAiNativePrompt,
+};
+
+function shouldUseExperimentalAgentLoop(promptText = '') {
+  const explicit = /^\/ai-agent\b/i.test(String(promptText || '').trim());
+  let enabled = false;
+  try {
+    enabled = String(localStorage.getItem('aiExeExperimentalAgent') || '') === '1';
+  } catch (_) {
+    enabled = false;
+  }
+  return Boolean(requestAiNativeAgentReply) && (explicit || enabled);
+}
+
+function getExperimentalAgentTaskText(promptText = '') {
+  const text = String(promptText || '').trim();
+  return text.replace(/^\/ai-agent\b\s*/i, '').trim() || text;
+}
+
+async function requestSelectedDeveloperAgentReply(requestToken, chatId, promptText) {
+  if (shouldUseExperimentalAgentLoop(promptText)) {
+    recordDebugTrace('experimental_agent_route', {
+      chatId: String(chatId || ''),
+      explicit: String(/^\/ai-agent\b/i.test(String(promptText || '').trim())),
+      latestUserPreview: debugPreview(promptText, 220),
+    }, {
+      chatId: String(chatId || ''),
+      latestUserInput: String(promptText || ''),
+      workspace: getWorkspaceDebugSnapshot(),
+    });
+    return requestAiNativeAgentReply(requestToken, chatId, getExperimentalAgentTaskText(promptText));
+  }
+  return requestDeveloperAgentReply(requestToken, chatId, promptText);
+}
+
 function hasConnectedLiveAssistantRow() {
   return Boolean(activeStreamRow && activeStreamRow.isConnected);
 }
@@ -11371,7 +11447,7 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
         requestToken.operationKind = 'agent';
         setThinkingStatus('Continuing changes...');
         continuationChat.needsContinue = false;
-        const handledByAgent = await requestDeveloperAgentReply(requestToken, chatId, promptText);
+        const handledByAgent = await requestSelectedDeveloperAgentReply(requestToken, chatId, promptText);
         if (!isInferenceActive(requestToken)) {
           return;
         }
@@ -11393,7 +11469,7 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
         if (developerAgentEnabled) {
           requestToken.operationKind = 'agent';
           setThinkingStatus('Planning changes...');
-          const handledByAgent = await requestDeveloperAgentReply(requestToken, chatId, promptText);
+          const handledByAgent = await requestSelectedDeveloperAgentReply(requestToken, chatId, promptText);
           if (!isInferenceActive(requestToken)) {
             return;
           }
@@ -11580,7 +11656,7 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
           } else {
           requestToken.operationKind = 'agent';
           setThinkingStatus('Planning changes...');
-          const handledByAgent = await requestDeveloperAgentReply(requestToken, chatId, promptText);
+          const handledByAgent = await requestSelectedDeveloperAgentReply(requestToken, chatId, promptText);
           if (!isInferenceActive(requestToken)) {
             return;
           }
