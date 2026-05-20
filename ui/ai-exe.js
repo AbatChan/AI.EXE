@@ -566,7 +566,7 @@ function getArtifactsForMessage(chatId, messageTs) {
   const chatKey = String(chatId || '');
   const ts = Number(messageTs) || 0;
   if (!chatKey || !ts) return [];
-  return getBrowsableArtifacts().filter((item) => String(item.chatId || '') === chatKey && Number(item.messageTs) === ts);
+  return getAllStoredArtifacts().filter((item) => String(item.chatId || '') === chatKey && Number(item.messageTs) === ts);
 }
 
 function getArtifactTypeLabel(itemOrType, canvasFormat = '') {
@@ -633,6 +633,14 @@ function enterChatView() {
 
 const histList = document.getElementById('historyList');
 const avatarBadge = document.getElementById('avatarBadge');
+const sidebarBottomActions = document.getElementById('sidebarBottomActions');
+const accountPopover = document.getElementById('accountPopover');
+const accountPopoverName = document.getElementById('accountPopoverName');
+const accountProfileBtn = document.getElementById('accountProfileBtn');
+const accountSettingsBtn = document.getElementById('accountSettingsBtn');
+const accountUsageBtn = document.getElementById('accountUsageBtn');
+const accountLogoutBtn = document.getElementById('accountLogoutBtn');
+const accountLogoutText = document.getElementById('accountLogoutText');
 const newChatBtn = document.getElementById('newChatBtn');
 const artifactsBtn = document.getElementById('artifactsBtn');
 const codeBtn = document.getElementById('codeBtn');
@@ -717,7 +725,7 @@ const expMoreBtn = document.getElementById('expMoreBtn');
 const expMoreMenu = document.getElementById('expMoreMenu');
 const expCloseProjectBtn = document.getElementById('expCloseProjectBtn');
 const expDeleteSelectedBtn = document.getElementById('expDeleteSelectedBtn');
-const emptyStateTemplate = (document.getElementById('emptyState') || { outerHTML: '' }).outerHTML;
+let emptyStateTemplate = (document.getElementById('emptyState') || { outerHTML: '' }).outerHTML;
 const loginBtn = document.getElementById('loginBtn');
 const loginBtnText = document.getElementById('loginBtnText');
 const loginSubText = document.getElementById('loginSubText');
@@ -767,6 +775,16 @@ const settingsVerifyBtn = document.getElementById('settingsVerifyBtn');
 const settingsCloseBtn = document.getElementById('settingsCloseBtn');
 const settingsSaveBtn = document.getElementById('settingsSaveBtn');
 const settingsNote = document.getElementById('settingsNote');
+const settingsViewTitle = document.getElementById('settingsViewTitle');
+const settingsViewSubtitle = document.getElementById('settingsViewSubtitle');
+const settingsNavButtons = Array.from(document.querySelectorAll('[data-settings-section]'));
+const settingsPanes = Array.from(document.querySelectorAll('[data-settings-pane]'));
+const settingsWorkModeCoding = document.getElementById('settingsWorkModeCoding');
+const settingsWorkModeEveryday = document.getElementById('settingsWorkModeEveryday');
+const settingsWorkModeCodingCard = document.getElementById('settingsWorkModeCodingCard');
+const settingsWorkModeEverydayCard = document.getElementById('settingsWorkModeEverydayCard');
+const settingsWorkerList = document.getElementById('settingsWorkerList');
+let settingsAutosaveTimer = 0;
 const searchInput = document.getElementById('searchInput');
 const searchDropdown = document.getElementById('searchDropdown');
 const plusBtn = document.getElementById('plusBtn');
@@ -861,6 +879,7 @@ let activeInferenceRequest = null;
 let inferenceIdleResolvers = [];
 const thinkingStartedByChatId = new Map();
 const pendingPreflightConfirmations = new Map();
+const smartTitleRenamePending = new Set();
 let notificationContainer = null;
 let urlContextMode = 'chat';
 let pendingAttachments = [];
@@ -872,6 +891,7 @@ let authStore = {
 };
 let appSettings = {
   inferenceProvider: 'local',
+  workMode: 'coding',
   huggingFaceToken: '',
   huggingFaceModel: 'Qwen/Qwen2.5-Coder-32B-Instruct:fastest',
   customOpenAiApiKey: '',
@@ -1020,8 +1040,8 @@ const inferenceProviderModelPresets = {
     'gemini-3-flash-preview',
   ],
   deepseek: [
-    'deepseek-chat',
-    'deepseek-reasoner',
+    'deepseek-v4-flash',
+    'deepseek-v4-pro',
   ],
   venice: [
     'venice-uncensored',
@@ -1042,7 +1062,7 @@ const agentMaxToolOutputChars = 3200;
 const agentStepTimeoutMs = 45000;
 const agentTotalTimeoutMs = 600000;
 const agentDecisionMaxTokens = 220;
-const agentFileContentMaxTokens = 2400;
+const agentFileContentMaxTokens = 5000;
 const agentPlannerEndpoint = devPlannerEnabled ? 'http://127.0.0.1:8765/plan' : '';
 const agentPlannerRequestTimeoutMs = 7000;
 const agentFileGenerationRequestTimeoutMs = 120000;
@@ -1189,7 +1209,7 @@ function submitPendingPreflightChoice(chatId, mode) {
   if (normalizedMode === 'create_new_project') {
     rewrittenPrompt = `${pending.originalTask || ''}\n\nStart from a fresh workspace.`.trim();
   } else if (normalizedMode === 'use_existing_workspace') {
-    rewrittenPrompt = `${pending.originalTask || ''}\n\nUse the existing workspace folder. DO NOT start from a fresh workspace.`.trim();
+    rewrittenPrompt = `${pending.originalTask || ''}\n\n[System Note: The user chose to use the current open workspace. Do not call new_project. If this is a request to build an app, generate the expected files directly in this workspace.]`.trim();
   } else {
     return false;
   }
@@ -1225,6 +1245,7 @@ function dismissPendingPreflightChoice(chatId, options = {}) {
     activeProjectScopeResolve = null;
   }
   setPendingPreflightConfirmation(key, null);
+  resolveChatNamingFallback(key, 'New Chat');
   recordDebugTrace('preflight_confirmation_dismissed', {
     chatId: key,
     taskPreview: debugPreview(String(pending.originalTask || ''), 220),
@@ -1567,12 +1588,14 @@ function initGlobalTooltipSystem() {
       persistFileTabsStateNow();
       return;
     }
-    void syncWorkspaceStateFromNative('visibility_return', { render: true });
+    void refreshWorkspaceFromExternalChange('visibility_return');
   });
 
   window.addEventListener('focus', () => {
-    void syncWorkspaceStateFromNative('window_focus', { render: true });
+    void refreshWorkspaceFromExternalChange('window_focus');
   });
+
+  startWorkspaceExternalRefreshLoop();
 }
 
 function placeComposerText(text) {
@@ -2007,7 +2030,7 @@ function saveEditedUserMessage(chatId, messageTs, nextText) {
   const branchedMessages = activeThread.messages.slice(0, userIndex + 1).map((msg) => {
     if (!msg) return msg;
     if (Number(msg.ts) === targetTs && msg.role === 'user') {
-      return { ...msg, text: cleaned };
+      return { ...msg, text: cleaned, displayTs: nowTs() };
     }
     return { ...msg };
   });
@@ -3277,6 +3300,61 @@ function sanitizeAutoTitle(rawTitle) {
   return out;
 }
 
+function sanitizeUserRequestTitle(rawTitle) {
+  let out = String(rawTitle || '').split(/\r?\n/).find((line) => String(line || '').trim()) || '';
+  out = out.trim();
+  const intentTitle = getCommonIntentChatTitle(out);
+  if (intentTitle) return intentTitle;
+  const greetingTitle = getGreetingChatTitle(out);
+  if (greetingTitle) return greetingTitle;
+  out = out
+    .replace(/^(?:please\s+)?(?:can|could|would)\s+you\s+/i, '')
+    .replace(/^(?:please\s+)?(?:help\s+me\s+)?(?:create|build|make|design|develop|generate|start|setup|set\s+up|implement)\s+(?:me\s+)?(?:a|an|the)?\s*/i, '')
+    .replace(/^(?:i\s+(?:need|want|would\s+like)\s+(?:you\s+to\s+)?)?(?:create|build|make|design|develop|generate|implement)\s+(?:a|an|the)?\s*/i, '')
+    .replace(/\s+(?:that|which)\s+(?:looks?|feels?|works?|runs?|shows?|includes?)\b[\s\S]*$/i, '')
+    .replace(/\s+with\s+requirements?\b[\s\S]*$/i, '')
+    .trim();
+  return sanitizeAutoTitle(out || rawTitle);
+}
+
+function getCommonIntentChatTitle(text) {
+  const clean = String(text || '').trim().toLowerCase()
+    .replace(/[!?.,]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!clean || clean.split(' ').length > 8) return '';
+  if (/^(what can you do|what are your capabilities|what can you help with|what do you do)$/.test(clean)) {
+    return 'Assistant Capabilities';
+  }
+  if (/^(who are you|what are you|introduce yourself)$/.test(clean)) {
+    return 'Assistant Introduction';
+  }
+  if (/^(help|help me|get started|start here)$/.test(clean)) {
+    return 'Getting Started';
+  }
+  return '';
+}
+
+function getGreetingChatTitle(text) {
+  const clean = String(text || '').trim().toLowerCase();
+  if (!clean) return '';
+  const normalized = clean
+    .replace(/[!?.,]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!normalized || normalized.split(' ').length > 6) return '';
+  if (/^(hi|hello|hey|hey there|hello there|yo|sup|what'?s up|whats up|howdy)$/.test(normalized)) {
+    return 'Greeting Exchange';
+  }
+  if (/^(how are you|how are you doing|how are things|how is it going|how's it going|hows it going)$/.test(normalized)) {
+    return 'Casual Check-in';
+  }
+  if (/^(good morning|good afternoon|good evening)$/.test(normalized)) {
+    return 'Greeting Exchange';
+  }
+  return '';
+}
+
 
 function hasDuplicateChatName(title, chatId) {
   const target = String(title || '').trim().toLowerCase();
@@ -3522,13 +3600,6 @@ function stripLeadingAiExePromptLeak(text, options = {}) {
 
 function shouldInlineNameChatResponse(chat) {
   if (!chat || chat.customName || !chat.isNaming) return false;
-  const userMessages = Array.isArray(chat.messages)
-    ? chat.messages.filter((msg) => msg && msg.role === 'user' && String(msg.text || '').trim())
-    : [];
-  const firstUserText = userMessages.length > 0 ? String(userMessages[0].text || '').trim() : '';
-  if (isGreetingLikeChatSeed(firstUserText)) {
-    return false;
-  }
   const aiCount = Array.isArray(chat.messages)
     ? chat.messages.filter((msg) => msg && msg.role === 'ai' && String(msg.text || '').trim()).length
     : 0;
@@ -3550,12 +3621,21 @@ function isGreetingLikeChatSeed(text) {
 function extractInlineChatNameMarker(text) {
   const src = String(text || '');
   if (!src) return { title: '', cleaned: '' };
-  // Match [[CHAT_NAME: title]] OR just [[title]] with or without markdown, allow line breaks
-  const marker = src.match(/\[\[\s*\*?\*?(?:CHAT_NAME\s*:\s*)?([^\]]+?)\*?\*?\s*\]\]/i);
+  // Match [[CHAT_NAME: title]] OR plain [[title]]. Ignore other labeled markers such as [[CHAIN_NAME: ...]].
+  const marker = src.match(/\[\[\s*\*?\*?([^\]]+?)\*?\*?\s*\]\]/i);
   if (!marker) {
     return { title: '', cleaned: src };
   }
-  const rawTitle = String(marker[1] || '').trim();
+  const rawMarker = String(marker[1] || '').trim();
+  let rawTitle = rawMarker;
+  const labelMatch = rawMarker.match(/^([A-Z_ -]{2,32})\s*:\s*(.+)$/i);
+  if (labelMatch) {
+    const label = String(labelMatch[1] || '').trim().toUpperCase().replace(/[\s-]+/g, '_');
+    if (label !== 'CHAT_NAME') {
+      return { title: '', cleaned: stripInlineChatNameMarkers(src) };
+    }
+    rawTitle = String(labelMatch[2] || '').trim();
+  }
   const title = sanitizeAutoTitle(rawTitle);
   const cleaned = stripInlineChatNameMarkers(src);
   return { title, cleaned };
@@ -3569,6 +3649,10 @@ function deriveFallbackChatName(chat, assistantText = '') {
     if (fromCanvas) {
       return makeUniqueChatName(fromCanvas, String(chat && chat.id ? chat.id : ''), fromCanvas);
     }
+  }
+  const fromUser = deriveFallbackChatNameFromUser(chat, '');
+  if (fromUser && fromUser !== 'New Chat') {
+    return fromUser;
   }
   const sourceParts = [];
   const userMsg = (chat && Array.isArray(chat.messages))
@@ -3595,9 +3679,24 @@ function resolveChatNamingFallback(chatId, fallbackName = 'New Chat') {
   return true;
 }
 
+function deriveFallbackChatNameFromUser(chat, fallbackName = 'New Chat') {
+  const firstUser = chat && Array.isArray(chat.messages)
+    ? chat.messages.find((msg) => msg && msg.role === 'user' && String(msg.text || '').trim())
+    : null;
+  const firstUserText = firstUser ? String(firstUser.text || '').trim() : '';
+  if (!firstUserText || isGreetingLikeChatSeed(firstUserText)) {
+    return normalizeChatName(fallbackName || 'New Chat');
+  }
+  const candidate = sanitizeUserRequestTitle(firstUserText);
+  if (!candidate) {
+    return normalizeChatName(fallbackName || 'New Chat');
+  }
+  return makeUniqueChatName(candidate, String(chat && chat.id ? chat.id : ''), firstUserText);
+}
+
 function applyAgentProjectChatName(chatId, planSpec = null) {
   const chat = findChatById(chatId);
-  if (!chat || chat.customName || !chat.isNaming || !planSpec) return false;
+  if (!chat || chat.customName || (!chat.isNaming && !chat.autoNamed) || !planSpec) return false;
   if (String(planSpec.taskKind || '') !== 'project') return false;
   const sourceName = String(planSpec.projectName || '').trim();
   if (!sourceName) return false;
@@ -3609,9 +3708,12 @@ function applyAgentProjectChatName(chatId, planSpec = null) {
     : 0;
   if (aiCount > 0 || userCount !== 1) return false;
   const prettyName = normalizeChatName(toAutoTitleCase(sourceName.replace(/[-_]+/g, ' ')) || sourceName);
-  if (!prettyName) return false;
-  chat.name = makeUniqueChatName(prettyName, chatId, prettyName);
+  const userDerivedName = deriveFallbackChatNameFromUser(chat, prettyName);
+  const displayName = normalizeChatName(userDerivedName && userDerivedName !== 'New Chat' ? userDerivedName : prettyName);
+  if (!displayName) return false;
+  chat.name = displayName;
   chat.isNaming = false;
+  chat.autoNamed = true;
   chat.updatedAt = nowTs();
   saveChats();
   renderHistory();
@@ -3637,7 +3739,7 @@ function applyInlineChatNameFromResponse(chatId, text) {
         title: chat.name,
       });
     } else {
-      chat.name = deriveFallbackChatName(chat, parsed.cleaned || String(text || ''));
+      chat.name = deriveFallbackChatName(chat, text);
       pushDebugTrace('inline_namer_fallback', {
         chatId: String(chatId || ''),
         reason: 'marker_missing_or_invalid',
@@ -3650,6 +3752,169 @@ function applyInlineChatNameFromResponse(chatId, text) {
     renderHistory();
   }
   return { text: parsed.cleaned || String(text || '') };
+}
+
+function extractSmartChatTitle(rawText) {
+  const raw = String(rawText || '').trim();
+  if (!raw) return '';
+  const parsed = extractFirstJsonObject(raw);
+  const rawTitle = parsed && typeof parsed.title === 'string'
+    ? parsed.title
+    : raw
+      .replace(/^```(?:json)?\s*/i, '')
+      .replace(/\s*```$/i, '')
+      .split('\n')
+      .map((line) => String(line || '').trim())
+      .find(Boolean);
+  let title = sanitizeAutoTitle(rawTitle || '');
+  title = title.replace(/\b(Chat|Conversation|User Request)\b/gi, '').replace(/\s+/g, ' ').trim();
+  title = sanitizeAutoTitle(title);
+  if (!title) return '';
+  if (/^(New|Untitled|Title|Chat|Conversation)$/i.test(title)) return '';
+  if (/^(We Need|The User|I Need|Need To|Generate A|Create A Concise)\b/i.test(title)) return '';
+  return title;
+}
+
+function settleSmartChatTitleFallback(chatId, reason = 'fallback', assistantText = '') {
+  const key = String(chatId || '');
+  const chat = findChatById(key);
+  if (!chat || chat.customName || !chat.isNaming) return false;
+  chat.name = 'New Chat';
+  chat.isNaming = false;
+  chat.autoNamed = false;
+  saveChats();
+  renderHistory();
+  pushDebugTrace('smart_chat_title_fallback', {
+    chatId: key,
+    reason: String(reason || 'fallback'),
+    title: chat.name,
+  });
+  return true;
+}
+
+function scheduleSmartChatRename(chatId) {
+  const key = String(chatId || '');
+  if (!key || smartTitleRenamePending.has(key)) return;
+  const chat = findChatById(key);
+  const needsGeneratedTitle = Boolean(chat && (chat.isNaming || chat.autoNamed));
+  if (!chat || chat.customName || !needsGeneratedTitle || chat.smartTitleAttempted) {
+    pushDebugTrace('smart_chat_title_skipped', {
+      chatId: key,
+      reason: !chat ? 'missing_chat' : chat.customName ? 'custom_name' : !needsGeneratedTitle ? 'already_named' : 'already_attempted',
+    });
+    return;
+  }
+  const activeThread = getChatActiveThread(chat);
+  const messages = activeThread && Array.isArray(activeThread.messages) ? activeThread.messages : [];
+  const firstUser = messages.find((msg) => msg && msg.role === 'user' && String(msg.text || '').trim());
+  const firstAssistant = messages.find((msg) => msg && msg.role === 'ai' && String(msg.text || '').trim());
+  const aiCount = messages.filter((msg) => msg && msg.role === 'ai' && String(msg.text || '').trim()).length;
+  if (!firstUser || !firstAssistant || aiCount !== 1 || !remoteProvidersEnabled) {
+    pushDebugTrace('smart_chat_title_skipped', {
+      chatId: key,
+      reason: !remoteProvidersEnabled ? 'remote_disabled' : !firstUser ? 'missing_user' : !firstAssistant ? 'missing_assistant' : 'not_first_assistant',
+      aiCount: String(aiCount),
+    });
+    if (!remoteProvidersEnabled || !firstAssistant) {
+      settleSmartChatTitleFallback(key, !remoteProvidersEnabled ? 'remote_disabled' : 'missing_assistant');
+    }
+    return;
+  }
+
+  chat.smartTitleAttempted = true;
+  saveChats();
+  smartTitleRenamePending.add(key);
+  pushDebugTrace('smart_chat_title_started', {
+    chatId: key,
+    currentTitle: String(chat.name || ''),
+  });
+
+  window.setTimeout(() => {
+    void (async () => {
+      try {
+        const latestChat = findChatById(key);
+        if (!latestChat || latestChat.customName || (!latestChat.isNaming && !latestChat.autoNamed)) return;
+        const prompt = [
+          'Generate a concise sidebar title for this chat.',
+          '',
+          'Rules:',
+          '- 3 to 6 words',
+          '- Same language as the chat',
+          '- Descriptive, not clickbait',
+          '- No quotes, markdown, or trailing punctuation',
+          '- Do not use the words chat, conversation, or user',
+          '- Return only valid JSON in this format:',
+          '{"title":"..."}',
+          '',
+          'Examples:',
+          'User: hello',
+          'Assistant: Hello! How can I help you today?',
+          'Output: {"title":"Greeting Exchange"}',
+          '',
+          'User: how are you doing?',
+          'Assistant: Doing well, thanks for asking.',
+          'Output: {"title":"Casual Check-in"}',
+          '',
+          'User: what can you do?',
+          'Assistant: I can help with coding, debugging, architecture, documentation, and technical questions.',
+          'Output: {"title":"Assistant Capabilities"}',
+          '',
+          'User: Create a desktop-style web app UI that looks like a modern operating system home screen.',
+          'Assistant: Here is an interactive desktop-style web app UI.',
+          'Output: {"title":"Desktop OS Interface"}',
+          '',
+          'Chat:',
+          `User: ${String(firstUser.text || '').trim().slice(0, 1200)}`,
+          `Assistant: ${String(firstAssistant.text || '').trim().slice(0, 1200)}`,
+        ].join('\n');
+        const result = await requestRemoteTextCompletionForCapability('chat.reply', prompt, 40, { preferStreaming: true });
+        const nextTitle = extractSmartChatTitle(result && result.ok ? result.output : '');
+        const current = String(latestChat.name || '').trim();
+        if (!nextTitle) {
+          pushDebugTrace('smart_chat_title_failed', {
+            chatId: key,
+            error: result && result.message ? String(result.message) : 'empty_or_invalid_title',
+            rawPreview: debugPreview(String(result && result.output ? result.output : ''), 300),
+            ok: String(Boolean(result && result.ok)),
+            provider: String((result && result.provider) || ''),
+            model: String((result && result.model) || ''),
+          });
+          settleSmartChatTitleFallback(key, 'empty_or_invalid_title', String(firstAssistant.text || ''));
+          return;
+        }
+        if (nextTitle.toLowerCase() === current.toLowerCase()) {
+          pushDebugTrace('smart_chat_title_skipped', {
+            chatId: key,
+            reason: 'same_title',
+            title: nextTitle,
+          });
+          latestChat.isNaming = false;
+          latestChat.autoNamed = false;
+          saveChats();
+          renderHistory();
+          return;
+        }
+        latestChat.name = makeUniqueChatName(nextTitle, key, nextTitle);
+        latestChat.isNaming = false;
+        latestChat.autoNamed = false;
+        saveChats();
+        renderHistory();
+        pushDebugTrace('smart_chat_title_applied', {
+          chatId: key,
+          title: latestChat.name,
+          provider: String((result && result.provider) || ''),
+          model: String((result && result.model) || ''),
+        });
+      } catch (err) {
+        pushDebugTrace('smart_chat_title_failed', {
+          chatId: key,
+          error: String(err && err.message ? err.message : err || 'unknown error'),
+        });
+      } finally {
+        smartTitleRenamePending.delete(key);
+      }
+    })();
+  }, 0);
 }
 
 function buildPromptWithInputAugments(basePrompt) {
@@ -3820,12 +4085,12 @@ function loadAuthStore() {
     const parsed = JSON.parse(raw);
     if (!parsed || !Array.isArray(parsed.users)) return;
     authStore.users = parsed.users
-      .filter((u) => u && typeof u.username === 'string' && typeof u.usernameKey === 'string' &&
+      .filter((u) => u && typeof u.username === 'string' &&
         typeof u.salt === 'string' && typeof u.passwordHash === 'string')
       .slice(0, 100)
       .map((u) => ({
         username: normalizeUsername(u.username),
-        usernameKey: usernameKey(u.usernameKey),
+        usernameKey: usernameKey(u.usernameKey || u.username),
         salt: String(u.salt),
         passwordHash: String(u.passwordHash),
         createdAt: Number(u.createdAt) || nowTs(),
@@ -3840,21 +4105,55 @@ function loadAuthStore() {
 function updateLoginUi() {
   const user = currentAuthUser();
   if (user) {
-    if (loginBtnText) loginBtnText.textContent = 'Account';
-    if (loginSubText) loginSubText.textContent = `// OFFLINE SESSION @${user.username}`;
+    if (loginBtnText) loginBtnText.textContent = 'Settings';
+    if (loginSubText) loginSubText.textContent = '';
+    if (accountPopoverName) accountPopoverName.textContent = user.username;
+    if (accountLogoutText) accountLogoutText.textContent = 'Log out';
     if (avatarBadge) {
       const initial = (user.username || 'U').trim().charAt(0).toUpperCase() || 'U';
       avatarBadge.textContent = initial;
       avatarBadge.title = `@${user.username}`;
     }
   } else {
-    if (loginBtnText) loginBtnText.textContent = 'Log In / Sign Up';
-    if (loginSubText) loginSubText.textContent = '// SECURE AUTH PROTOCOL';
+    if (loginBtnText) loginBtnText.textContent = 'Settings';
+    if (loginSubText) loginSubText.textContent = '';
+    if (accountPopoverName) accountPopoverName.textContent = 'Guest';
+    if (accountLogoutText) accountLogoutText.textContent = 'Log in';
     if (avatarBadge) {
       avatarBadge.textContent = 'U';
       avatarBadge.title = 'Guest';
     }
   }
+}
+
+function moveGlobalControlsIntoSidebar() {
+  if (sidebarBottomActions) sidebarBottomActions.innerHTML = '';
+  if (accountPopover && accountPopover.parentElement !== document.body) {
+    document.body.appendChild(accountPopover);
+  }
+}
+
+function closeAccountPopover() {
+  if (!accountPopover) return;
+  accountPopover.classList.remove('open');
+  accountPopover.setAttribute('aria-hidden', 'true');
+  accountPopover.style.left = '';
+  accountPopover.style.bottom = '';
+}
+
+function toggleAccountPopover() {
+  if (!accountPopover) return;
+  const isOpen = accountPopover.classList.contains('open');
+  if (!isOpen && loginBtn) {
+    const rect = loginBtn.getBoundingClientRect();
+    accountPopover.style.left = `${Math.max(10, rect.left)}px`;
+    const popoverWidth = Math.min(272, window.innerWidth - 24);
+    const maxLeft = Math.max(10, window.innerWidth - popoverWidth - 10);
+    accountPopover.style.left = `${Math.min(Math.max(10, rect.left), maxLeft)}px`;
+    accountPopover.style.bottom = `${Math.max(12, window.innerHeight - rect.top + 12)}px`;
+  }
+  accountPopover.classList.toggle('open', !isOpen);
+  accountPopover.setAttribute('aria-hidden', isOpen ? 'true' : 'false');
 }
 
 function setAuthNote(message, kind = 'error') {
@@ -3913,6 +4212,7 @@ function setAuthMode(mode) {
 
 function openAuthModal(mode = 'login') {
   if (!authBackdrop) return;
+  closeAccountPopover();
   setAuthMode(mode);
   authBackdrop.classList.add('open');
   authBackdrop.setAttribute('aria-hidden', 'false');
@@ -3962,6 +4262,7 @@ function loadAppSettings() {
     deepseekModel: 'deepseek-chat',
     veniceApiKey: '',
     veniceModel: 'venice-uncensored',
+    workMode: 'coding',
     modelUrl: '',
     keepModelOnUpdate: true,
     debugTraceEnabled: false,
@@ -3976,6 +4277,10 @@ function loadAppSettings() {
       appSettings.inferenceProvider = Object.prototype.hasOwnProperty.call(inferenceProviderDefs, provider)
         ? provider
         : 'local';
+    }
+    if (typeof parsed.workMode === 'string') {
+      const workMode = parsed.workMode.trim().toLowerCase();
+      appSettings.workMode = workMode === 'everyday' ? 'everyday' : 'coding';
     }
     if (typeof parsed.huggingFaceToken === 'string') appSettings.huggingFaceToken = parsed.huggingFaceToken.trim();
     if (typeof parsed.huggingFaceModel === 'string' && parsed.huggingFaceModel.trim()) {
@@ -4026,6 +4331,111 @@ function getSelectedInferenceProvider() {
 
 function isRemoteInferenceProviderEnabled() {
   return remoteProvidersEnabled && getSelectedInferenceProvider() !== 'local';
+}
+
+const workerCapabilityLabels = {
+  'chat.reply': 'Chat',
+  'agent.plan': 'Plan',
+  'agent.writeFile': 'Write',
+  'agent.editFile': 'Edit',
+  'agent.complete': 'Complete',
+};
+
+const coreInferenceCapabilities = ['chat.reply', 'agent.plan', 'agent.writeFile', 'agent.editFile', 'agent.complete'];
+
+function getWorkerCapabilityLabel(capability) {
+  const key = String(capability || '').trim();
+  return workerCapabilityLabels[key] || key;
+}
+
+function getConfiguredInferenceWorkers() {
+  const selectedProvider = getSelectedInferenceProvider();
+  const workers = [{
+    id: 'local-runtime',
+    type: 'local-inference',
+    provider: 'local',
+    label: 'Local Runtime',
+    detail: nativeBridge.available() ? 'Native local model runtime' : 'Native bridge unavailable',
+    capabilities: coreInferenceCapabilities.slice(),
+    enabled: nativeBridge.available(),
+    health: nativeBridge.available() ? 'ready' : 'offline',
+    priority: selectedProvider === 'local' ? 100 : 40,
+    costClass: 'local',
+    latencyClass: 'device',
+  }];
+
+  if (!remoteProvidersEnabled) return workers;
+
+  Object.keys(inferenceProviderDefs).forEach((provider) => {
+    if (provider === 'local') return;
+    const def = getInferenceProviderDef(provider);
+    const apiKey = getProviderApiKey(provider);
+    const model = getProviderModel(provider);
+    const endpoint = getProviderEndpoint(provider);
+    const hasConfig = Boolean(apiKey && model && (def.protocol === 'anthropic' || endpoint));
+    workers.push({
+      id: `provider-${provider}`,
+      type: 'hosted-provider',
+      provider,
+      label: def.label || provider,
+      detail: hasConfig ? model : 'Missing API key, model, or endpoint',
+      capabilities: coreInferenceCapabilities.slice(),
+      enabled: hasConfig,
+      health: hasConfig ? 'ready' : 'needs setup',
+      priority: selectedProvider === provider ? 100 : 55,
+      costClass: 'provider',
+      latencyClass: 'network',
+    });
+  });
+
+  return workers;
+}
+
+function selectWorkerForJob(capability, options = {}) {
+  const key = String(capability || '').trim();
+  const selectedProvider = getSelectedInferenceProvider();
+  const allowLocal = options.allowLocal !== false;
+  const allowRemote = options.allowRemote !== false;
+  const workers = getConfiguredInferenceWorkers()
+    .filter((worker) => worker && worker.enabled)
+    .filter((worker) => Array.isArray(worker.capabilities) && worker.capabilities.includes(key))
+    .filter((worker) => (worker.provider === 'local' ? allowLocal : allowRemote));
+  if (workers.length === 0) return null;
+  workers.sort((a, b) => {
+    const aSelected = a.provider === selectedProvider ? 1 : 0;
+    const bSelected = b.provider === selectedProvider ? 1 : 0;
+    if (aSelected !== bSelected) return bSelected - aSelected;
+    return (Number(b.priority) || 0) - (Number(a.priority) || 0);
+  });
+  return workers[0];
+}
+
+function renderSettingsWorkerList() {
+  if (!settingsWorkerList) return;
+  const workers = getConfiguredInferenceWorkers();
+  if (workers.length === 0) {
+    settingsWorkerList.innerHTML = '<div class="settings-note-block">No workers are configured.</div>';
+    return;
+  }
+  settingsWorkerList.innerHTML = '';
+  workers.forEach((worker) => {
+    const card = document.createElement('div');
+    card.className = 'settings-worker-card';
+    card.classList.toggle('disabled', !worker.enabled);
+    const statusClass = worker.enabled ? 'ready' : 'offline';
+    const caps = Array.isArray(worker.capabilities)
+      ? worker.capabilities.map((item) => `<span>${escapeHtml(getWorkerCapabilityLabel(item))}</span>`).join('')
+      : '';
+    card.innerHTML = [
+      '<div class="settings-worker-main">',
+      `<div class="settings-worker-title">${escapeHtml(worker.label || worker.id)}</div>`,
+      `<div class="settings-worker-detail">${escapeHtml(worker.detail || '')}</div>`,
+      `<div class="settings-worker-caps">${caps}</div>`,
+      '</div>',
+      `<div class="settings-worker-status ${statusClass}">${escapeHtml(worker.health || '')}</div>`,
+    ].join('');
+    settingsWorkerList.appendChild(card);
+  });
 }
 
 function getDebugMessageHistoryTotal(chatId) {
@@ -4115,6 +4525,61 @@ function getProviderPresetValue(provider, modelId) {
   return presets.includes(cleanModel) ? cleanModel : '__custom__';
 }
 
+function getSettingsSectionMeta(section) {
+  const key = String(section || '').trim().toLowerCase();
+  if (key === 'models') {
+    return {
+      title: 'Models & Inference',
+      subtitle: 'Choose where inference runs and tune provider-specific settings.',
+    };
+  }
+  if (key === 'workers') {
+    return {
+      title: 'Workers',
+      subtitle: 'Route AI.EXE jobs through local and provider workers with visible capabilities and health.',
+    };
+  }
+  if (key === 'personalization') {
+    return {
+      title: 'Personalization',
+      subtitle: 'Reserved for reply style, themes, layout density, and UI preferences.',
+    };
+  }
+  if (key === 'advanced') {
+    return {
+      title: 'Advanced',
+      subtitle: 'Verification, maintenance, and diagnostics for the local runtime.',
+    };
+  }
+  return {
+    title: 'General',
+    subtitle: 'Core runtime behavior and day-to-day defaults.',
+  };
+}
+
+function syncSettingsWorkModeUi() {
+  const workMode = String(appSettings && appSettings.workMode ? appSettings.workMode : 'coding').trim().toLowerCase() === 'everyday'
+    ? 'everyday'
+    : 'coding';
+  if (settingsWorkModeCoding) settingsWorkModeCoding.checked = workMode === 'coding';
+  if (settingsWorkModeEveryday) settingsWorkModeEveryday.checked = workMode === 'everyday';
+  if (settingsWorkModeCodingCard) settingsWorkModeCodingCard.classList.toggle('active', workMode === 'coding');
+  if (settingsWorkModeEverydayCard) settingsWorkModeEverydayCard.classList.toggle('active', workMode === 'everyday');
+}
+
+function openSettingsSection(section) {
+  const key = String(section || 'general').trim().toLowerCase();
+  settingsNavButtons.forEach((btn) => {
+    btn.classList.toggle('active', String(btn.dataset.settingsSection || '').trim().toLowerCase() === key);
+  });
+  settingsPanes.forEach((pane) => {
+    pane.classList.toggle('active', String(pane.dataset.settingsPane || '').trim().toLowerCase() === key);
+  });
+  const meta = getSettingsSectionMeta(key);
+  if (settingsViewTitle) settingsViewTitle.textContent = meta.title;
+  if (settingsViewSubtitle) settingsViewSubtitle.textContent = meta.subtitle;
+}
+
 function populateProviderPresetOptions(provider, modelId) {
   if (!settingsApiModelPreset) return;
   const presets = Array.isArray(inferenceProviderModelPresets[provider]) ? inferenceProviderModelPresets[provider] : [];
@@ -4179,6 +4644,7 @@ function syncSettingsProviderUi() {
   } else if (settingsProviderHelp) {
     settingsProviderHelp.textContent = remoteProvidersEnabled ? '' : 'This release is offline-only. Hosted API providers are disabled.';
   }
+  renderSettingsWorkerList();
 }
 
 function debugPreview(value, maxLen = 99999) {
@@ -4289,6 +4755,19 @@ function getChatDebugSnapshot(chatId, maxMessages = 18) {
     }));
 }
 
+function chatHasPriorAgentWorkspaceWork(chatId) {
+  const chat = findChatById(chatId);
+  if (!chat || !Array.isArray(chat.messages)) return false;
+  return chat.messages.some((message) => (
+    message
+    && message.role === 'ai'
+    && (
+      message.agentMeta
+      || (Array.isArray(message.agentActivities) && message.agentActivities.length > 0)
+    )
+  ));
+}
+
 function persistDebugEntry(channel, entry) {
   if (!nativeBridge.available() || !shouldPersistDebugEntry(entry && entry.kind)) {
     return;
@@ -4351,16 +4830,61 @@ function dumpDebugTrace(limit = 12, chatId = '') {
 }
 
 function setSettingsNote(text, kind = 'error') {
-  if (!settingsNote) return;
   const clean = String(text || '').trim();
-  if (!clean) {
+  if (settingsNote) {
     settingsNote.textContent = '';
     settingsNote.classList.remove('visible', 'auth-info');
-    return;
   }
-  settingsNote.textContent = clean;
-  settingsNote.classList.add('visible');
-  settingsNote.classList.toggle('auth-info', kind === 'info');
+  if (!clean) return;
+  showAppNotification({
+    title: kind === 'info'
+      ? (/^settings saved\b/i.test(clean) ? 'Settings saved' : 'Update complete')
+      : 'Action needed',
+    message: clean,
+    kind: kind === 'info' ? 'success' : 'error',
+  });
+}
+
+function saveSettingsFromUi(options = {}) {
+  const provider = settingsProviderSelect
+    ? String(settingsProviderSelect.value || 'local').trim().toLowerCase()
+    : 'local';
+  appSettings.inferenceProvider = remoteProvidersEnabled && Object.prototype.hasOwnProperty.call(inferenceProviderDefs, provider)
+    ? provider
+    : 'local';
+  appSettings.workMode = settingsWorkModeEveryday && settingsWorkModeEveryday.checked ? 'everyday' : 'coding';
+  const providerDef = getInferenceProviderDef(appSettings.inferenceProvider);
+  if (appSettings.inferenceProvider !== 'local' && providerDef.keyField && providerDef.modelField) {
+    appSettings[providerDef.keyField] = settingsApiKeyInput ? settingsApiKeyInput.value.trim() : '';
+    appSettings[providerDef.modelField] = settingsApiModelInput && settingsApiModelInput.value.trim()
+      ? settingsApiModelInput.value.trim()
+      : String(providerDef.defaultModel || '');
+    if (providerDef.endpointField) {
+      appSettings[providerDef.endpointField] = settingsApiEndpointInput && settingsApiEndpointInput.value.trim()
+        ? settingsApiEndpointInput.value.trim()
+        : String(providerDef.defaultEndpoint || '');
+    }
+  }
+  appSettings.modelUrl = settingsModelUrlInput ? settingsModelUrlInput.value.trim() : '';
+  appSettings.keepModelOnUpdate = Boolean(settingsKeepModelChk && settingsKeepModelChk.checked);
+  appSettings.debugTraceEnabled = Boolean(settingsDebugTraceChk && settingsDebugTraceChk.checked);
+  saveAppSettings();
+  if (options.toast) {
+    setSettingsNote(
+      appSettings.inferenceProvider === 'local'
+        ? 'Settings saved locally.'
+        : `Settings saved locally. ${providerDef.label} is active.`,
+      'info'
+    );
+  }
+}
+
+function scheduleSettingsAutosave(delay = 420) {
+  if (settingsAutosaveTimer) clearTimeout(settingsAutosaveTimer);
+  settingsAutosaveTimer = setTimeout(() => {
+    settingsAutosaveTimer = 0;
+    saveSettingsFromUi({ toast: false });
+  }, delay);
 }
 
 function setButtonLoading(btn, loading) {
@@ -4531,6 +5055,28 @@ function completeInferenceRequest(token) {
   renderHistory();
 }
 
+function commitInterruptedAgentRun(chatId, reason = 'Agent was interrupted before finishing.') {
+  if (!activeAgentStreamState || String(activeAgentStreamState.chatId || '') !== String(chatId || '')) return false;
+  const interruptedActivities = cloneAgentActivities(activeAgentStreamState.activities || []);
+  if (!interruptedActivities.length) return false;
+  mergeAgentActivityIntoList(interruptedActivities, {
+    kind: 'error',
+    title: 'Interrupted',
+    detail: reason,
+    status: 'error',
+  });
+  commitAssistantMessage(String(chatId || ''), '', '', {
+    agentActivities: interruptedActivities,
+    agentMeta: { startedAt: Date.now(), completedAt: Date.now(), collapsed: true },
+    forceNeedsContinue: true,
+  });
+  pushDebugTrace('interrupted_agent_committed', {
+    chatId: String(chatId || ''),
+    activityCount: String(interruptedActivities.length),
+  });
+  return true;
+}
+
 function cancelActiveInference() {
   const token = activeInferenceRequest;
   if (!token || token.cancelled) return;
@@ -4560,33 +5106,23 @@ function cancelActiveInference() {
     : null;
   const partialRaw = consumeLiveAssistantText();
   cancelLiveStreamRender();
-  const partialText = sanitizeAssistantText(partialRaw);
+  let partialText = sanitizeAssistantText(partialRaw);
   if (activeAgentState && Array.isArray(activeAgentState.activities) && activeAgentState.activities.length > 0) {
-    const interruptedActivities = cloneAgentActivities(activeAgentState.activities || []);
-    mergeAgentActivityIntoList(interruptedActivities, {
-      kind: 'error',
-      title: 'Interrupted',
-      detail: 'Agent was interrupted before finishing.',
-      status: 'error',
-    });
-    commitAssistantMessage(String(token.chatId || ''), '', '', {
-      agentActivities: interruptedActivities,
-      agentMeta: { startedAt: Number(token.startedAt) || Date.now(), completedAt: Date.now(), collapsed: true },
-      forceNeedsContinue: false,
-    });
+    commitInterruptedAgentRun(String(token.chatId || ''), 'Agent was interrupted before finishing.');
     pushDebugTrace('request_cancelled_agent_committed', {
       chatId: String(token.chatId || ''),
-      activityCount: String(interruptedActivities.length),
+      activityCount: String(activeAgentState.activities.length),
     });
   } else if (partialText && !isArtifactOnlyResponse(partialText)) {
-    commitAssistantMessage(String(token.chatId || ''), partialText, partialRaw);
+    const named = applyInlineChatNameFromResponse(String(token.chatId || ''), partialRaw);
+    partialText = sanitizeAssistantText(named.text);
+    commitAssistantMessage(String(token.chatId || ''), partialText, named.text || partialRaw);
     pushDebugTrace('request_cancelled_partial_committed', {
       chatId: String(token.chatId || ''),
       preview: debugPreview(partialText, 600),
     });
-  } else {
-    resolveChatNamingFallback(String(token.chatId || ''), 'New Chat');
   }
+  resolveChatNamingFallback(String(token.chatId || ''), 'New Chat');
   setThinkingStatus('Cancelled');
   completeInferenceRequest(token);
   setTimeout(() => {
@@ -4851,6 +5387,12 @@ async function streamOpenAiCompatibleChatCompletion(provider, prompt, handlers =
             && parsed.choices[0].delta
             && typeof parsed.choices[0].delta.content === 'string'
             ? parsed.choices[0].delta.content
+            : parsed
+              && Array.isArray(parsed.choices)
+              && parsed.choices[0]
+              && parsed.choices[0].message
+              && typeof parsed.choices[0].message.content === 'string'
+              ? parsed.choices[0].message.content
             : '';
           if (!delta) continue;
           output += delta;
@@ -4859,6 +5401,9 @@ async function streamOpenAiCompatibleChatCompletion(provider, prompt, handlers =
           }
         }
       }
+    }
+    if (!output.trim()) {
+      return { ok: false, message: `${def.label} streamed response was empty.` };
     }
     return {
       ok: true,
@@ -5086,13 +5631,38 @@ async function requestAnthropicTextCompletion(prompt, maxTokens) {
 }
 
 async function requestSelectedRemoteTextCompletion(prompt, maxTokens) {
-  if (!remoteProvidersEnabled) return null;
-  const provider = getSelectedInferenceProvider();
-  if (provider === 'local') return null;
-  if (provider === 'anthropic') {
-    return requestAnthropicTextCompletion(prompt, maxTokens);
+  return requestRemoteTextCompletionForCapability('agent.writeFile', prompt, maxTokens);
+}
+
+async function requestRemoteTextCompletionForCapability(capability, prompt, maxTokens, options = {}) {
+  const worker = selectWorkerForJob(capability || 'agent.writeFile', { allowLocal: false, allowRemote: true });
+  if (!worker || worker.provider === 'local') return null;
+  const provider = worker.provider;
+  recordDebugTrace('worker_route_selected', {
+    job: String(capability || 'agent.writeFile'),
+    workerId: worker.id,
+    workerType: worker.type,
+    provider,
+    model: String(getProviderModel(provider) || ''),
+  }, {
+    job: String(capability || 'agent.writeFile'),
+    capability: String(capability || 'agent.writeFile'),
+    worker,
+    promptLength: String(prompt || '').length,
+    maxTokens: Number(maxTokens) || 0,
+  });
+  if (options && options.preferStreaming) {
+    const result = await streamRemoteChatCompletion(provider, prompt, {}, {
+      maxTokens: Math.max(1, Number(maxTokens) || 64),
+    });
+    return result ? { ...result, workerId: worker.id, provider, model: getProviderModel(provider) } : result;
   }
-  return requestOpenAiCompatibleTextCompletion(provider, prompt, maxTokens);
+  if (provider === 'anthropic') {
+    const result = await requestAnthropicTextCompletion(prompt, maxTokens);
+    return result ? { ...result, workerId: worker.id, provider, model: getProviderModel(provider) } : result;
+  }
+  const result = await requestOpenAiCompatibleTextCompletion(provider, prompt, maxTokens);
+  return result ? { ...result, workerId: worker.id, provider, model: getProviderModel(provider) } : result;
 }
 
 function normalizeReplyModeDecision(text) {
@@ -5256,12 +5826,15 @@ async function requestPreflightRouteDecision(chatId, latestUserMessage, options 
     && workspaceStatusSnapshot.ok
     && String(workspaceStatusSnapshot.rootName || workspaceStatusSnapshot.rootPath || '').trim()
   );
+  const workspaceHasDebugRoot = Boolean(String(workspaceDebugSnapshot.workspaceRootName || '').trim());
   const workspace = workspaceHasRealRoot
     ? {
       ...workspaceDebugSnapshot,
       workspaceRootName: String(workspaceStatusSnapshot.rootName || workspaceDebugSnapshot.workspaceRootName || '').trim(),
       currentPath: normalizeWorkspacePath(workspaceStatusSnapshot.currentPath || workspaceDebugSnapshot.currentPath || '/'),
     }
+    : workspaceHasDebugRoot
+    ? workspaceDebugSnapshot
     : {
       ...workspaceDebugSnapshot,
       workspaceRootName: '',
@@ -5271,55 +5844,8 @@ async function requestPreflightRouteDecision(chatId, latestUserMessage, options 
       rootEntryCount: 0,
       rootEntries: [],
     };
-  const recentMessages = getChatDebugSnapshot(chatId, 10)
-    .map((msg) => `${msg.role}: ${String(msg.text || '').slice(0, 1000)}`)
-    .join('\n\n');
   const agentEnabled = Boolean(options && options.agentEnabled);
-  const canvasEnabled = Boolean(options && options.canvasEnabled);
-  const prompt = [
-    'Return exactly one JSON object. No prose.',
-    'Keys: route, shouldInspectWorkspace, shouldReadFiles, shouldModifyFiles, shouldCreateProject, shouldAskUser, reason, userMessage',
-    'route must be one of: chat, inspect, agent, confirm',
-    'Use inspect when the answer should be grounded in the current workspace by listing or reading files first, without editing them.',
-    'Use agent when the user wants file or project changes.',
-    'Use confirm when the next step should be a natural follow-up question before creating a project or making a risky assumption.',
-    'Use chat only when no workspace grounding or mutation is needed.',
-    'If there is an open workspace and the user refers to the current project or existing work, prefer inspect or agent over chat.',
-    'If there is an open workspace but the user appears to be asking for a fresh project that may be unrelated to what is currently open, prefer confirm and ask whether to keep using the current project or create a new one.',
-    'If there is no open workspace and the user appears to want project/file changes, prefer confirm with a natural userMessage asking whether to create a new project or open an existing folder.',
-    'If agent mode is disabled, do not return agent; use inspect, chat, or confirm.',
-    'If canvas mode is enabled, ignore it here; this router is only for chat vs inspect vs agent vs confirm.',
-    'Decide from meaning, not keywords alone.',
-    'When a follow-up question depends on the already open project, keep it grounded in that workspace even if the user mentions an OS, shell, terminal, package manager, or environment.',
-    'Only choose chat when the answer is complete without reading any workspace files.',
-    '',
-    'Examples:',
-    '- Open workspace exists. User: "inspect it" -> route: inspect',
-    '- Open workspace exists. User: "how do I run this on Mac?" -> route: inspect',
-    '- Open workspace exists. User: "does the current project already satisfy what I asked for?" -> route: inspect',
-    '- Open workspace exists. User: "add pause support" -> route: agent',
-    '- Open workspace exists. User: "start over in a brand new workspace" -> route: confirm or agent only if the request is explicitly for a separate project',
-    '- No open workspace. User: "build a snake game in python" -> route: confirm',
-    '- No open workspace. User: "what is Python?" -> route: chat',
-    '',
-    `Agent enabled: ${agentEnabled ? 'yes' : 'no'}`,
-    `Canvas enabled: ${canvasEnabled ? 'yes' : 'no'}`,
-    `Workspace root: ${workspace.workspaceRootName || '(none)'}`,
-    `Workspace current path: ${workspace.currentPath || '/'}`,
-    `Workspace root entry count: ${Number(workspace.rootEntryCount) || 0}`,
-    `Recent chat:\n${recentMessages || '(none)'}`,
-    '',
-    `Latest user message:\n${String(latestUserMessage || '').trim()}`,
-    '',
-    'JSON:',
-  ].join('\n');
-
-  let parsed = null;
-  if (remoteProvidersEnabled) {
-    const remote = await requestSelectedRemoteTextCompletion(prompt, 220);
-    parsed = extractFirstJsonObject(remote && remote.ok ? remote.output : '');
-  }
-  const advisoryDecision = normalizePreflightRouteDecision(parsed);
+  const advisoryDecision = normalizePreflightRouteDecision({ route: 'chat' });
   const router = window.AIExePreflightRouter && typeof window.AIExePreflightRouter.evaluate === 'function'
     ? window.AIExePreflightRouter
     : null;
@@ -5334,6 +5860,18 @@ async function requestPreflightRouteDecision(chatId, latestUserMessage, options 
     normalizeWorkspacePath,
   });
   const decision = normalizePreflightRouteDecision(evaluated && evaluated.decision ? evaluated.decision : advisoryDecision);
+  const sameChatWorkspaceFollowup = Boolean(chatHasPriorAgentWorkspaceWork(chatId) && workspace.workspaceRootName);
+  const followupLooksLikeEdit = /\b(improve|update|edit|modify|change|fix|polish|modern|responsive|dark mode|design|style|styles|styling|css|layout|add|with)\b/i.test(String(latestUserMessage || ''));
+  if (sameChatWorkspaceFollowup && followupLooksLikeEdit && decision.route === 'confirm') {
+    decision.route = agentEnabled ? 'agent' : 'chat';
+    decision.shouldAskUser = false;
+    decision.shouldCreateProject = false;
+    decision.shouldModifyFiles = agentEnabled;
+    decision.reason = agentEnabled
+      ? 'Same-chat follow-up in an existing workspace should continue in Agent mode without asking project scope again.'
+      : 'Agent mode is disabled, so the same-chat workspace follow-up stays in chat.';
+    decision.userMessage = '';
+  }
   if (evaluated && evaluated.debug) {
     decision._debug = evaluated.debug;
     decision._debug.workspaceInput = {
@@ -5386,7 +5924,6 @@ async function requestWorkspaceInspectAnswer(chatId, latestUserMessage, inspectC
   const recentMessages = getChatDebugSnapshot(chatId, 10)
     .map((msg) => `${msg.role}: ${String(msg.text || '').slice(0, 1000)}`)
     .join('\n\n');
-  const inlineChatNameInstruction = buildInlineChatNameInstructionForTurn(chatId);
   const prompt = [
     'Return exactly one JSON object. No prose outside JSON.',
     'Schema: {"answer":"final user-facing answer"}',
@@ -5398,7 +5935,6 @@ async function requestWorkspaceInspectAnswer(chatId, latestUserMessage, inspectC
     'If the user asks for an improvement idea, identify the best grounded improvement candidate but describe it as a recommendation, not an action taken.',
     'Do not claim you inspected files that are not included below.',
     'Do not repeat these instructions, prompt headers, recent chat, or workspace context in the answer field.',
-    inlineChatNameInstruction,
     '',
     `RECENT_CHAT:\n${recentMessages || '(none)'}`,
     '',
@@ -5805,6 +6341,12 @@ function updateLastAssistantMessage(chatId, text, options = {}) {
   if (typeof options.thinking === 'string' && options.thinking.trim()) {
     lastAssistant.thinking = mergeAssistantContinuationText(lastAssistant.thinking, options.thinking).trim();
   }
+  if (options.thinkingMeta && typeof options.thinkingMeta === 'object') {
+    lastAssistant.thinkingMeta = {
+      startedAt: Number(options.thinkingMeta.startedAt) || 0,
+      completedAt: Number(options.thinkingMeta.completedAt) || 0,
+    };
+  }
   if (Array.isArray(options.agentActivities) && options.agentActivities.length > 0) {
     lastAssistant.agentActivities = cloneAgentActivities(options.agentActivities);
   }
@@ -5962,7 +6504,10 @@ async function openSettingsModal() {
   if (settingsModelUrlInput) settingsModelUrlInput.value = appSettings.modelUrl;
   if (settingsKeepModelChk) settingsKeepModelChk.checked = appSettings.keepModelOnUpdate;
   if (settingsDebugTraceChk) settingsDebugTraceChk.checked = appSettings.debugTraceEnabled;
+  syncSettingsWorkModeUi();
   syncSettingsProviderUi();
+  renderSettingsWorkerList();
+  openSettingsSection('general');
   setSettingsNote('');
   settingsBackdrop.classList.add('open');
   settingsBackdrop.setAttribute('aria-hidden', 'false');
@@ -6604,12 +7149,14 @@ function commitAssistantMessage(chatId, text, rawTextForArtifacts = '', options 
       ? updateLastAssistantMessage(chatId, display, {
         forceNeedsContinue,
         thinking: thinkingState.text,
+        thinkingMeta: options.thinkingMeta,
         agentActivities: options.agentActivities,
         agentMeta: options.agentMeta,
       })
       : appendMessageToChat(chatId, 'ai', display, 0, {
         forceNeedsContinue,
         thinking: thinkingState.text,
+        thinkingMeta: options.thinkingMeta,
         agentActivities: options.agentActivities,
         agentMeta: options.agentMeta,
       });
@@ -6617,12 +7164,14 @@ function commitAssistantMessage(chatId, text, rawTextForArtifacts = '', options 
     appendedMessage = appendMessageToChat(chatId, 'ai', 'Artifact created. Open details below.', 0, {
       forceNeedsContinue: false,
       thinking: thinkingState.text,
+      thinkingMeta: options.thinkingMeta,
       agentActivities: options.agentActivities,
       agentMeta: options.agentMeta,
     });
   } else {
     appendedMessage = appendErrorMessageToChat(chatId, 'Offline inference backend returned empty output.', 0);
   }
+  resolveChatNamingFallback(chatId, 'New Chat');
   const messageTs = appendedMessage ? Number(appendedMessage.ts) || nowTs() : nowTs();
   let addedAnyArtifacts = false;
   if (parsed.payloads.length > 0) {
@@ -6677,6 +7226,32 @@ function formatHistoryTime(tsMillis) {
   return `${Math.max(1, deltaYear)}y`;
 }
 
+function formatMessageClockTime(tsMillis) {
+  const ts = Number(tsMillis) || Date.now();
+  const date = new Date(ts);
+  if (Number.isNaN(date.getTime())) return '';
+  return date.toLocaleTimeString('en-US', {
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true,
+  });
+}
+
+function formatMessageFullTime(tsMillis) {
+  const ts = Number(tsMillis) || Date.now();
+  const date = new Date(ts);
+  if (Number.isNaN(date.getTime())) return '';
+  return date.toLocaleString('en-US', {
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true,
+  });
+}
+
 function getRunningChatOperationToken() {
   const token = activeInferenceRequest;
   if (!token || token.cancelled || token.done || token.finalizing) return null;
@@ -6699,40 +7274,109 @@ function isChatOperationVisibleHere(chatId) {
 function ensureNotificationContainer() {
   if (notificationContainer && notificationContainer.isConnected) return notificationContainer;
   notificationContainer = document.createElement('div');
-  notificationContainer.className = 'chat-toast-stack';
+  notificationContainer.className = 'app-toast-stack';
   document.body.appendChild(notificationContainer);
   return notificationContainer;
 }
 
-function showChatCompletionNotification(chatId, message) {
-  const text = String(message || '').trim();
-  if (!text) return;
+function showAppNotification(options = {}) {
+  const text = String(options.message || '').trim();
+  if (!text) return null;
   const stack = ensureNotificationContainer();
-  const toast = document.createElement('button');
-  toast.type = 'button';
-  toast.className = 'chat-toast';
+  const kind = ['success', 'error', 'warning', 'info'].includes(String(options.kind || ''))
+    ? String(options.kind)
+    : 'info';
+  const title = String(options.title || (
+    kind === 'success' ? 'Success'
+      : kind === 'error' ? 'Something went wrong'
+        : kind === 'warning' ? 'Check this'
+          : 'Notice'
+  )).trim();
+  const duration = Number.isFinite(Number(options.durationMs)) ? Math.max(1200, Number(options.durationMs)) : 4600;
+  const toast = document.createElement('div');
+  toast.className = `app-toast ${kind}`;
+  toast.setAttribute('role', kind === 'error' ? 'alert' : 'status');
+  toast.setAttribute('aria-live', kind === 'error' ? 'assertive' : 'polite');
   toast.innerHTML = `
-    <span class="chat-toast-title">Operation finished</span>
-    <span class="chat-toast-body">${escapeHtml(text)}</span>
+    <div class="app-toast-icon" aria-hidden="true">${kind === 'success' ? '✓' : kind === 'error' ? '!' : kind === 'warning' ? '!' : 'i'}</div>
+    <div class="app-toast-copy">
+      <div class="app-toast-title">${escapeHtml(title)}</div>
+      <div class="app-toast-body">${escapeHtml(text)}</div>
+    </div>
+    <button class="app-toast-close" type="button" aria-label="Close notification">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
+        <path d="M18 6 6 18"></path>
+        <path d="m6 6 12 12"></path>
+      </svg>
+    </button>
   `;
+  let closeTimer = 0;
   const close = () => {
+    if (closeTimer) {
+      clearTimeout(closeTimer);
+      closeTimer = 0;
+    }
     if (!toast.isConnected) return;
     toast.classList.remove('open');
     setTimeout(() => {
       if (toast.parentNode) toast.remove();
     }, 180);
   };
-  toast.addEventListener('click', () => {
-    close();
-    if (String(chatId || '').trim()) {
-      loadHistory(String(chatId || '').trim());
+  const scheduleClose = (delay = duration) => {
+    if (closeTimer) clearTimeout(closeTimer);
+    closeTimer = setTimeout(close, delay);
+  };
+  const closeBtn = toast.querySelector('.app-toast-close');
+  if (closeBtn) {
+    closeBtn.addEventListener('click', (event) => {
+      event.stopPropagation();
+      close();
+    });
+  }
+  if (typeof options.onClick === 'function') {
+    toast.classList.add('clickable');
+    toast.addEventListener('click', (event) => {
+      if (event.target && event.target.closest && event.target.closest('.app-toast-close')) return;
+      options.onClick();
+      close();
+    });
+  }
+  toast.addEventListener('mouseenter', () => {
+    if (closeTimer) {
+      clearTimeout(closeTimer);
+      closeTimer = 0;
     }
   });
+  toast.addEventListener('mouseleave', () => scheduleClose(2200));
+  toast.addEventListener('focusin', () => {
+    if (closeTimer) {
+      clearTimeout(closeTimer);
+      closeTimer = 0;
+    }
+  });
+  toast.addEventListener('focusout', () => scheduleClose(2200));
   stack.appendChild(toast);
   requestAnimationFrame(() => {
     toast.classList.add('open');
   });
-  setTimeout(close, 4800);
+  scheduleClose();
+  return toast;
+}
+
+function showChatCompletionNotification(chatId, message) {
+  const text = String(message || '').trim();
+  if (!text) return;
+  showAppNotification({
+    title: 'Operation finished',
+    message: text,
+    kind: 'success',
+    durationMs: 4800,
+    onClick: () => {
+      if (String(chatId || '').trim()) {
+        loadHistory(String(chatId || '').trim());
+      }
+    },
+  });
 }
 
 const chatShell = window.AIExeChatShell && typeof window.AIExeChatShell.createChatShell === 'function'
@@ -6816,6 +7460,7 @@ const workspaceCore = window.AIExeWorkspaceCore && typeof window.AIExeWorkspaceC
     },
     renderArtifacts,
     refreshWorkspaceTree: (...args) => refreshWorkspaceTree(...args),
+    refreshOpenFileTabsFromWorkspace: (...args) => refreshOpenFileTabsFromWorkspace(...args),
   })
   : null;
 const {
@@ -6881,6 +7526,8 @@ const workspaceActions = window.AIExeWorkspaceActions && typeof window.AIExeWork
     loadWorkspaceChildren,
     setWorkspaceSelection,
     renderArtifacts: (...args) => renderArtifacts(...args),
+    removeWorkspaceTab: (...args) => removeWorkspaceTab(...args),
+    closeAllWorkspaceTabs: (...args) => closeAllWorkspaceTabs(...args),
     setWorkspaceItems: (value) => { workspaceItems = Array.isArray(value) ? value : []; },
     recordDebugTrace,
     getWorkspaceDebugSnapshot,
@@ -6967,6 +7614,8 @@ const chatRenderer = window.AIExeChatRenderer && typeof window.AIExeChatRenderer
     saveEditedUserMessage,
     applyCustomTooltip,
     makeMessageActionIcon,
+    formatMessageClockTime,
+    formatMessageFullTime,
     copyTextToClipboard,
     applyCopyFeedback,
     pushDebugTrace,
@@ -7157,10 +7806,17 @@ function applyWorkspaceStatusSnapshot(statusSnapshot, options = {}) {
   workspaceCurrentKind = snapshot.currentKind === 'file' && hasRoot ? 'file' : 'folder';
   if (!hasRoot) {
     workspaceItems = [];
+    const expandedPaths = new Set();
+    workspaceTreeState.forEach((node, path) => {
+      if (node && node.expanded) expandedPaths.add(normalizeWorkspacePath(path));
+    });
     workspaceTreeState.clear();
     const freshRoot = getWorkspaceNodeState('/');
     freshRoot.expanded = true;
     freshRoot.loaded = false;
+    expandedPaths.forEach((path) => {
+      if (path && path !== '/') getWorkspaceNodeState(path).expanded = true;
+    });
     workspaceSelectedPaths.clear();
     workspaceSelectedPaths.add('/');
     saveWorkspaceRootPath('');
@@ -7181,6 +7837,8 @@ function applyWorkspaceStatusSnapshot(statusSnapshot, options = {}) {
 }
 
 let workspaceSyncPromise = null;
+let workspaceExternalRefreshPromise = null;
+let workspaceExternalRefreshTimer = 0;
 // Keep JS workspace state aligned with the native workspace root override.
 async function syncWorkspaceStateFromNative(reason = 'manual', options = {}) {
   if (!nativeBridge.available()) return null;
@@ -7214,6 +7872,41 @@ async function syncWorkspaceStateFromNative(reason = 'manual', options = {}) {
   } finally {
     workspaceSyncPromise = null;
   }
+}
+
+async function refreshWorkspaceFromExternalChange(reason = 'external_change') {
+  if (!nativeBridge.available() || document.hidden || !String(workspaceRootName || '').trim()) return null;
+  if (workspaceDraft || workspaceRenameDraft) return null;
+  if (workspaceExternalRefreshPromise) return workspaceExternalRefreshPromise;
+  workspaceExternalRefreshPromise = (async () => {
+    await syncWorkspaceStateFromNative(reason, { render: false, log: false });
+    if (!String(workspaceRootName || '').trim()) {
+      closeAllWorkspaceTabs();
+      await renderArtifacts();
+      return null;
+    }
+    workspaceTreeState.clear();
+    const freshRoot = getWorkspaceNodeState('/');
+    freshRoot.expanded = true;
+    freshRoot.loaded = false;
+    await renderArtifacts();
+    await refreshOpenFileTabsFromWorkspace();
+    return null;
+  })();
+  try {
+    return await workspaceExternalRefreshPromise;
+  } finally {
+    workspaceExternalRefreshPromise = null;
+  }
+}
+
+function startWorkspaceExternalRefreshLoop() {
+  if (workspaceExternalRefreshTimer) return;
+  workspaceExternalRefreshTimer = window.setInterval(() => {
+    if (!document.hidden && String(workspaceRootName || '').trim()) {
+      void refreshWorkspaceFromExternalChange('background_poll');
+    }
+  }, 2500);
 }
 
 function normalizeWorkspaceTurnModeDecision(text) {
@@ -7286,11 +7979,26 @@ function removeWorkspaceTab(path) {
     return current !== normalized && !current.startsWith(`${normalized}/`);
   });
   if (openFileTabs.length === beforeCount) return;
+  let activeRemoved = false;
   if (String(activeTabId || '') === normalized || String(activeTabId || '').startsWith(`${normalized}/`)) {
     activeTabId = 'chat';
+    activeRemoved = true;
   }
   persistFileTabsStateNow();
   renderTabBar();
+  if (activeRemoved) switchToTab('chat');
+}
+
+function closeAllWorkspaceTabs() {
+  if (!Array.isArray(openFileTabs) || openFileTabs.length === 0) {
+    if (activeTabId !== 'chat') switchToTab('chat');
+    return;
+  }
+  openFileTabs = [];
+  activeTabId = 'chat';
+  persistFileTabsStateNow();
+  renderTabBar();
+  switchToTab('chat');
 }
 
 const agentCore = window.AIExeAgentCore && typeof window.AIExeAgentCore.createAgentCore === 'function'
@@ -7298,7 +8006,7 @@ const agentCore = window.AIExeAgentCore && typeof window.AIExeAgentCore.createAg
     normalizeWorkspaceName,
     normalizeWorkspacePath,
     getWorkspaceContext,
-    looksLikePlaceholderImplementation: (content) => /placeholder|todo:|coming soon|implement this/i.test(String(content || '')),
+    looksLikePlaceholderImplementation: (content) => /\b(todo:|coming soon|implement this|placeholder code|placeholder content)\b/i.test(String(content || '')),
   })
   : null;
 const {
@@ -7319,6 +8027,7 @@ const {
   buildFallbackExpectedFiles,
   shouldFallbackPlanNeedReadme,
   isExplicitReadmeOrDocsTask,
+  isDocsOnlyTask,
   isExistingProjectMutationRequest,
   normalizeAgentPlanSpec,
   buildFallbackAgentPlanSpec,
@@ -7371,6 +8080,7 @@ const agentPlanner = window.AIExeAgentPlanner && typeof window.AIExeAgentPlanner
     hasReadmeRunInstructions,
     isLikelyCompleteReadme,
     isExplicitReadmeOrDocsTask,
+    isDocsOnlyTask,
     buildFallbackAgentPlanSpec,
     buildAgentFileGenerationHints,
     loadPromptTemplate,
@@ -7835,6 +8545,13 @@ function syncFileTabFromWorkspaceWrite(...args) {
   return undefined;
 }
 
+async function refreshOpenFileTabsFromWorkspace(...args) {
+  if (fileViewerApi.refreshOpenFileTabsFromWorkspace) {
+    return fileViewerApi.refreshOpenFileTabsFromWorkspace(...args);
+  }
+  return undefined;
+}
+
 function switchToTab(...args) {
   if (fileViewerApi.switchToTab) {
     return fileViewerApi.switchToTab(...args);
@@ -8244,9 +8961,16 @@ function loadStoredChats() {
             role: m.role,
             text: m.text,
             ts: Number(m.ts) || nowTs(),
+            displayTs: Number(m.displayTs) || 0,
             thinking: m && m.role === 'ai' && typeof m.thinking === 'string'
               ? m.thinking.slice(0, 20000)
               : '',
+            thinkingMeta: m && m.role === 'ai' && m.thinkingMeta && typeof m.thinkingMeta === 'object'
+              ? {
+                startedAt: Number(m.thinkingMeta.startedAt) || 0,
+                completedAt: Number(m.thinkingMeta.completedAt) || 0,
+              }
+              : null,
             agentActivities: m && m.role === 'ai' && Array.isArray(m.agentActivities)
               ? normalizeAgentActivities(m.agentActivities)
               : [],
@@ -8466,14 +9190,52 @@ if (chatActionBackdrop) {
   });
 }
 if (loginBtn) {
-  loginBtn.addEventListener('click', () => {
+  loginBtn.addEventListener('click', (event) => {
+    event.stopPropagation();
+    if (!currentAuthUser()) {
+      openAuthModal('login');
+      return;
+    }
+    toggleAccountPopover();
+  });
+}
+if (accountProfileBtn) {
+  accountProfileBtn.addEventListener('click', () => {
+    closeAccountPopover();
+    openAuthModal(currentAuthUser() ? 'account' : 'login');
+  });
+}
+if (accountSettingsBtn) {
+  accountSettingsBtn.addEventListener('click', () => {
+    closeAccountPopover();
+    void openSettingsModal();
+  });
+}
+if (accountUsageBtn) {
+  accountUsageBtn.addEventListener('click', () => {
+    showAppNotification({
+      title: 'Usage',
+      message: 'Usage details are not available in this offline preview.',
+      kind: 'info',
+    });
+  });
+}
+if (accountLogoutBtn) {
+  accountLogoutBtn.addEventListener('click', () => {
+    closeAccountPopover();
     if (currentAuthUser()) {
-      openAuthModal('account');
+      handleLogout();
     } else {
       openAuthModal('login');
     }
   });
 }
+if (accountPopover) {
+  accountPopover.addEventListener('click', (event) => {
+    event.stopPropagation();
+  });
+}
+document.addEventListener('click', closeAccountPopover);
 if (authLoginTab) authLoginTab.addEventListener('click', () => setAuthMode('login'));
 if (authSignupTab) authSignupTab.addEventListener('click', () => setAuthMode('signup'));
 if (authActionBtn) authActionBtn.addEventListener('click', () => { void handleAuthAction(); });
@@ -8486,6 +9248,40 @@ if (authBackdrop) {
     }
   });
 }
+document.addEventListener('click', (event) => {
+  if (!authBackdrop || !authBackdrop.classList.contains('open')) return;
+  const target = event.target;
+  if (!(target instanceof Element)) return;
+  if (target.closest('#authCancelBtn')) {
+    event.preventDefault();
+    event.stopPropagation();
+    closeAuthModal();
+    return;
+  }
+  if (target.closest('#authActionBtn')) {
+    event.preventDefault();
+    event.stopPropagation();
+    void handleAuthAction();
+    return;
+  }
+  if (target.closest('#authLoginTab')) {
+    event.preventDefault();
+    event.stopPropagation();
+    setAuthMode('login');
+    return;
+  }
+  if (target.closest('#authSignupTab')) {
+    event.preventDefault();
+    event.stopPropagation();
+    setAuthMode('signup');
+    return;
+  }
+  if (target === authBackdrop) {
+    event.preventDefault();
+    event.stopPropagation();
+    closeAuthModal();
+  }
+}, true);
 if (settingsBtn) {
   settingsBtn.addEventListener('click', () => { void openSettingsModal(); });
 }
@@ -8521,9 +9317,18 @@ if (settingsImportBtn) {
         const res = await fetchRuntimeStatus('importModel');
         if (res && res.ok) {
           importBtn.textContent = 'Model Imported ✓';
+          showAppNotification({
+            title: 'Model imported',
+            message: res.message || 'The local model is ready.',
+            kind: 'success',
+          });
         } else {
           importBtn.textContent = 'Import Model';
-          window.alert((res && res.message) || 'Model import failed.');
+          showAppNotification({
+            title: 'Model import failed',
+            message: (res && res.message) || 'Model import failed.',
+            kind: 'error',
+          });
         }
       } finally {
         importBtn.disabled = false;
@@ -8564,7 +9369,34 @@ if (settingsVerifyBtn) {
 }
 if (settingsProviderSelect) {
   settingsProviderSelect.addEventListener('change', () => {
+    appSettings.inferenceProvider = remoteProvidersEnabled && Object.prototype.hasOwnProperty.call(inferenceProviderDefs, settingsProviderSelect.value)
+      ? String(settingsProviderSelect.value || 'local').trim().toLowerCase()
+      : 'local';
     syncSettingsProviderUi();
+    saveSettingsFromUi({ toast: false });
+  });
+}
+settingsNavButtons.forEach((btn) => {
+  btn.addEventListener('click', () => {
+    openSettingsSection(btn.dataset.settingsSection || 'general');
+  });
+});
+if (settingsWorkModeCoding) {
+  settingsWorkModeCoding.addEventListener('change', () => {
+    if (settingsWorkModeCoding.checked) {
+      appSettings.workMode = 'coding';
+      syncSettingsWorkModeUi();
+      saveSettingsFromUi({ toast: false });
+    }
+  });
+}
+if (settingsWorkModeEveryday) {
+  settingsWorkModeEveryday.addEventListener('change', () => {
+    if (settingsWorkModeEveryday.checked) {
+      appSettings.workMode = 'everyday';
+      syncSettingsWorkModeUi();
+      saveSettingsFromUi({ toast: false });
+    }
   });
 }
 if (settingsApiModelPreset) {
@@ -8577,6 +9409,7 @@ if (settingsApiModelPreset) {
       return;
     }
     settingsApiModelInput.value = preset;
+    saveSettingsFromUi({ toast: false });
   });
 }
 if (settingsApiModelInput) {
@@ -8584,7 +9417,23 @@ if (settingsApiModelInput) {
     if (!settingsApiModelPreset || !settingsProviderSelect) return;
     const provider = String(settingsProviderSelect.value || 'local').trim().toLowerCase();
     settingsApiModelPreset.value = getProviderPresetValue(provider, settingsApiModelInput.value);
+    scheduleSettingsAutosave();
   });
+}
+if (settingsApiKeyInput) {
+  settingsApiKeyInput.addEventListener('input', () => scheduleSettingsAutosave());
+}
+if (settingsApiEndpointInput) {
+  settingsApiEndpointInput.addEventListener('input', () => scheduleSettingsAutosave());
+}
+if (settingsModelUrlInput) {
+  settingsModelUrlInput.addEventListener('input', () => scheduleSettingsAutosave());
+}
+if (settingsKeepModelChk) {
+  settingsKeepModelChk.addEventListener('change', () => saveSettingsFromUi({ toast: false }));
+}
+if (settingsDebugTraceChk) {
+  settingsDebugTraceChk.addEventListener('change', () => saveSettingsFromUi({ toast: false }));
 }
 if (settingsSaveBtn) {
   settingsSaveBtn.addEventListener('click', async () => {
@@ -8592,35 +9441,8 @@ if (settingsSaveBtn) {
     setButtonLoading(settingsSaveBtn, true);
     await waitForUiPaint();
     try {
-      const provider = settingsProviderSelect
-        ? String(settingsProviderSelect.value || 'local').trim().toLowerCase()
-        : 'local';
-      appSettings.inferenceProvider = remoteProvidersEnabled && Object.prototype.hasOwnProperty.call(inferenceProviderDefs, provider)
-        ? provider
-        : 'local';
-      const providerDef = getInferenceProviderDef(appSettings.inferenceProvider);
-      if (appSettings.inferenceProvider !== 'local' && providerDef.keyField && providerDef.modelField) {
-        appSettings[providerDef.keyField] = settingsApiKeyInput ? settingsApiKeyInput.value.trim() : '';
-        appSettings[providerDef.modelField] = settingsApiModelInput && settingsApiModelInput.value.trim()
-          ? settingsApiModelInput.value.trim()
-          : String(providerDef.defaultModel || '');
-        if (providerDef.endpointField) {
-          appSettings[providerDef.endpointField] = settingsApiEndpointInput && settingsApiEndpointInput.value.trim()
-            ? settingsApiEndpointInput.value.trim()
-            : String(providerDef.defaultEndpoint || '');
-        }
-      }
-      appSettings.modelUrl = settingsModelUrlInput ? settingsModelUrlInput.value.trim() : '';
-      appSettings.keepModelOnUpdate = Boolean(settingsKeepModelChk && settingsKeepModelChk.checked);
-      appSettings.debugTraceEnabled = Boolean(settingsDebugTraceChk && settingsDebugTraceChk.checked);
-      saveAppSettings();
+      saveSettingsFromUi({ toast: true });
       await ensureMinLoading(startedAt, 180);
-      setSettingsNote(
-        appSettings.inferenceProvider === 'local'
-          ? 'Settings saved locally.'
-          : `Settings saved locally. ${providerDef.label} is active.`,
-        'info'
-      );
     } finally {
       setButtonLoading(settingsSaveBtn, false);
     }
@@ -9211,12 +10033,12 @@ function renderActiveChat(...args) {
 function createChat(seedText) {
   const ts = nowTs();
   const id = makeChatId();
-  const seed = String(seedText || '').trim();
   const chat = {
     id,
     name: 'New Chat',
     customName: false,
     isNaming: true,
+    autoNamed: false,
     createdAt: ts,
     updatedAt: ts,
     messages: [],
@@ -9265,8 +10087,15 @@ function appendMessageToChat(chatId, role, text, forcedTs = 0, options = {}) {
 
   const ts = Number(forcedTs) || nowTs();
   const message = { role, text: cleaned, ts };
+  let shouldScheduleSmartRename = false;
   if (role === 'ai' && typeof options.thinking === 'string' && options.thinking.trim()) {
     message.thinking = options.thinking.trim();
+  }
+  if (role === 'ai' && options.thinkingMeta && typeof options.thinkingMeta === 'object') {
+    message.thinkingMeta = {
+      startedAt: Number(options.thinkingMeta.startedAt) || 0,
+      completedAt: Number(options.thinkingMeta.completedAt) || 0,
+    };
   }
   if (role === 'ai' && Array.isArray(options.agentActivities) && options.agentActivities.length > 0) {
     message.agentActivities = cloneAgentActivities(options.agentActivities);
@@ -9299,13 +10128,8 @@ function appendMessageToChat(chatId, role, text, forcedTs = 0, options = {}) {
     if (prevAi && prevAi.text.trim() === cleaned) {
       message.loopDetected = true;
     }
-    if (chat.isNaming && !chat.customName) {
-      const aiCount = activeThread.messages.filter((m) => m && m.role === 'ai').length;
-      if (aiCount === 1) {
-        chat.name = deriveFallbackChatName(chat, cleaned);
-        chat.isNaming = false;
-      }
-    }
+    const aiCount = activeThread.messages.filter((m) => m && m.role === 'ai' && String(m.text || '').trim()).length;
+    shouldScheduleSmartRename = false;
   } else if (role === 'error') {
     activeThread.needsContinue = false;
     if (chat.isNaming && !chat.customName) {
@@ -9322,6 +10146,9 @@ function appendMessageToChat(chatId, role, text, forcedTs = 0, options = {}) {
     renderActiveChat();
   }
   updateChatScrollDownButtonVisibility();
+  if (shouldScheduleSmartRename) {
+    scheduleSmartChatRename(chatId);
+  }
   return message;
 }
 
@@ -9620,7 +10447,11 @@ async function startDictationWaveVisualizer(useMic = true) {
 async function startDictation() {
   if (!mainInput || pendingInferenceCount > 0) return;
   if (!nativeBridge.available()) {
-    window.alert('Native runtime bridge unavailable.');
+    showAppNotification({
+      title: 'Runtime unavailable',
+      message: 'Native runtime bridge unavailable.',
+      kind: 'error',
+    });
     return;
   }
   pushDictationTrace('start');
@@ -9642,7 +10473,11 @@ async function startDictation() {
       setMicListeningState(false);
       stopDictationWaveVisualizer();
       stopDictationLevelPolling();
-      window.alert(String((res && res.message) || 'Failed to start offline dictation.'));
+      showAppNotification({
+        title: 'Dictation failed',
+        message: String((res && res.message) || 'Failed to start offline dictation.'),
+        kind: 'error',
+      });
       return;
     }
     startDictationLevelPolling();
@@ -9650,7 +10485,11 @@ async function startDictation() {
     setMicListeningState(false);
     stopDictationWaveVisualizer();
     stopDictationLevelPolling();
-    window.alert(`Failed to start offline dictation: ${String(err && err.message ? err.message : err || 'Unknown error')}`);
+    showAppNotification({
+      title: 'Dictation failed',
+      message: `Failed to start offline dictation: ${String(err && err.message ? err.message : err || 'Unknown error')}`,
+      kind: 'error',
+    });
   }
 }
 
@@ -9800,7 +10639,7 @@ function parseThinkControl(rawValue) {
   if (!input) return { handled: false, modelText: input, userText: input, thinkForced: false };
   const lower = input.toLowerCase();
 
-  if (/^\/?think\s+off$/.test(lower) || /^\/?unthink$/.test(lower)) {
+  if (/^\/think\s+off$/.test(lower) || /^\/unthink$/.test(lower)) {
     setThinkMode(false);
     syncInputAugmentState();
     return {
@@ -9812,7 +10651,7 @@ function parseThinkControl(rawValue) {
       thinkForced: false,
     };
   }
-  if (/^\/?think$/.test(lower) || /^\/?think\s+on$/.test(lower)) {
+  if (/^\/think$/.test(lower) || /^\/think\s+on$/.test(lower)) {
     setThinkMode(true);
     syncInputAugmentState();
     return {
@@ -9825,7 +10664,7 @@ function parseThinkControl(rawValue) {
     };
   }
 
-  const withPayload = input.match(/^\/?think(?:\s*[:\-]\s*|\s+)([\s\S]+)$/i);
+  const withPayload = input.match(/^\/think(?:\s*[:\-]\s*|\s+)([\s\S]+)$/i);
   if (!withPayload) {
     return { handled: false, modelText: input, userText: input, thinkForced: false };
   }
@@ -9833,7 +10672,7 @@ function parseThinkControl(rawValue) {
   if (!payload) {
     return { handled: false, modelText: input, userText: input, thinkForced: false };
   }
-  return { handled: false, modelText: payload, userText: payload, thinkForced: true };
+  return { handled: false, modelText: payload, userText: input, thinkForced: true };
 }
 
 const quickStartPromptMap = {
@@ -9904,8 +10743,17 @@ function continueMessage() {
   if (!chat) return;
   if (!chat.needsContinue) return;
 
+  const lastAssistant = findLastAssistantMessage(chat);
+  const lastWasAgentRun = Boolean(lastAssistant && Array.isArray(lastAssistant.agentActivities) && lastAssistant.agentActivities.length > 0);
   chat.needsContinue = false;
   chatAutoScrollPinned = true;
+  if (developerAgentEnabled && lastWasAgentRun) {
+    void requestAssistantReply(chat.id, 'continue', false, {
+      preflightChoiceResolved: 'agent',
+      suppressChatNameInstruction: true,
+    });
+    return;
+  }
   setChatAutoContinuing(chat.id, true);
   void startAssistantContinuation(chat.id, { autoContinuationRemaining: 0 });
 }
@@ -9924,6 +10772,16 @@ function startAssistantContinuation(chatId, options = {}) {
 }
 
 
+function buildRequestThinkingMeta(requestToken) {
+  const token = requestToken && typeof requestToken === 'object' ? requestToken : null;
+  if (!token) return null;
+  const active = Boolean(thinkModeEnabled || token.thinkForced);
+  if (!active) return null;
+  return {
+    startedAt: Number(token.startedAt) || Date.now(),
+    completedAt: Date.now(),
+  };
+}
 
 async function buildInferencePrompt(chatId, fallbackPrompt, options = {}) {
   return promptCoreApi.buildInferencePrompt
@@ -9942,8 +10800,8 @@ function buildAgentHistoryTranscript(chatId, maxMessages = 14) {
 function stripThinkingBlocksAndFragments(text) {
   return normalizeImplicitThinkingTrace(text)
     .replace(/<(thinking|think)>[\s\S]*?<\/\1>/gi, '')
-    .replace(/<(thinking|think)>[\s\S]*$/i, '')
-    .replace(/<\s*\/?\s*t(?:h(?:i(?:n(?:k(?:i(?:n(?:g)?)?)?)?)?)?)?[^>]*$/i, '');
+    .replace(/(?:^|\n)\s*<(thinking|think)>[\s\S]*$/i, '')
+    .replace(/(?:^|\n)\s*<\s*\/?\s*t(?:h(?:i(?:n(?:k(?:i(?:n(?:g)?)?)?)?)?)?)?[^>\n]*$/i, '');
 }
 
 function sanitizeAssistantDelta(text) {
@@ -9996,7 +10854,8 @@ function sanitizeAssistantText(text) {
   const normalizedSource = normalizeImplicitThinkingTrace(text);
   const hadThinkingTrace = /<(thinking|think)>[\s\S]*?<\/\1>/i.test(normalizedSource);
   let clean = sanitizeAssistantDelta(text);
-  clean = clean.replace(/^\s*__?AGENT_PROGRESS__?:\s*/gim, '');
+  clean = clean.replace(/^\s*__?AGENT_PROGRESS__?:\s*(?:Thinking|Working|Planning|Inspecting|Creating|Writing|Editing|Saving|Checking|Continuing|Starting|Finalizing|Adjusting|Stopped)\b(?:[^.\n]*\.\.\.)?\s*/gim, '');
+  clean = clean.replace(/^\s*__?AGENT_PROGRESS__?:[^\n]*(?:\n|$)/gim, '');
   clean = clean.replace(/^\s*(?:Writing answer|Preparing grounded answer|Choosing relevant files|Inspecting workspace|Planning changes|Creating project workspace)\.\.\.\s*/gim, '');
   clean = clean.replace(/Output exactly one non-empty canvas block in this format:[\s\S]*?The content after --- must be non-empty\. Never leave it blank\./gi, '');
   clean = clean.replace(/Respond with ONLY a canvas block containing the full answer\./gi, '');
@@ -10194,7 +11053,13 @@ function renderLiveStreamNow() {
   const bubble = activeStreamRow.querySelector('.msg-bubble');
   if (!bubble) return;
   const agentProgressText = parseAgentProgressMarker(activeStreamRawText);
-  if (agentProgressText) {
+  const agentStreamActive = Boolean(
+    activeAgentStreamState
+    && activeAgentStreamState.chatId
+    && activeChatId
+    && String(activeAgentStreamState.chatId) === String(activeChatId)
+  );
+  if (agentStreamActive && agentProgressText) {
     bubble.innerHTML = '';
     bubble.appendChild(buildAgentActivityPanel(
       activeAgentStreamState && activeAgentStreamState.chatId ? activeAgentStreamState.chatId : '',
@@ -10212,6 +11077,9 @@ function renderLiveStreamNow() {
   const parsedCanvas = extractCanvasBlocksFromReply(activeStreamRawText);
   populateAssistantBubble(bubble, activeStreamText, {
     showThinkingLoader: thinkingState.inProgress || Boolean(thinkingState.text),
+    thinkingText: thinkingState.text,
+    thinkingStartedAt: Number(thinkingStartedAt) || Date.now(),
+    thinkingCompletedAt: Date.now(),
     showCanvasLoader: canvasModeEnabled && hasCanvasTokenStarted(activeStreamRawText) && parsedCanvas.payloads.length === 0,
     canvasRawText: activeStreamRawText,
   });
@@ -10268,10 +11136,6 @@ function appendLiveDelta(chatId, delta) {
   if (activeAgentStreamState) {
     resetActiveAgentStreamState();
   }
-  if (!activeStreamRow || !activeStreamRow.isConnected) {
-    createLiveAssistantRow(chatId);
-  }
-  if (!activeStreamRow) return;
   const nextRaw = `${activeStreamRawText}${raw}`;
   const nextDisplay = stripLeadingInlineChatNameFragment(stripCanvasBlocksForDisplay(
     sanitizeStreamDelta(nextRaw)
@@ -10282,6 +11146,10 @@ function appendLiveDelta(chatId, delta) {
   if (!activeStreamText.trim() && !thinkingState.text && !thinkingState.inProgress) {
     return;
   }
+  if (!activeStreamRow || !activeStreamRow.isConnected) {
+    createLiveAssistantRow(chatId);
+  }
+  if (!activeStreamRow) return;
   scheduleLiveStreamRender();
 }
 
@@ -10308,7 +11176,7 @@ function consumeLiveAssistantText() {
   return text;
 }
 
-async function typewriterAssistantMessage(chatId, text) {
+async function typewriterAssistantMessage(chatId, text, options = {}) {
   const rawContent = String(text || '').trim();
   const content = sanitizeAssistantText(rawContent);
   if (!content) {
@@ -10317,7 +11185,7 @@ async function typewriterAssistantMessage(chatId, text) {
   }
 
   if (activeChatId !== chatId || inNewChatMode) {
-    commitAssistantMessage(chatId, content, rawContent);
+    commitAssistantMessage(chatId, content, rawContent, options);
     return;
   }
 
@@ -10335,7 +11203,7 @@ async function typewriterAssistantMessage(chatId, text) {
   const displayContent = stripCanvasBlocksForDisplay(content);
   if (!displayContent) {
     row.remove();
-    commitAssistantMessage(chatId, content, rawContent);
+    commitAssistantMessage(chatId, content, rawContent, options);
     return;
   }
 
@@ -10392,7 +11260,7 @@ async function typewriterAssistantMessage(chatId, text) {
   });
 
   row.remove();
-  commitAssistantMessage(chatId, content, rawContent);
+  commitAssistantMessage(chatId, content, rawContent, options);
 }
 
 async function requestAssistantReply(chatId, promptText, alreadyCounted = false, options = {}) {
@@ -10477,6 +11345,30 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
     if (!canvasModeUiEnabled || developerAgentEnabled) {
       const workspaceStateComparison = getWorkspaceStateComparison();
       const workspaceStatusSnapshot = await requestWorkspaceStatusSnapshot();
+      const continuationChat = findChatById(chatId);
+      const continuationText = String(promptText || '').trim().toLowerCase();
+      const continuationOnly = /^(continue|carry on|keep going|go on|resume|continue from here|continue from current state)$/i.test(continuationText);
+      const lastAssistantForContinuation = findLastAssistantMessage(continuationChat);
+      const lastAssistantAskedContinue = /ask me to continue|continue from the current project state|continue from the current workspace state/i.test(
+        String(lastAssistantForContinuation && lastAssistantForContinuation.text ? lastAssistantForContinuation.text : ''),
+      );
+      if (
+        developerAgentEnabled
+        && continuationOnly
+        && continuationChat
+        && (continuationChat.needsContinue || lastAssistantAskedContinue)
+      ) {
+        requestToken.operationKind = 'agent';
+        setThinkingStatus('Continuing changes...');
+        continuationChat.needsContinue = false;
+        const handledByAgent = await requestDeveloperAgentReply(requestToken, chatId, promptText);
+        if (!isInferenceActive(requestToken)) {
+          return;
+        }
+        if (handledByAgent) {
+          return;
+        }
+      }
       // If the user already resolved the preflight confirmation, skip the router and proceed directly
       if (requestToken.preflightChoiceResolved) {
         recordDebugTrace('preflight_bypassed_by_resolved_choice', {
@@ -10488,18 +11380,30 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
           resolvedChoice: requestToken.preflightChoiceResolved,
           latestUserInput: String(promptText || ''),
         });
-        requestToken.operationKind = 'agent';
-        setThinkingStatus('Planning changes...');
-        const handledByAgent = await requestDeveloperAgentReply(requestToken, chatId, promptText);
-        if (!isInferenceActive(requestToken)) {
-          return;
-        }
-        if (handledByAgent) {
-          return;
+        if (developerAgentEnabled) {
+          requestToken.operationKind = 'agent';
+          setThinkingStatus('Planning changes...');
+          const handledByAgent = await requestDeveloperAgentReply(requestToken, chatId, promptText);
+          if (!isInferenceActive(requestToken)) {
+            return;
+          }
+          if (handledByAgent) {
+            return;
+          }
+        } else {
+          recordDebugTrace('preflight_resolved_agent_blocked', {
+            chatId: requestToken.chatId,
+            resolvedChoice: requestToken.preflightChoiceResolved,
+            reasonPreview: 'Resolved project action ignored because Agent mode is disabled.',
+          }, {
+            chatId: requestToken.chatId,
+            resolvedChoice: requestToken.preflightChoiceResolved,
+            latestUserInput: String(promptText || ''),
+          });
         }
       } else {
         const preflightDecision = await requestPreflightRouteDecision(chatId, promptText, {
-          agentEnabled: true,
+          agentEnabled: developerAgentEnabled,
           canvasEnabled: canvasModeUiEnabled,
         });
         const preflightDebug = preflightDecision && preflightDecision._debug ? preflightDecision._debug : null;
@@ -10543,6 +11447,8 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
           chatHistory: getChatDebugSnapshot(chatId),
         });
         if (
+          developerAgentEnabled
+          &&
           preflightDecision.route === 'confirm'
           && !workspaceHasOpenProjectForLog
           && Boolean(preflightDecision.shouldCreateProject)
@@ -10627,10 +11533,13 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
               commitAssistantMessage(chatId, finalText, rawCandidate, {
                 appendToLastAssistant: true,
                 forceNeedsContinue: false,
+                thinkingMeta: buildRequestThinkingMeta(requestToken),
               });
             } else {
               consumeLiveAssistantText();
-              await typewriterAssistantMessage(chatId, rawCandidate);
+              await typewriterAssistantMessage(chatId, rawCandidate, {
+                thinkingMeta: buildRequestThinkingMeta(requestToken),
+              });
             }
             return;
           }
@@ -10647,6 +11556,18 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
           return;
         }
         if (preflightDecision.route === 'agent') {
+          if (!developerAgentEnabled) {
+            recordDebugTrace('preflight_agent_blocked', {
+              chatId: requestToken.chatId,
+              route: 'chat',
+              reasonPreview: 'Agent route blocked because Agent mode is disabled.',
+            }, {
+              chatId: requestToken.chatId,
+              latestUserInput: String(promptText || ''),
+              preflightDecision,
+              workspace: workspaceDebug,
+            });
+          } else {
           requestToken.operationKind = 'agent';
           setThinkingStatus('Planning changes...');
           const handledByAgent = await requestDeveloperAgentReply(requestToken, chatId, promptText);
@@ -10655,6 +11576,7 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
           }
           if (handledByAgent) {
             return;
+          }
           }
         }
       } // end else (preflightChoiceResolved)
@@ -10671,7 +11593,10 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
       });
     }
     setThinkingStatus('Preparing answer...');
-    const inferenceProvider = getSelectedInferenceProvider();
+    const selectedChatWorker = selectWorkerForJob('chat.reply', { allowLocal: true, allowRemote: true });
+    const inferenceProvider = selectedChatWorker && selectedChatWorker.provider
+      ? selectedChatWorker.provider
+      : getSelectedInferenceProvider();
     const debugMessageHistoryTotal = String(getDebugMessageHistoryTotal(chatId));
     if (inferenceProvider !== 'local') {
       const fullPrompt = await buildInferencePrompt(chatId, promptText, {
@@ -10690,6 +11615,8 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
         promptLines: String(fullPrompt.split('\n').length),
         thinkMode: String(Boolean(thinkModeEnabled || requestToken.thinkForced)),
         canvasModeResolved: String(canvasModeOverride === null ? canvasModeUiEnabled : canvasModeOverride),
+        workerId: selectedChatWorker ? selectedChatWorker.id : '',
+        workerType: selectedChatWorker ? selectedChatWorker.type : '',
         provider: inferenceProvider,
         model: String(getProviderModel(inferenceProvider) || ''),
         promptPreview: requestToken.promptPreview,
@@ -10701,6 +11628,7 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
         promptLines: fullPrompt.split('\n').length,
         thinkMode: Boolean(thinkModeEnabled || requestToken.thinkForced),
         canvasModeResolved: Boolean(canvasModeOverride === null ? canvasModeUiEnabled : canvasModeOverride),
+        worker: selectedChatWorker || null,
         provider: inferenceProvider,
         model: String(getProviderModel(inferenceProvider) || ''),
         latestUserInput: String(promptText || ''),
@@ -10714,6 +11642,7 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
           recordDebugTrace('stream_start', {
             chatId: requestToken.chatId,
             streamId: requestToken.streamId,
+            workerId: selectedChatWorker ? selectedChatWorker.id : '',
             provider: inferenceProvider,
             model: String(getProviderModel(inferenceProvider) || ''),
             messageHistoryTotal: debugMessageHistoryTotal,
@@ -10721,6 +11650,7 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
             chatId: requestToken.chatId,
             streamId: requestToken.streamId,
             requestMode: 'remote',
+            worker: selectedChatWorker || null,
             provider: inferenceProvider,
             model: String(getProviderModel(inferenceProvider) || ''),
             messageHistoryTotal: Number(debugMessageHistoryTotal) || 0,
@@ -10791,6 +11721,7 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
           sanitizedPreview: debugPreview(finalText, 1800),
           displayPreview: debugPreview(displayText, 1800),
           provider: inferenceProvider,
+          workerId: selectedChatWorker ? selectedChatWorker.id : '',
           model: String(getProviderModel(inferenceProvider) || ''),
         }, {
           chatId: requestToken.chatId,
@@ -10800,6 +11731,7 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
           deltaCount: requestToken.deltaCount,
           inferenceRoute: String(res && res.status ? res.status.lastInferenceRoute : ''),
           provider: inferenceProvider,
+          worker: selectedChatWorker || null,
           model: String(getProviderModel(inferenceProvider) || ''),
           rawStream: clipDebugText(requestToken.streamRaw, 60000),
           rawCandidate: clipDebugText(rawCandidate, 60000),
@@ -10810,6 +11742,7 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
         commitAssistantMessage(chatId, finalText, rawCandidate, {
           appendToLastAssistant: requestToken.appendToLastAssistant,
           forceNeedsContinue: false,
+          thinkingMeta: buildRequestThinkingMeta(requestToken),
         });
         return;
       }
@@ -10828,6 +11761,7 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
           rawStreamPreview: debugPreview(requestToken.streamRaw, 1800),
           sanitizedPreview: debugPreview(namedText, 1800),
           provider: inferenceProvider,
+          workerId: selectedChatWorker ? selectedChatWorker.id : '',
           model: String(getProviderModel(inferenceProvider) || ''),
         }, {
           chatId: requestToken.chatId,
@@ -10836,6 +11770,7 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
           deltaCount: requestToken.deltaCount,
           inferenceRoute: String(res && res.status ? res.status.lastInferenceRoute : ''),
           provider: inferenceProvider,
+          worker: selectedChatWorker || null,
           model: String(getProviderModel(inferenceProvider) || ''),
           rawStream: clipDebugText(requestToken.streamRaw, 60000),
           sanitizedOutput: clipDebugText(namedText, 60000),
@@ -10844,6 +11779,7 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
         commitAssistantMessage(chatId, namedText, namedText, {
           appendToLastAssistant: requestToken.appendToLastAssistant,
           forceNeedsContinue: false,
+          thinkingMeta: buildRequestThinkingMeta(requestToken),
         });
         return;
       }
@@ -10857,6 +11793,7 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
         rawStreamPreview: debugPreview(requestToken.streamRaw, 1800),
         error: debugPreview(res && res.message ? res.message : `${providerDef.label} inference failed.`, 600),
         provider: inferenceProvider,
+        workerId: selectedChatWorker ? selectedChatWorker.id : '',
         model: String(getProviderModel(inferenceProvider) || ''),
       }, {
         chatId: requestToken.chatId,
@@ -10867,6 +11804,7 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
         rawStream: clipDebugText(requestToken.streamRaw, 60000),
         error: String(res && res.message ? res.message : `${providerDef.label} inference failed.`),
         provider: inferenceProvider,
+        worker: selectedChatWorker || null,
         model: String(getProviderModel(inferenceProvider) || ''),
         workspace: getWorkspaceDebugSnapshot(),
       });
@@ -10889,11 +11827,14 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
         promptLines: String(fullPrompt.split('\n').length),
         thinkMode: String(Boolean(thinkModeEnabled || requestToken.thinkForced)),
         canvasModeResolved: String(canvasModeOverride === null ? canvasModeUiEnabled : canvasModeOverride),
+        workerId: selectedChatWorker ? selectedChatWorker.id : 'local-runtime',
+        workerType: selectedChatWorker ? selectedChatWorker.type : 'local-inference',
         model: String(appSettings.modelUrl || ''),
         promptPreview: requestToken.promptPreview,
       }, {
         chatId: requestToken.chatId,
         requestMode: 'local',
+        worker: selectedChatWorker || null,
         ...getCurrentDebugModelInfo(),
         messageHistoryTotal: Number(debugMessageHistoryTotal) || 0,
         promptLength: fullPrompt.length,
@@ -10911,12 +11852,14 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
           recordDebugTrace('stream_start', {
             chatId: requestToken.chatId,
             streamId: requestToken.streamId,
+            workerId: selectedChatWorker ? selectedChatWorker.id : 'local-runtime',
             model: String(appSettings.modelUrl || ''),
             messageHistoryTotal: debugMessageHistoryTotal,
           }, {
             chatId: requestToken.chatId,
             streamId: requestToken.streamId,
             requestMode: 'local',
+            worker: selectedChatWorker || null,
             ...getCurrentDebugModelInfo(),
             messageHistoryTotal: Number(debugMessageHistoryTotal) || 0,
           });
@@ -11134,6 +12077,7 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
         commitAssistantMessage(chatId, finalText, rawCandidate, {
           appendToLastAssistant: requestToken.appendToLastAssistant,
           forceNeedsContinue,
+          thinkingMeta: buildRequestThinkingMeta(requestToken),
         });
         if (autoContinue) {
           requestToken.nextAction = () => {
@@ -11181,6 +12125,7 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
         commitAssistantMessage(chatId, namedText, namedText, {
           appendToLastAssistant: requestToken.appendToLastAssistant,
           forceNeedsContinue: partialNeedsContinue,
+          thinkingMeta: buildRequestThinkingMeta(requestToken),
         });
         return;
       }
@@ -11221,9 +12166,12 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
             commitAssistantMessage(chatId, namedOutput, namedOutput, {
               appendToLastAssistant: true,
               forceNeedsContinue: fallbackNeedsContinue,
+              thinkingMeta: buildRequestThinkingMeta(requestToken),
             });
           } else {
-            await typewriterAssistantMessage(chatId, namedOutput);
+            await typewriterAssistantMessage(chatId, namedOutput, {
+              thinkingMeta: buildRequestThinkingMeta(requestToken),
+            });
           }
           return;
         }
@@ -11291,6 +12239,7 @@ async function resolveTypingFallback(chatId) {
 loadAuthStore();
 updateLoginUi();
 loadAppSettings();
+moveGlobalControlsIntoSidebar();
 setupMacTopbarNativeDrag();
 hydrateCustomTooltips(document);
 initGlobalTooltipSystem();
@@ -11304,7 +12253,11 @@ function handleProjKey(e) {
 function createFolder() {
   if (!ensureSignedIn()) return;
   if (!nativeBridge.available()) {
-    window.alert('Native runtime bridge unavailable.');
+    showAppNotification({
+      title: 'Runtime unavailable',
+      message: 'Native runtime bridge unavailable.',
+      kind: 'error',
+    });
     return;
   }
   startWorkspaceDraft('folder');
@@ -11313,7 +12266,11 @@ function createFolder() {
 function createFile() {
   if (!ensureSignedIn()) return;
   if (!nativeBridge.available()) {
-    window.alert('Native runtime bridge unavailable.');
+    showAppNotification({
+      title: 'Runtime unavailable',
+      message: 'Native runtime bridge unavailable.',
+      kind: 'error',
+    });
     return;
   }
   startWorkspaceDraft('file');
@@ -11322,7 +12279,11 @@ function createFile() {
 function renameSelectedWorkspaceItem() {
   if (!ensureSignedIn()) return;
   if (!nativeBridge.available()) {
-    window.alert('Native runtime bridge unavailable.');
+    showAppNotification({
+      title: 'Runtime unavailable',
+      message: 'Native runtime bridge unavailable.',
+      kind: 'error',
+    });
     return;
   }
   void startWorkspaceRenameSelected();
@@ -11353,7 +12314,11 @@ function generateProject() {
 async function newProject() {
   if (!ensureSignedIn()) return;
   if (!nativeBridge.available()) {
-    window.alert('Native runtime bridge unavailable.');
+    showAppNotification({
+      title: 'Runtime unavailable',
+      message: 'Native runtime bridge unavailable.',
+      kind: 'error',
+    });
     return;
   }
 
@@ -11366,7 +12331,11 @@ async function newProject() {
     // Close the current project first.
     const closeRes = await invokeWorkspaceAction('workspaceCloseRoot', {});
     if (!closeRes || !closeRes.ok) {
-      window.alert((closeRes && closeRes.message) || 'Failed to close current project.');
+      showAppNotification({
+        title: 'Project close failed',
+        message: (closeRes && closeRes.message) || 'Failed to close current project.',
+        kind: 'error',
+      });
       return;
     }
     clearWorkspaceDragExpandTimers();
@@ -11382,7 +12351,11 @@ async function newProject() {
   // Create a new project folder in Downloads and set it as workspace root.
   const response = await invokeWorkspaceAction('workspaceNewProject', {});
   if (!response || !response.ok) {
-    window.alert((response && response.message) || 'Failed to create new project.');
+    showAppNotification({
+      title: 'Project creation failed',
+      message: (response && response.message) || 'Failed to create new project.',
+      kind: 'error',
+    });
     return;
   }
 
@@ -11426,6 +12399,9 @@ Object.assign(window, {
 });
 
 window.addEventListener('beforeunload', () => {
+  if (activeAgentStreamState && activeAgentStreamState.chatId) {
+    commitInterruptedAgentRun(String(activeAgentStreamState.chatId || ''), 'Agent was interrupted before the app closed or reloaded.');
+  }
   persistFileTabsStateNow();
   clearDebugTraceEntries();
 });

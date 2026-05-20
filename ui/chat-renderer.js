@@ -88,6 +88,20 @@
       return `${seconds}s`;
     }
 
+    function formatThoughtDuration(startedAtMs, completedAtMs = Date.now()) {
+      const start = Number(startedAtMs) || 0;
+      if (!start) return 'a couple of seconds';
+      const end = Math.max(start, Number(completedAtMs) || (start + 2000));
+      const totalSec = Math.max(0, Math.round((end - start) / 1000));
+      if (totalSec < 3) return 'a couple of seconds';
+      if (totalSec < 60) return `${totalSec} seconds`;
+      const minutes = Math.floor(totalSec / 60);
+      const seconds = totalSec - (minutes * 60);
+      if (minutes === 1 && seconds < 10) return 'a minute';
+      if (minutes === 1) return `1 minute ${seconds}s`;
+      return seconds > 0 ? `${minutes} minutes ${seconds}s` : `${minutes} minutes`;
+    }
+
     function normalizeAgentActivities(list) {
       return Array.from(list || [])
         .map((item) => {
@@ -608,15 +622,13 @@
     function buildAgentPlanActivity(planSpec = null) {
       const plan = planSpec && typeof planSpec === 'object' ? planSpec : null;
       if (!plan) return null;
-      const detail = String(plan.summary || (plan.projectName ? plan.projectName.replace(/-/g, ' ') : 'Plan ready')).trim();
-      const meta = Array.isArray(plan.expectedFiles) && plan.expectedFiles.length
-        ? plan.expectedFiles.slice(0, 6).join(' ')
-        : (plan.taskKind === 'project' ? 'MVP deliverables planned' : '');
+      const detail = String(plan.summary || '').trim();
+      if (!detail) return null;
       return {
         kind: 'plan',
         title: '',
         detail,
-        meta,
+        meta: '',
         status: 'done',
       };
     }
@@ -624,12 +636,7 @@
     function buildAgentCorrectionActivity(detail) {
       const text = String(detail || '').trim();
       if (!text) return null;
-      return buildInlineAgentActivityBase({
-        kind: 'correction',
-        title: 'Needs work',
-        detail: text,
-        status: 'done',
-      });
+      return null;
     }
 
     async function openAgentActivityTarget(activity) {
@@ -738,7 +745,7 @@
       const detail = String(activity && activity.detail ? activity.detail : '').trim();
       if (detail) {
         const detailEl = document.createElement('div');
-        detailEl.className = `msg-agent-activity-detail${activity && activity.kind === 'plan' ? ' plan-note' : ''}`;
+        detailEl.className = `msg-agent-activity-detail${activity && (activity.kind === 'plan' || activity.kind === 'summary') ? ' plan-note' : ''}`;
         detailEl.textContent = detail;
         item.appendChild(detailEl);
       }
@@ -1087,6 +1094,106 @@
       return button;
     }
 
+    function setThoughtPanelExpanded(panel, expanded, animate = true) {
+      if (!panel) return;
+      panel.dataset.expanded = expanded ? 'true' : 'false';
+      const summaryToggle = panel.querySelector('.msg-thought-summary-toggle');
+      if (summaryToggle) summaryToggle.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+      const drawer = panel.querySelector('.msg-agent-activity-drawer');
+      if (!drawer) return;
+      if (!animate) {
+        drawer.hidden = !expanded;
+        drawer.style.maxHeight = expanded ? 'none' : '0px';
+        drawer.style.opacity = expanded ? '1' : '0';
+        drawer.style.transform = expanded ? 'translateY(0)' : 'translateY(-6px)';
+      } else if (expanded) {
+        drawer.hidden = false;
+        drawer.style.maxHeight = '0px';
+        drawer.style.opacity = '0';
+        drawer.style.transform = 'translateY(-6px)';
+        requestAnimationFrame(() => {
+          drawer.style.maxHeight = `${drawer.scrollHeight}px`;
+          drawer.style.opacity = '1';
+          drawer.style.transform = 'translateY(0)';
+        });
+        const settle = () => {
+          drawer.style.maxHeight = 'none';
+          drawer.removeEventListener('transitionend', settle);
+        };
+        drawer.addEventListener('transitionend', settle);
+      } else {
+        drawer.style.maxHeight = `${drawer.scrollHeight}px`;
+        drawer.style.opacity = '1';
+        drawer.style.transform = 'translateY(0)';
+        requestAnimationFrame(() => {
+          drawer.style.maxHeight = '0px';
+          drawer.style.opacity = '0';
+          drawer.style.transform = 'translateY(-6px)';
+        });
+        const settle = () => {
+          drawer.hidden = true;
+          drawer.removeEventListener('transitionend', settle);
+        };
+        drawer.addEventListener('transitionend', settle);
+      }
+    }
+
+    function buildThoughtSummaryToggle(label, expanded = false) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'msg-thought-summary-toggle';
+      button.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+
+      const labelText = document.createElement('span');
+      labelText.className = 'msg-thought-summary-label-text';
+      labelText.textContent = String(label || '').trim() || 'Details';
+      button.appendChild(labelText);
+
+      const chevron = document.createElement('span');
+      chevron.className = 'msg-thought-summary-chevron';
+      chevron.innerHTML = `
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M4.5 6.5 8 10l3.5-3.5"></path>
+        </svg>
+      `;
+      button.appendChild(chevron);
+
+      button.addEventListener('click', () => {
+        const panel = button.closest('.msg-thought-panel');
+        const nextExpanded = !(panel && panel.dataset.expanded === 'true');
+        setThoughtPanelExpanded(panel, nextExpanded, true);
+      });
+      return button;
+    }
+
+    function buildThinkingPanel(thinkingText = '', options = {}) {
+      const text = String(thinkingText || '').trim();
+      const inProgress = Boolean(options.inProgress);
+      if (!text && !inProgress) return null;
+
+      const expanded = inProgress;
+      const wrapper = document.createElement('div');
+      wrapper.className = 'msg-agent-panel msg-thought-panel';
+      if (inProgress) wrapper.classList.add('in-progress');
+      wrapper.dataset.expanded = expanded ? 'true' : 'false';
+      const label = inProgress
+        ? 'Thinking'
+        : `Thought for ${formatThoughtDuration(options.startedAt, options.completedAt)}`;
+      wrapper.appendChild(buildThoughtSummaryToggle(label, expanded));
+
+      const drawer = document.createElement('div');
+      drawer.className = 'msg-agent-activity-drawer';
+      if (text) {
+        const body = document.createElement('div');
+        body.className = 'msg-agent-activity-thought';
+        body.textContent = text;
+        drawer.appendChild(body);
+      }
+      wrapper.appendChild(drawer);
+      setThoughtPanelExpanded(wrapper, expanded, false);
+      return wrapper;
+    }
+
     function buildAgentActivityPanel(chatId, activities, options = {}) {
       const normalizedRows = normalizeAgentActivities(activities);
       const meta = normalizeAgentMeta(options.agentMeta);
@@ -1161,10 +1268,16 @@
       if (!bubble) return;
       bubble.innerHTML = '';
       const shouldShowThinkingLoader = Boolean(options.showThinkingLoader);
+      const thinkingPanel = buildThinkingPanel(options.thinkingText || '', {
+        inProgress: shouldShowThinkingLoader,
+        startedAt: options.thinkingStartedAt,
+        completedAt: options.thinkingCompletedAt,
+      });
       if (options.showCanvasLoader) {
         bubble.appendChild(buildCanvasLoader(displayText, options.canvasRawText));
         return;
       }
+      if (thinkingPanel) bubble.appendChild(thinkingPanel);
       if (Array.isArray(options.agentActivities) && (options.agentActivities.length > 0 || options.agentStatusText)) {
         bubble.appendChild(buildAgentActivityPanel(options.chatId || '', options.agentActivities, {
           statusText: options.agentStatusText || '',
@@ -1202,10 +1315,9 @@
       content.innerHTML = d.renderMarkdownHtml ? d.renderMarkdownHtml(contentText) : contentText;
       bubble.appendChild(content);
       if (typeof d.attachCodeCopyButtons === 'function') d.attachCodeCopyButtons(content);
-      if (shouldShowThinkingLoader) bubble.appendChild(buildThinkingLoader());
     }
 
-    function buildMsgNode(role, text, chatId = '', messageTs = 0, loopDetected = false, thinkingText = '', branchAnchorTs = 0, agentActivities = [], agentMeta = null) {
+    function buildMsgNode(role, text, chatId = '', messageTs = 0, loopDetected = false, thinkingText = '', branchAnchorTs = 0, agentActivities = [], agentMeta = null, displayTs = 0, thinkingMeta = null) {
       const div = document.createElement('div');
       div.className = `msg ${role}`;
       const editingUserMessage = role === 'user' && d.isEditingUserMessage && d.isEditingUserMessage(chatId, messageTs);
@@ -1227,7 +1339,15 @@
         canvasFollowUp = originalText.slice(markerIndex + followMarker.length).trim();
       }
       if (role === 'ai') {
-        populateAssistantBubble(bubble, renderText, { chatId, agentActivities, agentMeta, messageTs });
+        populateAssistantBubble(bubble, renderText, {
+          chatId,
+          agentActivities,
+          agentMeta,
+          messageTs,
+          thinkingText,
+          thinkingStartedAt: Number(thinkingMeta && thinkingMeta.startedAt) || 0,
+          thinkingCompletedAt: Number(thinkingMeta && thinkingMeta.completedAt) || 0,
+        });
       } else if (role === 'error') {
         bubble.textContent = renderText;
       } else if (editingUserMessage) {
@@ -1356,6 +1476,21 @@
       if (role === 'ai' || role === 'user') {
         const actions = document.createElement('div');
         actions.className = `msg-action-rail ${role}`;
+        const makeTimeNode = () => {
+          const ts = Number(displayTs) || Number(messageTs) || 0;
+          const label = ts && typeof d.formatMessageClockTime === 'function'
+            ? d.formatMessageClockTime(ts)
+            : '';
+          if (!label) return null;
+          const node = document.createElement('span');
+          node.className = 'msg-action-time';
+          node.textContent = label;
+          const full = typeof d.formatMessageFullTime === 'function'
+            ? d.formatMessageFullTime(ts)
+            : '';
+          if (full) node.title = full;
+          return node;
+        };
         const makeActionButton = (kind, title, onClick) => {
           const btn = document.createElement('button');
           btn.className = `msg-action-btn ${kind}`;
@@ -1372,6 +1507,8 @@
         };
 
         if (role === 'user') {
+          const timeNode = makeTimeNode();
+          if (timeNode) actions.appendChild(timeNode);
           actions.appendChild(makeActionButton('edit', 'Edit', async () => {
             if (typeof d.editUserMessage === 'function') d.editUserMessage(chatId, messageTs);
           }));
@@ -1394,6 +1531,8 @@
           const aiNav = (d.buildBranchNavigator && d.buildBranchNavigator(chatId, navTargetTs, 'retry'))
             || (d.buildBranchNavigator && d.buildBranchNavigator(chatId, d.findFallbackRetryAnchorTs ? d.findFallbackRetryAnchorTs(chatId, messageTs) : 0, 'retry'));
           if (aiNav) actions.appendChild(aiNav);
+          const timeNode = makeTimeNode();
+          if (timeNode) actions.appendChild(timeNode);
         }
         if (actions.childElementCount > 0) stack.appendChild(actions);
       }
@@ -1481,6 +1620,8 @@
           Number(msg.branchAnchorTs) || 0,
           msg.agentActivities || [],
           msg.agentMeta || null,
+          Number(msg.displayTs) || 0,
+          msg.thinkingMeta || null,
         ));
       });
       if (forceBottom || (d.getChatAutoScrollPinned && d.getChatAutoScrollPinned())) {
