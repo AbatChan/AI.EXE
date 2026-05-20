@@ -130,9 +130,82 @@
           const looksLikeEditProgram = rawContent.startsWith('[') || rawContent.startsWith('{');
           const looksLikeRawCode = rawContent.length > 40 && !looksLikeEditProgram;
           const isProjectCreation = String(planSpec && planSpec.taskKind || '').toLowerCase() === 'project';
+          const isEditTask = String(planSpec && planSpec.taskKind || '').toLowerCase() === 'edit';
           const expectedFiles = Array.isArray(planSpec && planSpec.expectedFiles) ? planSpec.expectedFiles : [];
+          const plannedInspectFiles = Array.isArray(planSpec && planSpec.filesToInspect)
+            ? planSpec.filesToInspect.map((path) => deps.normalizeWorkspacePath(path || '')).filter(Boolean)
+            : [];
+          const plannedAffectedFiles = Array.isArray(planSpec && planSpec.affectedFiles)
+            ? planSpec.affectedFiles.map((path) => deps.normalizeWorkspacePath(path || '')).filter(Boolean)
+            : [];
           const targetPath = deps.normalizeWorkspacePath(decision.path || '');
           const isExpectedFile = expectedFiles.map((path) => deps.normalizeWorkspacePath(path || '')).includes(targetPath);
+          const successfulReads = new Set(toolEvents
+            .filter((event) => event && event.ok && String(event.tool || '').toLowerCase() === 'read_file')
+            .map((event) => deps.normalizeWorkspacePath(event.path || ''))
+            .filter(Boolean));
+          const successfulWrites = new Set(toolEvents
+            .filter((event) => event && event.ok && ['write_file', 'edit_file'].includes(String(event.tool || '').toLowerCase()))
+            .map((event) => deps.normalizeWorkspacePath(event.path || ''))
+            .filter(Boolean));
+          if (isEditTask && plannedInspectFiles.length > 1) {
+            const unreadPlannedFile = plannedInspectFiles.find((path) => !successfulReads.has(path));
+            if (unreadPlannedFile) {
+              recordDebugTrace('agent_edit_deferred_for_planned_read', {
+                chatId: String(chatId || ''),
+                step: String(step),
+                attemptedPath: deps.debugPreview(targetPath, 180),
+                readPath: deps.debugPreview(unreadPlannedFile, 180),
+              }, {
+                chatId: String(chatId || ''),
+                step,
+                originalDecision: decision,
+                planSpec,
+                toolEvents,
+              });
+              return {
+                action: 'tool',
+                tool: 'read_file',
+                message: `Read ${unreadPlannedFile} before editing the coordinated feature.`,
+                path: unreadPlannedFile,
+                content: '',
+                srcPath: '',
+                dstPath: '',
+                raw: '[repair-read-planned-file-before-edit]',
+              };
+            }
+          }
+          if (isEditTask && plannedAffectedFiles.length > 1 && targetPath && successfulWrites.has(targetPath)) {
+            const untouchedAffectedFile = plannedAffectedFiles.find((path) => path !== targetPath && !successfulWrites.has(path));
+            if (untouchedAffectedFile) {
+              recordDebugTrace('agent_repeat_edit_redirected_to_planned_file', {
+                chatId: String(chatId || ''),
+                step: String(step),
+                attemptedPath: deps.debugPreview(targetPath, 180),
+                nextPath: deps.debugPreview(untouchedAffectedFile, 180),
+              }, {
+                chatId: String(chatId || ''),
+                step,
+                originalDecision: decision,
+                planSpec,
+                toolEvents,
+              });
+              return {
+                action: 'tool',
+                tool: successfulReads.has(untouchedAffectedFile) ? 'edit_file' : 'read_file',
+                message: successfulReads.has(untouchedAffectedFile)
+                  ? `Update ${untouchedAffectedFile} as the next planned file for this feature.`
+                  : `Read ${untouchedAffectedFile} before editing the next planned file.`,
+                path: untouchedAffectedFile,
+                content: '',
+                srcPath: '',
+                dstPath: '',
+                raw: successfulReads.has(untouchedAffectedFile)
+                  ? '[repair-edit-next-planned-file]'
+                  : '[repair-read-next-planned-file]',
+              };
+            }
+          }
           const hasReadTarget = toolEvents.some((event) => (
             event
             && event.ok
