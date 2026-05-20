@@ -30,6 +30,8 @@ Rules:
 - For a simple web app with separate HTML, CSS, and JavaScript, expected_files must include /index.html|/style.css|/script.js. Add /README.md only when the user asks for README/docs/run instructions.
 - For edit tasks, affected_files must list every file that must change for the feature to actually work. If the request needs structure, styling, and behavior, include all relevant files. If only styling changes, include only styling files.
 - For edit or analysis tasks, files_to_inspect should list the files whose current contents are needed for an aware next step. Leave empty only when discovery/search is needed first.
+- For follow-up edits in a small known workspace, plan to inspect the central files directly instead of searching for filenames.
+- For debugging from a pasted error, plan search around distinctive error text, function names, selectors, or stack frames, then inspect the matching source file before editing.
 - done_criteria should say what must be true before finalizing, for example "calculator controls exist|calculator buttons work|theme preference persists".
 - validation should say how to check the result. Use validate_files for static project checks when useful, but do not invent expensive checks.
 - expected_files must contain text-editable deliverables only. Do not include binary assets like .png, .jpg, .jpeg, .gif, or .webp.
