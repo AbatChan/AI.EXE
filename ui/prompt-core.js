@@ -103,7 +103,7 @@
         '- If the task is complete, return {"action":"final","tool":"none",...}.',
         '- If the same blocker appears twice for the same target or requirement, do not retry the same underlying action with a different tool. Either choose a genuinely different grounded step or finalize with a limitation/explanation.',
         '- If the user is asking for explanation or instructions about existing code, prefer read_file and then final instead of editing files.',
-        '- If the next file to edit is unclear, prefer PLAN paths, validation issue paths, and already-listed source files. Use search_files only when no grounded candidate file is known.',
+        '- If the next file to edit is unclear, prefer PLAN paths, validation issue paths, and already-listed source files. Use search_files to locate pasted errors, symbols, selectors, or keywords inside files; do not use it as filename discovery.',
         '- For a new app/project that includes README.md, do not stop to inspect before writing it; use the planned files and recent writes. Only read implementation files first for docs-only or existing-code documentation tasks.',
         '- If validate_files finds issues, DO NOT call validate_files again. Read and fix the specific files.',
         '- Never copy literal placeholder values from examples.',
