@@ -470,6 +470,7 @@
           ? getDuplicateDecisionObservation(decision)
           : '';
         if (duplicateDecisionObservation) {
+          let duplicateRepairedToFallback = false;
           const duplicateTool = String(decision.tool || '').toLowerCase();
           toolEvents.push({
             tool: decision.tool,
@@ -530,42 +531,74 @@
           }
           if (duplicateTool === 'edit_file' || duplicateTool === 'read_file') {
             const duplicatePath = normalizeDecisionPath(decision.path || '');
-            const duplicateBlockedCount = toolEvents.filter((event) => (
-              event
-              && !event.ok
-              && String(event.tool || '').toLowerCase() === duplicateTool
-              && normalizeDecisionPath(event.path || '') === duplicatePath
-              && /same tool\/target already failed|already read and no workspace changes/i.test(String(event.observation || ''))
-            )).length;
-            if (duplicateBlockedCount >= 2) {
-              const blockedText = duplicateTool === 'edit_file'
-                ? `I stopped because editing ${duplicatePath || 'the target file'} kept hitting the same blocker. I did not switch to unrelated files just to keep the loop running.`
-                : `I stopped because ${duplicatePath || 'that file'} was already read and no workspace changes happened after it. I did not keep rereading or switch to unrelated files.`;
-              setAgentProgress('Stopped.');
-              deps.consumeLiveAssistantText();
-              deps.commitAssistantMessage(chatId, blockedText, blockedText, {
-                agentActivities,
-                agentMeta: { startedAt, completedAt: Date.now(), collapsed: true },
-                forceNeedsContinue: true,
-              });
-              recordDebugTrace('agent_done', {
-                chatId: String(chatId || ''),
-                step: String(step),
-                fallback: 'true',
-                reason: 'duplicate_target_blocker',
-              }, {
-                chatId: String(chatId || ''),
-                step,
-                fallback: true,
-                reason: 'duplicate_target_blocker',
-                toolEvents,
-              });
-              return true;
+            const fallbackDecision = deps.deriveFallbackAgentDecision(taskText, toolEvents, planSpec);
+            if (fallbackDecision && fallbackDecision.action === 'tool' && fallbackDecision.tool && fallbackDecision.tool !== 'none') {
+              const fallbackSignature = buildDecisionSignature(fallbackDecision);
+              const duplicateSignature = buildDecisionSignature(decision);
+              const sameTarget = fallbackSignature.tool === duplicateSignature.tool
+                && fallbackSignature.path === duplicateSignature.path
+                && fallbackSignature.srcPath === duplicateSignature.srcPath
+                && fallbackSignature.dstPath === duplicateSignature.dstPath;
+              if (!sameTarget) {
+                recordDebugTrace('agent_duplicate_decision_repaired', {
+                  chatId: String(chatId || ''),
+                  step: String(step),
+                  fromTool: String(decision.tool || ''),
+                  fromPath: deps.debugPreview(String(decision.path || ''), 180),
+                  toTool: String(fallbackDecision.tool || ''),
+                  toPath: deps.debugPreview(String(fallbackDecision.path || ''), 180),
+                }, {
+                  chatId: String(chatId || ''),
+                  step,
+                  originalDecision: decision,
+                  repairedDecision: fallbackDecision,
+                  duplicateDecisionObservation,
+                  toolEvents,
+                });
+                decision = fallbackDecision;
+                duplicateRepairedToFallback = true;
+              }
             }
-            setAgentProgress('Continuing...');
-            continue;
+            if (duplicateRepairedToFallback) {
+              setAgentProgress('Continuing...');
+            } else {
+              const duplicateBlockedCount = toolEvents.filter((event) => (
+                event
+                && !event.ok
+                && String(event.tool || '').toLowerCase() === duplicateTool
+                && normalizeDecisionPath(event.path || '') === duplicatePath
+                && /same tool\/target already failed|already read and no workspace changes/i.test(String(event.observation || ''))
+              )).length;
+              if (duplicateBlockedCount >= 2) {
+                const blockedText = duplicateTool === 'edit_file'
+                  ? `I stopped because editing ${duplicatePath || 'the target file'} kept hitting the same blocker. I did not switch to unrelated files just to keep the loop running.`
+                  : `I stopped because ${duplicatePath || 'that file'} was already read and no workspace changes happened after it. I did not keep rereading or switch to unrelated files.`;
+                setAgentProgress('Stopped.');
+                deps.consumeLiveAssistantText();
+                deps.commitAssistantMessage(chatId, blockedText, blockedText, {
+                  agentActivities,
+                  agentMeta: { startedAt, completedAt: Date.now(), collapsed: true },
+                  forceNeedsContinue: true,
+                });
+                recordDebugTrace('agent_done', {
+                  chatId: String(chatId || ''),
+                  step: String(step),
+                  fallback: 'true',
+                  reason: 'duplicate_target_blocker',
+                }, {
+                  chatId: String(chatId || ''),
+                  step,
+                  fallback: true,
+                  reason: 'duplicate_target_blocker',
+                  toolEvents,
+                });
+                return true;
+              }
+              setAgentProgress('Continuing...');
+              continue;
+            }
           }
-          const fallbackDecision = deps.deriveFallbackAgentDecision(taskText, toolEvents, planSpec);
+          const fallbackDecision = duplicateRepairedToFallback ? null : deps.deriveFallbackAgentDecision(taskText, toolEvents, planSpec);
           if (fallbackDecision && fallbackDecision.action === 'tool' && fallbackDecision.tool && fallbackDecision.tool !== 'none') {
             const fallbackSignature = buildDecisionSignature(fallbackDecision);
             const duplicateSignature = buildDecisionSignature(decision);
