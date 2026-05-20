@@ -56,6 +56,54 @@
       return Array.from(new Set([...quoted, ...lines, ...words].map((item) => String(item || '').trim()).filter(Boolean))).slice(0, 24);
     }
 
+    function escapeRegExp(text) {
+      return String(text || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    }
+
+    function basenameForSearch(path) {
+      return String(path || '').split('/').filter(Boolean).pop() || '';
+    }
+
+    function queryLooksLikeFilenameSearch(query, needles = []) {
+      const src = String(query || '');
+      if (/(?:^|[\s"'`])(?:\*[\w.*?-]*|\.[a-z0-9]{1,8}\b|[\w.-]+\.(?:html?|css|scss|sass|less|js|mjs|cjs|ts|jsx|tsx|json|md|txt|py)\b)/i.test(src)) {
+        return true;
+      }
+      return needles.some((needle) => {
+        const item = String(needle || '').trim();
+        return /[*?]/.test(item) || /^\.[a-z0-9]{1,8}$/i.test(item) || /\.[a-z0-9]{1,8}$/i.test(item);
+      });
+    }
+
+    function filePathMatchesSearchNeedle(filePath, needle, rawQuery = '') {
+      const normalizedPath = deps.normalizeWorkspacePath(filePath || '');
+      const pathWithoutSlash = normalizedPath.replace(/^\//, '').toLowerCase();
+      const basename = basenameForSearch(normalizedPath).toLowerCase();
+      const lowerNeedle = String(needle || '').trim().toLowerCase();
+      if (!lowerNeedle) return false;
+      if (/[*?]/.test(lowerNeedle)) {
+        const pattern = `^${escapeRegExp(lowerNeedle)
+          .replace(/\\\*/g, '.*')
+          .replace(/\\\?/g, '.')}$`;
+        try {
+          const regex = new RegExp(pattern, 'i');
+          return regex.test(basename) || regex.test(pathWithoutSlash);
+        } catch (_) {
+          return false;
+        }
+      }
+      if (/^\.[a-z0-9]{1,8}$/i.test(lowerNeedle)) {
+        return basename.endsWith(lowerNeedle);
+      }
+      if (/\.[a-z0-9]{1,8}$/i.test(lowerNeedle)) {
+        return basename === lowerNeedle || pathWithoutSlash.endsWith(lowerNeedle.replace(/^\//, ''));
+      }
+      if (/\.[a-z0-9]{1,8}\b/i.test(String(rawQuery || ''))) {
+        return basename.includes(lowerNeedle) || pathWithoutSlash.includes(lowerNeedle);
+      }
+      return false;
+    }
+
     function lineMatchesNeedle(line, needle) {
       const haystack = String(line || '').toLowerCase();
       const lowerNeedle = String(needle || '').toLowerCase();
@@ -536,6 +584,13 @@
         }
         const files = await collectSearchableWorkspaceFiles(path || '/', 80);
         const results = [];
+        if (queryLooksLikeFilenameSearch(query, needles)) {
+          for (const filePath of files) {
+            if (results.length >= 60) break;
+            if (!needles.some((needle) => filePathMatchesSearchNeedle(filePath, needle, query))) continue;
+            results.push(`- ${filePath}:1: filename match`);
+          }
+        }
         for (const filePath of files) {
           if (results.length >= 60) break;
           const response = await deps.invokeWorkspaceAction('workspaceReadFile', { path: filePath });

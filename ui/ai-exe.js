@@ -7732,6 +7732,15 @@ const agentPlanGrammar = String(promptCoreApi.agentPlanGrammar || '');
 
 function getWorkspaceContext() {
   const rootNode = workspaceTreeState.get('/') || null;
+  const rootEntries = rootNode && Array.isArray(rootNode.children)
+    ? rootNode.children.slice(0, 60).map((entry) => ({
+      kind: String(entry && entry.kind ? entry.kind : ''),
+      path: normalizeWorkspacePath(entry && entry.path ? entry.path : ''),
+      name: String(entry && entry.name ? entry.name : ''),
+      childCount: Number(entry && entry.childCount) || 0,
+      sizeBytes: Number(entry && entry.sizeBytes) || 0,
+    }))
+    : [];
   const rootEntryCount = rootNode && Array.isArray(rootNode.children)
     ? rootNode.children.length
     : 0;
@@ -7742,6 +7751,7 @@ function getWorkspaceContext() {
     selectedPaths: Array.from(workspaceSelectedPaths || []),
     rootLoaded: Boolean(rootNode && rootNode.loaded),
     rootEntryCount,
+    rootEntries,
   };
 }
 

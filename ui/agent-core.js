@@ -1151,11 +1151,35 @@
         : fallbackProjectName;
       let expectedFiles = parseAgentExpectedFiles(parsed && parsed.expected_files ? parsed.expected_files : '');
       expectedFiles = expectedFiles.filter((path) => !/\.(?:png|jpe?g|gif|webp|bmp|ico|tiff?)$/i.test(String(path || '')));
-      const affectedFiles = parseAgentPlanPathList(parsed && parsed.affected_files ? parsed.affected_files : '');
-      const filesToInspect = parseAgentPlanPathList(parsed && parsed.files_to_inspect ? parsed.files_to_inspect : '');
+      let affectedFiles = parseAgentPlanPathList(parsed && parsed.affected_files ? parsed.affected_files : '');
+      let filesToInspect = parseAgentPlanPathList(parsed && parsed.files_to_inspect ? parsed.files_to_inspect : '');
       const doneCriteria = parseAgentPlanTextList(parsed && parsed.done_criteria ? parsed.done_criteria : '');
       const validationSteps = parseAgentPlanTextList(parsed && parsed.validation ? parsed.validation : '', 6);
       const looksLikeWebProjectTask = taskKind === 'project' && (WEB_TASK_HINT_REGEX.test(lower) || /\bcalculator\b/.test(lower));
+      const rootEntries = Array.isArray(workspaceContext.rootEntries) ? workspaceContext.rootEntries : [];
+      const rootFilePaths = rootEntries
+        .filter((entry) => String(entry && entry.kind || '').toLowerCase() !== 'folder')
+        .map((entry) => normalizeWorkspacePath((entry && entry.path) || (entry && entry.name ? `/${entry.name}` : '')))
+        .filter(Boolean);
+      const findRootFile = (regex) => rootFilePaths.find((path) => regex.test(path)) || '';
+      const webEditNeedsCoordinatedFiles = taskKind === 'edit'
+        && hasOpenWorkspaceContext()
+        && /\b(design|style|layout|responsive|mobile|dark\s*mode|light\s*mode|theme|toggle|calculator|modern|polish|ui|frontend)\b/i.test(lower);
+      if (webEditNeedsCoordinatedFiles) {
+        const coordinatedFiles = [
+          findRootFile(/\/[^/]+\.html?$/i),
+          findRootFile(/\/[^/]+\.(?:css|scss|sass|less)$/i),
+          findRootFile(/\/[^/]+\.(?:js|mjs|cjs|ts|jsx|tsx)$/i),
+        ].filter(Boolean);
+        if (coordinatedFiles.length > 0) {
+          if (affectedFiles.length === 0) {
+            affectedFiles = coordinatedFiles.slice();
+          }
+          if (filesToInspect.length === 0) {
+            filesToInspect = coordinatedFiles.slice();
+          }
+        }
+      }
       const expectedFilesLookLikeGenericText = expectedFiles.length > 0 && expectedFiles.every((path) => /\.(txt|md)$/i.test(String(path || '')));
       if (looksLikeWebProjectTask && (primaryStack === 'generic' || expectedFilesLookLikeGenericText)) {
         primaryStack = 'web';

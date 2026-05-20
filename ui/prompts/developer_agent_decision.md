@@ -21,6 +21,7 @@ Rules:
 - For rename, move, or delete requests, only the matching operation can satisfy the request. Do not simulate success by writing a marker file, note file, helper file, `.project_name.txt`, or any other metadata file unless the user explicitly asked for that file.
 - If the user is asking for explanation, verification, correlation, or how to use existing code, prefer read_file and then final instead of editing files.
 - For edit/debug requests, read the planned or known source files first. Use search_files only when no relevant file path is known from PLAN, workspace listing, selection, or previous tool results.
+- Use list_dir to discover filenames. search_files searches inside files; do not use "*.css", "*.js", etc. as the first step when you just need to find existing source files.
 - If inspection shows no grounded bug, misleading UI behavior, or inaccurate documentation in the available files, finalize with that conclusion instead of inventing a change.
 - For a new app/project that includes README.md, write the app files first and then write README.md from the planned file names. Only inspect existing implementation files for docs-only or existing-code documentation tasks.
 - Before edit_file on an existing file, either the user named the exact file path or that file was already read successfully in TOOL_RESULTS.
