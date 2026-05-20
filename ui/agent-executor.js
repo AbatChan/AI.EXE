@@ -114,6 +114,61 @@
       return normalizedNeedle.length >= 4 && normalizedHaystack.includes(normalizedNeedle);
     }
 
+    function getRecentSearchHitLines(toolEvents = [], path = '') {
+      const normalizedPath = deps.normalizeWorkspacePath(path || '');
+      const hitLines = [];
+      for (let i = Array.isArray(toolEvents) ? toolEvents.length - 1 : -1; i >= 0; i -= 1) {
+        const event = toolEvents[i];
+        if (!event || !event.ok || String(event.tool || '').toLowerCase() !== 'search_files') continue;
+        const observation = String(event.observation || '');
+        for (const match of observation.matchAll(/-\s+(\/[^\s:]+):(\d+):/g)) {
+          const matchPath = deps.normalizeWorkspacePath(match[1] || '');
+          const lineNumber = Number(match[2]) || 0;
+          if (matchPath !== normalizedPath || lineNumber <= 0) continue;
+          if (!hitLines.includes(lineNumber)) hitLines.push(lineNumber);
+        }
+        if (hitLines.length > 0) break;
+      }
+      return hitLines.slice(0, 6).sort((left, right) => left - right);
+    }
+
+    function buildFocusedReadFromLineHits(path, body, hitLines = [], maxChars = 3200) {
+      const normalizedPath = deps.normalizeWorkspacePath(path || '');
+      const lines = String(body || '').split(/\r?\n/);
+      const windows = [];
+      hitLines.forEach((lineNumber) => {
+        const start = Math.max(1, lineNumber - 8);
+        const end = Math.min(lines.length, lineNumber + 12);
+        const previous = windows[windows.length - 1];
+        if (previous && start <= previous.end + 3) {
+          previous.end = Math.max(previous.end, end);
+          return;
+        }
+        windows.push({ start, end });
+      });
+      const chunks = [];
+      let used = 0;
+      windows.forEach((window) => {
+        if (used >= maxChars) return;
+        const rendered = [];
+        for (let line = window.start; line <= window.end; line += 1) {
+          const marker = hitLines.includes(line) ? '>' : ' ';
+          rendered.push(`${marker} ${line}: ${lines[line - 1] || ''}`);
+        }
+        const chunk = [`${normalizedPath}:${window.start}-${window.end}`, ...rendered].join('\n');
+        if (used + chunk.length > maxChars && chunks.length > 0) return;
+        chunks.push(chunk.slice(0, Math.max(0, maxChars - used)));
+        used += chunk.length + 2;
+      });
+      if (!chunks.length) return '';
+      return [
+        `Focused read for ${normalizedPath} around search hit${hitLines.length === 1 ? '' : 's'} ${hitLines.join(', ')}:`,
+        chunks.join('\n\n'),
+        '',
+        `[focused excerpt from ${lines.length} lines; use search_files with a more specific keyword if another area is needed]`,
+      ].join('\n');
+    }
+
     async function collectSearchableWorkspaceFiles(rootPath, maxFiles = 80) {
       const queue = [deps.normalizeWorkspacePath(rootPath || '/') || '/'];
       const files = [];
@@ -620,9 +675,13 @@
           return { ok: false, mutated, observation: `read_file failed for ${path}: ${(response && response.message) || 'unknown error'}` };
         }
         const body = String(response.output || '');
-        const clipped = body.length > deps.agentMaxToolOutputChars
+        const searchHitLines = getRecentSearchHitLines(toolEvents, path);
+        const focusedRead = body.length > deps.agentMaxToolOutputChars && searchHitLines.length > 0
+          ? buildFocusedReadFromLineHits(path, body, searchHitLines, deps.agentMaxToolOutputChars)
+          : '';
+        const clipped = focusedRead || (body.length > deps.agentMaxToolOutputChars
           ? `${body.slice(0, deps.agentMaxToolOutputChars)}\n...[truncated]`
-          : body;
+          : body);
         deps.syncFileTabFromWorkspaceWrite(path, body, deps.workspaceBaseName(path));
         observation = `read_file ${path}\n${clipped || '(empty file)'}`;
         return { ok: true, mutated, observation, readPath: path, readContent: body };
