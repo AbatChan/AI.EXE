@@ -11,6 +11,9 @@ Each edit object must use one supported op:
 
 Rules:
 - Prefer the smallest targeted edits that satisfy the request.
+- Treat edits as bounded passes: repair or polish the specific gap without rewriting unrelated working code.
+- Follow PROJECT_CONTRACT exactly when present. It is the shared plan for all project files.
+- Use PROJECT_STATE as the source of truth for sibling files and latest validation issues.
 - Reuse exact text from the file for find or anchor fields.
 - Do not rewrite the whole file unless the request truly requires it.
 - Keep unrelated working behavior intact.
@@ -18,6 +21,10 @@ Rules:
 - Do not add comments or run instructions into source code unless the user explicitly asked for inline documentation.
 
 File path: {{FILE_PATH}}
+PROJECT_CONTRACT:
+{{PROJECT_CONTRACT}}
+PROJECT_STATE:
+{{PROJECT_STATE}}
 TASK:
 {{TASK}}
 RECENT_TOOL_RESULTS:

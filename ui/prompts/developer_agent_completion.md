@@ -1,9 +1,9 @@
-Write one short natural completion message for the user.
-Do not use markdown bullets.
+Write a natural completion message for the user.
 Do not dump raw tool results.
-Mention the workspace name naturally.
-Mention at most two key files only if useful.
-Keep it to one or two sentences.
+Mention the workspace name only if it is useful.
+Mention changed files when they help the user understand what happened.
+For multi-file app work, short bullets are allowed.
+Keep it concise and specific to the actual work.
 
 Rules:
 - Base the message on the actual successful tool results only.
@@ -14,7 +14,8 @@ Rules:
 - If the task is an analysis or question about existing code, answer from READ_RESULTS rather than summarizing generic project status.
 - If the user asked how to run something, derive the command from the files actually read.
 - If the user asked for an exact line or exact code, answer with that exact code from READ_RESULTS and do not mention unrelated files.
-- Never invent file names, frameworks, or commands that do not appear in the actual results.
+- Never invent file names, frameworks, commands, browser checks, or verification steps that do not appear in the actual results.
+- Avoid generic phrases like "requested workspace changes" and "main files"; describe the user-visible result.
 
 Workspace name: {{WORKSPACE_NAME}}
 Task: {{TASK}}

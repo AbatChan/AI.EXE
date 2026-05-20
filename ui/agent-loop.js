@@ -16,11 +16,27 @@
       let planSpec = null;
 
       const appendAgentActivity = (activity) => {
+        if (!activity) return;
         deps.mergeAgentActivityIntoList(agentActivities, activity);
         deps.pushActiveAgentStreamActivity(chatId, activity);
         if (deps.isInferenceActive(requestToken)) {
           deps.scheduleLiveStreamRender();
         }
+      };
+
+      let lastNarrationDetail = '';
+      const appendAgentNarration = (text) => {
+        const detail = String(text || '').trim();
+        if (!detail || detail.length < 8) return;
+        if (/^(return exactly|keys:|rules:|json:|toolresult|agent step:)/i.test(detail)) return;
+        if (detail === lastNarrationDetail) return;
+        appendAgentActivity({
+          kind: 'thought',
+          title: '',
+          detail: detail.slice(0, 900),
+          status: 'done',
+        });
+        lastNarrationDetail = detail;
       };
 
       const setAgentProgress = (text) => {
@@ -39,6 +55,13 @@
         && event.ok
         && ['new_project', 'write_file', 'edit_file', 'mkdir', 'move', 'delete'].includes(String(event.tool || '').toLowerCase())
       ));
+
+      const isWeakEditPlan = () => {
+        if (String(planSpec && planSpec.taskKind || '').toLowerCase() !== 'edit') return false;
+        const affectedFiles = Array.isArray(planSpec && planSpec.affectedFiles) ? planSpec.affectedFiles.filter(Boolean) : [];
+        const doneCriteria = Array.isArray(planSpec && planSpec.doneCriteria) ? planSpec.doneCriteria.filter(Boolean) : [];
+        return affectedFiles.length === 0 && doneCriteria.length === 0;
+      };
 
       const isMutationTool = (tool) => ['new_project', 'write_file', 'edit_file', 'mkdir', 'move', 'delete'].includes(String(tool || '').toLowerCase());
       const normalizeDecisionPath = (value) => deps.normalizeWorkspacePath ? deps.normalizeWorkspacePath(value || '') : String(value || '');
@@ -78,6 +101,19 @@
         if (signature.tool === 'read_file' && lastEvent.ok && !hasWorkspaceMutationSince(lastIndex)) {
           return `read_file blocked for ${signature.path || 'this file'}: it was already read and no workspace changes happened since then. Use that result or take the next corrective step instead of rereading it.`;
         }
+        if (
+          signature.tool === 'edit_file'
+          && !lastEvent.ok
+          && /read the file first/i.test(String(lastEvent.observation || ''))
+          && toolEvents.slice(lastIndex + 1).some((event) => (
+            event
+            && event.ok
+            && String(event.tool || '').toLowerCase() === 'read_file'
+            && normalizeDecisionPath(event.path || '') === signature.path
+          ))
+        ) {
+          return '';
+        }
         if (!lastEvent.ok && !hasWorkspaceMutationSince(lastIndex)) {
           return `${signature.tool} blocked for ${signature.path || signature.dstPath || signature.srcPath || 'this target'}: the same tool/target already failed and nothing changed since then. Follow the latest observation and choose a different corrective step.`;
         }
@@ -88,12 +124,22 @@
       ));
       const repairDecisionBeforeExecution = (decision) => {
         if (!decision || decision.action !== 'tool') return decision;
-        // Coerce edit_file with raw file content (not a JSON edit program) to write_file
+        // Coerce raw edit_file payloads only while creating planned project files.
         if (String(decision.tool || '').toLowerCase() === 'edit_file') {
           const rawContent = String(decision.content || '').trim();
           const looksLikeEditProgram = rawContent.startsWith('[') || rawContent.startsWith('{');
           const looksLikeRawCode = rawContent.length > 40 && !looksLikeEditProgram;
-          if (looksLikeRawCode) {
+          const isProjectCreation = String(planSpec && planSpec.taskKind || '').toLowerCase() === 'project';
+          const expectedFiles = Array.isArray(planSpec && planSpec.expectedFiles) ? planSpec.expectedFiles : [];
+          const targetPath = deps.normalizeWorkspacePath(decision.path || '');
+          const isExpectedFile = expectedFiles.map((path) => deps.normalizeWorkspacePath(path || '')).includes(targetPath);
+          const hasReadTarget = toolEvents.some((event) => (
+            event
+            && event.ok
+            && String(event.tool || '').toLowerCase() === 'read_file'
+            && deps.normalizeWorkspacePath(event.path || '') === targetPath
+          ));
+          if (looksLikeRawCode && isProjectCreation && isExpectedFile && !hasReadTarget) {
             recordDebugTrace('agent_edit_file_coerced_to_write', {
               chatId: String(chatId || ''),
               step: String(step),
@@ -113,23 +159,6 @@
         }
         if (String(decision.tool || '').toLowerCase() !== 'new_project') return decision;
         if (!hasSuccessfulNewProject()) return decision;
-        const fallbackDecision = deps.deriveFallbackAgentDecision(taskText, toolEvents, planSpec);
-        if (fallbackDecision && String(fallbackDecision.tool || '').toLowerCase() !== 'new_project') {
-          recordDebugTrace('agent_decision_repaired', {
-            chatId: String(chatId || ''),
-            step: String(toolEvents.length + 1),
-            fromTool: 'new_project',
-            toTool: String(fallbackDecision.tool || ''),
-            reason: 'workspace_already_created',
-          }, {
-            chatId: String(chatId || ''),
-            originalDecision: decision,
-            repairedDecision: fallbackDecision,
-            reason: 'workspace_already_created',
-            toolEvents,
-          });
-          return fallbackDecision;
-        }
         const lastValidateIndex = findLastToolEventIndex((e) => String(e && e.tool || '').toLowerCase() === 'validate_files');
         if (lastValidateIndex >= 0 && !hasWorkspaceMutationSince(lastValidateIndex)) {
           const validateEvent = toolEvents[lastValidateIndex];
@@ -148,6 +177,33 @@
               };
             }
           }
+          return {
+            action: 'final',
+            tool: 'none',
+            message: 'Done.',
+            path: '',
+            content: '',
+            srcPath: '',
+            dstPath: '',
+            raw: '[repair-final-after-duplicate-validation]',
+          };
+        }
+        const fallbackDecision = deps.deriveFallbackAgentDecision(taskText, toolEvents, planSpec);
+        if (fallbackDecision && String(fallbackDecision.tool || '').toLowerCase() !== 'new_project') {
+          recordDebugTrace('agent_decision_repaired', {
+            chatId: String(chatId || ''),
+            step: String(toolEvents.length + 1),
+            fromTool: 'new_project',
+            toTool: String(fallbackDecision.tool || ''),
+            reason: 'workspace_already_created',
+          }, {
+            chatId: String(chatId || ''),
+            originalDecision: decision,
+            repairedDecision: fallbackDecision,
+            reason: 'workspace_already_created',
+            toolEvents,
+          });
+          return fallbackDecision;
         }
         return {
           action: 'tool',
@@ -161,7 +217,7 @@
         };
       };
 
-      setAgentProgress('Planning...');
+      setAgentProgress('Thinking...');
       if (typeof deps.syncWorkspaceStateFromNative === 'function') {
         await deps.syncWorkspaceStateFromNative('agent_start', { render: false });
       }
@@ -217,149 +273,130 @@
         }
 
         deps.setThinkingStatus('');
-        setAgentProgress('Thinking...');
-        const agentPrompt = await deps.buildAgentDecisionPrompt(chatId, taskText, toolEvents, step, planSpec);
-        const res = await Promise.race([
-          deps.requestAgentPlannerInference(agentPrompt, deps.agentDecisionMaxTokens, deps.agentDecisionGrammar),
-          new Promise((resolve) => setTimeout(() => resolve({
-            ok: false,
-            timedOut: true,
-            message: 'Agent step timed out.',
-          }), deps.agentStepTimeoutMs)),
-        ]);
-
-        if (!deps.isInferenceActive(requestToken)) return true;
-        if (!res || !res.ok) {
-          setAgentProgress('Stopped.');
-          appendAgentActivity({
-            kind: 'error',
-            title: 'Stopped',
-            detail: (res && res.timedOut) ? 'Agent step timed out.' : ((res && res.message) || 'Agent step failed.'),
-            status: 'error',
-          });
-          recordDebugTrace('agent_error', {
+        let agentPrompt = '';
+        let rawPlannerOutput = '';
+        let decision = String(planSpec && planSpec.taskKind || '').toLowerCase() === 'project'
+          ? deps.deriveFallbackAgentDecision(taskText, toolEvents, planSpec)
+          : null;
+        if (decision) {
+          recordDebugTrace('agent_deterministic_decision', {
             chatId: String(chatId || ''),
             step: String(step),
-            reason: deps.debugPreview((res && res.message) || 'agent infer failed', 240),
-            timedOut: String(Boolean(res && res.timedOut)),
+            tool: String(decision.tool || ''),
+            path: deps.debugPreview(String(decision.path || ''), 180),
           }, {
             chatId: String(chatId || ''),
             step,
-            reason: String((res && res.message) || 'agent infer failed'),
-            timedOut: Boolean(res && res.timedOut),
-            agentPrompt,
+            decision,
+            reason: 'project_requirements',
+            toolEvents,
           });
-          deps.consumeLiveAssistantText();
-          const failure = (res && res.timedOut)
-            ? 'I started the workspace changes, but the agent timed out before finishing. Ask me to continue from the current project state.'
-            : 'I started the workspace changes, but the agent hit an error before finishing. Ask me to continue from the current project state.';
-          if (agentHasWorkspaceMutations()) {
-            await deps.refreshWorkspaceTree(true);
-          }
-          deps.commitAssistantMessage(chatId, failure, failure, {
-            agentActivities,
-            agentMeta: { startedAt, completedAt: Date.now(), collapsed: true },
-            forceNeedsContinue: false,
-          });
-          return true;
-        }
+        } else {
+          setAgentProgress('Thinking...');
+          agentPrompt = await deps.buildAgentDecisionPrompt(chatId, taskText, toolEvents, step, planSpec);
+          const res = await Promise.race([
+            deps.requestAgentPlannerInference(agentPrompt, deps.agentDecisionMaxTokens, deps.agentDecisionGrammar),
+            new Promise((resolve) => setTimeout(() => resolve({
+              ok: false,
+              timedOut: true,
+              message: 'Agent step timed out.',
+            }), deps.agentStepTimeoutMs)),
+          ]);
 
-        let decision = deps.parseAgentDecision(String(res.output || ''));
-        recordDebugTrace('agent_planner_output', {
-          chatId: String(chatId || ''),
-          step: String(step),
-          model: deps.debugPreview(String((res && res.model) || ''), 120),
-          rawPreview: deps.debugPreview(String(res.output || ''), 320),
-        }, {
-          chatId: String(chatId || ''),
-          step,
-          plannerSource: 'primary',
-          plannerModel: String((res && res.model) || ''),
-          agentPrompt,
-          rawPlannerOutput: String(res.output || ''),
-        });
-        if (!decision) {
-          const repairPrompt = await deps.buildAgentDecisionRepairPrompt(taskText, toolEvents, step, String(res.output || ''), planSpec);
-          const repair = await Promise.race([
-            deps.requestAgentPlannerInference(repairPrompt, deps.agentDecisionMaxTokens, deps.agentDecisionGrammar),
-            new Promise((resolve) => setTimeout(() => resolve({
-              ok: false,
-              timedOut: true,
-              message: 'Agent repair step timed out.',
-            }), deps.agentStepTimeoutMs)),
-          ]);
-          if (deps.isInferenceActive(requestToken) && repair && repair.ok) {
-            decision = deps.parseAgentDecision(String(repair.output || ''));
-            recordDebugTrace('agent_planner_output', {
-              chatId: String(chatId || ''),
-              step: String(step),
-              model: deps.debugPreview(String((repair && repair.model) || ''), 120),
-              rawPreview: deps.debugPreview(String(repair.output || ''), 320),
-            }, {
-              chatId: String(chatId || ''),
-              step,
-              plannerSource: 'repair',
-              plannerModel: String((repair && repair.model) || ''),
-              agentPrompt: repairPrompt,
-              rawPlannerOutput: String(repair.output || ''),
+          if (!deps.isInferenceActive(requestToken)) return true;
+          if (!res || !res.ok) {
+            setAgentProgress('Stopped.');
+            appendAgentActivity({
+              kind: 'error',
+              title: 'Stopped',
+              detail: (res && res.timedOut) ? 'Agent step timed out.' : ((res && res.message) || 'Agent step failed.'),
+              status: 'error',
             });
-          }
-        }
-        if (!decision) {
-          const nativeRes = await Promise.race([
-            deps.requestNativeAgentPlannerInference(agentPrompt, deps.agentDecisionMaxTokens, deps.agentDecisionGrammar),
-            new Promise((resolve) => setTimeout(() => resolve({
-              ok: false,
-              timedOut: true,
-              message: 'Native agent step timed out.',
-            }), deps.agentStepTimeoutMs)),
-          ]);
-          if (deps.isInferenceActive(requestToken) && nativeRes && nativeRes.ok) {
-            decision = deps.parseAgentDecision(String(nativeRes.output || ''));
-            recordDebugTrace('agent_planner_output', {
+            recordDebugTrace('agent_error', {
               chatId: String(chatId || ''),
               step: String(step),
-              model: deps.debugPreview(String((nativeRes && nativeRes.model) || ''), 120),
-              rawPreview: deps.debugPreview(String(nativeRes.output || ''), 320),
+              reason: deps.debugPreview((res && res.message) || 'agent infer failed', 240),
+              timedOut: String(Boolean(res && res.timedOut)),
             }, {
               chatId: String(chatId || ''),
               step,
-              plannerSource: 'native',
-              plannerModel: String((nativeRes && nativeRes.model) || ''),
+              reason: String((res && res.message) || 'agent infer failed'),
+              timedOut: Boolean(res && res.timedOut),
               agentPrompt,
-              rawPlannerOutput: String(nativeRes.output || ''),
             });
+            deps.consumeLiveAssistantText();
+            const failure = (res && res.timedOut)
+              ? 'I started the workspace changes, but the agent timed out before finishing. Ask me to continue from the current project state.'
+              : 'I started the workspace changes, but the agent hit an error before finishing. Ask me to continue from the current project state.';
+            if (agentHasWorkspaceMutations()) {
+              await deps.refreshWorkspaceTree(true);
+            }
+            deps.commitAssistantMessage(chatId, failure, failure, {
+              agentActivities,
+              agentMeta: { startedAt, completedAt: Date.now(), collapsed: true },
+              forceNeedsContinue: true,
+            });
+            return true;
           }
+
+          rawPlannerOutput = String(res.output || '');
+          decision = deps.parseAgentDecision(rawPlannerOutput);
+          recordDebugTrace('agent_planner_output', {
+            chatId: String(chatId || ''),
+            step: String(step),
+            model: deps.debugPreview(String((res && res.model) || ''), 120),
+            rawPreview: deps.debugPreview(rawPlannerOutput, 320),
+          }, {
+            chatId: String(chatId || ''),
+            step,
+            plannerSource: 'primary',
+            plannerModel: String((res && res.model) || ''),
+            agentPrompt,
+            rawPlannerOutput,
+          });
           if (!decision) {
-            const nativeRepairPrompt = await deps.buildAgentDecisionRepairPrompt(
-              taskText,
-              toolEvents,
-              step,
-              String((nativeRes && nativeRes.output) || (res && res.output) || ''),
-              planSpec
-            );
-            const nativeRepair = await Promise.race([
-              deps.requestNativeAgentPlannerInference(nativeRepairPrompt, deps.agentDecisionMaxTokens, deps.agentDecisionGrammar),
-              new Promise((resolve) => setTimeout(() => resolve({
-                ok: false,
-                timedOut: true,
-                message: 'Native agent repair step timed out.',
-              }), deps.agentStepTimeoutMs)),
-            ]);
-            if (deps.isInferenceActive(requestToken) && nativeRepair && nativeRepair.ok) {
-              decision = deps.parseAgentDecision(String(nativeRepair.output || ''));
-              recordDebugTrace('agent_planner_output', {
+            const fallbackDecision = deps.deriveFallbackAgentDecision(taskText, toolEvents, planSpec);
+            if (fallbackDecision) {
+              decision = fallbackDecision;
+              recordDebugTrace('agent_fallback_decision', {
                 chatId: String(chatId || ''),
                 step: String(step),
-                model: deps.debugPreview(String((nativeRepair && nativeRepair.model) || ''), 120),
-                rawPreview: deps.debugPreview(String(nativeRepair.output || ''), 320),
+                tool: fallbackDecision.tool,
+                path: deps.debugPreview(fallbackDecision.path, 180),
+                reason: 'primary-invalid',
               }, {
                 chatId: String(chatId || ''),
                 step,
-                plannerSource: 'native_repair',
-                plannerModel: String((nativeRepair && nativeRepair.model) || ''),
-                agentPrompt: nativeRepairPrompt,
-                rawPlannerOutput: String(nativeRepair.output || ''),
+                fallbackDecision,
+                reason: 'primary-invalid',
+                rawPlannerOutput,
+              });
+            }
+          }
+          if (!decision) {
+            const repairPrompt = await deps.buildAgentDecisionRepairPrompt(taskText, toolEvents, step, rawPlannerOutput, planSpec);
+            const repair = await Promise.race([
+              deps.requestAgentPlannerInference(repairPrompt, deps.agentDecisionMaxTokens, deps.agentDecisionGrammar),
+              new Promise((resolve) => setTimeout(() => resolve({
+                ok: false,
+                timedOut: true,
+                message: 'Agent repair step timed out.',
+              }), deps.agentStepTimeoutMs)),
+            ]);
+            if (deps.isInferenceActive(requestToken) && repair && repair.ok) {
+              decision = deps.parseAgentDecision(String(repair.output || ''));
+              recordDebugTrace('agent_planner_output', {
+                chatId: String(chatId || ''),
+                step: String(step),
+                model: deps.debugPreview(String((repair && repair.model) || ''), 120),
+                rawPreview: deps.debugPreview(String(repair.output || ''), 320),
+              }, {
+                chatId: String(chatId || ''),
+                step,
+                plannerSource: 'repair',
+                plannerModel: String((repair && repair.model) || ''),
+                agentPrompt: repairPrompt,
+                rawPlannerOutput: String(repair.output || ''),
               });
             }
           }
@@ -378,7 +415,7 @@
               chatId: String(chatId || ''),
               step,
               fallbackDecision,
-              reason: 'edit-after-read',
+              reason: 'fallback-after-planner',
             });
           }
         }
@@ -393,11 +430,11 @@
           recordDebugTrace('agent_parse_error', {
             chatId: String(chatId || ''),
             step: String(step),
-            rawPreview: deps.debugPreview(String(res.output || ''), 320),
+            rawPreview: deps.debugPreview(rawPlannerOutput, 320),
           }, {
             chatId: String(chatId || ''),
             step,
-            rawPlannerOutput: String(res.output || ''),
+            rawPlannerOutput,
           });
           deps.consumeLiveAssistantText();
           const failure = 'I started the workspace changes, but the agent returned an invalid planning step. Ask me to continue from the current project state.';
@@ -407,12 +444,14 @@
           deps.commitAssistantMessage(chatId, failure, failure, {
             agentActivities,
             agentMeta: { startedAt, completedAt: Date.now(), collapsed: true },
-            forceNeedsContinue: false,
+            forceNeedsContinue: true,
           });
           return true;
         }
 
         decision = repairDecisionBeforeExecution(decision);
+
+        appendAgentNarration(decision.thought);
 
         recordDebugTrace('agent_decision', {
           chatId: String(chatId || ''),
@@ -431,6 +470,7 @@
           ? getDuplicateDecisionObservation(decision)
           : '';
         if (duplicateDecisionObservation) {
+          const duplicateTool = String(decision.tool || '').toLowerCase();
           toolEvents.push({
             tool: decision.tool,
             ok: false,
@@ -453,53 +493,210 @@
             ok: false,
             observation: duplicateDecisionObservation,
           });
+          if (duplicateTool === 'validate_files') {
+            const finalCheck = deps.validateAgentFinalDecision(taskText, toolEvents, planSpec);
+            const missing = Array.isArray(finalCheck && finalCheck.missing) ? finalCheck.missing : [];
+            const onlyValidationMissing = missing.length > 0 && missing.every((item) => /validate/i.test(String(item || '')));
+            if (((finalCheck && finalCheck.ok) || onlyValidationMissing) && !isWeakEditPlan()) {
+              deps.consumeLiveAssistantText();
+              setAgentProgress('Finalizing...');
+              const workspaceLabel = deps.getWorkspaceRootName() || deps.deriveProjectNameFromTask(taskText) || 'project';
+              const finalText = await deps.generateAgentCompletionText(taskText, toolEvents, workspaceLabel, planSpec);
+              if (agentHasWorkspaceMutations()) {
+                await deps.refreshWorkspaceTree(true);
+              }
+              deps.consumeLiveAssistantText();
+              deps.commitAssistantMessage(chatId, finalText, finalText, {
+                agentActivities,
+                agentMeta: { startedAt, completedAt: Date.now(), collapsed: true },
+                forceNeedsContinue: false,
+              });
+              recordDebugTrace('agent_done', {
+                chatId: String(chatId || ''),
+                step: String(step),
+                autoFinalized: 'true',
+                reason: 'duplicate_validate_files_only_missing_requirement',
+                finalPreview: deps.debugPreview(finalText, 260),
+              }, {
+                chatId: String(chatId || ''),
+                step,
+                autoFinalized: true,
+                reason: 'duplicate_validate_files_only_missing_requirement',
+                finalText,
+                toolEvents,
+              });
+              return true;
+            }
+          }
+          if (duplicateTool === 'edit_file' || duplicateTool === 'read_file') {
+            const duplicatePath = normalizeDecisionPath(decision.path || '');
+            const duplicateBlockedCount = toolEvents.filter((event) => (
+              event
+              && !event.ok
+              && String(event.tool || '').toLowerCase() === duplicateTool
+              && normalizeDecisionPath(event.path || '') === duplicatePath
+              && /same tool\/target already failed|already read and no workspace changes/i.test(String(event.observation || ''))
+            )).length;
+            if (duplicateBlockedCount >= 2) {
+              const blockedText = duplicateTool === 'edit_file'
+                ? `I stopped because editing ${duplicatePath || 'the target file'} kept hitting the same blocker. I did not switch to unrelated files just to keep the loop running.`
+                : `I stopped because ${duplicatePath || 'that file'} was already read and no workspace changes happened after it. I did not keep rereading or switch to unrelated files.`;
+              setAgentProgress('Stopped.');
+              deps.consumeLiveAssistantText();
+              deps.commitAssistantMessage(chatId, blockedText, blockedText, {
+                agentActivities,
+                agentMeta: { startedAt, completedAt: Date.now(), collapsed: true },
+                forceNeedsContinue: true,
+              });
+              recordDebugTrace('agent_done', {
+                chatId: String(chatId || ''),
+                step: String(step),
+                fallback: 'true',
+                reason: 'duplicate_target_blocker',
+              }, {
+                chatId: String(chatId || ''),
+                step,
+                fallback: true,
+                reason: 'duplicate_target_blocker',
+                toolEvents,
+              });
+              return true;
+            }
+            setAgentProgress('Continuing...');
+            continue;
+          }
+          const fallbackDecision = deps.deriveFallbackAgentDecision(taskText, toolEvents, planSpec);
+          if (fallbackDecision && fallbackDecision.action === 'tool' && fallbackDecision.tool && fallbackDecision.tool !== 'none') {
+            const fallbackSignature = buildDecisionSignature(fallbackDecision);
+            const duplicateSignature = buildDecisionSignature(decision);
+            const sameTarget = fallbackSignature.tool === duplicateSignature.tool
+              && fallbackSignature.path === duplicateSignature.path
+              && fallbackSignature.srcPath === duplicateSignature.srcPath
+              && fallbackSignature.dstPath === duplicateSignature.dstPath;
+            if (!sameTarget) {
+              recordDebugTrace('agent_duplicate_decision_repaired', {
+                chatId: String(chatId || ''),
+                step: String(step),
+                fromTool: String(decision.tool || ''),
+                fromPath: deps.debugPreview(String(decision.path || ''), 180),
+                toTool: String(fallbackDecision.tool || ''),
+                toPath: deps.debugPreview(String(fallbackDecision.path || ''), 180),
+              }, {
+                chatId: String(chatId || ''),
+                step,
+                originalDecision: decision,
+                repairedDecision: fallbackDecision,
+                duplicateDecisionObservation,
+                toolEvents,
+              });
+              decision = fallbackDecision;
+            } else {
+              setAgentProgress('Continuing...');
+              continue;
+            }
+          } else {
           setAgentProgress('Continuing...');
           continue;
+          }
         }
 
         if (decision.action !== 'tool' || decision.tool === 'none') {
           const finalCheck = deps.validateAgentFinalDecision(taskText, toolEvents, planSpec);
           if (!finalCheck.ok) {
-            toolEvents.push({
-              tool: 'final_guard',
-              ok: false,
-              observation: `final blocked: still missing - ${finalCheck.missing.join('; ')}`,
-            });
-            recordDebugTrace('agent_final_rejected', {
+            const fallbackDecision = deps.deriveFallbackAgentDecision(taskText, toolEvents, planSpec);
+            if (fallbackDecision && fallbackDecision.action === 'tool' && fallbackDecision.tool && fallbackDecision.tool !== 'none') {
+              decision = fallbackDecision;
+              recordDebugTrace('agent_final_repaired', {
+                chatId: String(chatId || ''),
+                step: String(step),
+                tool: String(fallbackDecision.tool || ''),
+                path: deps.debugPreview(String(fallbackDecision.path || ''), 180),
+                missing: deps.debugPreview(finalCheck.missing.join('; '), 260),
+              }, {
+                chatId: String(chatId || ''),
+                step,
+                missing: finalCheck.missing,
+                repairedDecision: fallbackDecision,
+                toolEvents,
+              });
+            } else {
+              const missingText = finalCheck.missing.join('; ');
+              toolEvents.push({
+                tool: 'final_guard',
+                ok: false,
+                observation: `final blocked: still missing - ${missingText}`,
+              });
+              recordDebugTrace('agent_final_rejected', {
+                chatId: String(chatId || ''),
+                step: String(step),
+                missing: deps.debugPreview(missingText, 260),
+                stopped: 'true',
+              }, {
+                chatId: String(chatId || ''),
+                step,
+                missing: finalCheck.missing,
+                toolEvents,
+                stopped: true,
+              });
+              setAgentProgress('Stopped.');
+              appendAgentActivity({
+                kind: 'error',
+                title: 'Stopped',
+                detail: `I could not determine the next safe workspace step. Still missing: ${missingText}`,
+                status: 'error',
+              });
+              deps.consumeLiveAssistantText();
+              if (agentHasWorkspaceMutations()) {
+                await deps.refreshWorkspaceTree(true);
+              }
+              const failure = `I stopped because the agent planner kept trying to finish before the work was complete. Still missing: ${missingText}`;
+              deps.commitAssistantMessage(chatId, failure, failure, {
+                agentActivities,
+                agentMeta: { startedAt, completedAt: Date.now(), collapsed: true },
+                forceNeedsContinue: false,
+              });
+              return true;
+            }
+          }
+          if (decision.action === 'tool' && decision.tool !== 'none') {
+            recordDebugTrace('agent_decision', {
               chatId: String(chatId || ''),
               step: String(step),
-              missing: deps.debugPreview(finalCheck.missing.join('; '), 260),
+              action: decision.action,
+              tool: decision.tool,
+              messagePreview: deps.debugPreview(decision.message, 220),
             }, {
               chatId: String(chatId || ''),
               step,
-              missing: finalCheck.missing,
+              decision,
+              toolEvents,
+              repairedFromFinal: true,
+            });
+          } else {
+            deps.consumeLiveAssistantText();
+            setAgentProgress('Finalizing...');
+            const finalText = deps.sanitizeAssistantText(decision.message || 'Done.') || 'Done.';
+            if (agentHasWorkspaceMutations()) {
+              await deps.refreshWorkspaceTree(true);
+            }
+            deps.consumeLiveAssistantText();
+            deps.commitAssistantMessage(chatId, finalText, finalText, {
+              agentActivities,
+              agentMeta: { startedAt, completedAt: Date.now(), collapsed: true },
+              forceNeedsContinue: false,
+            });
+            recordDebugTrace('agent_done', {
+              chatId: String(chatId || ''),
+              step: String(step),
+              finalPreview: deps.debugPreview(finalText, 260),
+            }, {
+              chatId: String(chatId || ''),
+              step,
+              finalText,
               toolEvents,
             });
-            setAgentProgress('Continuing...');
-            continue;
+            return true;
           }
-          setAgentProgress('Finalizing...');
-          deps.consumeLiveAssistantText();
-          const finalText = deps.sanitizeAssistantText(decision.message || 'Done.') || 'Done.';
-          if (agentHasWorkspaceMutations()) {
-            await deps.refreshWorkspaceTree(true);
-          }
-          deps.commitAssistantMessage(chatId, finalText, finalText, {
-            agentActivities,
-            agentMeta: { startedAt, completedAt: Date.now(), collapsed: true },
-            forceNeedsContinue: false,
-          });
-          recordDebugTrace('agent_done', {
-            chatId: String(chatId || ''),
-            step: String(step),
-            finalPreview: deps.debugPreview(finalText, 260),
-          }, {
-            chatId: String(chatId || ''),
-            step,
-            finalText,
-            toolEvents,
-          });
-          return true;
         }
 
         if (decision.thought) {
@@ -595,6 +792,9 @@
           srcPath: deps.normalizeWorkspacePath(decision.srcPath || ''),
           dstPath: deps.normalizeWorkspacePath(decision.dstPath || ''),
           validationPassed: toolResult && toolResult.validationPassed === true,
+          validationIssues: Array.isArray(toolResult && toolResult.validationIssues)
+            ? toolResult.validationIssues.map((issue) => String(issue || '')).filter(Boolean)
+            : [],
           content: ['write_file', 'edit_file'].includes(String(decision.tool || '').toLowerCase())
             ? String(toolResult && typeof toolResult.writtenContent === 'string' ? toolResult.writtenContent : decision.content || '')
             : (String(decision.tool || '').toLowerCase() === 'read_file'
@@ -669,6 +869,48 @@
             lastCorrectionDetail = summary;
           }
         }
+        if (!toolResult.ok && String(decision.tool || '').toLowerCase() === 'write_file') {
+          const failedPath = deps.normalizeWorkspacePath(decision.path || '');
+          const expectedFiles = Array.isArray(planSpec && planSpec.expectedFiles)
+            ? planSpec.expectedFiles.map((path) => deps.normalizeWorkspacePath(path || '')).filter(Boolean)
+            : [];
+          const isExpectedFile = expectedFiles.includes(failedPath);
+          const observation = String(toolResult.observation || '');
+          const isGenerationBlock = /content still looks too small|placeholder-like|incomplete|empty content|syntax error|did not pass validation|unclosed|unterminated|truncated|unmatched/i.test(observation);
+          if (isExpectedFile && isGenerationBlock) {
+            const writtenPaths = toolEvents
+              .filter((event) => event && event.ok && ['write_file', 'edit_file'].includes(String(event.tool || '').toLowerCase()))
+              .map((event) => deps.normalizeWorkspacePath(event.path || ''))
+              .filter(Boolean);
+            const writtenSummary = writtenPaths.length
+              ? ` I kept the files already written: ${writtenPaths.slice(0, 4).join(', ')}.`
+              : '';
+            const stoppedText = `I stopped because the generated content for ${failedPath} did not pass the project quality check.${writtenSummary} The workspace is left in its current state so you can continue or retry without losing the files already created.`;
+            setAgentProgress('Stopped.');
+            deps.consumeLiveAssistantText();
+            if (agentHasWorkspaceMutations()) {
+              await deps.refreshWorkspaceTree(true);
+            }
+            deps.commitAssistantMessage(chatId, stoppedText, stoppedText, {
+              agentActivities,
+              agentMeta: { startedAt, completedAt: Date.now(), collapsed: true },
+              forceNeedsContinue: false,
+            });
+            recordDebugTrace('agent_stopped_after_blocked_file_generation', {
+              chatId: String(chatId || ''),
+              step: String(step),
+              path: failedPath,
+              observationPreview: deps.debugPreview(observation, 300),
+            }, {
+              chatId: String(chatId || ''),
+              step,
+              path: failedPath,
+              observation,
+              toolEvents,
+            });
+            return true;
+          }
+        }
         if (toolResult.ok) {
           const finalCheck = deps.validateAgentFinalDecision(taskText, toolEvents, planSpec);
           if (!finalCheck.ok) {
@@ -689,14 +931,15 @@
               lastCorrectionDetail = correctionDetail;
             }
           }
-          if (finalCheck.ok) {
-            setAgentProgress('Finalizing...');
+          if (finalCheck.ok && !isWeakEditPlan()) {
             deps.consumeLiveAssistantText();
+            setAgentProgress('Finalizing...');
             const workspaceLabel = deps.getWorkspaceRootName() || deps.deriveProjectNameFromTask(taskText) || 'project';
             const finalText = await deps.generateAgentCompletionText(taskText, toolEvents, workspaceLabel, planSpec);
             if (agentHasWorkspaceMutations()) {
               await deps.refreshWorkspaceTree(true);
             }
+            deps.consumeLiveAssistantText();
             deps.commitAssistantMessage(chatId, finalText, finalText, {
               agentActivities,
               agentMeta: { startedAt, completedAt: Date.now(), collapsed: true },

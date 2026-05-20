@@ -8,7 +8,7 @@
       : (value) => String(value || '').trim();
     const looksLikePlaceholderImplementation = typeof deps.looksLikePlaceholderImplementation === 'function'
       ? deps.looksLikePlaceholderImplementation
-      : ((content) => /placeholder|todo:|coming soon|implement this/i.test(String(content || '')));
+      : ((content) => /\b(todo:|coming soon|implement this|placeholder code|placeholder content)\b/i.test(String(content || '')));
     const WEB_TASK_HINT_REGEX = /\b(html|css|javascript|website|web|site|landing page|page|frontend|browser|ui)\b/i;
 
     function sanitizeProjectSlug(candidate, projectKind = '') {
@@ -16,7 +16,8 @@
         .toLowerCase()
         .replace(/^(can-you|could-you|would-you|please|help-me|i-need|i-want|make-me|build-me|design-me)-?/i, '')
         .replace(/[^a-z0-9\s_-]+/gi, ' ')
-        .replace(/\b(simple|nice|modern|clean|beautiful|responsive|basic|small|cool)\b/gi, ' ')
+        .replace(/^(create|build|make|design|develop|craft|start|setup|set-up|generate|draft)[\s_-]+(a|an|the)?[\s_-]*/i, '')
+        .replace(/\b(good|great|simple|nice|modern|clean|beautiful|responsive|basic|small|cool|professional|awesome|best|solid)\b/gi, ' ')
         .replace(/\s+/g, ' ')
         .trim()
         .replace(/^(a|an|the)\s+/i, '')
@@ -26,11 +27,15 @@
         .slice(0, 48);
       if (!slug) return '';
       if (projectKind === 'game' && !slug.endsWith('-game')) slug = `${slug}-game`;
-      if (projectKind === 'site' && !slug.endsWith('-site')) slug = `${slug}-site`;
+      if (projectKind === 'site' && !/(?:-site|-website|-page)$/.test(slug)) slug = `${slug}-site`;
       if (projectKind === 'dashboard' && !slug.endsWith('-dashboard')) slug = `${slug}-dashboard`;
-      if (projectKind === 'website' && !slug.endsWith('-website')) slug = `${slug}-website`;
+      if (projectKind === 'website' && !/(?:-website|-site|-page)$/.test(slug)) slug = `${slug}-website`;
       if (projectKind === 'api' && !slug.endsWith('-api')) slug = `${slug}-api`;
       if (projectKind === 'cli' && !slug.endsWith('-cli')) slug = `${slug}-cli`;
+      if (projectKind === 'tracker' && !slug.endsWith('-tracker')) slug = `${slug}-tracker`;
+      if (projectKind === 'manager' && !slug.endsWith('-manager')) slug = `${slug}-manager`;
+      if (projectKind === 'generator' && !slug.endsWith('-generator')) slug = `${slug}-generator`;
+      if (projectKind === 'editor' && !slug.endsWith('-editor')) slug = `${slug}-editor`;
       return slug;
     }
 
@@ -41,6 +46,7 @@
       if (/[/.\\]/.test(raw)) return false;
       if (/\b(return exactly|json object|write_file|read_file|tool|step|rules:|keys:|action:|message:)\b/i.test(raw)) return false;
       const lower = raw.toLowerCase();
+      if (/^(?:app|project|site|website|page|tool|ui|style|web|frontend|interface|screen|home|modern)$/i.test(lower)) return false;
       const wordCount = lower.split(/\s+/).filter(Boolean).length;
       if (wordCount > 5) return false;
       if (/\b(can|could|would|please|help|need|want|design|create|build|make|start)\b/.test(lower) && wordCount > 3) return false;
@@ -52,6 +58,13 @@
     function deriveProjectNameFromTask(taskText) {
       const source = String(taskText || '').toLowerCase();
       if (!source) return '';
+      if (/\bdesktop[-\s]?style\b[\s\S]*\b(?:operating system|os|home screen|desktop ui|desktop interface)\b/i.test(source)
+        || /\bmodern operating system home screen\b/i.test(source)) {
+        return 'desktop-os-interface';
+      }
+      if (/\bdesktop[-\s]?style\b[\s\S]*\b(?:web app|app|ui|interface)\b/i.test(source)) {
+        return 'desktop-ui';
+      }
       const cleanedSource = source
         .replace(/^[^a-z0-9]*(can you|could you|would you|please|help me|i want|i need|make me|build me|design me)\b/i, '')
         .replace(/^[^a-z0-9]+/, '')
@@ -74,10 +87,13 @@
         const compactMatch = source.match(/\b(?:for|of)?\s*([a-z0-9][a-z0-9\s_-]{1,28}?)\s+(?:project|app|site|tool|game|dashboard|website|page|cli|api|service|bot|assistant|tracker|manager|generator|editor)\b/i);
         if (compactMatch && compactMatch[1]) candidate = compactMatch[1];
       }
+      if (candidate && /\b(surprise|reveal|secret|easter egg)\b/i.test(source) && !/\b(surprise|reveal|secret|easter egg)\b/i.test(candidate)) {
+        candidate = `${candidate} surprise`;
+      }
       const clean = candidate
-        .replace(/^(create|build|make|start|set up|setup|generate|draft)\s+/gi, ' ')
+        .replace(/^(create|build|make|start|set up|setup|generate|draft|design)\s+/gi, ' ')
         .replace(/\b(that|which|with|for|using|in|on|to|from|runs|run|running)\b[\s\S]*$/gi, ' ')
-        .replace(/\b(python|javascript|typescript|react|vue|node|offline|local|simple|desktop|browser|web|small|business|businesses|for)\b/gi, ' ')
+        .replace(/\b(good|great|python|javascript|typescript|react|vue|node|offline|local|simple|desktop|browser|web|style|styled|small|business|businesses|for)\b/gi, ' ')
         .replace(/[^a-z0-9\s_-]+/gi, ' ')
         .replace(/\s+/g, ' ')
         .trim();
@@ -146,6 +162,7 @@
       }
       if (isAgentTaskSoftwareProject(lower)) {
         hints.push('Prefer a self-contained offline MVP with as few external runtime requirements as possible unless the user explicitly requested a stack.');
+        hints.push('Treat this as a first-pass implementation: complete the core working file within a bounded size, then rely on later edit passes for extra polish.');
       }
       if (isAgentBudgetTrackerTask(lower)) {
         hints.push('Include real budget tracking features such as add expense or income, listing entries, totals, and category or date fields.');
@@ -161,15 +178,20 @@
         hints.push('Return only HTML markup for this file.');
         hints.push('Do not output CSS rules as the main body of this file.');
         hints.push('Do not output JavaScript as the main body of this file.');
-        hints.push('If the project has separate styles.css or script.js files, prefer linking them instead of embedding large inline <style> or <script> blocks.');
+        hints.push('If the project has separate style.css or script.js files, prefer linking them instead of embedding large inline <style> or <script> blocks.');
+        hints.push('Keep markup semantic and compact. Use reusable classes and stable IDs that CSS and JS can share.');
       }
       if (/\.css$/i.test(normalized)) {
         hints.push('Return only CSS for this file.');
         hints.push('Do not output HTML, <html>, <head>, <body>, <script>, or full document markup.');
+        hints.push('Keep CSS complete and bounded: prefer a polished concise stylesheet over excessive effects, and ensure every opened block, string, and comment is closed.');
+        hints.push('For multi-section landing pages, style the requested sections with reusable selectors instead of generating oversized repeated CSS.');
+        hints.push('Use a small animation system: a few reusable keyframes and transitions, not unique animations for every block.');
       }
       if (/\.(js|ts|jsx|tsx)$/i.test(normalized)) {
         hints.push('Return only JavaScript or TypeScript source for this file.');
         hints.push('Do not output HTML, <script> tags, or CSS rules.');
+        hints.push('Keep script focused on core behavior and DOM interactions. Avoid large decorative systems unless required.');
       }
       return hints;
     }
@@ -192,6 +214,48 @@
     function parseAgentDecision(outputText) {
       const raw = String(outputText || '').trim();
       if (!raw) return null;
+      const extractJsonObjects = (text) => {
+        const src = String(text || '');
+        const candidates = [];
+        for (const match of src.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)) {
+          const block = String(match[1] || '').trim();
+          if (block.includes('{') && block.includes('}')) candidates.push(block);
+        }
+        let inString = false;
+        let escaped = false;
+        let depth = 0;
+        let start = -1;
+        for (let i = 0; i < src.length; i += 1) {
+          const ch = src[i];
+          if (inString) {
+            if (escaped) {
+              escaped = false;
+            } else if (ch === '\\') {
+              escaped = true;
+            } else if (ch === '"') {
+              inString = false;
+            }
+            continue;
+          }
+          if (ch === '"') {
+            inString = true;
+            continue;
+          }
+          if (ch === '{') {
+            if (depth === 0) start = i;
+            depth += 1;
+            continue;
+          }
+          if (ch === '}' && depth > 0) {
+            depth -= 1;
+            if (depth === 0 && start >= 0) {
+              candidates.push(src.slice(start, i + 1));
+              start = -1;
+            }
+          }
+        }
+        return Array.from(new Set(candidates.map((item) => String(item || '').trim()).filter(Boolean)));
+      };
       let thought = '';
       const firstCurly = raw.indexOf('{');
       const firstDecision = raw.indexOf('<decision>');
@@ -260,9 +324,27 @@
 
       if (!action && /"action"\s*:\s*"[^"]+"/i.test(candidate)) {
         let parsed = null;
-        try {
-          parsed = JSON.parse(candidate);
-        } catch (_) {
+        const jsonCandidates = [candidate, ...extractJsonObjects(candidate), ...extractJsonObjects(raw)];
+        for (const jsonCandidate of jsonCandidates) {
+          if (parsed) break;
+          try {
+            parsed = JSON.parse(jsonCandidate);
+          } catch (_) {
+            const start = jsonCandidate.indexOf('{');
+            const end = jsonCandidate.lastIndexOf('}');
+            if (start >= 0 && end > start) {
+              try {
+                parsed = JSON.parse(jsonCandidate.slice(start, end + 1));
+              } catch (_) {
+                parsed = null;
+              }
+            }
+          }
+          if (parsed && typeof parsed === 'object' && !String(parsed.action || '').trim()) {
+            parsed = null;
+          }
+        }
+        if (!parsed) {
           const start = candidate.indexOf('{');
           const end = candidate.lastIndexOf('}');
           if (start >= 0 && end > start) {
@@ -284,11 +366,31 @@
         }
       }
 
+      if (!action) {
+        const jsonish = raw.includes('{') ? raw.slice(raw.indexOf('{')) : raw;
+        const readStringValue = (key) => {
+          const re = new RegExp(`"${key}"\\s*:\\s*"([^"\\\\]*(?:\\\\.[^"\\\\]*)*)`, 'i');
+          const match = jsonish.match(re);
+          if (!match || !match[1]) return '';
+          try {
+            return JSON.parse(`"${match[1]}"`);
+          } catch (_) {
+            return String(match[1] || '');
+          }
+        };
+        action = readStringValue('action');
+        tool = readStringValue('tool');
+        path = readStringValue('path');
+        message = readStringValue('message');
+        srcPath = readStringValue('src_path') || readStringValue('srcPath');
+        dstPath = readStringValue('dst_path') || readStringValue('dstPath');
+      }
+
       if (!action && !tool && !path && !message && !srcPath && !dstPath && !content) {
         return null;
       }
       const normalizedAction = String(action || '').trim().toLowerCase();
-      const validTools = ['none', 'new_project', 'list_dir', 'read_file', 'write_file', 'edit_file', 'validate_files', 'mkdir', 'move', 'delete'];
+      const validTools = ['none', 'new_project', 'list_dir', 'search_files', 'read_file', 'write_file', 'edit_file', 'validate_files', 'mkdir', 'move', 'delete'];
       let resolvedAction = normalizedAction;
       let resolvedTool = String(tool || '').toLowerCase();
       // Auto-repair: model put tool name in action field (e.g. "action": "read_file")
@@ -317,12 +419,10 @@
 
     function deriveFallbackAgentDecision(taskText, toolEvents, planSpec = null) {
       const taskKind = String(planSpec && planSpec.taskKind ? planSpec.taskKind : '').toLowerCase();
+      const expectedFiles = Array.isArray(planSpec && planSpec.expectedFiles) ? planSpec.expectedFiles : [];
       if (taskKind === 'project') {
-        const expectedFiles = Array.isArray(planSpec && planSpec.expectedFiles) ? planSpec.expectedFiles : [];
-        const explicitSeparateWorkspaceIntent = /\b(new project|new workspace|another project|separate project|different project|start from scratch|from scratch)\b/i.test(String(taskText || ''));
-        const hasWorkspace = typeof deps.getWorkspaceContext === 'function'
-          ? Boolean(String((deps.getWorkspaceContext() || {}).workspaceRootName || '').trim())
-          : false;
+        const explicitSeparateWorkspaceIntent = /\b(new project|new workspace|fresh workspace|another project|separate project|different project|start from scratch|from scratch)\b/i.test(String(taskText || ''));
+        const hasWorkspace = hasOpenWorkspaceContext();
         const projectCreated = Array.isArray(toolEvents)
           && toolEvents.some((event) => event && event.ok && String(event.tool || '').toLowerCase() === 'new_project');
         if ((!hasWorkspace || explicitSeparateWorkspaceIntent) && !projectCreated) {
@@ -343,12 +443,87 @@
             .map((event) => normalizeWorkspacePath(event.path || ''))
             .filter(Boolean)
           : [];
+        const latestValidationIndex = Array.isArray(toolEvents)
+          ? (() => {
+            for (let i = toolEvents.length - 1; i >= 0; i -= 1) {
+              if (String(toolEvents[i] && toolEvents[i].tool || '').toLowerCase() === 'validate_files') return i;
+            }
+            return -1;
+          })()
+          : -1;
+        const latestValidation = latestValidationIndex >= 0 ? toolEvents[latestValidationIndex] : null;
+        if (latestValidation && latestValidation.validationPassed === false && Array.isArray(latestValidation.validationIssues) && latestValidation.validationIssues.length > 0) {
+          const firstIssue = String(latestValidation.validationIssues[0] || '');
+          const targetMatch = firstIssue.match(/^(\/[^[\]:\s]+)/);
+          const roles = getPlannedFileRoles(expectedFiles);
+          let targetPath = normalizeWorkspacePath(targetMatch && targetMatch[1] ? targetMatch[1] : (roles.htmlFile || expectedFiles[0] || '/'));
+          const toggledMissingClassMatch = firstIssue.match(/^(\/[^\s:]+):\s+toggles\s+\.([a-z0-9_-]+),/i);
+          const issueSourcePath = normalizeWorkspacePath(toggledMissingClassMatch && toggledMissingClassMatch[1] ? toggledMissingClassMatch[1] : '');
+          const sourceIsScriptFile = issueSourcePath && /\.(js|mjs|cjs|ts|jsx|tsx)$/i.test(issueSourcePath);
+          if (toggledMissingClassMatch && sourceIsScriptFile && roles.cssFile) {
+            targetPath = roles.cssFile;
+          }
+          const readAfterValidation = toolEvents.slice(latestValidationIndex + 1).some((event) => (
+            event
+            && event.ok
+            && String(event.tool || '').toLowerCase() === 'read_file'
+            && normalizeWorkspacePath(event.path || '') === targetPath
+          ));
+          const readFailedAfterValidation = toolEvents.slice(latestValidationIndex + 1).some((event) => (
+            event
+            && !event.ok
+            && String(event.tool || '').toLowerCase() === 'read_file'
+            && normalizeWorkspacePath(event.path || '') === targetPath
+          ));
+          const mutationAfterValidation = toolEvents.slice(latestValidationIndex + 1).some((event) => (
+            event
+            && event.ok
+            && ['write_file', 'edit_file'].includes(String(event.tool || '').toLowerCase())
+          ));
+          if (!mutationAfterValidation) {
+            // If edit_file already failed for this path, read again and give the next step more grounded context.
+            const editAlreadyFailed = readAfterValidation && toolEvents.slice(latestValidationIndex + 1).some((event) => (
+              event
+              && !event.ok
+              && String(event.tool || '').toLowerCase() === 'edit_file'
+              && normalizeWorkspacePath(event.path || '') === targetPath
+            ));
+            const targetWasWritten = writtenPaths.includes(targetPath);
+            const repairTool = (readAfterValidation || readFailedAfterValidation || targetWasWritten)
+              ? (editAlreadyFailed ? 'write_file' : 'edit_file')
+              : 'read_file';
+            return {
+              action: 'tool',
+              tool: repairTool,
+              message: repairTool === 'read_file'
+                ? `Read ${targetPath} before repairing the validation issues.`
+                : repairTool === 'write_file'
+                ? `Rewrite ${targetPath} to repair the validation issues.`
+                : `Repair ${targetPath} using the validation issues and project contract.`,
+              path: targetPath,
+              content: repairTool !== 'read_file'
+                ? `Fix the real validation issues without adding placeholder CSS stubs:\n${latestValidation.validationIssues.join('\n')}`
+                : '',
+              srcPath: '',
+              dstPath: '',
+              raw: `[fallback-project-${repairTool}-after-validation]`,
+            };
+          }
+        }
         const nextPath = expectedFiles.find((path) => {
           const normalized = normalizeWorkspacePath(path || '');
           return normalized && normalized !== '/README.md' && !writtenPaths.includes(normalized);
         }) || expectedFiles.find((path) => normalizeWorkspacePath(path || '') === '/README.md' && !writtenPaths.includes('/README.md'))
           || '';
         if (nextPath) {
+          const lastAttemptForPath = Array.isArray(toolEvents)
+            ? [...toolEvents].reverse().find((event) => (
+              event
+              && ['write_file', 'edit_file'].includes(String(event.tool || '').toLowerCase())
+              && normalizeWorkspacePath(event.path || '') === normalizeWorkspacePath(nextPath)
+            ))
+            : null;
+          if (lastAttemptForPath && !lastAttemptForPath.ok) return null;
           return {
             action: 'tool',
             tool: 'write_file',
@@ -360,10 +535,239 @@
             raw: '[fallback-project-write-file]',
           };
         }
+        const nonReadmeExpectedFiles = expectedFiles
+          .map((path) => normalizeWorkspacePath(path || ''))
+          .filter((path) => path && path !== '/README.md' && path !== '/src');
+        const allExpectedFilesWritten = nonReadmeExpectedFiles.length > 0
+          && nonReadmeExpectedFiles.every((path) => writtenPaths.includes(path));
+        if (allExpectedFilesWritten) {
+          let latestWriteIndex = -1;
+          let projectLatestValidationIndex = -1;
+          let projectLatestValidation = null;
+          for (let i = 0; Array.isArray(toolEvents) && i < toolEvents.length; i += 1) {
+            const event = toolEvents[i];
+            const tool = String(event && event.tool || '').toLowerCase();
+            if (event && event.ok && ['write_file', 'edit_file'].includes(tool)) {
+              const path = normalizeWorkspacePath(event.path || '');
+              if (nonReadmeExpectedFiles.includes(path)) latestWriteIndex = i;
+            }
+            if (event && tool === 'validate_files') {
+              projectLatestValidationIndex = i;
+              projectLatestValidation = event;
+            }
+          }
+          if (!projectLatestValidation || projectLatestValidationIndex < latestWriteIndex) {
+            return {
+              action: 'tool',
+              tool: 'validate_files',
+              message: 'Validate the written project files',
+              path: '/',
+              content: '',
+              srcPath: '',
+              dstPath: '',
+              raw: '[fallback-project-validate-files]',
+            };
+          }
+        }
       }
       if (taskKind === 'analysis') return null;
       const inferredEditTask = taskKind === 'edit' || !/\b(create|build|make|start|setup|set up)\b/i.test(String(taskText || ''));
-      if (!inferredEditTask || !Array.isArray(toolEvents) || !toolEvents.length) return null;
+      if (!inferredEditTask || !Array.isArray(toolEvents)) return null;
+      const plannedInspectFiles = Array.isArray(planSpec && planSpec.filesToInspect)
+        ? planSpec.filesToInspect.map((path) => normalizeWorkspacePath(path || '')).filter(Boolean)
+        : [];
+      const plannedAffectedFiles = Array.isArray(planSpec && planSpec.affectedFiles)
+        ? planSpec.affectedFiles.map((path) => normalizeWorkspacePath(path || '')).filter(Boolean)
+        : [];
+      const plannedEditFiles = Array.from(new Set([...plannedInspectFiles, ...plannedAffectedFiles]));
+      const successfulPlannedReads = new Set(toolEvents
+        .filter((event) => event && event.ok && String(event.tool || '').toLowerCase() === 'read_file')
+        .map((event) => normalizeWorkspacePath(event.path || ''))
+        .filter(Boolean));
+      const successfulPlannedWrites = new Set(toolEvents
+        .filter((event) => event && event.ok && ['write_file', 'edit_file'].includes(String(event.tool || '').toLowerCase()))
+        .map((event) => normalizeWorkspacePath(event.path || ''))
+        .filter(Boolean));
+      const failedPlannedReads = new Set(toolEvents
+        .filter((event) => event && !event.ok && String(event.tool || '').toLowerCase() === 'read_file')
+        .map((event) => normalizeWorkspacePath(event.path || ''))
+        .filter(Boolean));
+      const unreadPlannedFile = plannedEditFiles.find((path) => !successfulPlannedReads.has(path) && !failedPlannedReads.has(path));
+      if (unreadPlannedFile) {
+        return {
+          action: 'tool',
+          tool: 'read_file',
+          message: `Read ${unreadPlannedFile}; it is part of the planned edit scope.`,
+          path: unreadPlannedFile,
+          content: '',
+          srcPath: '',
+          dstPath: '',
+          raw: '[fallback-read-planned-edit-file]',
+        };
+      }
+      const untouchedAffectedFile = plannedAffectedFiles.find((path) => !successfulPlannedWrites.has(path));
+      if (untouchedAffectedFile && successfulPlannedReads.has(untouchedAffectedFile)) {
+        return {
+          action: 'tool',
+          tool: 'edit_file',
+          message: `Update ${untouchedAffectedFile} to satisfy the planned edit scope.`,
+          path: untouchedAffectedFile,
+          content: '',
+          srcPath: '',
+          dstPath: '',
+          raw: '[fallback-edit-planned-affected-file]',
+        };
+      }
+      const validationSteps = Array.isArray(planSpec && planSpec.validationSteps)
+        ? planSpec.validationSteps.map((step) => String(step || '').toLowerCase()).filter(Boolean)
+        : [];
+      const validateRequested = validationSteps.some((step) => /validate_files|static|syntax|check|test|verify/.test(step));
+      const affectedFilesUpdated = plannedAffectedFiles.length > 0
+        && plannedAffectedFiles.every((path) => successfulPlannedWrites.has(path));
+      if (validateRequested && affectedFilesUpdated) {
+        let latestPlannedWriteIndex = -1;
+        let latestValidationIndex = -1;
+        for (let i = 0; i < toolEvents.length; i += 1) {
+          const event = toolEvents[i];
+          const tool = String(event && event.tool || '').toLowerCase();
+          const path = normalizeWorkspacePath(event && event.path ? event.path : '');
+          if (event && event.ok && ['write_file', 'edit_file'].includes(tool) && plannedAffectedFiles.includes(path)) {
+            latestPlannedWriteIndex = i;
+          }
+          if (event && tool === 'validate_files') {
+            latestValidationIndex = i;
+          }
+        }
+        if (latestPlannedWriteIndex >= 0 && latestValidationIndex < latestPlannedWriteIndex) {
+          return {
+            action: 'tool',
+            tool: 'validate_files',
+            message: 'Validate the updated files before finalizing.',
+            path: '/',
+            content: '',
+            srcPath: '',
+            dstPath: '',
+            raw: '[fallback-validate-planned-edit]',
+          };
+        }
+      }
+      if (!toolEvents.length) {
+        return {
+          action: 'tool',
+          tool: 'list_dir',
+          message: 'Inspect the current workspace files before editing.',
+          path: '/',
+          content: '',
+          srcPath: '',
+          dstPath: '',
+          raw: '[fallback-list-before-edit]',
+        };
+      }
+      const successfulSearches = toolEvents.filter((event) => event && event.ok && String(event.tool || '').toLowerCase() === 'search_files');
+      const successfulReads = new Set(toolEvents
+        .filter((event) => event && event.ok && String(event.tool || '').toLowerCase() === 'read_file')
+        .map((event) => normalizeWorkspacePath(event.path || ''))
+        .filter(Boolean));
+      const latestSearch = successfulSearches.length ? successfulSearches[successfulSearches.length - 1] : null;
+      if (latestSearch) {
+        const resultPaths = [];
+        for (const match of String(latestSearch.observation || '').matchAll(/-\s+(\/[^\s:]+):\d+:/g)) {
+          const path = normalizeWorkspacePath(match[1] || '');
+          if (path && !resultPaths.includes(path)) resultPaths.push(path);
+        }
+        const taskLower = String(taskText || '').toLowerCase();
+        const ranked = resultPaths.slice().sort((left, right) => {
+          const score = (path) => {
+            let value = 0;
+            if (/\b(back to top|scroll|click|button)\b/i.test(taskLower) && /\.(js|mjs|cjs|ts|jsx|tsx)$/i.test(path)) value += 4;
+            if (/\b(visible|contrast|color|colour|background|overlay|text)\b/i.test(taskLower) && /\.(css|scss|sass|less)$/i.test(path)) value += 4;
+            if (/\.html?$/i.test(path)) value += 1;
+            return value;
+          };
+          return score(right) - score(left);
+        });
+        const unreadResult = ranked.find((path) => !successfulReads.has(path));
+        if (unreadResult) {
+          return {
+            action: 'tool',
+            tool: 'read_file',
+            message: `Read ${unreadResult}; search_files found relevant matches there.`,
+            path: unreadResult,
+            content: '',
+            srcPath: '',
+            dstPath: '',
+            raw: '[fallback-read-search-result]',
+          };
+        }
+      }
+
+      const latestFailedIndex = (() => {
+        for (let i = toolEvents.length - 1; i >= 0; i -= 1) {
+          const event = toolEvents[i];
+          if (event && !event.ok && ['edit_file', 'write_file'].includes(String(event.tool || '').toLowerCase())) return i;
+        }
+        return -1;
+      })();
+      const latestFailed = latestFailedIndex >= 0 ? toolEvents[latestFailedIndex] : null;
+      const latestFailedPath = normalizeWorkspacePath(latestFailed && latestFailed.path ? latestFailed.path : '');
+      const latestFailedObservation = String(latestFailed && latestFailed.observation ? latestFailed.observation : '');
+      const failedBinaryOrMissingTarget = latestFailed
+        && (
+          /\.(?:png|jpe?g|gif|webp|avif|ico|bmp|tiff|mp4|mov|webm|mp3|wav|pdf|zip)$/i.test(latestFailedPath)
+          || /binary image assets are not editable|file does not exist|outside the current plan/i.test(latestFailedObservation)
+        );
+      if (failedBinaryOrMissingTarget) {
+        const listedFiles = [];
+        toolEvents.forEach((event) => {
+          if (!event || !event.ok || String(event.tool || '').toLowerCase() !== 'list_dir') return;
+          for (const match of String(event.observation || '').matchAll(/-\s+\[file\]\s+([^\s(]+)/g)) {
+            const path = normalizeWorkspacePath(`/${String(match[1] || '').trim()}`);
+            if (path && path !== '/') listedFiles.push(path);
+          }
+        });
+        const sourceFiles = Array.from(new Set([...expectedFiles, ...listedFiles]
+          .map((path) => normalizeWorkspacePath(path || ''))
+          .filter((path) => /\.(html?|css|scss|sass|less|js|mjs|cjs|ts|jsx|tsx|py|java|c|cc|cpp|cxx|h|hpp|cs|go|rs|php|rb)$/i.test(path))));
+        const roles = getPlannedFileRoles(sourceFiles);
+        const lowerTask = String(taskText || '').toLowerCase();
+        const candidates = [];
+        const pushCandidate = (path) => {
+          const normalized = normalizeWorkspacePath(path || '');
+          if (normalized && normalized !== '/' && sourceFiles.includes(normalized) && !candidates.includes(normalized)) candidates.push(normalized);
+        };
+        if (/\b(click|button|link|back to top|scroll|doesn'?t work|not work|broken|interaction)\b/i.test(lowerTask)) {
+          pushCandidate(roles.scriptFile);
+          pushCandidate(roles.htmlFile);
+          pushCandidate(roles.cssFile);
+        }
+        if (/\b(visible|visibility|readable|contrast|color|colour|background|overlay|text)\b/i.test(lowerTask)) {
+          pushCandidate(roles.cssFile);
+          pushCandidate(roles.htmlFile);
+        }
+        sourceFiles.forEach(pushCandidate);
+        const targetPath = candidates.find((path) => !toolEvents.slice(latestFailedIndex + 1).some((event) => (
+          event && event.ok && String(event.tool || '').toLowerCase() === 'read_file' && normalizeWorkspacePath(event.path || '') === path
+        ))) || candidates[0] || '';
+        if (targetPath) {
+          const readAfterFailure = toolEvents.slice(latestFailedIndex + 1).some((event) => (
+            event && event.ok && String(event.tool || '').toLowerCase() === 'read_file' && normalizeWorkspacePath(event.path || '') === targetPath
+          ));
+          return {
+            action: 'tool',
+            tool: readAfterFailure ? 'edit_file' : 'read_file',
+            message: readAfterFailure
+              ? `Apply the requested change in ${targetPath}.`
+              : `Read ${targetPath} as the nearest editable source for the requested change.`,
+            path: targetPath,
+            content: readAfterFailure
+              ? `Fix the user's requested issue by editing this source file. Do not edit ${latestFailedPath || 'the unavailable asset'}.`
+              : '',
+            srcPath: '',
+            dstPath: '',
+            raw: readAfterFailure ? '[fallback-edit-source-after-uneditable-target]' : '[fallback-read-source-after-uneditable-target]',
+          };
+        }
+      }
 
       let latestReadIndex = -1;
       let latestRead = null;
@@ -378,13 +782,75 @@
       }
       if (!latestRead) return null;
 
+      const listedFilesForFallback = [];
+      toolEvents.forEach((event) => {
+        if (!event || !event.ok || String(event.tool || '').toLowerCase() !== 'list_dir') return;
+        for (const match of String(event.observation || '').matchAll(/-\s+\[file\]\s+([^\s(]+)/g)) {
+          const path = normalizeWorkspacePath(`/${String(match[1] || '').trim()}`);
+          if (path && path !== '/' && !listedFilesForFallback.includes(path)) listedFilesForFallback.push(path);
+        }
+      });
+      if (listedFilesForFallback.length) {
+        const taskLowerForReads = String(taskText || '').toLowerCase();
+        const roleCandidates = [];
+        const pushRoleCandidate = (path) => {
+          const normalized = normalizeWorkspacePath(path || '');
+          if (normalized && listedFilesForFallback.includes(normalized) && !successfulReads.has(normalized)) roleCandidates.push(normalized);
+        };
+        if (/\b(calculator|dark mode|theme|responsive|modern|design|style|layout)\b/i.test(taskLowerForReads)) {
+          pushRoleCandidate('/style.css');
+          pushRoleCandidate('/script.js');
+          pushRoleCandidate('/index.html');
+        }
+        const nextSourceRead = roleCandidates[0];
+        if (nextSourceRead) {
+          return {
+            action: 'tool',
+            tool: 'read_file',
+            message: `Read ${nextSourceRead} before editing the coordinated feature.`,
+            path: nextSourceRead,
+            content: '',
+            srcPath: '',
+            dstPath: '',
+            raw: '[fallback-read-related-source-before-edit]',
+          };
+        }
+      }
+
       const alreadyUpdated = toolEvents.slice(latestReadIndex + 1).some((event) => (
         event
         && event.ok
-        && String(event.tool || '').toLowerCase() === 'write_file'
+        && ['write_file', 'edit_file'].includes(String(event.tool || '').toLowerCase())
         && normalizeWorkspacePath(event.path || '') === latestRead.path
       ));
-      if (alreadyUpdated) return null;
+      if (alreadyUpdated) {
+        const latestMutationIndex = (() => {
+          for (let i = toolEvents.length - 1; i >= 0; i -= 1) {
+            const event = toolEvents[i];
+            if (event && event.ok && ['write_file', 'edit_file', 'mkdir', 'move', 'delete'].includes(String(event.tool || '').toLowerCase())) return i;
+          }
+          return -1;
+        })();
+        const latestValidationIndex = (() => {
+          for (let i = toolEvents.length - 1; i >= 0; i -= 1) {
+            if (String(toolEvents[i] && toolEvents[i].tool || '').toLowerCase() === 'validate_files') return i;
+          }
+          return -1;
+        })();
+        if (latestMutationIndex >= 0 && latestValidationIndex < latestMutationIndex) {
+          return {
+            action: 'tool',
+            tool: 'validate_files',
+            message: 'Validate the updated files before finalizing.',
+            path: '/',
+            content: '',
+            srcPath: '',
+            dstPath: '',
+            raw: '[fallback-validate-unscoped-edit]',
+          };
+        }
+        return null;
+      }
 
       const taskLower = String(taskText || '').toLowerCase();
       let message = `Update ${latestRead.path} to satisfy the user's requested changes.`;
@@ -398,7 +864,7 @@
 
       return {
         action: 'tool',
-        tool: 'write_file',
+        tool: 'edit_file',
         message,
         path: latestRead.path,
         content: '',
@@ -493,6 +959,23 @@
         .slice(0, 8);
     }
 
+    function parseAgentPlanPathList(raw) {
+      return String(raw || '')
+        .split('|')
+        .map((item) => normalizeWorkspacePath(item))
+        .filter((item) => item && item !== '/')
+        .filter((item) => !/\.(?:png|jpe?g|gif|webp|bmp|ico|tiff?|mp4|mov|webm|mp3|wav|pdf|zip)$/i.test(item))
+        .slice(0, 12);
+    }
+
+    function parseAgentPlanTextList(raw, maxItems = 8) {
+      return String(raw || '')
+        .split('|')
+        .map((item) => String(item || '').trim())
+        .filter(Boolean)
+        .slice(0, maxItems);
+    }
+
     function buildFallbackExpectedFiles(taskKind, primaryStack, projectName = '') {
       if (String(taskKind || '').toLowerCase() !== 'project') return [];
       const base = String(projectName || '')
@@ -504,9 +987,67 @@
         return [base ? `/${base.replace(/-/g, '_')}.py` : '/main.py'];
       }
       if (String(primaryStack || '').toLowerCase() === 'web') {
-        return ['/index.html', '/styles.css', '/script.js'];
+        return ['/index.html', '/style.css', '/script.js'];
       }
       return base ? [`/${base}.txt`] : ['/main.txt'];
+    }
+
+    function getPlannedFileRoles(expectedFiles = []) {
+      const files = Array.isArray(expectedFiles) ? expectedFiles.map((path) => normalizeWorkspacePath(path || '')).filter(Boolean) : [];
+      return {
+        files,
+        htmlFile: files.find((path) => /\.html?$/i.test(path)) || '',
+        cssFile: files.find((path) => /\.(css|scss|sass|less)$/i.test(path)) || '',
+        scriptFile: files.find((path) => /\.(js|mjs|cjs|ts|jsx|tsx)$/i.test(path)) || '',
+        pythonFile: files.find((path) => /\.py$/i.test(path)) || '',
+      };
+    }
+
+    function buildAgentProjectContract(taskText = '', taskKind = '', primaryStack = '', expectedFiles = []) {
+      if (String(taskKind || '').toLowerCase() !== 'project') return '';
+      const { files, htmlFile, cssFile, scriptFile } = getPlannedFileRoles(expectedFiles);
+      const lower = String(taskText || '').toLowerCase();
+      const lines = [];
+      lines.push(`Planned files: ${files.join(', ') || '(none)'}`);
+      lines.push('Generation budget contract:');
+      lines.push('- First pass must prioritize a complete working MVP over exhaustive polish.');
+      lines.push('- Keep each file compact enough to finish cleanly in one response; add optional polish in later edit passes after validation.');
+      lines.push('- Do not spend the whole budget on decoration. Reuse shared classes, helpers, and patterns.');
+      if (String(primaryStack || '').toLowerCase() === 'web' || htmlFile) {
+        lines.push('Web project contract:');
+        if (htmlFile) {
+          lines.push(`- ${htmlFile} budget: semantic structure, requested sections, shared classes, and stable IDs only; avoid unnecessary markup.`);
+        }
+        if (htmlFile && cssFile) {
+          const cssHref = cssFile.replace(/^\//, '');
+          lines.push(`- ${htmlFile} must include <link rel="stylesheet" href="${cssHref}"> in <head>.`);
+          lines.push(`- ${htmlFile} must not contain a <style> block or large inline style attributes.`);
+          lines.push(`- ${cssFile} must contain the visual design and only CSS.`);
+          lines.push(`- ${cssFile} budget: design tokens, layout, responsive basics, and a small reusable animation set; avoid one-off decorative selectors for every element.`);
+        }
+        if (htmlFile && scriptFile) {
+          const scriptSrc = scriptFile.replace(/^\//, '');
+          lines.push(`- ${htmlFile} must include <script src="${scriptSrc}" defer></script>.`);
+          lines.push(`- ${htmlFile} must not contain inline JavaScript.`);
+          lines.push(`- ${scriptFile} must only reference IDs/classes that exist in ${htmlFile}.`);
+          lines.push(`- ${scriptFile} budget: core interactions only; avoid large decorative systems unless essential.`);
+        }
+        if (/\bsurprise|reveal|secret|easter egg\b/.test(lower)) {
+          lines.push(`- Shared interaction contract: include a primary button with id="surprise-btn" and a reveal region with id="surprise-panel"${htmlFile ? ` in ${htmlFile}` : ''}.`);
+          if (scriptFile) lines.push(`- ${scriptFile} should attach the surprise interaction to #surprise-btn and update/toggle #surprise-panel.`);
+        }
+        lines.push('- Keep class and ID names consistent across HTML, CSS, and JavaScript.');
+        lines.push('- Prefer local CSS/JS only; do not rely on network assets unless the user explicitly asks.');
+      }
+      if (String(primaryStack || '').toLowerCase() === 'python') {
+        lines.push('Python project contract:');
+        lines.push('- First pass should include a complete runnable script with clear functions and minimal dependencies.');
+        lines.push('- Split into additional files only when the plan explicitly includes them or the project needs modules.');
+      }
+      if (files.includes('/README.md')) {
+        lines.push('README budget: concise project purpose, local run instructions, and actual file names only.');
+      }
+      return lines.join('\n');
     }
 
     function shouldFallbackPlanNeedReadme(taskText = '') {
@@ -524,13 +1065,29 @@
         || (/self-explanatory/.test(lower) && /\b(project|workspace|repo|codebase|app|code)\b/.test(lower));
     }
 
+    function isDocsOnlyTask(taskText = '') {
+      const lower = String(taskText || '').toLowerCase();
+      if (!isExplicitReadmeOrDocsTask(taskText)) return false;
+      const createsSoftware = /\b(create|build|make|start|setup|set up|design|develop|generate|craft)\b/.test(lower)
+        && /\b(project|app|site|website|page|tool|game|dashboard|calculator|frontend|ui)\b/.test(lower);
+      return !createsSoftware;
+    }
+
     function isExistingProjectMutationRequest(taskText = '') {
       const lower = String(taskText || '').toLowerCase();
       if (!lower) return false;
       const mutationIntent = /\b(add|update|edit|modify|change|fix|delete|remove|rename|refactor|improve|create)\b/.test(lower);
       const existingProjectTarget = /\b(project|workspace|code|file|files|readme|docs?|current|existing|this)\b/.test(lower);
-      const explicitNewProject = /\b(new project|new workspace|from scratch|separate project|brand new)\b/.test(lower);
+      const explicitNewProject = /\b(new project|new workspace|fresh workspace|from scratch|start from scratch|separate project|brand new)\b/.test(lower);
       return mutationIntent && existingProjectTarget && !explicitNewProject;
+    }
+
+    function isOpenWorkspaceFollowupMutation(taskText = '') {
+      if (!hasOpenWorkspaceContext()) return false;
+      const lower = String(taskText || '').toLowerCase();
+      if (!lower) return false;
+      if (/\b(new project|new workspace|fresh workspace|from scratch|start from scratch|separate project|brand new)\b/.test(lower)) return false;
+      return /\b(add|update|edit|modify|change|fix|delete|remove|rename|refactor|improve|implement|polish|modern|responsive|dark mode|design|style|styles|styling|css|layout|calculator)\b/.test(lower);
     }
 
     function hasOpenWorkspaceContext() {
@@ -547,39 +1104,68 @@
 
     function normalizeAgentPlanSpec(parsed, taskText = '') {
       const lower = String(taskText || '').toLowerCase();
+      const explicitFreshWorkspaceIntent = /\b(new project|new workspace|fresh workspace|from scratch|start from scratch|separate project|brand new)\b/.test(lower);
       const projectLikeFallback = (
         /\b(create|build|make|start|setup|set up|design|develop|generate|craft)\b/.test(lower)
         && /\b(project|app|site|website|page|tool|game|dashboard|calculator|frontend|ui)\b/.test(lower)
       );
       const explicitDocsTask = isExplicitReadmeOrDocsTask(taskText);
+      const docsOnlyTask = isDocsOnlyTask(taskText);
       const workspaceScopedMutation = hasOpenWorkspaceContext() && isExistingProjectMutationRequest(taskText);
+      const openWorkspaceFollowupMutation = isOpenWorkspaceFollowupMutation(taskText);
+      const workspaceContext = typeof deps.getWorkspaceContext === 'function' ? deps.getWorkspaceContext() || {} : {};
+      const isWorkspaceEmpty = hasOpenWorkspaceContext() && Number(workspaceContext.rootEntryCount) === 0;
       let taskKind = ['project', 'edit', 'analysis'].includes(String(parsed && parsed.task_kind || '').toLowerCase())
         ? String(parsed.task_kind).toLowerCase()
         : (projectLikeFallback ? 'project' : 'edit');
-      if (!workspaceScopedMutation && projectLikeFallback && taskKind !== 'analysis') {
+      if (explicitFreshWorkspaceIntent && projectLikeFallback && !docsOnlyTask) {
         taskKind = 'project';
       }
-      if ((explicitDocsTask || workspaceScopedMutation) && taskKind === 'project' && !/\b(new project|new workspace|from scratch|separate project|brand new)\b/.test(lower)) {
+      if (openWorkspaceFollowupMutation && !explicitFreshWorkspaceIntent && taskKind !== 'analysis') {
         taskKind = 'edit';
+      }
+      if (!workspaceScopedMutation && !openWorkspaceFollowupMutation && projectLikeFallback && taskKind !== 'analysis') {
+        taskKind = 'project';
+      }
+      if ((docsOnlyTask || workspaceScopedMutation || openWorkspaceFollowupMutation) && taskKind === 'project' && !explicitFreshWorkspaceIntent) {
+        if (!isWorkspaceEmpty) {
+          taskKind = 'edit';
+        }
+      }
+      if (taskKind === 'edit' && isWorkspaceEmpty) {
+        taskKind = 'project';
       }
       let primaryStack = ['python', 'web', 'generic'].includes(String(parsed && parsed.primary_stack || '').toLowerCase())
         ? String(parsed.primary_stack).toLowerCase()
         : (/python|pygame|\.py\b/.test(lower) ? 'python' : ((WEB_TASK_HINT_REGEX.test(lower) || /\bcalculator\b/.test(lower)) ? 'web' : 'generic'));
       const parsedProjectName = normalizeWorkspaceName(parsed && parsed.project_name ? parsed.project_name : '');
       const fallbackProjectName = deriveProjectNameFromTask(taskText);
-      const projectName = parsedProjectNameLooksUsable(parsedProjectName, taskText)
+      const sanitizedParsedProjectName = parsedProjectNameLooksUsable(parsedProjectName, taskText)
         ? sanitizeProjectSlug(parsedProjectName)
+        : '';
+      const fallbackHasIntent = /\b(surprise|landing|dashboard|tracker|calculator|game|site|page|desktop|os|interface|ui)\b/i.test(String(fallbackProjectName || ''));
+      const parsedMissingIntent = fallbackHasIntent
+        && !String(sanitizedParsedProjectName || '').split('-').some((part) => String(fallbackProjectName || '').split('-').includes(part) && /surprise|landing|dashboard|tracker|calculator|game|site|page|desktop|os|interface|ui/i.test(part));
+      const projectName = sanitizedParsedProjectName && !parsedMissingIntent
+        ? sanitizedParsedProjectName
         : fallbackProjectName;
       let expectedFiles = parseAgentExpectedFiles(parsed && parsed.expected_files ? parsed.expected_files : '');
       expectedFiles = expectedFiles.filter((path) => !/\.(?:png|jpe?g|gif|webp|bmp|ico|tiff?)$/i.test(String(path || '')));
+      const affectedFiles = parseAgentPlanPathList(parsed && parsed.affected_files ? parsed.affected_files : '');
+      const filesToInspect = parseAgentPlanPathList(parsed && parsed.files_to_inspect ? parsed.files_to_inspect : '');
+      const doneCriteria = parseAgentPlanTextList(parsed && parsed.done_criteria ? parsed.done_criteria : '');
+      const validationSteps = parseAgentPlanTextList(parsed && parsed.validation ? parsed.validation : '', 6);
       const looksLikeWebProjectTask = taskKind === 'project' && (WEB_TASK_HINT_REGEX.test(lower) || /\bcalculator\b/.test(lower));
       const expectedFilesLookLikeGenericText = expectedFiles.length > 0 && expectedFiles.every((path) => /\.(txt|md)$/i.test(String(path || '')));
       if (looksLikeWebProjectTask && (primaryStack === 'generic' || expectedFilesLookLikeGenericText)) {
         primaryStack = 'web';
         expectedFiles = [];
       }
-      if (explicitDocsTask && expectedFiles.length === 0) {
+      if (docsOnlyTask && expectedFiles.length === 0) {
         expectedFiles = ['/README.md'];
+      }
+      if (taskKind === 'edit' && expectedFiles.length === 0 && affectedFiles.length > 0) {
+        expectedFiles = affectedFiles.slice();
       }
       const nonReadmeExpectedFiles = expectedFiles.filter((path) => path && path !== '/README.md');
       const simpleSingleFileProject = taskKind === 'project' && nonReadmeExpectedFiles.length === 1 && !explicitDocsTask;
@@ -593,13 +1179,24 @@
       ) && !simpleSingleFileProject;
       const needsReadme = requestedReadme || requestedRunInstructions;
       const needsRunInstructions = requestedRunInstructions;
-      const finalRequiresRealFiles = !explicitDocsTask && taskKind === 'project' && (
+      const finalRequiresRealFiles = !docsOnlyTask && taskKind === 'project' && (
         String(parsed && parsed.final_requires_real_files || '').toLowerCase() === 'yes'
         || taskKind === 'project'
       );
       if (taskKind === 'project' && expectedFiles.length === 0) {
         expectedFiles = buildFallbackExpectedFiles(taskKind, primaryStack, projectName || deriveProjectNameFromTask(taskText));
       }
+      if (taskKind === 'project' && (primaryStack === 'web' || looksLikeWebProjectTask)) {
+        ['/index.html', '/style.css', '/script.js'].forEach((path) => {
+          if (!expectedFiles.includes(path) && !expectedFiles.some((item) => new RegExp(`\\.${path.split('.').pop()}$`, 'i').test(item))) {
+            expectedFiles.push(path);
+          }
+        });
+      }
+      if (taskKind === 'project' && needsReadme && !expectedFiles.includes('/README.md')) {
+        expectedFiles.push('/README.md');
+      }
+      const parsedSummary = String(parsed && parsed.summary ? parsed.summary : '').trim().slice(0, 220);
       return {
         taskKind,
         projectName: projectName || deriveProjectNameFromTask(taskText),
@@ -608,38 +1205,59 @@
         needsRunInstructions,
         finalRequiresRealFiles,
         expectedFiles,
-        summary: String(parsed && parsed.summary ? parsed.summary : '').trim().slice(0, 220),
+        affectedFiles,
+        filesToInspect,
+        doneCriteria,
+        validationSteps,
+        projectContract: buildAgentProjectContract(taskText, taskKind, primaryStack, expectedFiles),
+        summary: parsedSummary,
       };
     }
 
     function buildFallbackAgentPlanSpec(taskText = '') {
       const lower = String(taskText || '').toLowerCase();
       const explicitDocsTask = isExplicitReadmeOrDocsTask(taskText);
+      const docsOnlyTask = isDocsOnlyTask(taskText);
       const workspaceScopedMutation = hasOpenWorkspaceContext() && isExistingProjectMutationRequest(taskText);
+      const openWorkspaceFollowupMutation = isOpenWorkspaceFollowupMutation(taskText);
       const projectLikeFallback = (
         /\b(create|build|make|start|setup|set up|design|develop|generate|craft)\b/.test(lower)
         && /\b(project|app|site|website|page|tool|game|dashboard|calculator|frontend|ui)\b/.test(lower)
       );
-      const taskKind = explicitDocsTask
+      const workspaceContext = typeof deps.getWorkspaceContext === 'function' ? deps.getWorkspaceContext() || {} : {};
+      const isWorkspaceEmpty = hasOpenWorkspaceContext() && Number(workspaceContext.rootEntryCount) === 0;
+      let taskKind = docsOnlyTask
         ? 'edit'
-        : workspaceScopedMutation
+        : (workspaceScopedMutation || openWorkspaceFollowupMutation)
         ? 'edit'
         : projectLikeFallback
         ? 'project'
         : (/\b(check|verify|review|inspect|analy[sz]e|compare|correlate|audit|look at)\b/.test(lower) ? 'analysis' : 'edit');
+      if (taskKind === 'edit' && isWorkspaceEmpty) {
+        taskKind = 'project';
+      }
       const primaryStack = /python|pygame|\.py\b/.test(lower)
         ? 'python'
         : (((WEB_TASK_HINT_REGEX.test(lower) || /\bcalculator\b/.test(lower))) ? 'web' : 'generic');
       const needsReadme = shouldFallbackPlanNeedReadme(taskText);
       const projectName = deriveProjectNameFromTask(taskText);
+      const fallbackExpectedFiles = docsOnlyTask ? ['/README.md'] : buildFallbackExpectedFiles(taskKind, primaryStack, projectName);
+      if (taskKind === 'project' && needsReadme && !fallbackExpectedFiles.includes('/README.md')) {
+        fallbackExpectedFiles.push('/README.md');
+      }
       return {
         taskKind,
         projectName,
         primaryStack,
         needsReadme,
         needsRunInstructions: needsReadme,
-        finalRequiresRealFiles: explicitDocsTask ? false : taskKind === 'project',
-        expectedFiles: explicitDocsTask ? ['/README.md'] : buildFallbackExpectedFiles(taskKind, primaryStack, projectName),
+        finalRequiresRealFiles: docsOnlyTask ? false : taskKind === 'project',
+        expectedFiles: fallbackExpectedFiles,
+        affectedFiles: taskKind === 'edit' ? [] : fallbackExpectedFiles.slice(),
+        filesToInspect: [],
+        doneCriteria: [],
+        validationSteps: taskKind === 'project' ? ['validate_files'] : [],
+        projectContract: buildAgentProjectContract(taskText, taskKind, primaryStack, fallbackExpectedFiles),
         summary: '',
       };
     }
@@ -660,9 +1278,13 @@
       parseAgentEditProgram,
       applyAgentEditProgram,
       buildFallbackExpectedFiles,
+      buildAgentProjectContract,
+      getPlannedFileRoles,
       shouldFallbackPlanNeedReadme,
       isExplicitReadmeOrDocsTask,
+      isDocsOnlyTask,
       isExistingProjectMutationRequest,
+      isOpenWorkspaceFollowupMutation,
       normalizeAgentPlanSpec,
       buildFallbackAgentPlanSpec,
     };

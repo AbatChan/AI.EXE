@@ -3,7 +3,7 @@
     const agentPlannerEndpoint = String(deps.agentPlannerEndpoint || '');
     const agentPlannerRequestTimeoutMs = Number(deps.agentPlannerRequestTimeoutMs) || 15000;
     const agentDecisionMaxTokens = Number(deps.agentDecisionMaxTokens) || 120;
-    const agentFileContentMaxTokens = Number(deps.agentFileContentMaxTokens) || 2200;
+    const agentFileContentMaxTokens = Number(deps.agentFileContentMaxTokens) || 5000;
     const agentFileGenerationRequestTimeoutMs = Number(deps.agentFileGenerationRequestTimeoutMs) || 30000;
 
     async function requestExternalAgentPlanner(prompt, maxTokens, timeoutMs = agentPlannerRequestTimeoutMs) {
@@ -36,8 +36,8 @@
       }
     }
 
-    async function generateAgentWriteFileContent(taskText, toolEvents, path, priorAttempt = '') {
-      const prompt = await deps.buildAgentWriteFileContentPrompt(taskText, toolEvents, path, priorAttempt);
+    async function generateAgentWriteFileContent(taskText, toolEvents, path, priorAttempt = '', planSpec = null) {
+      const prompt = await deps.buildAgentWriteFileContentPrompt(taskText, toolEvents, path, priorAttempt, planSpec);
       const remote = await deps.requestSelectedRemoteTextCompletion(prompt, agentFileContentMaxTokens);
       if (remote && remote.ok) {
         const cleaned = deps.sanitizeAgentGeneratedFileContent(remote.output || '', path);
@@ -58,8 +58,8 @@
       return deps.sanitizeAgentGeneratedFileContent(res.output || '', path);
     }
 
-    async function generateAgentEditFileProgram(taskText, toolEvents, path, currentContent, priorAttempt = '') {
-      const prompt = await deps.buildAgentEditFileContentPrompt(taskText, toolEvents, path, currentContent, priorAttempt);
+    async function generateAgentEditFileProgram(taskText, toolEvents, path, currentContent, priorAttempt = '', planSpec = null) {
+      const prompt = await deps.buildAgentEditFileContentPrompt(taskText, toolEvents, path, currentContent, priorAttempt, planSpec);
       const remote = await deps.requestSelectedRemoteTextCompletion(prompt, agentDecisionMaxTokens * 3);
       if (remote && remote.ok) {
         const cleaned = deps.sanitizeAgentGeneratedEditProgram(remote.output || '');
@@ -80,8 +80,8 @@
       return deps.sanitizeAgentGeneratedEditProgram(res.output || '');
     }
 
-    async function generateAgentRewriteExistingFileContent(taskText, toolEvents, path, currentContent, priorAttempt = '') {
-      const prompt = await deps.buildAgentRewriteExistingFilePrompt(taskText, toolEvents, path, currentContent, priorAttempt);
+    async function generateAgentRewriteExistingFileContent(taskText, toolEvents, path, currentContent, priorAttempt = '', planSpec = null) {
+      const prompt = await deps.buildAgentRewriteExistingFilePrompt(taskText, toolEvents, path, currentContent, priorAttempt, planSpec);
       const remote = await deps.requestSelectedRemoteTextCompletion(prompt, agentFileContentMaxTokens);
       if (remote && remote.ok) {
         const cleaned = deps.sanitizeAgentGeneratedFileContent(remote.output || '', path);
@@ -115,13 +115,13 @@
         .filter((item) => ['write_file', 'edit_file'].includes(String(item.tool || '').toLowerCase()))
         .map((item) => deps.normalizeWorkspacePath(item.path || ''))
         .filter(Boolean);
-      const uniqueWritten = Array.from(new Set(writtenPaths)).slice(0, 3);
-      const fileSummary = uniqueWritten.length === 0
-        ? ''
-        : uniqueWritten.length === 1
-          ? ` Main file: \`${uniqueWritten[0]}\`.`
-          : ` Main files: ${uniqueWritten.map((path) => `\`${path}\``).join(', ')}.`;
-      return `I finished the requested workspace changes in \`${workspaceLabel || deps.deriveProjectNameFromTask(taskText) || 'project'}\`.${fileSummary}`;
+      const uniqueWritten = Array.from(new Set(writtenPaths)).slice(0, 6);
+      const fileSummary = uniqueWritten.length
+        ? `Updated ${uniqueWritten.map((path) => `\`${path}\``).join(', ')}.`
+        : 'Done.';
+      const validated = rows.some((item) => String(item.tool || '').toLowerCase() === 'validate_files' && item.validationPassed === true);
+      const verification = validated ? ' Validation passed.' : '';
+      return `${fileSummary}${verification}`;
     }
 
     async function generateAgentCompletionText(taskText, toolEvents, workspaceLabel, planSpec = null) {
@@ -131,6 +131,7 @@
         .map((item) => deps.normalizeWorkspacePath(item.path || ''))
         .filter(Boolean)
         .slice(-6);
+      const deterministicCompletion = buildAgentCompletionFallbackText(taskText, toolEvents, workspaceLabel);
       const readResults = rows
         .filter((item) => String(item.tool || '').toLowerCase() === 'read_file')
         .slice(-2)
@@ -140,16 +141,16 @@
         ].join('\n'))
         .join('\n\n');
       let prompt = [
-        'Write one short natural completion message for the user.',
-        'Do not use markdown bullets.',
+        'Write a natural completion message for the user.',
         'Do not dump raw tool results.',
-        'Mention the workspace name naturally.',
-        'Mention at most two key files only if useful.',
-        'Keep it to one or two sentences.',
+        'Mention the workspace name only if it is useful.',
+        'Mention changed files when they help the user understand what happened.',
+        'For multi-file app work, short bullets are allowed.',
+        'Keep it concise and specific to the actual work.',
         `Workspace name: ${workspaceLabel || deps.deriveProjectNameFromTask(taskText) || 'project'}`,
         `Task: ${String(taskText || '').trim()}`,
         planSpec && planSpec.summary ? `Plan summary: ${planSpec.summary}` : '',
-        writtenPaths.length ? `Written files: ${writtenPaths.slice(0, 2).join(', ')}` : '',
+        writtenPaths.length ? `Written files: ${Array.from(new Set(writtenPaths)).slice(0, 6).join(', ')}` : '',
         readResults ? `READ_RESULTS:\n${readResults}` : '',
         'Completion message:',
       ].filter(Boolean).join('\n');
@@ -160,22 +161,22 @@
             WORKSPACE_NAME: workspaceLabel || deps.deriveProjectNameFromTask(taskText) || 'project',
             TASK: String(taskText || '').trim(),
             PLAN_SUMMARY: planSpec && planSpec.summary ? planSpec.summary : '',
-            WRITTEN_FILES: writtenPaths.length ? writtenPaths.slice(0, 2).join(', ') : '',
+            WRITTEN_FILES: writtenPaths.length ? Array.from(new Set(writtenPaths)).slice(0, 6).join(', ') : '',
             READ_RESULTS: readResults || '(none)',
           });
         }
       }
-      const remote = await deps.requestSelectedRemoteTextCompletion(prompt, 120);
+      const remote = await deps.requestSelectedRemoteTextCompletion(prompt, 240);
       if (remote && remote.ok) {
         const text = deps.sanitizeAssistantText(remote.output || '');
         if (text) return text;
       }
-      const external = await requestExternalAgentPlanner(prompt, 120, 12000);
+      const external = await requestExternalAgentPlanner(prompt, 240, 12000);
       if (external && external.ok) {
         const text = deps.sanitizeAssistantText(external.output || '');
         if (text) return text;
       }
-      return buildAgentCompletionFallbackText(taskText, toolEvents, workspaceLabel);
+      return deterministicCompletion;
     }
 
     function buildAgentProgressMarkdown(progressEntries, startedAtMs) {

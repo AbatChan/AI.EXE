@@ -5,6 +5,14 @@
     const hasReadmeRunInstructions = deps.hasReadmeRunInstructions;
     const isLikelyCompleteReadme = deps.isLikelyCompleteReadme;
     const isExplicitReadmeOrDocsTask = deps.isExplicitReadmeOrDocsTask;
+    const isDocsOnlyTask = typeof deps.isDocsOnlyTask === 'function'
+      ? deps.isDocsOnlyTask
+      : (taskText = '') => {
+        const lower = String(taskText || '').toLowerCase();
+        const createsSoftware = /\b(create|build|make|start|setup|set up|design|develop|generate|craft)\b/.test(lower)
+          && /\b(project|app|site|website|page|tool|game|dashboard|calculator|frontend|ui)\b/.test(lower);
+        return !createsSoftware && typeof isExplicitReadmeOrDocsTask === 'function' && isExplicitReadmeOrDocsTask(taskText);
+      };
     const buildFallbackAgentPlanSpec = deps.buildFallbackAgentPlanSpec;
     const buildAgentFileGenerationHints = deps.buildAgentFileGenerationHints;
     const loadPromptTemplate = deps.loadPromptTemplate;
@@ -23,7 +31,9 @@
       return [
         'functionality here',
         'todo:',
-        'placeholder',
+        'placeholder code',
+        'placeholder for',
+        'placeholder content',
         'coming soon',
         'start developing',
         'implement this',
@@ -42,14 +52,19 @@
       return text.trim().length >= 800 && score >= 3;
     }
 
-    function isLikelyCompleteJavaScriptProjectSource(content) {
+    function isLikelyCompleteJavaScriptProjectSource(content, taskText = '') {
       const text = String(content || '');
       const lower = text.toLowerCase();
+      const lowerTask = String(taskText || '').toLowerCase();
       let score = 0;
       if (/function\s+\w+|const\s+\w+\s*=|class\s+\w+/i.test(text)) score += 1;
       if (/addEventListener|onclick|document\.querySelector|getElementById|localStorage|module\.exports|export\s+/i.test(text)) score += 1;
       if (/\b(save|load|render|update|delete|remove|list|total|summary)\b/i.test(lower)) score += 1;
       if (looksLikePlaceholderImplementation(text)) return false;
+      const isDomScript = /addEventListener|onclick|document\.querySelector|getElementById|classList|textContent|innerHTML/i.test(text);
+      const hasInteraction = /click|submit|input|change|keydown|toggle|show|hide|reveal|surprise/i.test(lower);
+      const taskWantsReveal = /\b(surprise|reveal|secret|easter egg|modal|landing|website|site|page)\b/i.test(lowerTask);
+      if (text.trim().length >= 320 && isDomScript && hasInteraction && (taskWantsReveal || score >= 2)) return true;
       return text.trim().length >= 700 && score >= 3;
     }
 
@@ -61,12 +76,12 @@
           : isLikelyCompletePythonProjectSource(content);
       }
       if (/\.(js|ts|jsx|tsx)$/i.test(normalized)) {
-        return isLikelyCompleteJavaScriptProjectSource(content);
+        return isLikelyCompleteJavaScriptProjectSource(content, taskText);
       }
       if (/\.html$/i.test(normalized)) {
         const text = String(content || '');
         const lower = text.toLowerCase();
-        return text.trim().length >= 500 && /<html|<body|<script|<main|<section/i.test(lower) && !looksLikePlaceholderImplementation(text);
+        return text.trim().length >= 400 && /<html|<body|<script|<main|<section/i.test(lower) && !looksLikePlaceholderImplementation(text);
       }
       return String(content || '').trim().length >= 500 && !looksLikePlaceholderImplementation(content);
     }
@@ -114,8 +129,25 @@
       const isAnalysisTask = plan.taskKind === 'analysis';
       const isPythonTask = plan.primaryStack === 'python';
       const isGameTask = isAgentTaskGameLike(lower);
-      const isDocsTask = isExplicitReadmeOrDocsTask(text);
+      const isDocsTask = isDocsOnlyTask(text);
       const isRenameTask = /\brename\b/.test(lower);
+      const workspace = typeof getWorkspaceContext === 'function' ? getWorkspaceContext() || {} : {};
+      const workspaceAlreadyOpen = Boolean(
+        String(workspace.workspaceRootName || '').trim()
+        || Number(workspace.rootEntryCount) > 0
+        || Boolean(workspace.rootLoaded)
+        || normalizeWorkspacePath(workspace.currentPath || '/') !== '/'
+      );
+      const explicitSeparateWorkspaceIntent = /\b(new project|new workspace|fresh workspace|another project|separate project|different project|start from scratch|from scratch)\b/i.test(text);
+      const plannedAffectedFiles = Array.isArray(plan.affectedFiles)
+        ? plan.affectedFiles.map((path) => normalizeWorkspacePath(path || '')).filter(Boolean)
+        : [];
+      const plannedInspectFiles = Array.isArray(plan.filesToInspect)
+        ? plan.filesToInspect.map((path) => normalizeWorkspacePath(path || '')).filter(Boolean)
+        : [];
+      const validationSteps = Array.isArray(plan.validationSteps)
+        ? plan.validationSteps.map((step) => String(step || '').toLowerCase()).filter(Boolean)
+        : [];
 
       const readmeWrite = getLatestSuccessfulAgentWrite(toolEvents, (event) => normalizeWorkspacePath(event.path || '') === '/README.md');
       const primarySourceWrite = getLatestSuccessfulAgentSourceWrite(toolEvents, (event, normalized) => {
@@ -127,7 +159,8 @@
         requirements.push({
           id: 'project_root',
           label: 'create the project workspace',
-          met: hasSuccessfulAgentTool(toolEvents, (event) => event.tool === 'new_project'),
+          met: (workspaceAlreadyOpen && !explicitSeparateWorkspaceIntent)
+            || hasSuccessfulAgentTool(toolEvents, (event) => event.tool === 'new_project'),
         });
       }
 
@@ -189,7 +222,7 @@
       }
 
       plan.expectedFiles
-        .filter((path) => !isDocsTask && path && path !== '/README.md' && path !== '/src')
+        .filter((path) => isSoftwareProject && !isDocsTask && path && path !== '/README.md' && path !== '/src')
         .slice(0, 6)
         .forEach((path) => {
           requirements.push({
@@ -199,6 +232,24 @@
           });
         });
 
+      if (!isSoftwareProject) {
+        plannedInspectFiles.slice(0, 8).forEach((path) => {
+          requirements.push({
+            id: `inspect_${path}`,
+            label: `inspect ${path}`,
+            met: hasSuccessfulAgentTool(toolEvents, (event) => String(event.tool || '').toLowerCase() === 'read_file' && normalizeWorkspacePath(event.path || '') === path),
+          });
+        });
+
+        plannedAffectedFiles.slice(0, 8).forEach((path) => {
+          requirements.push({
+            id: `affected_${path}`,
+            label: `update ${path}`,
+            met: hasSuccessfulAgentTool(toolEvents, (event) => ['write_file', 'edit_file'].includes(String(event.tool || '').toLowerCase()) && normalizeWorkspacePath(event.path || '') === path),
+          });
+        });
+      }
+
       const expectedNonReadmeFiles = plan.expectedFiles
         .filter((path) => !isDocsTask && path && path !== '/README.md' && path !== '/src');
       const allExpectedFilesWritten = expectedNonReadmeFiles.length > 0
@@ -206,18 +257,28 @@
           toolEvents,
           (event) => ['write_file', 'edit_file'].includes(String(event.tool || '').toLowerCase()) && normalizeWorkspacePath(event.path || '') === path,
         ));
-      if (isSoftwareProject && allExpectedFilesWritten) {
+      const validateRequested = validationSteps.some((step) => /validate_files|static|syntax|check|test|verify/.test(step));
+      const plannedAffectedFilesUpdated = plannedAffectedFiles.length > 0
+        && plannedAffectedFiles.every((path) => hasSuccessfulAgentTool(
+          toolEvents,
+          (event) => ['write_file', 'edit_file'].includes(String(event.tool || '').toLowerCase()) && normalizeWorkspacePath(event.path || '') === path,
+        ));
+      if ((isSoftwareProject && allExpectedFilesWritten) || (!isSoftwareProject && validateRequested && plannedAffectedFilesUpdated)) {
         requirements.push({
           id: 'validate_written_files',
-          label: 'validate the written project files',
+          label: isSoftwareProject ? 'validate the written project files' : 'validate the updated files',
           met: hasSuccessfulAgentTool(toolEvents, (event) => String(event.tool || '').toLowerCase() === 'validate_files' && event.validationPassed === true),
         });
       }
 
       if (!requirements.length) {
+        const hasMutation = hasSuccessfulAgentTool(toolEvents, (event) => {
+          const tool = String(event.tool || '').toLowerCase();
+          return ['write_file', 'edit_file', 'mkdir', 'move', 'delete'].includes(tool);
+        });
         requirements.push({
           id: 'deliverable',
-          label: isAnalysisTask ? 'inspect the relevant workspace files and answer the request' : 'complete the requested workspace changes',
+          label: isAnalysisTask ? 'inspect the relevant workspace files and answer the request' : 'finish the planned work',
           met: hasSuccessfulAgentTool(toolEvents, (event) => {
             const tool = String(event.tool || '').toLowerCase();
             if (isAnalysisTask) {
@@ -229,6 +290,13 @@
             return ['write_file', 'edit_file', 'mkdir', 'move', 'delete'].includes(tool);
           }),
         });
+        if (!isAnalysisTask && hasMutation) {
+          requirements.push({
+            id: 'validate_after_unscoped_edit',
+            label: 'validate the updated files',
+            met: hasSuccessfulAgentTool(toolEvents, (event) => String(event.tool || '').toLowerCase() === 'validate_files' && event.validationPassed === true),
+          });
+        }
       }
 
       return requirements;
@@ -296,6 +364,37 @@
       let text = String(outputText || '').replace(/\r/g, '').trim();
       if (!text) return '';
       const normalizedPath = normalizeWorkspacePath(path || '');
+      const extension = (normalizedPath.match(/\.([a-z0-9]+)$/i) || [])[1] || '';
+      const languageAliases = {
+        html: ['html', 'htm'],
+        htm: ['html', 'htm'],
+        css: ['css', 'scss', 'sass', 'less'],
+        js: ['javascript', 'js', 'node'],
+        mjs: ['javascript', 'js', 'mjs', 'node'],
+        cjs: ['javascript', 'js', 'cjs', 'node'],
+        ts: ['typescript', 'ts', 'javascript', 'js'],
+        jsx: ['jsx', 'javascript', 'js'],
+        tsx: ['tsx', 'typescript', 'ts', 'jsx'],
+        py: ['python', 'py'],
+        md: ['markdown', 'md'],
+        json: ['json'],
+      };
+      const wantedLanguages = languageAliases[String(extension || '').toLowerCase()] || [String(extension || '').toLowerCase()];
+      const fencedBlocks = [];
+      for (const match of text.matchAll(/```([a-z0-9_+\-]*)\s*([\s\S]*?)```/gi)) {
+        const language = String(match[1] || '').trim().toLowerCase();
+        const body = String(match[2] || '').trim();
+        if (!body) continue;
+        fencedBlocks.push({ language, body });
+      }
+      if (fencedBlocks.length) {
+        const matched = fencedBlocks.find((block) => wantedLanguages.includes(block.language))
+          || fencedBlocks.find((block) => !block.language)
+          || fencedBlocks[0];
+        if (matched && matched.body) {
+          text = matched.body;
+        }
+      }
       const leakedPrompt = /return only the file contents\.|file path:\s*\/|mvp_requirements:|recent_tool_results:|file_content:/i.test(text);
       const fencedBlock = text.match(/```[a-z0-9_-]*\s*([\s\S]*?)```/i);
       if (leakedPrompt && fencedBlock && fencedBlock[1]) {
@@ -312,6 +411,18 @@
         .replace(/^Here(?:'|’)s the file(?: content)?[:\s-]*/i, '')
         .replace(/^Below is the file(?: content)?[:\s-]*/i, '')
         .trim();
+      if (/^(?:-\s+(?:Write|Keep|If this|Prefer|Respect|Use|Follow|Never|Do not)\b[\s\S]*?\n)+(?:```)?/i.test(text)) {
+        const firstLikelyCode = (() => {
+          if (/\.(html?)$/i.test(normalizedPath)) return text.search(/<!doctype html\b|<html\b|<head\b|<body\b|<section\b|<main\b|<div\b/i);
+          if (/\.css$/i.test(normalizedPath)) return text.search(/(?:^|\n)\s*(?:\/\*|:root\b|@media\b|@import\b|[.#a-z][^{;\n]*\{)/i);
+          if (/\.(js|mjs|cjs|ts|jsx|tsx)$/i.test(normalizedPath)) return text.search(/(?:^|\n)\s*(?:["']use strict["'];?|import\b|const\b|let\b|var\b|function\b|class\b|document\.|window\.)/i);
+          if (/\.md$/i.test(normalizedPath)) return text.search(/(?:^|\n)\s*#/);
+          return -1;
+        })();
+        if (firstLikelyCode > 0) {
+          text = text.slice(firstLikelyCode).trim();
+        }
+      }
       if (/\.(html?)$/i.test(normalizedPath)) {
         const htmlStart = text.search(/<!doctype html\b|<html\b/i);
         if (htmlStart > 0) {
@@ -357,18 +468,92 @@
       return text;
     }
 
-    async function buildAgentWriteFileContentPrompt(taskText, toolEvents, path, priorAttempt = '') {
+    function summarizeFileSignals(path, content) {
+      const normalized = normalizeWorkspacePath(path || '');
+      const text = String(content || '');
+      const pick = (items, limit = 80) => Array.from(new Set(items.filter(Boolean))).slice(0, limit);
+      if (/\.html?$/i.test(normalized)) {
+        const ids = pick(Array.from(text.matchAll(/\bid=["']([^"']+)["']/gi)).map((match) => String(match[1] || '').trim()));
+        const classes = [];
+        for (const match of text.matchAll(/\bclass=["']([^"']+)["']/gi)) {
+          String(match[1] || '').split(/\s+/).forEach((name) => classes.push(String(name || '').trim()));
+        }
+        return [
+          ids.length ? `HTML ids: ${ids.join(', ')}` : '',
+          classes.length ? `HTML classes: ${pick(classes, 120).join(', ')}` : '',
+        ].filter(Boolean).join('\n');
+      }
+      if (/\.(css|scss|sass|less)$/i.test(normalized)) {
+        const classSelectors = pick(Array.from(text.matchAll(/\.([a-z_][a-z0-9_-]*)/gi)).map((match) => String(match[1] || '').trim()), 140);
+        const idSelectors = pick(Array.from(text.matchAll(/#([a-z_][a-z0-9_-]*)/gi)).map((match) => String(match[1] || '').trim()).filter((id) => !/^[0-9a-f]{3,8}$/i.test(id)));
+        return [
+          classSelectors.length ? `CSS class selectors: ${classSelectors.join(', ')}` : '',
+          idSelectors.length ? `CSS id selectors: ${idSelectors.join(', ')}` : '',
+        ].filter(Boolean).join('\n');
+      }
+      if (/\.(js|mjs|cjs|ts|jsx|tsx)$/i.test(normalized)) {
+        const ids = pick(Array.from(text.matchAll(/getElementById\s*\(\s*['"]([^'"]+)['"]\s*\)/g)).map((match) => String(match[1] || '').trim()));
+        const queriedClasses = pick(Array.from(text.matchAll(/querySelector(?:All)?\s*\(\s*['"]\.([a-z_][a-z0-9_-]*)['"]\s*\)/gi)).map((match) => String(match[1] || '').trim()));
+        const mutatedClasses = pick(Array.from(text.matchAll(/classList\.(?:add|remove|toggle|contains)\s*\(\s*['"]([^'"]+)['"]\s*\)/g)).map((match) => String(match[1] || '').trim()));
+        return [
+          ids.length ? `JS referenced ids: ${ids.join(', ')}` : '',
+          queriedClasses.length ? `JS queried classes: ${queriedClasses.join(', ')}` : '',
+          mutatedClasses.length ? `JS class mutations: ${mutatedClasses.join(', ')}` : '',
+        ].filter(Boolean).join('\n');
+      }
+      return '';
+    }
+
+    function buildAgentProjectStateContext(toolEvents = [], planSpec = null) {
+      const expectedFiles = Array.isArray(planSpec && planSpec.expectedFiles)
+        ? planSpec.expectedFiles.map((path) => normalizeWorkspacePath(path || '')).filter(Boolean)
+        : [];
+      const latestByPath = new Map();
+      const validationIssues = [];
+      (Array.isArray(toolEvents) ? toolEvents : []).forEach((event) => {
+        if (!event) return;
+        const tool = String(event.tool || '').toLowerCase();
+        const path = normalizeWorkspacePath(event.path || event.writtenPath || event.readPath || '');
+        if (event.validationPassed === false && Array.isArray(event.validationIssues)) {
+          event.validationIssues.forEach((issue) => validationIssues.push(String(issue || '').trim()));
+        }
+        if (!path || !expectedFiles.includes(path)) return;
+        if (['write_file', 'edit_file'].includes(tool) && typeof event.content === 'string') {
+          latestByPath.set(path, String(event.content || ''));
+        } else if (tool === 'read_file' && typeof event.content === 'string') {
+          latestByPath.set(path, String(event.content || ''));
+        }
+      });
+      const sections = [];
+      if (expectedFiles.length) sections.push(`Expected files: ${expectedFiles.join(', ')}`);
+      expectedFiles.forEach((path) => {
+        const content = latestByPath.has(path) ? latestByPath.get(path) : '';
+        if (!String(content || '').trim()) return;
+        const signals = summarizeFileSignals(path, content);
+        if (signals) sections.push(`SIGNALS ${path}:\n${signals}`);
+        sections.push(`CURRENT ${path}:\n${String(content || '').slice(0, 9000)}`);
+      });
+      if (validationIssues.length) {
+        sections.push(`LATEST VALIDATION ISSUES:\n- ${validationIssues.slice(-12).join('\n- ')}`);
+      }
+      return sections.join('\n\n').trim();
+    }
+
+    async function buildAgentWriteFileContentPrompt(taskText, toolEvents, path, priorAttempt = '', planSpec = null) {
       const toolLog = (toolEvents || []).slice(-6).map((event, index) => {
         const observation = String(event && event.observation ? event.observation : '').slice(0, 1000);
         return `ToolResult ${index + 1}: ${String(event && event.tool ? event.tool : 'unknown')}\n${observation}`;
       }).join('\n\n');
       const normalizedPath = normalizeWorkspacePath(path || '');
       const generationHints = buildAgentFileGenerationHints(taskText, normalizedPath);
+      const projectState = buildAgentProjectStateContext(toolEvents, planSpec);
       const template = await loadPromptTemplate('developer_agent_write_file');
       if (template) {
         return renderPromptTemplate(template, {
           FILE_PATH: normalizedPath,
           MVP_REQUIREMENTS: generationHints.length ? `- ${generationHints.join('\n- ')}` : '',
+          PROJECT_CONTRACT: String(planSpec && planSpec.projectContract ? planSpec.projectContract : ''),
+          PROJECT_STATE: projectState,
           TASK: String(taskText || '').trim(),
           RECENT_TOOL_RESULTS: toolLog || '(none yet)',
           PREVIOUS_ATTEMPT_TO_IMPROVE: priorAttempt ? String(priorAttempt).slice(0, 1800) : '',
@@ -384,27 +569,32 @@
         '- If this is README.md, include setup or run instructions.',
         '- If this is a main source file, include the core functionality requested by the task.',
         generationHints.length ? `MVP_REQUIREMENTS:\n- ${generationHints.join('\n- ')}` : '',
+        planSpec && planSpec.projectContract ? `PROJECT_CONTRACT:\n${String(planSpec.projectContract)}` : '',
+        projectState ? `PROJECT_STATE:\n${projectState}` : '',
         'TASK:',
         String(taskText || '').trim(),
         'RECENT_TOOL_RESULTS:',
         toolLog || '(none yet)',
         priorAttempt
-          ? `PREVIOUS_ATTEMPT_TO_IMPROVE:\n${String(priorAttempt).slice(0, 1800)}`
+          ? `PREVIOUS_ATTEMPT_TO_IMPROVE:\nThe previous generation was rejected because it was either too short or contained placeholders (e.g. "todo", "coming soon"). Expand this code into a fully working implementation:\n${String(priorAttempt).slice(0, 1800)}`
           : '',
         'FILE_CONTENT:',
       ].filter(Boolean).join('\n');
     }
 
-    async function buildAgentEditFileContentPrompt(taskText, toolEvents, path, currentContent, priorAttempt = '') {
+    async function buildAgentEditFileContentPrompt(taskText, toolEvents, path, currentContent, priorAttempt = '', planSpec = null) {
       const toolLog = (toolEvents || []).slice(-6).map((event, index) => {
         const observation = String(event && event.observation ? event.observation : '').slice(0, 1000);
         return `ToolResult ${index + 1}: ${String(event && event.tool ? event.tool : 'unknown')}\n${observation}`;
       }).join('\n\n');
       const normalizedPath = normalizeWorkspacePath(path || '');
+      const projectState = buildAgentProjectStateContext(toolEvents, planSpec);
       const template = await loadPromptTemplate('developer_agent_edit_file');
       if (template) {
         return renderPromptTemplate(template, {
           FILE_PATH: normalizedPath,
+          PROJECT_CONTRACT: String(planSpec && planSpec.projectContract ? planSpec.projectContract : ''),
+          PROJECT_STATE: projectState,
           TASK: String(taskText || '').trim(),
           RECENT_TOOL_RESULTS: toolLog || '(none yet)',
           PREVIOUS_ATTEMPT_TO_IMPROVE: priorAttempt ? String(priorAttempt).slice(0, 1800) : '',
@@ -426,6 +616,8 @@
         '- Reuse exact text from the file for find/anchor fields.',
         '- Do not rewrite the whole file unless the request truly requires it.',
         `File path: ${normalizedPath}`,
+        planSpec && planSpec.projectContract ? `PROJECT_CONTRACT:\n${String(planSpec.projectContract)}` : '',
+        projectState ? `PROJECT_STATE:\n${projectState}` : '',
         'TASK:',
         String(taskText || '').trim(),
         'RECENT_TOOL_RESULTS:',
@@ -439,16 +631,19 @@
       ].filter(Boolean).join('\n');
     }
 
-    async function buildAgentRewriteExistingFilePrompt(taskText, toolEvents, path, currentContent, priorAttempt = '') {
+    async function buildAgentRewriteExistingFilePrompt(taskText, toolEvents, path, currentContent, priorAttempt = '', planSpec = null) {
       const toolLog = (toolEvents || []).slice(-6).map((event, index) => {
         const observation = String(event && event.observation ? event.observation : '').slice(0, 1000);
         return `ToolResult ${index + 1}: ${String(event && event.tool ? event.tool : 'unknown')}\n${observation}`;
       }).join('\n\n');
       const normalizedPath = normalizeWorkspacePath(path || '');
+      const projectState = buildAgentProjectStateContext(toolEvents, planSpec);
       const template = await loadPromptTemplate('developer_agent_rewrite_file');
       if (template) {
         return renderPromptTemplate(template, {
           FILE_PATH: normalizedPath,
+          PROJECT_CONTRACT: String(planSpec && planSpec.projectContract ? planSpec.projectContract : ''),
+          PROJECT_STATE: projectState,
           TASK: String(taskText || '').trim(),
           RECENT_TOOL_RESULTS: toolLog || '(none yet)',
           PREVIOUS_ATTEMPT_TO_IMPROVE: priorAttempt ? String(priorAttempt).slice(0, 1800) : '',
@@ -459,6 +654,8 @@
         'Rewrite the complete final contents for one existing file after applying the requested edits.',
         'Return only the file contents. No markdown fences. No explanation.',
         `File path: ${normalizedPath}`,
+        planSpec && planSpec.projectContract ? `PROJECT_CONTRACT:\n${String(planSpec.projectContract)}` : '',
+        projectState ? `PROJECT_STATE:\n${projectState}` : '',
         'Rules:',
         '- Preserve unrelated working behavior.',
         '- Apply only the requested edits cleanly.',
@@ -539,6 +736,19 @@
           Array.isArray(planSpec.expectedFiles) && planSpec.expectedFiles.length
             ? `Expected files: ${planSpec.expectedFiles.join(', ')}`
             : '',
+          Array.isArray(planSpec.affectedFiles) && planSpec.affectedFiles.length
+            ? `Affected files: ${planSpec.affectedFiles.join(', ')}`
+            : '',
+          Array.isArray(planSpec.filesToInspect) && planSpec.filesToInspect.length
+            ? `Inspect first: ${planSpec.filesToInspect.join(', ')}`
+            : '',
+          Array.isArray(planSpec.doneCriteria) && planSpec.doneCriteria.length
+            ? `Done criteria: ${planSpec.doneCriteria.join(' | ')}`
+            : '',
+          Array.isArray(planSpec.validationSteps) && planSpec.validationSteps.length
+            ? `Validation: ${planSpec.validationSteps.join(' | ')}`
+            : '',
+          planSpec.projectContract ? `Project contract:\n${planSpec.projectContract}` : '',
           planSpec.needsReadme ? 'README required: yes' : 'README required: no',
         ].filter(Boolean).join('\n')
         : '(none)';

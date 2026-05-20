@@ -25,26 +25,105 @@
       return [`Directory ${path}:`, ...lines].join('\n');
     }
 
+    function parseWorkspaceListEntries(rawOutput) {
+      try {
+        const parsed = JSON.parse(String(rawOutput || '{}'));
+        return Array.isArray(parsed && parsed.entries)
+          ? parsed.entries.map((entry) => deps.mapWorkspaceEntry(entry)).filter((entry) => entry && entry.path)
+          : [];
+      } catch (_) {
+        return [];
+      }
+    }
+
+    function isSearchableTextPath(path) {
+      const normalized = String(path || '').toLowerCase();
+      if (/\.(png|jpe?g|gif|webp|avif|ico|bmp|tiff|mp4|mov|webm|mp3|wav|pdf|zip|gz|tar|7z|dmg|app|exe|dll|so|dylib|bin)$/i.test(normalized)) return false;
+      return /\.(html?|css|scss|sass|less|js|mjs|cjs|ts|jsx|tsx|json|md|txt|py|java|c|cc|cpp|cxx|h|hpp|cs|go|rs|php|rb|sh|yml|yaml|xml|svg)$/i.test(normalized);
+    }
+
+    function buildSearchNeedles(query) {
+      const src = String(query || '').trim();
+      const quoted = Array.from(src.matchAll(/["'“”‘’`]([^"'“”‘’`]{3,120})["'“”‘’`]/g))
+        .map((match) => String(match[1] || '').trim())
+        .filter(Boolean);
+      const lines = src.split(/\n+/).map((line) => line.trim()).filter((line) => line.length >= 3 && line.length <= 120);
+      const words = src
+        .toLowerCase()
+        .replace(/[^a-z0-9_-]+/g, ' ')
+        .split(/\s+/)
+        .filter((word) => word.length >= 4 && !/^(that|this|with|into|your|from|have|maybe|really|clicked|work|worked|excellent|source|files|search)$/i.test(word));
+      return Array.from(new Set([...quoted, ...lines, ...words].map((item) => String(item || '').trim()).filter(Boolean))).slice(0, 24);
+    }
+
+    function lineMatchesNeedle(line, needle) {
+      const haystack = String(line || '').toLowerCase();
+      const lowerNeedle = String(needle || '').toLowerCase();
+      if (!lowerNeedle) return false;
+      if (haystack.includes(lowerNeedle)) return true;
+      const normalizedHaystack = haystack.replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim();
+      const normalizedNeedle = lowerNeedle.replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim();
+      return normalizedNeedle.length >= 4 && normalizedHaystack.includes(normalizedNeedle);
+    }
+
+    async function collectSearchableWorkspaceFiles(rootPath, maxFiles = 80) {
+      const queue = [deps.normalizeWorkspacePath(rootPath || '/') || '/'];
+      const files = [];
+      const seenDirs = new Set();
+      while (queue.length && files.length < maxFiles) {
+        const dir = deps.normalizeWorkspacePath(queue.shift() || '/');
+        if (seenDirs.has(dir)) continue;
+        seenDirs.add(dir);
+        const response = await deps.invokeWorkspaceAction('workspaceList', { path: dir });
+        if (!response || !response.ok) continue;
+        const entries = parseWorkspaceListEntries(response.output || '');
+        entries.forEach((entry) => {
+          const path = deps.normalizeWorkspacePath(entry.path || '');
+          if (!path || path === '/') return;
+          if (entry.kind === 'folder') {
+            if (!/\/(?:node_modules|vendor|dist|build|\.git|\.cache)(?:\/|$)/i.test(path)) queue.push(path);
+            return;
+          }
+          if (files.length < maxFiles && isSearchableTextPath(path)) files.push(path);
+        });
+      }
+      return files;
+    }
+
     function validateGeneratedFile(path, content, taskText, planSpec) {
       const normalized = deps.normalizeWorkspacePath(path || '');
       const text = String(content || '');
       const issues = [];
       const expectedFiles = Array.isArray(planSpec && planSpec.expectedFiles) ? planSpec.expectedFiles : [];
+      const htmlFile = expectedFiles.find((candidate) => /\.html?$/i.test(String(candidate || ''))) || '';
+      const cssFile = expectedFiles.find((candidate) => /\.(css|scss|sass|less)$/i.test(String(candidate || ''))) || '';
+      const scriptFile = expectedFiles.find((candidate) => /\.(js|mjs|cjs|ts|jsx|tsx)$/i.test(String(candidate || ''))) || '';
+      if (/```[a-z0-9_+\-]*|^\s*-\s+(?:Write|Keep|If this|Prefer|Respect|Use|Follow|Never|Do not)\b/im.test(text)) {
+        issues.push('contains prompt instructions or markdown fences instead of only file contents');
+      }
       if (/\.html?$/i.test(normalized)) {
-        if (expectedFiles.includes('/styles.css') && /<style[\s>]/i.test(text)) {
-          issues.push('contains inline <style> content even though /styles.css exists');
+        if (cssFile && /<style[\s>]/i.test(text)) {
+          issues.push(`contains inline <style> content even though ${cssFile} exists`);
         }
-        if (expectedFiles.includes('/script.js') && /<script(?![^>]*\bsrc=)[\s>]/i.test(text)) {
-          issues.push('contains inline <script> content even though /script.js exists');
+        if (scriptFile && /<script(?![^>]*\bsrc=)[\s>]/i.test(text)) {
+          issues.push(`contains inline <script> content even though ${scriptFile} exists`);
         }
       }
       if (/\.css$/i.test(normalized)) {
         if (/<\/?(?:html|head|body|script|main|section|div)\b|<!doctype html/i.test(text)) {
           issues.push('contains HTML markup instead of pure CSS');
         }
+        const cssSyntaxIssue = getCssSyntaxIssue(text);
+        if (cssSyntaxIssue) issues.push(cssSyntaxIssue);
       }
       if (/\.(js|ts|jsx|tsx)$/i.test(normalized)) {
-        if (/<\/?(?:html|head|body|style|main|section|div)\b|<!doctype html/i.test(text)) {
+        // Strip template literals and innerHTML/textContent string assignments
+        // so that valid JS like `el.innerHTML = '<div>...'` is not flagged.
+        const strippedForHtmlCheck = text
+          .replace(/`[\s\S]*?`/g, '')           // remove template literals
+          .replace(/\.innerHTML\s*=\s*['"][\s\S]*?['"]\s*;/g, '')  // remove innerHTML assignments
+          .replace(/\.textContent\s*=\s*['"][\s\S]*?['"]\s*;/g, ''); // remove textContent assignments
+        if (/<\/?(?:html|head|body|style)\b|<!doctype html/i.test(strippedForHtmlCheck)) {
           issues.push('contains HTML markup instead of pure JavaScript');
         }
         if (!/\b(import|export)\b/.test(text)) {
@@ -61,6 +140,52 @@
         issues.push('still looks incomplete for the requested MVP');
       }
       return issues;
+    }
+
+    function getCssSyntaxIssue(css) {
+      const text = String(css || '');
+      const trimmed = text.trim();
+      if (!trimmed) return 'is empty';
+      if (/^:\s*\/\*/.test(trimmed)) return 'starts with a stray colon before a CSS comment';
+      let depth = 0;
+      let quote = '';
+      let inComment = false;
+      for (let i = 0; i < text.length; i += 1) {
+        const ch = text[i];
+        const next = text[i + 1] || '';
+        if (inComment) {
+          if (ch === '*' && next === '/') {
+            inComment = false;
+            i += 1;
+          }
+          continue;
+        }
+        if (quote) {
+          if (ch === '\\') {
+            i += 1;
+            continue;
+          }
+          if (ch === quote) quote = '';
+          continue;
+        }
+        if (ch === '/' && next === '*') {
+          inComment = true;
+          i += 1;
+          continue;
+        }
+        if (ch === '"' || ch === "'") {
+          quote = ch;
+          continue;
+        }
+        if (ch === '{') depth += 1;
+        if (ch === '}') depth -= 1;
+        if (depth < 0) return 'has an unmatched closing brace';
+      }
+      if (inComment) return 'has an unterminated CSS comment';
+      if (quote) return 'has an unterminated CSS string';
+      if (depth > 0) return 'has unclosed CSS blocks';
+      if (/[{:;,]$/.test(text.trim().slice(-1))) return 'appears truncated at the end';
+      return '';
     }
 
     function extractHtmlIds(html) {
@@ -83,53 +208,149 @@
     }
 
     function extractCssClassSelectors(css) {
-      return Array.from(String(css || '').matchAll(/\.([a-z_][a-z0-9_-]*)/gi)).map((match) => String(match[1] || '').trim()).filter(Boolean);
+      const cleaned = String(css || '')
+        .replace(/\/\*[\s\S]*?\*\//g, ' ')
+        .replace(/url\s*\((?:[^)(]|\([^)(]*\))*\)/gi, ' ')
+        .replace(/(["'])(?:\\.|(?!\1)[\s\S])*\1/g, ' ');
+      const junkTokens = new Set(['css', 'com', 'http', 'https', 'org', 'svg', 'w3', 'www', 'xmlns']);
+      return Array.from(cleaned.matchAll(/(^|[,{>+~\s.])\.([a-z_][a-z0-9_-]*)/gi))
+        .map((match) => String(match[2] || '').trim())
+        .filter((name) => name && !junkTokens.has(name.toLowerCase()));
+    }
+
+    function extractCssIdSelectors(css) {
+      return Array.from(String(css || '').matchAll(/#([a-z_][a-z0-9_-]*)/gi))
+        .map((match) => String(match[1] || '').trim())
+        .filter((id) => {
+          if (!id) return false;
+          // Ignore typical hex color signatures
+          if (/^[0-9a-f]{3}$/i.test(id)) return false;
+          if (/^[0-9a-f]{4}$/i.test(id)) return false;
+          if (/^[0-9a-f]{6}$/i.test(id)) return false;
+          if (/^[0-9a-f]{8}$/i.test(id)) return false;
+          return true;
+        });
     }
 
     function extractJsHtmlExpectations(js) {
+      const src = String(js || '');
+      const createdIds = Array.from(src.matchAll(/(?:\.id\s*=\s*|setAttribute\s*\(\s*['"]id['"]\s*,\s*)['"]([^'"]+)['"]/g))
+        .map((match) => String(match[1] || '').trim())
+        .filter(Boolean);
+      const createdClasses = [];
+      for (const match of src.matchAll(/(?:\.className\s*=\s*|setAttribute\s*\(\s*['"]class['"]\s*,\s*)['"]([^'"]+)['"]/g)) {
+        String(match[1] || '').split(/\s+/).forEach((className) => {
+          const value = String(className || '').trim();
+          if (value) createdClasses.push(value);
+        });
+      }
+      for (const match of src.matchAll(/\bclass\s*=\s*["']([^"']+)["']/g)) {
+        String(match[1] || '').split(/\s+/).forEach((className) => {
+          const value = String(className || '').trim();
+          if (value) createdClasses.push(value);
+        });
+      }
+      const classMutations = [];
+      for (const match of src.matchAll(/classList\.(?:add|remove|toggle|contains)\s*\(([^)]*)\)/g)) {
+        const args = String(match[1] || '');
+        for (const argMatch of args.matchAll(/['"]([^'"]+)['"]/g)) {
+          const value = String(argMatch[1] || '').trim();
+          if (value) classMutations.push(value);
+        }
+      }
       return {
-        ids: Array.from(String(js || '').matchAll(/getElementById\s*\(\s*['"]([^'"]+)['"]\s*\)/g)).map((match) => String(match[1] || '').trim()).filter(Boolean),
-        dataActions: Array.from(String(js || '').matchAll(/\[data-action=["']([^"']+)["']\]/g)).map((match) => String(match[1] || '').trim()).filter(Boolean),
+        ids: Array.from(src.matchAll(/getElementById\s*\(\s*['"]([^'"]+)['"]\s*\)/g)).map((match) => String(match[1] || '').trim()).filter(Boolean),
+        dataActions: Array.from(src.matchAll(/\[data-action=["']([^"']+)["']\]/g)).map((match) => String(match[1] || '').trim()).filter(Boolean),
+        queriedClasses: Array.from(src.matchAll(/querySelector(?:All)?\s*\(\s*['"]\.([a-z_][a-z0-9_-]*)['"]\s*\)/gi)).map((match) => String(match[1] || '').trim()).filter(Boolean),
+        classMutations,
+        createdIds,
+        createdClasses,
       };
     }
 
     function validateWebProjectConsistency(fileContents, planSpec) {
       const issues = [];
-      const html = String(fileContents['/index.html'] || '');
-      const css = String(fileContents['/styles.css'] || '');
-      const js = String(fileContents['/script.js'] || fileContents['/app.js'] || '');
+      const expectedFiles = Array.isArray(planSpec && planSpec.expectedFiles) ? planSpec.expectedFiles : [];
+      const htmlFile = expectedFiles.find((path) => /\.html?$/i.test(String(path || ''))) || '';
+      const cssFile = expectedFiles.find((path) => /\.(css|scss|sass|less)$/i.test(String(path || ''))) || '';
+      const scriptFile = expectedFiles.find((path) => /\.(js|mjs|cjs|ts|jsx|tsx)$/i.test(String(path || ''))) || '';
+      if (!htmlFile || (!cssFile && !scriptFile)) return issues;
+      const html = String(fileContents[htmlFile] || '');
+      const css = cssFile ? String(fileContents[cssFile] || '') : '';
+      const js = scriptFile ? String(fileContents[scriptFile] || '') : '';
       if (!html) return issues;
 
-      const expectedFiles = Array.isArray(planSpec && planSpec.expectedFiles) ? planSpec.expectedFiles : [];
-      if (expectedFiles.includes('/styles.css') && !/href=["'][^"']*styles\.css["']/i.test(html)) {
-        issues.push('/index.html: does not link /styles.css');
+      if (cssFile) {
+        const cssHref = cssFile.replace(/^\//, '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        if (!new RegExp(`href=["'][^"']*${cssHref}["']`, 'i').test(html)) {
+          issues.push(`${htmlFile}: does not link ${cssFile}`);
+        }
       }
-      if (expectedFiles.includes('/script.js') && !/src=["'][^"']*script\.js["']/i.test(html)) {
-        issues.push('/index.html: does not load /script.js');
+      if (scriptFile) {
+        const scriptSrc = scriptFile.replace(/^\//, '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        if (!new RegExp(`src=["'][^"']*${scriptSrc}["']`, 'i').test(html)) {
+          issues.push(`${htmlFile}: does not load ${scriptFile}`);
+        }
       }
 
       const htmlIds = new Set(extractHtmlIds(html));
       const htmlDataActions = new Set(extractHtmlDataActions(html));
       const htmlClasses = new Set(extractHtmlClasses(html));
       const cssClasses = new Set(extractCssClassSelectors(css));
+      const cssIds = new Set(extractCssIdSelectors(css));
       const jsExpectations = extractJsHtmlExpectations(js);
+      const pushIssue = (issue) => {
+        const text = String(issue || '').trim();
+        if (text && !issues.includes(text)) issues.push(text);
+      };
 
       jsExpectations.ids.forEach((id) => {
-        if (!htmlIds.has(id)) {
-          issues.push(`/script.js: references #${id}, but index.html does not define that id`);
+        if (!htmlIds.has(id) && !jsExpectations.createdIds.includes(id)) {
+          pushIssue(`${scriptFile || 'script file'}: references #${id}, but ${htmlFile} does not define that id`);
         }
       });
       jsExpectations.dataActions.forEach((action) => {
         if (!htmlDataActions.has(action)) {
-          issues.push(`/script.js: expects data-action="${action}", but index.html does not provide it`);
+          pushIssue(`${scriptFile || 'script file'}: expects data-action="${action}", but ${htmlFile} does not provide it`);
+        }
+      });
+      jsExpectations.queriedClasses.forEach((className) => {
+        if (!htmlClasses.has(className) && !cssClasses.has(className) && !jsExpectations.createdClasses.includes(className)) {
+          pushIssue(`${scriptFile || 'script file'}: queries .${className}, but ${htmlFile} does not define that class`);
+        }
+      });
+      jsExpectations.classMutations.forEach((className) => {
+        if (!cssClasses.has(className) && !htmlClasses.has(className) && !jsExpectations.createdClasses.includes(className)) {
+          pushIssue(`${scriptFile || 'script file'}: toggles .${className}, but neither ${htmlFile} nor ${cssFile || 'stylesheet'} define that class`);
         }
       });
 
+      const unusedCssIds = Array.from(cssIds).filter((id) => !htmlIds.has(id));
+      unusedCssIds.slice(0, 4).forEach((id) => {
+        pushIssue(`${cssFile || 'stylesheet'}: styles #${id}, but ${htmlFile} does not define that id`);
+      });
+      const jsUsedClasses = new Set([
+        ...jsExpectations.classMutations,
+        ...jsExpectations.createdClasses,
+        ...jsExpectations.queriedClasses,
+      ]);
+      const unusedCssClasses = Array.from(cssClasses).filter((className) => !htmlClasses.has(className) && !jsUsedClasses.has(className));
+      if (unusedCssClasses.length > Math.max(3, Math.floor(cssClasses.size * 0.35))) {
+        pushIssue(`${cssFile || 'stylesheet'}: many class selectors do not match ${htmlFile} (${unusedCssClasses.slice(0, 6).map((name) => `.${name}`).join(', ')})`);
+      }
+      const importantHtmlClasses = Array.from(htmlClasses).filter((className) => (
+        /hero|panel|button|btn|card|section|content|title|subtitle|footer|nav|header|quote|badge|logo|overlay/i.test(className)
+      ));
+      const unstyledImportantClasses = importantHtmlClasses.filter((className) => !cssClasses.has(className));
+      if (css && unstyledImportantClasses.length > 3) {
+        pushIssue(`${htmlFile}: important classes are not styled in ${cssFile || 'stylesheet'} (${unstyledImportantClasses.slice(0, 6).map((name) => `.${name}`).join(', ')})`);
+      }
+
       if (cssClasses.has('buttons-grid') && !htmlClasses.has('buttons-grid') && htmlClasses.has('buttons')) {
-        issues.push('/styles.css: styles .buttons-grid, but index.html uses .buttons for the calculator grid');
+        pushIssue(`${cssFile || 'stylesheet'}: styles .buttons-grid, but ${htmlFile} uses .buttons for the calculator grid`);
       }
       if (htmlClasses.has('buttons') && !cssClasses.has('buttons') && cssClasses.has('buttons-grid')) {
-        issues.push('/index.html: uses .buttons, but styles.css only defines .buttons-grid for the button layout');
+        pushIssue(`${htmlFile}: uses .buttons, but ${cssFile || 'stylesheet'} only defines .buttons-grid for the button layout`);
       }
       return issues;
     }
@@ -181,6 +402,16 @@
         if (normalized === '/README.md') return Boolean(planSpec && planSpec.needsReadme);
         return planExpectedFiles.includes(normalized);
       };
+      const listedExistingFiles = new Set();
+      if (Array.isArray(toolEvents)) {
+        toolEvents.forEach((event) => {
+          if (!event || !event.ok || String(event.tool || '').toLowerCase() !== 'list_dir') return;
+          for (const match of String(event.observation || '').matchAll(/-\s+\[file\]\s+([^\s(]+)/g)) {
+            const listedPath = deps.normalizeWorkspacePath(`/${String(match[1] || '').trim()}`);
+            if (listedPath && listedPath !== '/') listedExistingFiles.add(listedPath);
+          }
+        });
+      }
       let mutated = false;
       let observation = '';
 
@@ -295,6 +526,35 @@
         return { ok: true, mutated, observation };
       }
 
+      if (tool === 'search_files') {
+        const workspace = deps.getWorkspaceContext();
+        const path = deps.normalizeWorkspacePath(decision.path || workspace.currentPath || '/');
+        const query = String(decision.content || decision.message || taskText || '').trim();
+        const needles = buildSearchNeedles(query);
+        if (!needles.length) {
+          return { ok: false, mutated, observation: 'search_files requires search text in content.' };
+        }
+        const files = await collectSearchableWorkspaceFiles(path || '/', 80);
+        const results = [];
+        for (const filePath of files) {
+          if (results.length >= 60) break;
+          const response = await deps.invokeWorkspaceAction('workspaceReadFile', { path: filePath });
+          if (!response || !response.ok) continue;
+          const lines = String(response.output || '').split(/\r?\n/);
+          for (let i = 0; i < lines.length && results.length < 60; i += 1) {
+            const line = lines[i];
+            if (!needles.some((needle) => lineMatchesNeedle(line, needle))) continue;
+            const snippet = line.trim().replace(/\s+/g, ' ').slice(0, 180);
+            results.push(`- ${filePath}:${i + 1}: ${snippet || '(blank)'}`);
+          }
+        }
+        observation = [
+          `search_files ${path || '/'} for ${JSON.stringify(needles.slice(0, 8).join(' | '))}`,
+          results.length ? results.join('\n') : `(no matches in ${files.length} text files)`,
+        ].join('\n');
+        return { ok: true, mutated, observation };
+      }
+
       if (tool === 'read_file') {
         const path = deps.normalizeWorkspacePath(decision.path || '');
         if (!path || path === '/') {
@@ -346,7 +606,7 @@
             observation: `write_file blocked for ${path}: this tool can only write text-editable files. Do not create binary image assets here; use CSS, inline SVG, or text placeholders instead.`,
           };
         }
-        const creatingNewFile = deps.isLikelyNewAgentFileTarget(toolEvents, path);
+        const creatingNewFile = deps.isLikelyNewAgentFileTarget(toolEvents, path) && !listedExistingFiles.has(path);
         let originalContent = '';
         if (!creatingNewFile) {
           const alreadyReadThisFile = Array.isArray(toolEvents) && toolEvents.some((event) => (
@@ -372,10 +632,10 @@
         let content = String(decision.content || '');
         const shouldAutoGenerate = deps.isAgentGeneratedContentTarget(path, taskText);
         if (shouldAutoGenerate) {
-          const generated = await deps.generateAgentWriteFileContent(taskText, toolEvents, path, content);
+          const generated = await deps.generateAgentWriteFileContent(taskText, toolEvents, path, content, planSpec);
           if (generated) content = generated;
         } else if (!String(content).trim()) {
-          const generated = await deps.generateAgentWriteFileContent(taskText, toolEvents, path, '');
+          const generated = await deps.generateAgentWriteFileContent(taskText, toolEvents, path, '', planSpec);
           if (generated) content = generated;
         }
         if (!String(content).trim()) {
@@ -388,6 +648,7 @@
         const projectStyleTask = deps.isAgentTaskSoftwareProject(taskText) || /\bcomplete\b/.test(taskLower);
         const gameLikeTask = deps.isAgentTaskGameLike(taskText);
         const primaryTarget = /\.(py|js|ts|jsx|tsx|html)$/i.test(path);
+        const cssTarget = /\.css$/i.test(path);
         const pythonTarget = /\.py$/i.test(path);
         const readmeTarget = deps.normalizeWorkspacePath(path) === '/README.md';
         const latestPrimarySourceWrite = deps.getLatestSuccessfulAgentSourceWrite(toolEvents);
@@ -405,10 +666,10 @@
           };
         }
         if (projectStyleTask && readmeTarget && !deps.isLikelyCompleteReadme(content)) {
-          const generated = await deps.generateAgentWriteFileContent(taskText, toolEvents, path, content);
+          const generated = await deps.generateAgentWriteFileContent(taskText, toolEvents, path, content, planSpec);
           if (generated) content = generated;
           if (!deps.isLikelyCompleteReadme(content)) {
-            const strengthened = await deps.generateAgentWriteFileContent(taskText, toolEvents, path, content);
+            const strengthened = await deps.generateAgentWriteFileContent(taskText, toolEvents, path, content, planSpec);
             if (strengthened) content = strengthened;
           }
           if (!deps.isLikelyCompleteReadme(content)) {
@@ -419,20 +680,52 @@
             };
           }
         }
+        if (projectStyleTask && cssTarget) {
+          let cssIssues = validateGeneratedFile(path, content, taskText, planSpec);
+          if (cssIssues.length) {
+            const generated = await deps.generateAgentWriteFileContent(
+              taskText,
+              toolEvents,
+              path,
+              `Previous CSS failed validation:\n${cssIssues.join('\n')}\n\n${content}`,
+              planSpec
+            );
+            if (generated) content = generated;
+            cssIssues = validateGeneratedFile(path, content, taskText, planSpec);
+          }
+          if (cssIssues.length) {
+            const strengthened = await deps.generateAgentWriteFileContent(
+              taskText,
+              toolEvents,
+              path,
+              `Rewrite complete valid CSS. Fix:\n${cssIssues.join('\n')}`,
+              planSpec
+            );
+            if (strengthened) content = strengthened;
+            cssIssues = validateGeneratedFile(path, content, taskText, planSpec);
+          }
+          if (cssIssues.length) {
+            return {
+              ok: false,
+              mutated,
+              observation: `write_file blocked for ${path}: generated CSS did not pass validation: ${cssIssues.join('; ')}`,
+            };
+          }
+        }
         if (projectStyleTask && primaryTarget) {
           const shouldUsePythonGameGate = gameLikeTask && pythonTarget;
           const isValidPrimaryContent = shouldUsePythonGameGate
             ? deps.isLikelyCompletePythonGameSource(content)
             : deps.isLikelyCompletePrimarySource(path, content, taskText);
           if (!isValidPrimaryContent) {
-            const generated = await deps.generateAgentWriteFileContent(taskText, toolEvents, path, content);
+            const generated = await deps.generateAgentWriteFileContent(taskText, toolEvents, path, content, planSpec);
             if (generated) content = generated;
           }
           const afterFirstRepair = shouldUsePythonGameGate
             ? deps.isLikelyCompletePythonGameSource(content)
             : deps.isLikelyCompletePrimarySource(path, content, taskText);
           if (!afterFirstRepair) {
-            const strengthened = await deps.generateAgentWriteFileContent(taskText, toolEvents, path, content);
+            const strengthened = await deps.generateAgentWriteFileContent(taskText, toolEvents, path, content, planSpec);
             if (strengthened) content = strengthened;
           }
           const validAfterExpansion = shouldUsePythonGameGate
@@ -513,20 +806,20 @@
             observation: `edit_file blocked for ${path}: binary image assets are not editable through this text tool.`,
           };
         }
-        if (deps.isLikelyNewAgentFileTarget(toolEvents, path)) {
+        if (deps.isLikelyNewAgentFileTarget(toolEvents, path) && !listedExistingFiles.has(path)) {
           return {
             ok: false,
             mutated,
-            observation: `edit_file blocked for ${path}: the file does not exist yet in this task. Use write_file to create it first.`,
+            observation: `edit_file blocked for ${path}: the file is not known yet. Use list_dir/search_files or read_file first; use write_file only when creating a genuinely new file.`,
           };
         }
-        const alreadyReadThisFile = Array.isArray(toolEvents) && toolEvents.some((event) => (
+        const alreadyReadOrWrittenThisFile = Array.isArray(toolEvents) && toolEvents.some((event) => (
           event
           && event.ok
-          && String(event.tool || '').toLowerCase() === 'read_file'
+          && ['read_file', 'write_file', 'edit_file'].includes(String(event.tool || '').toLowerCase())
           && deps.normalizeWorkspacePath(event.path || '') === path
         ));
-        if (!alreadyReadThisFile) {
+        if (!alreadyReadOrWrittenThisFile) {
           return {
             ok: false,
             mutated,
@@ -541,11 +834,11 @@
         deps.setActiveAgentStreamStatus(chatId, `Editing file ${path}...`);
         let program = deps.parseAgentEditProgram(decision.content || '');
         if (!program) {
-          const generated = await deps.generateAgentEditFileProgram(taskText, toolEvents, path, originalContent, decision.content || '');
+          const generated = await deps.generateAgentEditFileProgram(taskText, toolEvents, path, originalContent, decision.content || '', planSpec);
           program = deps.parseAgentEditProgram(generated);
         }
         if (!program) {
-          const rewritten = await deps.generateAgentRewriteExistingFileContent(taskText, toolEvents, path, originalContent, decision.content || '');
+          const rewritten = await deps.generateAgentRewriteExistingFileContent(taskText, toolEvents, path, originalContent, decision.content || '', planSpec);
           if (String(rewritten || '').trim() && rewritten !== originalContent) {
             const rewriteResponse = await deps.invokeWorkspaceAction('workspaceWriteFile', { path, content: rewritten });
             if (rewriteResponse && rewriteResponse.ok) {
@@ -761,6 +1054,7 @@
       if (phase === 'start') {
         if (name === 'new_project') return 'Creating project workspace';
         if (name === 'list_dir') return withTarget('Scanning folder');
+        if (name === 'search_files') return withTarget('Searching files');
         if (name === 'read_file') return withTarget('Reading file');
         if (name === 'write_file') return withTarget('Writing file');
         if (name === 'edit_file') return withTarget('Editing file');
