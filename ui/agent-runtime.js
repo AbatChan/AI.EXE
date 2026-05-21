@@ -116,12 +116,27 @@
         .map((item) => deps.normalizeWorkspacePath(item.path || ''))
         .filter(Boolean);
       const uniqueWritten = Array.from(new Set(writtenPaths)).slice(0, 6);
+      const createdProject = rows.some((item) => String(item.tool || '').toLowerCase() === 'new_project');
+      const action = createdProject && uniqueWritten.length ? 'Created' : 'Updated';
       const fileSummary = uniqueWritten.length
-        ? `Updated ${uniqueWritten.map((path) => `\`${path}\``).join(', ')}.`
+        ? `${action} ${uniqueWritten.map((path) => `\`${path}\``).join(', ')}.`
         : 'Done.';
       const validated = rows.some((item) => String(item.tool || '').toLowerCase() === 'validate_files' && item.validationPassed === true);
       const verification = validated ? ' Validation passed.' : '';
       return `${fileSummary}${verification}`;
+    }
+
+    function isLikelyIncompleteCompletion(text) {
+      const value = String(text || '').trim();
+      if (!value) return true;
+      if (/[,:;(\[{]$/.test(value)) return true;
+      if (/(?:\b(and|or|with|for|to|by|including|computing|showing|using|plus))$/i.test(value)) return true;
+      const lines = value.split(/\n/).map((line) => line.trim()).filter(Boolean);
+      const lastLine = lines[lines.length - 1] || value;
+      if (/^[-*]\s+\S[^.!?`)]*$/.test(lastLine) && lines.length > 1) return true;
+      const hasTerminalPunctuation = /[.!?`)"]$/.test(value);
+      if (!hasTerminalPunctuation && value.length > 120) return true;
+      return false;
     }
 
     async function generateAgentCompletionText(taskText, toolEvents, workspaceLabel, planSpec = null) {
@@ -142,11 +157,12 @@
         .join('\n\n');
       let prompt = [
         'Write a natural completion message for the user.',
+        'Return a complete answer. Do not end mid-sentence or mid-list.',
         'Do not dump raw tool results.',
         'Mention the workspace name only if it is useful.',
         'Mention changed files when they help the user understand what happened.',
         'For multi-file app work, short bullets are allowed.',
-        'Keep it concise and specific to the actual work.',
+        'Keep it concise and specific to the actual work. Prefer under 120 words.',
         `Workspace name: ${workspaceLabel || deps.deriveProjectNameFromTask(taskText) || 'project'}`,
         `Task: ${String(taskText || '').trim()}`,
         planSpec && planSpec.summary ? `Plan summary: ${planSpec.summary}` : '',
@@ -166,15 +182,15 @@
           });
         }
       }
-      const remote = await deps.requestSelectedRemoteTextCompletion(prompt, 240);
+      const remote = await deps.requestSelectedRemoteTextCompletion(prompt, 420);
       if (remote && remote.ok) {
         const text = deps.sanitizeAssistantText(remote.output || '');
-        if (text) return text;
+        if (text && !isLikelyIncompleteCompletion(text)) return text;
       }
-      const external = await requestExternalAgentPlanner(prompt, 240, 12000);
+      const external = await requestExternalAgentPlanner(prompt, 420, 12000);
       if (external && external.ok) {
         const text = deps.sanitizeAssistantText(external.output || '');
-        if (text) return text;
+        if (text && !isLikelyIncompleteCompletion(text)) return text;
       }
       return deterministicCompletion;
     }

@@ -122,6 +122,50 @@
       const hasSuccessfulNewProject = () => toolEvents.some((event) => (
         event && event.ok && String(event.tool || '').toLowerCase() === 'new_project'
       ));
+      const isCoordinatedFrontendEdit = () => (
+        String(planSpec && planSpec.taskKind || '').toLowerCase() === 'edit'
+        && /\b(design|style|layout|responsive|mobile|dark\s*mode|light\s*mode|theme|toggle|calculator|modern|polish|ui|frontend)\b/i.test(taskText)
+      );
+      const getKnownRootFilePaths = () => {
+        const paths = [];
+        const workspaceContext = typeof deps.getWorkspaceContext === 'function' ? deps.getWorkspaceContext() : null;
+        const rootEntries = Array.isArray(workspaceContext && workspaceContext.rootEntries) ? workspaceContext.rootEntries : [];
+        rootEntries.forEach((entry) => {
+          if (!entry || String(entry.kind || '').toLowerCase() === 'folder') return;
+          const path = deps.normalizeWorkspacePath((entry.path || (entry.name ? `/${entry.name}` : '')));
+          if (path) paths.push(path);
+        });
+        toolEvents.forEach((event) => {
+          if (!event || !event.ok || String(event.tool || '').toLowerCase() !== 'list_dir') return;
+          String(event.observation || '').split(/\n/).forEach((line) => {
+            const match = line.match(/-\s+\[file\]\s+([^\s(]+)/i);
+            if (match && match[1]) {
+              const base = deps.normalizeWorkspacePath(event.path || '/') || '/';
+              const name = match[1].replace(/^\/+/, '');
+              paths.push(deps.normalizeWorkspacePath(base === '/' ? `/${name}` : `${base}/${name}`));
+            }
+          });
+        });
+        return Array.from(new Set(paths.filter(Boolean)));
+      };
+      const getCoordinatedFrontendFiles = () => {
+        const plannedFiles = []
+          .concat(Array.isArray(planSpec && planSpec.filesToInspect) ? planSpec.filesToInspect : [])
+          .concat(Array.isArray(planSpec && planSpec.affectedFiles) ? planSpec.affectedFiles : [])
+          .concat(Array.isArray(planSpec && planSpec.expectedFiles) ? planSpec.expectedFiles : [])
+          .map((path) => deps.normalizeWorkspacePath(path || ''))
+          .filter(Boolean);
+        const knownRootFiles = getKnownRootFilePaths();
+        const sourceCandidates = knownRootFiles.filter((path) => /\.(?:html?|css|scss|sass|less|js|mjs|cjs|ts|jsx|tsx)$/i.test(path));
+        const coordinated = isCoordinatedFrontendEdit()
+          ? [
+            sourceCandidates.find((path) => /\.html?$/i.test(path)) || '',
+            sourceCandidates.find((path) => /\.(?:css|scss|sass|less)$/i.test(path)) || '',
+            sourceCandidates.find((path) => /\.(?:js|mjs|cjs|ts|jsx|tsx)$/i.test(path)) || '',
+          ].filter(Boolean)
+          : [];
+        return Array.from(new Set(plannedFiles.concat(coordinated))).filter(Boolean);
+      };
       const repairDecisionBeforeExecution = (decision) => {
         if (!decision || decision.action !== 'tool') return decision;
         // Coerce raw edit_file payloads only while creating planned project files.
@@ -132,12 +176,12 @@
           const isProjectCreation = String(planSpec && planSpec.taskKind || '').toLowerCase() === 'project';
           const isEditTask = String(planSpec && planSpec.taskKind || '').toLowerCase() === 'edit';
           const expectedFiles = Array.isArray(planSpec && planSpec.expectedFiles) ? planSpec.expectedFiles : [];
-          const plannedInspectFiles = Array.isArray(planSpec && planSpec.filesToInspect)
-            ? planSpec.filesToInspect.map((path) => deps.normalizeWorkspacePath(path || '')).filter(Boolean)
-            : [];
-          const plannedAffectedFiles = Array.isArray(planSpec && planSpec.affectedFiles)
-            ? planSpec.affectedFiles.map((path) => deps.normalizeWorkspacePath(path || '')).filter(Boolean)
-            : [];
+          const plannedInspectFiles = getCoordinatedFrontendFiles();
+          const plannedAffectedFiles = plannedInspectFiles.length
+            ? plannedInspectFiles
+            : (Array.isArray(planSpec && planSpec.affectedFiles)
+              ? planSpec.affectedFiles.map((path) => deps.normalizeWorkspacePath(path || '')).filter(Boolean)
+              : []);
           const targetPath = deps.normalizeWorkspacePath(decision.path || '');
           const isExpectedFile = expectedFiles.map((path) => deps.normalizeWorkspacePath(path || '')).includes(targetPath);
           const successfulReads = new Set(toolEvents
@@ -319,6 +363,9 @@
       });
       deps.resetActiveAgentStreamState();
       appendAgentActivity(deps.buildAgentPlanActivity(planSpec));
+      if (planSpec && planSpec.summary) {
+        appendAgentNarration(planSpec.summary);
+      }
       setAgentProgress('Starting...');
 
       for (let step = 1; step <= deps.agentMaxSteps; step += 1) {
