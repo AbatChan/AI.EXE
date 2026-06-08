@@ -1,4 +1,81 @@
 (function initAIExeAgentLoop(global) {
+  // Pure derivation for the bounded self-correction circuit breaker: given a tool
+  // decision + its result, return a stable failure signature ({ streakPath,
+  // shortReason, normIssue, streakKey }) when this step is a "file is bad" failure
+  // worth retrying, or null otherwise. Keyed on path + normalized issue so the same
+  // failure repeating accumulates, while a productive fix (different issue) resets.
+  // Extracted so it can be unit-tested without driving the full inference loop.
+  function deriveAgentFailureSignature(decision, toolResult, normalizeWorkspacePath) {
+    const norm = typeof normalizeWorkspacePath === 'function' ? normalizeWorkspacePath : (p) => String(p || '');
+    const failTool = String((decision && decision.tool) || '').toLowerCase();
+    const isValidationBad = failTool === 'validate_files' && toolResult && toolResult.validationPassed === false;
+    const isHardEditFailure = Boolean(toolResult && !toolResult.ok && failTool === 'edit_file');
+    if (!isValidationBad && !isHardEditFailure) return null;
+    const rawIssue = isValidationBad
+      ? (Array.isArray(toolResult.validationIssues) && toolResult.validationIssues.length
+        ? String(toolResult.validationIssues[0])
+        : 'validation failed')
+      : String(toolResult.observation || '');
+    const issuePathMatch = rawIssue.match(/(\/[^[\]:\s]+)/);
+    const failedPath = norm((toolResult && toolResult.writtenPath) || (decision && decision.path) || '');
+    const streakPath = (issuePathMatch && issuePathMatch[1]) || failedPath || `tool:${failTool}`;
+    const shortReason = rawIssue
+      .replace(/^[a-z_]+ (?:blocked|failed) for [^:]+:\s*/i, '')
+      .trim()
+      .slice(0, 140) || 'it did not pass the check';
+    const normIssue = shortReason.replace(/`[^`]*`/g, '').replace(/\d+/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
+    return { streakPath, shortReason, normIssue, rawIssue, streakKey: `${streakPath}|${normIssue}` };
+  }
+
+  // Successful reads+searches since the last mutation. Drives the inspection-budget
+  // guard (stop inspecting forever without editing); resets on each mutation.
+  function countInspectionsSinceMutation(toolEvents) {
+    const events = Array.isArray(toolEvents) ? toolEvents : [];
+    let inspections = 0;
+    for (let i = events.length - 1; i >= 0; i -= 1) {
+      const e = events[i];
+      if (!e || !e.ok) continue;
+      const tool = String(e.tool || '').toLowerCase();
+      if (tool === 'write_file' || tool === 'edit_file' || tool === 'new_project') break;
+      if (tool === 'read_file' || tool === 'search_files') inspections += 1;
+    }
+    return inspections;
+  }
+
+  // Range/truncation-aware read-loop guard: blocks exact re-reads, re-reads of a
+  // fully-seen file, and a hard cap — but allows paging forward while truncated.
+  function summarizeReadRange(ev) {
+    return `${Number(ev && ev.startLine) || 0}:${Number(ev && ev.endLine) || 0}:${Number(ev && ev.offset) || 0}`;
+  }
+  function readEventWasTruncated(ev) {
+    return /\[file continues/i.test(String((ev && ev.observation) || ''));
+  }
+  function evaluateRepeatedRead(toolEvents, readPath, currentSig, hardCap = 6) {
+    const events = Array.isArray(toolEvents) ? toolEvents : [];
+    // Only count reads AFTER the last edit/write — re-reading to verify a change is legit.
+    let lastMutationIndex = -1;
+    for (let i = events.length - 1; i >= 0; i -= 1) {
+      const e = events[i];
+      if (e && e.ok && ['write_file', 'edit_file'].includes(String(e.tool || '').toLowerCase())
+        && String(e.path || '') === readPath) { lastMutationIndex = i; break; }
+    }
+    const priorReads = events.filter((e, i) => e && e.ok && i > lastMutationIndex
+      && String(e.tool || '').toLowerCase() === 'read_file'
+      && String(e.path || '') === readPath);
+    if (priorReads.length === 0) return null;
+    if (priorReads.some((e) => summarizeReadRange(e) === currentSig)) return 'exact-repeat';
+    if (priorReads.length >= hardCap) return 'hard-cap';
+    const last = priorReads[priorReads.length - 1];
+    // "already-seen" only blocks BROAD/full re-reads; a targeted line-range read
+    // (focusing on a section to edit) is allowed, bounded by exact-repeat + hard cap.
+    const sigParts = String(currentSig).split(':');
+    const currentIsTargeted = (Number(sigParts[0]) || 0) > 0 || (Number(sigParts[2]) || 0) > 0;
+    if (priorReads.length >= 2 && !readEventWasTruncated(last) && !currentIsTargeted) return 'already-seen';
+    // Otherwise the file is still partially unseen (last read truncated) — allow
+    // the model to page forward to the part it has not read yet.
+    return null;
+  }
+
   function createAgentLoop(deps) {
     const recordDebugTrace = typeof deps.recordDebugTrace === 'function'
       ? deps.recordDebugTrace
@@ -10,10 +87,30 @@
       if (!taskText) return false;
       const toolEvents = [];
       const agentActivities = [];
+      // Oscillation guard: if an edit returns a file to a prior content state, the
+      // agent is flip-flopping — block further edits to it and finalize.
+      const fileStateHistory = new Map(); // path -> Set(contentHash)
+      const oscillatingEditPaths = new Set();
+      const hashFileState = (text) => {
+        const s = String(text || '');
+        let h = 5381;
+        for (let i = 0; i < s.length; i += 1) h = ((h * 33) ^ s.charCodeAt(i)) >>> 0;
+        return `${s.length}:${h}`;
+      };
       let lastCorrectionDetail = '';
+      // Advisory final-gate: nudge the model at most once when it tries to
+      // finish with planned items still unmet, then trust its judgment.
+      let finalNudges = 0;
       const startedAt = Date.now();
       const deadlineAt = startedAt + deps.agentTotalTimeoutMs;
       let planSpec = null;
+      // Guaranteed finalizer (see the matching finally at the end): the run must
+      // never exit — via early return, stop, or a thrown error — while the chat
+      // still shows an in-progress "...". loader. The send-button state is always
+      // reset by the outer handler's completeInferenceRequest; this gives the chat
+      // stream the same guarantee so the partial response is committed (saved) and
+      // the spinner clears instead of being orphaned and lost on reload.
+      try {
 
       const appendAgentActivity = (activity) => {
         if (!activity) return;
@@ -24,11 +121,26 @@
         }
       };
 
+      const synthesizeToolNarration = (decision) => {
+        const tool = String(decision && decision.tool || '').toLowerCase();
+        const path = String(decision && decision.path || '').trim();
+        if (tool === 'read_file') return path ? `Reading ${path} before deciding the next change.` : 'Reading the file before deciding the next change.';
+        if (tool === 'search_files') return 'Searching for relevant code patterns before choosing files to edit.';
+        if (tool === 'edit_file') return path ? `Applying the targeted edit in ${path}.` : 'Applying the targeted file edit.';
+        if (tool === 'write_file') return path ? `Writing ${path}.` : 'Writing the file.';
+        if (tool === 'validate_files') return 'Checking the changed files before finishing.';
+        if (tool === 'list_dir') return 'Checking the workspace structure.';
+        if (tool === 'mkdir') return path ? `Creating directory ${path}.` : 'Creating the directory.';
+        if (tool === 'move') return 'Moving the file to its final location.';
+        if (tool === 'delete') return path ? `Removing ${path}.` : 'Removing the file.';
+        return '';
+      };
+
       let lastNarrationDetail = '';
+      let deterministicBatchNarrated = false;
       const appendAgentNarration = (text) => {
         const detail = String(text || '').trim();
         if (!detail || detail.length < 8) return;
-        if (/^(return exactly|keys:|rules:|json:|toolresult|agent step:)/i.test(detail)) return;
         if (detail === lastNarrationDetail) return;
         appendAgentActivity({
           kind: 'thought',
@@ -70,6 +182,9 @@
         path: normalizeDecisionPath(decision && decision.path),
         srcPath: normalizeDecisionPath(decision && decision.srcPath),
         dstPath: normalizeDecisionPath(decision && decision.dstPath),
+        offset: Number(decision && decision.offset || 0),
+        startLine: Number(decision && decision.start_line || 0),
+        endLine: Number(decision && decision.end_line || 0),
       });
       const hasWorkspaceMutationSince = (index) => {
         const start = Math.max(-1, Number(index));
@@ -93,13 +208,24 @@
           return String(event.tool || '').toLowerCase() === signature.tool
             && normalizeDecisionPath(event.path || '') === signature.path
             && normalizeDecisionPath(event.srcPath || '') === signature.srcPath
-            && normalizeDecisionPath(event.dstPath || '') === signature.dstPath;
+            && normalizeDecisionPath(event.dstPath || '') === signature.dstPath
+            && Number(event.offset || 0) === signature.offset
+            && Number(event.startLine || 0) === signature.startLine
+            && Number(event.endLine || 0) === signature.endLine;
         });
         if (lastIndex < 0) return '';
         const lastEvent = toolEvents[lastIndex];
         if (!lastEvent) return '';
         if (signature.tool === 'read_file' && lastEvent.ok && !hasWorkspaceMutationSince(lastIndex)) {
-          return `read_file blocked for ${signature.path || 'this file'}: it was already read and no workspace changes happened since then. Use that result or take the next corrective step instead of rereading it.`;
+          const truncLimit = Number(deps.agentMaxToolOutputChars) || 8000;
+          const obs = String(lastEvent.observation || '');
+          const wasLikelyTruncated = obs.length >= truncLimit - 20 || obs.includes('[file continues');
+          if (!wasLikelyTruncated) {
+            return `read_file blocked for ${signature.path || 'this file'}: it was already read and no workspace changes happened since then. Use that result or take the next corrective step instead of rereading it.`;
+          }
+        }
+        if (signature.tool === 'list_dir' && lastEvent.ok && !hasWorkspaceMutationSince(lastIndex)) {
+          return `list_dir blocked for ${signature.path || '/'}: you already listed this folder and nothing has changed since then. Use that result and take the next concrete step (write or edit a file) instead of re-listing.`;
         }
         if (
           signature.tool === 'edit_file'
@@ -115,6 +241,14 @@
           return '';
         }
         if (!lastEvent.ok && !hasWorkspaceMutationSince(lastIndex)) {
+          if (signature.tool === 'edit_file') {
+            const hasRefreshedRead = toolEvents.slice(lastIndex + 1).some((e) => (
+              e && e.ok
+              && String(e.tool || '').toLowerCase() === 'read_file'
+              && normalizeDecisionPath(e.path || '') === signature.path
+            ));
+            if (hasRefreshedRead) return '';
+          }
           return `${signature.tool} blocked for ${signature.path || signature.dstPath || signature.srcPath || 'this target'}: the same tool/target already failed and nothing changed since then. Follow the latest observation and choose a different corrective step.`;
         }
         return '';
@@ -166,7 +300,7 @@
           : [];
         return Array.from(new Set(plannedFiles.concat(coordinated))).filter(Boolean);
       };
-      const repairDecisionBeforeExecution = (decision) => {
+      const repairDecisionBeforeExecution = (decision, step) => {
         if (!decision || decision.action !== 'tool') return decision;
         // Coerce raw edit_file payloads only while creating planned project files.
         if (String(decision.tool || '').toLowerCase() === 'edit_file') {
@@ -338,7 +472,18 @@
       if (typeof deps.syncWorkspaceStateFromNative === 'function') {
         await deps.syncWorkspaceStateFromNative('agent_start', { render: false });
       }
-      planSpec = await deps.buildAgentPlanSpec(chatId, taskText);
+      // When the user explicitly approved creating a new project at preflight,
+      // force project scope INSIDE the planner so expectedFiles/finalRequiresRealFiles
+      // are derived coherently. (Just relabelling taskKind afterward produced an
+      // "empty project is done" plan that finalized after new_project with no files.)
+      const approvedNewProject = Boolean(requestToken && requestToken.approvedNewProject);
+      planSpec = await deps.buildAgentPlanSpec(chatId, taskText, { forceProjectScope: approvedNewProject });
+      // Safety net: if a planner ever returns a non-project plan despite the flag,
+      // rebuild a coherent project plan rather than leaving derived fields stale.
+      if (approvedNewProject && planSpec && String(planSpec.taskKind || '').toLowerCase() !== 'project'
+        && typeof deps.buildFallbackAgentPlanSpec === 'function') {
+        planSpec = deps.buildFallbackAgentPlanSpec(taskText, { chatId, forceProjectScope: true });
+      }
       deps.applyAgentProjectChatName(chatId, planSpec);
       const workspaceStateComparison = typeof deps.getWorkspaceStateComparison === 'function'
         ? deps.getWorkspaceStateComparison()
@@ -362,12 +507,59 @@
         workspaceStatusSnapshot,
       });
       deps.resetActiveAgentStreamState();
-      appendAgentActivity(deps.buildAgentPlanActivity(planSpec));
-      if (planSpec && planSpec.summary) {
+      const planActivity = deps.buildAgentPlanActivity(planSpec);
+      appendAgentActivity(planActivity);
+      if (!planActivity && planSpec && planSpec.summary) {
         appendAgentNarration(planSpec.summary);
       }
+
+      // Harness-driven checklist from planSpec.doneCriteria (marked done mechanically).
+      const checklistItems = Array.isArray(planSpec && planSpec.doneCriteria)
+        ? planSpec.doneCriteria.filter(Boolean)
+        : [];
+      let lastChecklistSignature = '';
+      const refreshChecklist = () => {
+        if (!checklistItems.length || typeof deps.computeAgentChecklistProgress !== 'function') return null;
+        const progress = deps.computeAgentChecklistProgress(checklistItems, toolEvents);
+        const doneCount = progress.filter((p) => p && p.done).length;
+        const signature = progress.map((p) => `${p.done ? '1' : '0'}:${p.text}`).join('|');
+        if (signature !== lastChecklistSignature) {
+          lastChecklistSignature = signature;
+          appendAgentActivity({
+            kind: 'checklist',
+            title: 'Plan',
+            meta: `${doneCount}/${progress.length}`,
+            items: progress.map((p) => ({ text: p.text, done: p.done })),
+            status: 'done',
+          });
+        }
+        return {
+          progress,
+          doneCount,
+          total: progress.length,
+          remaining: progress.filter((p) => p && !p.done).map((p) => p.text),
+          allDone: doneCount >= progress.length && progress.length > 0,
+        };
+      };
+      refreshChecklist();
       setAgentProgress('Starting...');
 
+      const sameFailureLimit = 3;
+      const failureStreak = { key: '', count: 0 };
+      // "One repair, then ship": count how many times validate_files has failed. After
+      // the first repair attempt (2nd failure), if only MINOR cross-file naming gaps
+      // remain, the project finishes successfully with an advisory note instead of
+      // looping or stopping over polish. A "minor" gap is a cross-file id/class
+      // reference mismatch — NOT a syntax/truncation/empty problem (those still get
+      // repaired, and continuation prevents most of them now).
+      let validationFailureCount = 0;
+      const isMinorCrossFileIssue = (issue) => {
+        const s = String(issue || '').toLowerCase();
+        if (/unclosed|unterminated|truncat|syntax error|incomplete|placeholder|empty|unmatched|too small|did not pass validation/.test(s)) return false;
+        return /references\s+#[\w-]+.*does not define that id/.test(s)
+          || /toggles\s+\.[\w-]+.*define that class/.test(s)
+          || /but (?:neither|the)\b.*\bdefine/.test(s);
+      };
       for (let step = 1; step <= deps.agentMaxSteps; step += 1) {
         if (!deps.isInferenceActive(requestToken)) return true;
         if (Date.now() >= deadlineAt) {
@@ -399,6 +591,7 @@
           ? deps.deriveFallbackAgentDecision(taskText, toolEvents, planSpec)
           : null;
         if (decision) {
+          decision._deterministic = true;
           recordDebugTrace('agent_deterministic_decision', {
             chatId: String(chatId || ''),
             step: String(step),
@@ -413,15 +606,46 @@
           });
         } else {
           setAgentProgress('Thinking...');
-          agentPrompt = await deps.buildAgentDecisionPrompt(chatId, taskText, toolEvents, step, planSpec);
-          const res = await Promise.race([
-            deps.requestAgentPlannerInference(agentPrompt, deps.agentDecisionMaxTokens, deps.agentDecisionGrammar),
-            new Promise((resolve) => setTimeout(() => resolve({
-              ok: false,
-              timedOut: true,
-              message: 'Agent step timed out.',
-            }), deps.agentStepTimeoutMs)),
-          ]);
+          const decisionPrompt = await deps.buildAgentDecisionPrompt(chatId, taskText, toolEvents, step, planSpec);
+          agentPrompt = decisionPrompt && decisionPrompt.prompt ? decisionPrompt.prompt : decisionPrompt;
+          const decisionSystemPrompt = (decisionPrompt && decisionPrompt.systemPrompt) || '';
+          // A single transient inference failure (e.g. "API unavailable — check
+          // your connection") used to kill the whole run. Retry a couple of times
+          // with short backoff so a momentary network/provider blip is survived.
+          // We do NOT retry timeouts (the model was simply too slow — retrying
+          // burns another full timeout) or user cancellations.
+          let res = null;
+          const maxInferenceRetries = 2;
+          for (let attempt = 0; attempt <= maxInferenceRetries; attempt += 1) {
+            // Capture + swallow so an inference abandoned by the timeout (and later
+            // aborted) cannot surface as an unhandledRejection.
+            const inferPromise = deps.requestAgentPlannerInference(agentPrompt, deps.agentDecisionMaxTokens, deps.agentDecisionGrammar, decisionSystemPrompt);
+            inferPromise.catch(() => {});
+            res = await Promise.race([
+              inferPromise,
+              new Promise((resolve) => setTimeout(() => resolve({
+                ok: false,
+                timedOut: true,
+                message: 'Agent step timed out.',
+              }), deps.agentStepTimeoutMs)),
+            ]);
+            // On a timeout the decision inference is still running in the background;
+            // kill it before retrying or stopping so we don't stack ghost requests.
+            if (res && res.timedOut && typeof deps.abortInFlightInference === 'function') {
+              deps.abortInFlightInference('decision_timeout');
+            }
+            if (!deps.isInferenceActive(requestToken)) return true;
+            if (res && res.ok) break;
+            const retriable = Boolean(res && !res.ok && !res.timedOut);
+            if (!retriable || attempt === maxInferenceRetries) break;
+            recordDebugTrace('agent_infer_retry', {
+              chatId: String(chatId || ''), step: String(step), attempt: String(attempt + 1),
+              reason: deps.debugPreview((res && res.message) || 'inference failed', 160),
+            }, { chatId: String(chatId || ''), step, attempt: attempt + 1, reason: String((res && res.message) || 'inference failed') });
+            setAgentProgress(`Reconnecting (retry ${attempt + 1}/${maxInferenceRetries})...`);
+            await new Promise((resolve) => setTimeout(resolve, 1200 * (attempt + 1)));
+            if (!deps.isInferenceActive(requestToken)) return true;
+          }
 
           if (!deps.isInferenceActive(requestToken)) return true;
           if (!res || !res.ok) {
@@ -453,7 +677,7 @@
             }
             deps.commitAssistantMessage(chatId, failure, failure, {
               agentActivities,
-              agentMeta: { startedAt, completedAt: Date.now(), collapsed: true },
+              agentMeta: { startedAt, completedAt: Date.now(), collapsed: false },
               forceNeedsContinue: true,
             });
             return true;
@@ -475,23 +699,20 @@
             rawPlannerOutput,
           });
           if (!decision) {
-            const fallbackDecision = deps.deriveFallbackAgentDecision(taskText, toolEvents, planSpec);
-            if (fallbackDecision) {
-              decision = fallbackDecision;
-              recordDebugTrace('agent_fallback_decision', {
-                chatId: String(chatId || ''),
-                step: String(step),
-                tool: fallbackDecision.tool,
-                path: deps.debugPreview(fallbackDecision.path, 180),
-                reason: 'primary-invalid',
-              }, {
-                chatId: String(chatId || ''),
-                step,
-                fallbackDecision,
-                reason: 'primary-invalid',
-                rawPlannerOutput,
-              });
-            }
+            // Primary output was invalid (e.g. partial/path-only JSON like {"path":"/x.css","offset":4000}).
+            // Record corrective guidance and let the REPAIR prompt re-ask first. Do NOT coerce a malformed
+            // read-intent straight into a destructive edit_file here — that skipped repair entirely and
+            // caused edit_file timeouts on large files. The final fallback below still catches it if repair fails.
+            const recentInvalidCount = toolEvents.slice(-4).filter((e) => e && e.tool === '_invalid_output').length;
+            const rawSnippet = String(rawPlannerOutput || '').slice(0, 200);
+            toolEvents.push({
+              tool: '_invalid_output',
+              ok: false,
+              path: '',
+              observation: recentInvalidCount >= 1
+                ? `Repeated invalid output. You returned partial/path-only JSON again: ${rawSnippet}. You must return {"action":"tool","tool":"<name>","path":"..."} or {"action":"final","message":"..."}. To read more of a file use {"action":"tool","tool":"read_file","path":"...","start_line":N,"end_line":M}. Do not return path-only or partial JSON.`
+                : `Invalid output: missing required "action" and "tool" fields. Got: ${rawSnippet}. To read a file return {"action":"tool","tool":"read_file","path":"..."} (add "start_line"/"end_line" to read a specific range). To finish return {"action":"final","message":"..."}.`,
+            });
           }
           if (!decision) {
             const repairPrompt = await deps.buildAgentDecisionRepairPrompt(taskText, toolEvents, step, rawPlannerOutput, planSpec);
@@ -540,6 +761,7 @@
           }
         }
         if (!decision) {
+          deps.setThinkingStatus('');
           setAgentProgress('Stopped.');
           appendAgentActivity({
             kind: 'error',
@@ -563,15 +785,29 @@
           }
           deps.commitAssistantMessage(chatId, failure, failure, {
             agentActivities,
-            agentMeta: { startedAt, completedAt: Date.now(), collapsed: true },
+            agentMeta: { startedAt, completedAt: Date.now(), collapsed: false },
             forceNeedsContinue: true,
           });
           return true;
         }
 
-        decision = repairDecisionBeforeExecution(decision);
+        decision = repairDecisionBeforeExecution(decision, step);
+        decision.path = normalizeDecisionPath(decision.path || '');
+        decision.srcPath = normalizeDecisionPath(decision.srcPath || '');
+        decision.dstPath = normalizeDecisionPath(decision.dstPath || '');
 
-        appendAgentNarration(decision.thought);
+        if (!decision._deterministic) {
+          const isFinal = decision.action === 'final' || String(decision.tool || '').toLowerCase() === 'none';
+          const isExplore = ['read_file', 'search_files', 'list_dir'].includes(String(decision.tool || '').toLowerCase());
+          // Don't pre-narrate a FINAL message — a rejected finish would otherwise
+          // leave a stray conclusion in the feed; an accepted one shows when committed.
+          const narration = isFinal ? '' : (decision.thought || decision.message || (isExplore ? '' : synthesizeToolNarration(decision)));
+          if (narration) appendAgentNarration(narration);
+        } else if (!deterministicBatchNarrated) {
+          const batchThought = decision.thought;
+          if (batchThought) appendAgentNarration(batchThought);
+          deterministicBatchNarrated = true;
+        }
 
         recordDebugTrace('agent_decision', {
           chatId: String(chatId || ''),
@@ -599,6 +835,9 @@
             srcPath: normalizeDecisionPath(decision.srcPath || ''),
             dstPath: normalizeDecisionPath(decision.dstPath || ''),
             content: '',
+            offset: Number(decision.offset || 0),
+            startLine: Number(decision.start_line || 0),
+            endLine: Number(decision.end_line || 0),
             observation: duplicateDecisionObservation.slice(0, deps.agentMaxToolOutputChars),
           });
           recordDebugTrace('agent_tool_result', {
@@ -619,7 +858,6 @@
             const missing = Array.isArray(finalCheck && finalCheck.missing) ? finalCheck.missing : [];
             const onlyValidationMissing = missing.length > 0 && missing.every((item) => /validate/i.test(String(item || '')));
             if (((finalCheck && finalCheck.ok) || onlyValidationMissing) && !isWeakEditPlan()) {
-              deps.consumeLiveAssistantText();
               setAgentProgress('Finalizing...');
               const workspaceLabel = deps.getWorkspaceRootName() || deps.deriveProjectNameFromTask(taskText) || 'project';
               const finalText = await deps.generateAgentCompletionText(taskText, toolEvents, workspaceLabel, planSpec);
@@ -649,7 +887,7 @@
               return true;
             }
           }
-          if (duplicateTool === 'edit_file' || duplicateTool === 'read_file') {
+          if (duplicateTool === 'edit_file') {
             const duplicatePath = normalizeDecisionPath(decision.path || '');
             const fallbackDecision = deps.deriveFallbackAgentDecision(taskText, toolEvents, planSpec);
             if (fallbackDecision && fallbackDecision.action === 'tool' && fallbackDecision.tool && fallbackDecision.tool !== 'none') {
@@ -697,7 +935,7 @@
                 deps.consumeLiveAssistantText();
                 deps.commitAssistantMessage(chatId, blockedText, blockedText, {
                   agentActivities,
-                  agentMeta: { startedAt, completedAt: Date.now(), collapsed: true },
+                  agentMeta: { startedAt, completedAt: Date.now(), collapsed: false },
                   forceNeedsContinue: true,
                 });
                 recordDebugTrace('agent_done', {
@@ -755,101 +993,56 @@
 
         if (decision.action !== 'tool' || decision.tool === 'none') {
           const finalCheck = deps.validateAgentFinalDecision(taskText, toolEvents, planSpec);
-          if (!finalCheck.ok) {
-            const fallbackDecision = deps.deriveFallbackAgentDecision(taskText, toolEvents, planSpec);
-            if (fallbackDecision && fallbackDecision.action === 'tool' && fallbackDecision.tool && fallbackDecision.tool !== 'none') {
-              decision = fallbackDecision;
-              recordDebugTrace('agent_final_repaired', {
-                chatId: String(chatId || ''),
-                step: String(step),
-                tool: String(fallbackDecision.tool || ''),
-                path: deps.debugPreview(String(fallbackDecision.path || ''), 180),
-                missing: deps.debugPreview(finalCheck.missing.join('; '), 260),
-              }, {
-                chatId: String(chatId || ''),
-                step,
-                missing: finalCheck.missing,
-                repairedDecision: fallbackDecision,
-                toolEvents,
-              });
-            } else {
-              const missingText = finalCheck.missing.join('; ');
-              toolEvents.push({
-                tool: 'final_guard',
-                ok: false,
-                observation: `final blocked: still missing - ${missingText}`,
-              });
-              recordDebugTrace('agent_final_rejected', {
-                chatId: String(chatId || ''),
-                step: String(step),
-                missing: deps.debugPreview(missingText, 260),
-                stopped: 'true',
-              }, {
-                chatId: String(chatId || ''),
-                step,
-                missing: finalCheck.missing,
-                toolEvents,
-                stopped: true,
-              });
-              setAgentProgress('Stopped.');
-              appendAgentActivity({
-                kind: 'error',
-                title: 'Stopped',
-                detail: `I could not determine the next safe workspace step. Still missing: ${missingText}`,
-                status: 'error',
-              });
-              deps.consumeLiveAssistantText();
-              if (agentHasWorkspaceMutations()) {
-                await deps.refreshWorkspaceTree(true);
-              }
-              const failure = `I stopped because the agent planner kept trying to finish before the work was complete. Still missing: ${missingText}`;
-              deps.commitAssistantMessage(chatId, failure, failure, {
-                agentActivities,
-                agentMeta: { startedAt, completedAt: Date.now(), collapsed: true },
-                forceNeedsContinue: false,
-              });
-              return true;
-            }
-          }
-          if (decision.action === 'tool' && decision.tool !== 'none') {
-            recordDebugTrace('agent_decision', {
+          // Advisory gate (not a veto): on the first finish attempt with planned
+          // items still unmet, surface them as a tool observation and let the
+          // model decide. We never override its decision or hard-stop on this.
+          if (!finalCheck.ok && finalNudges < 1) {
+            finalNudges += 1;
+            const missingText = finalCheck.missing.join('; ');
+            toolEvents.push({
+              tool: 'final_check',
+              ok: false,
+              observation: `You chose to finish, but these planned items still look incomplete: ${missingText}. If they are actually done or genuinely not needed for this request, finish again and it will be accepted. Otherwise take the next concrete step to complete them.`,
+            });
+            recordDebugTrace('agent_final_advisory', {
               chatId: String(chatId || ''),
               step: String(step),
-              action: decision.action,
-              tool: decision.tool,
-              messagePreview: deps.debugPreview(decision.message, 220),
+              missing: deps.debugPreview(missingText, 260),
             }, {
               chatId: String(chatId || ''),
               step,
-              decision,
-              toolEvents,
-              repairedFromFinal: true,
-            });
-          } else {
-            deps.consumeLiveAssistantText();
-            setAgentProgress('Finalizing...');
-            const finalText = deps.sanitizeAssistantText(decision.message || 'Done.') || 'Done.';
-            if (agentHasWorkspaceMutations()) {
-              await deps.refreshWorkspaceTree(true);
-            }
-            deps.consumeLiveAssistantText();
-            deps.commitAssistantMessage(chatId, finalText, finalText, {
-              agentActivities,
-              agentMeta: { startedAt, completedAt: Date.now(), collapsed: true },
-              forceNeedsContinue: false,
-            });
-            recordDebugTrace('agent_done', {
-              chatId: String(chatId || ''),
-              step: String(step),
-              finalPreview: deps.debugPreview(finalText, 260),
-            }, {
-              chatId: String(chatId || ''),
-              step,
-              finalText,
+              missing: finalCheck.missing,
               toolEvents,
             });
-            return true;
+            setAgentProgress('Reviewing...');
+            continue;
           }
+          // Honor the model's final decision: requirements met, or it reaffirmed
+          // finishing after the single advisory nudge.
+          setAgentProgress('Finalizing...');
+          const finalText = deps.sanitizeAssistantText(decision.message || 'Done.') || 'Done.';
+          if (agentHasWorkspaceMutations()) {
+            await deps.refreshWorkspaceTree(true);
+          }
+          deps.consumeLiveAssistantText();
+          deps.commitAssistantMessage(chatId, finalText, finalText, {
+            agentActivities,
+            agentMeta: { startedAt, completedAt: Date.now(), collapsed: true },
+            forceNeedsContinue: false,
+          });
+          recordDebugTrace('agent_done', {
+            chatId: String(chatId || ''),
+            step: String(step),
+            finalPreview: deps.debugPreview(finalText, 260),
+            honoredAfterAdvisory: String(!finalCheck.ok),
+          }, {
+            chatId: String(chatId || ''),
+            step,
+            finalText,
+            toolEvents,
+            honoredAfterAdvisory: !finalCheck.ok,
+          });
+          return true;
         }
 
         if (decision.thought) {
@@ -860,38 +1053,252 @@
           });
         }
 
+        // Read-loop guard (see evaluateRepeatedRead).
+        if (decision.action === 'tool' && String(decision.tool || '').toLowerCase() === 'read_file') {
+          const readPath = deps.normalizeWorkspacePath(decision.path || '');
+          const currentSig = `${Number(decision.start_line) || 0}:${Number(decision.end_line) || 0}:${Number(decision.offset) || 0}`;
+          const blockReason = readPath ? evaluateRepeatedRead(toolEvents, readPath, currentSig) : null;
+          if (blockReason) {
+            recordDebugTrace('agent_read_loop_blocked', {
+              chatId: String(chatId || ''), step: String(step), path: readPath, reason: blockReason,
+            }, { chatId: String(chatId || ''), step, path: readPath, reason: blockReason });
+            toolEvents.push({
+              tool: 'read_file',
+              ok: false,
+              path: readPath,
+              observation: `You have already read the relevant parts of ${readPath} (${blockReason}) — stop re-reading; you have enough context. To find a specific selector/class/id/function, use ONE search_files query on ${readPath}. Otherwise MAKE THE EDIT now (edit_file) or finalize. Do NOT call read_file on ${readPath} again.`,
+            });
+            continue;
+          }
+        }
+
+        // Inspection-budget guard: too many reads/searches with no edit -> steer to act.
+        if (decision.action === 'tool'
+          && (String(decision.tool || '').toLowerCase() === 'read_file'
+            || String(decision.tool || '').toLowerCase() === 'search_files')) {
+          const inspections = countInspectionsSinceMutation(toolEvents);
+          if (inspections >= 8) {
+            recordDebugTrace('agent_inspection_budget_blocked', {
+              chatId: String(chatId || ''), step: String(step), tool: String(decision.tool || ''), inspections: String(inspections),
+            }, { chatId: String(chatId || ''), step, tool: String(decision.tool || ''), inspections });
+            const cl = refreshChecklist();
+            const nextItem = cl && cl.remaining && cl.remaining.length ? cl.remaining[0] : '';
+            const checklistSteer = cl && cl.allDone
+              ? ' All planned items appear addressed — finalize now.'
+              : (nextItem ? ` Next planned item to handle: "${nextItem}".` : '');
+            toolEvents.push({
+              tool: String(decision.tool || ''),
+              ok: false,
+              path: deps.normalizeWorkspacePath(decision.path || ''),
+              observation: `You have inspected the workspace ${inspections} times without making a single change — you already have enough context. STOP inspecting: no more read_file or search_files. Make the change now with edit_file using the lines you have already located, or finalize if the task is done. Anchors do NOT need to be byte-exact — close matches (whitespace/indent differences) are accepted, so edit from what you have.${checklistSteer}`,
+            });
+            continue;
+          }
+        }
+
+        // Oscillation guard: file cycled back to a prior state -> block re-edit, finalize.
+        if (decision.action === 'tool'
+          && ['write_file', 'edit_file'].includes(String(decision.tool || '').toLowerCase())) {
+          const editPath = deps.normalizeWorkspacePath(decision.path || '');
+          if (editPath && oscillatingEditPaths.has(editPath)) {
+            recordDebugTrace('agent_edit_oscillation_blocked', {
+              chatId: String(chatId || ''), step: String(step), path: editPath,
+            }, { chatId: String(chatId || ''), step, path: editPath });
+            toolEvents.push({
+              tool: String(decision.tool || ''),
+              ok: false,
+              path: editPath,
+              observation: `Stop editing ${editPath}: your edits have cycled it back to a state it was already in this run — you are going in circles, removing the same code you just added. It is correct as-is. Do NOT edit ${editPath} again. Finalize now (or move to a different file if one genuinely still needs changes).`,
+            });
+            continue;
+          }
+        }
+
         const targetInfo = deps.describeAgentToolTarget(decision);
         const startLabel = decision.tool === 'write_file' && deps.isLikelyNewAgentFileTarget(toolEvents, targetInfo)
           ? (targetInfo ? `Creating file ${targetInfo}` : 'Creating file')
           : deps.describeAgentToolPhase(decision.tool, targetInfo, 'start');
         setAgentProgress(`${startLabel}...`);
         appendAgentActivity(deps.buildAgentPendingActivity(decision, toolEvents));
-        const toolResult = await deps.executeDeveloperToolCall(chatId, decision, taskText, toolEvents, planSpec);
+        // Tool execution can itself make a (slow) inference call to generate file
+        // content. Only the decision step was timeout-bounded, so a stalled
+        // write/edit generation used to hang the whole loop forever — the deadline
+        // check only runs at the top of a step, which is never reached while a tool
+        // is stuck. Race the tool against a generous timeout so a stall surfaces as
+        // a normal failure (which the circuit breaker then handles) instead of a
+        // frozen "Repairing..." UI.
+        const toolTimeoutMs = Number(deps.agentToolTimeoutMs) || 150000;
+        // Idle watchdog (not flat wall-clock): generation heartbeats each pass; abandon
+        // only on no progress for idleLimitMs, with an absolute ceiling.
+        const idleLimitMs = Number(deps.agentToolIdleTimeoutMs) || toolTimeoutMs;
+        const hardCapMs = Math.max(
+          idleLimitMs,
+          Math.min(Number(deps.agentToolHardCapMs) || (toolTimeoutMs * 3), Math.max(60000, deadlineAt - Date.now() - 5000)),
+        );
+        let toolResult;
+        try {
+          if (typeof deps.markAgentToolProgress === 'function') deps.markAgentToolProgress();
+          // Capture + swallow so a late abort of an abandoned tool can't throw unhandled.
+          const toolPromise = deps.executeDeveloperToolCall(chatId, decision, taskText, toolEvents, planSpec, {
+            approvedNewProject: Boolean(requestToken && requestToken.approvedNewProject),
+            skipNewProjectConfirmation: Boolean(requestToken && requestToken.skipNewProjectConfirmation),
+            forceCurrentWorkspace: Boolean(requestToken && requestToken.forceCurrentWorkspace),
+          });
+          toolPromise.catch(() => {});
+          let toolSettled = false;
+          toolPromise.then(() => { toolSettled = true; }, () => { toolSettled = true; });
+          const toolStartedAt = Date.now();
+          const watchdog = new Promise((resolve) => {
+            const iv = setInterval(() => {
+              if (toolSettled) { clearInterval(iv); resolve(null); return; }
+              const lastProgress = typeof deps.getLastAgentToolProgressAt === 'function'
+                ? Number(deps.getLastAgentToolProgressAt()) || toolStartedAt
+                : toolStartedAt;
+              const idleMs = Date.now() - lastProgress;
+              const totalMs = Date.now() - toolStartedAt;
+              if (idleMs >= idleLimitMs || totalMs >= hardCapMs) {
+                clearInterval(iv);
+                const why = totalMs >= hardCapMs ? `ran past ${Math.round(hardCapMs / 1000)}s` : `made no progress for ${Math.round(idleMs / 1000)}s`;
+                resolve({
+                  ok: false,
+                  _toolTimedOut: true,
+                  observation: `${decision.tool} for ${deps.normalizeWorkspacePath(decision.path || decision.srcPath || '/')} ${why} and was abandoned.`,
+                });
+              }
+            }, 4000);
+          });
+          toolResult = await Promise.race([toolPromise, watchdog]);
+        } catch (toolErr) {
+          recordDebugTrace('agent_tool_exception', {
+            chatId: String(chatId || ''),
+            step: String(step),
+            tool: String(decision.tool || ''),
+            path: deps.normalizeWorkspacePath(decision.path || ''),
+            message: String(toolErr && toolErr.message ? toolErr.message : toolErr),
+            stack: typeof deps.debugPreview === 'function' ? deps.debugPreview(String(toolErr && toolErr.stack ? toolErr.stack : ''), 600) : '',
+          }, {
+            chatId: String(chatId || ''),
+            step,
+            tool: String(decision.tool || ''),
+            error: String(toolErr && toolErr.stack ? toolErr.stack : (toolErr && toolErr.message ? toolErr.message : toolErr)),
+          });
+          toolResult = {
+            ok: false,
+            observation: `${decision.tool} failed with an error: ${String(toolErr && toolErr.message ? toolErr.message : toolErr)}`,
+          };
+        }
+        if (toolResult && toolResult.requiresDeleteConfirmation) {
+          // Human-in-the-loop approval for a destructive op. Surface what's being
+          // deleted and only trash it if the user explicitly confirms.
+          setAgentProgress('Waiting for confirmation...');
+          const delPath = deps.normalizeWorkspacePath(toolResult.deletePath || decision.path || '');
+          recordDebugTrace('agent_delete_confirm_prompt', {
+            chatId: String(chatId || ''), step: String(step), path: delPath,
+          }, { chatId: String(chatId || ''), step, path: delPath });
+          let delChoice = null;
+          if (typeof deps.requestProjectScopeConfirmation === 'function') {
+            delChoice = await deps.requestProjectScopeConfirmation(chatId, {
+              kind: 'delete',
+              deletePath: delPath,
+              userMessage: String(toolResult.userFacingMessage || `Delete ${delPath}?`),
+            });
+          }
+          recordDebugTrace('agent_delete_confirm_choice', {
+            chatId: String(chatId || ''), step: String(step), choice: String(delChoice || 'null'),
+          }, { chatId: String(chatId || ''), step, choice: String(delChoice || '') });
+          if (delChoice === 'confirm_delete') {
+            const trashRes = await deps.invokeWorkspaceAction('workspaceTrash', { path: delPath });
+            if (trashRes && trashRes.ok) {
+              toolResult = { ok: true, mutated: true, observation: `delete ok: moved ${delPath} to Trash after user confirmation.` };
+              await deps.refreshWorkspaceTree(true);
+            } else {
+              toolResult = { ok: false, mutated: false, observation: `delete failed for ${delPath}: ${(trashRes && trashRes.message) || 'unknown error'}` };
+            }
+          } else {
+            toolResult = { ok: false, mutated: false, observation: `User declined to delete ${delPath}. Do NOT retry the delete; continue with other steps or finalize.` };
+          }
+        }
         if (toolResult && (toolResult.requiresUserInput || toolResult.requiresProjectScopeConfirmation)) {
           setAgentProgress('Waiting for confirmation...');
-          deps.consumeLiveAssistantText();
+          // Only consume/remove live text for generic input requests.
+          // For project scope confirmation, leave the activity stream visible so the user
+          // can see what the agent was doing before the confirmation prompt appeared.
+          if (!toolResult.requiresProjectScopeConfirmation) {
+            deps.consumeLiveAssistantText();
+          }
           if (agentHasWorkspaceMutations()) {
             await deps.refreshWorkspaceTree(true);
           }
           let userChoice = null;
           if (toolResult.requiresProjectScopeConfirmation && typeof deps.requestProjectScopeConfirmation === 'function') {
+            recordDebugTrace('agent_project_scope_prompt_shown', {
+              chatId: String(chatId || ''),
+              step: String(step),
+              tool: String(decision.tool || ''),
+              workspaceOpen: String(Boolean(toolResult.workspaceOpen)),
+            }, {
+              chatId: String(chatId || ''),
+              step,
+              taskText: String(taskText || ''),
+              userFacingMessage: String(toolResult.userFacingMessage || ''),
+            });
             userChoice = await deps.requestProjectScopeConfirmation(chatId, {
               kind: 'project_scope',
               originalTask: String(taskText || ''),
               userMessage: String(toolResult.userFacingMessage || ''),
               workspaceOpen: toolResult.workspaceOpen === false ? false : Boolean(toolResult.workspaceOpen),
             });
+            recordDebugTrace('agent_project_scope_choice_received', {
+              chatId: String(chatId || ''),
+              step: String(step),
+              userChoice: String(userChoice || 'null'),
+            }, {
+              chatId: String(chatId || ''),
+              step,
+              userChoice: String(userChoice || ''),
+            });
             if (userChoice === 'create_new_project') {
-              const response = await deps.invokeWorkspaceAction('workspaceNewProject', {});
-              if (response && response.ok) {
-                deps.resetWorkspaceForNewProject();
-                toolResult.ok = true;
-                toolResult.mutated = true;
-                toolResult.observation = 'User explicitly confirmed creating a new project via UI. Workspace reset.';
-              } else {
+              const derivedName = planSpec && planSpec.projectName
+                ? String(planSpec.projectName).trim()
+                : String(typeof deps.deriveProjectNameFromTask === 'function' ? deps.deriveProjectNameFromTask(taskText) : '').trim();
+              recordDebugTrace('agent_new_project_close_workspace', {
+                chatId: String(chatId || ''),
+                step: String(step),
+                derivedName,
+              }, { chatId: String(chatId || ''), derivedName, taskText: String(taskText || '') });
+              // Close the old workspace first — native bridge requires this before creating a new project.
+              const closeRes = await deps.invokeWorkspaceAction('workspaceCloseRoot', {});
+              recordDebugTrace('agent_new_project_close_result', {
+                chatId: String(chatId || ''),
+                ok: String(Boolean(closeRes && closeRes.ok)),
+                message: String(closeRes && closeRes.message ? closeRes.message : ''),
+              }, { chatId: String(chatId || ''), closeRes });
+              if (closeRes && !closeRes.ok) {
                 toolResult.ok = false;
                 toolResult.mutated = false;
-                toolResult.observation = 'User confirmed creating a new project via UI, but creation failed: ' + String(response && response.message ? response.message : 'unknown error');
+                toolResult.observation = 'Could not close current workspace before creating new project: ' + String(closeRes.message || 'unknown error');
+              } else {
+                const response = await deps.invokeWorkspaceAction('workspaceNewProject', derivedName ? { name: derivedName } : {});
+                recordDebugTrace('agent_new_project_create_result', {
+                  chatId: String(chatId || ''),
+                  ok: String(Boolean(response && response.ok)),
+                  derivedName,
+                  message: String(response && response.message ? response.message : ''),
+                }, { chatId: String(chatId || ''), response, derivedName });
+                if (response && response.ok) {
+                  if (typeof deps.resetWorkspaceForNewProject === 'function') {
+                    deps.resetWorkspaceForNewProject();
+                  }
+                  // Sync workspace tree in the background — don't block agent continuation.
+                  void deps.syncWorkspaceStateFromNative('new_project_confirmed', { render: true, log: true });
+                  toolResult.ok = true;
+                  toolResult.mutated = true;
+                  toolResult.observation = `User confirmed creating a new project via UI. Workspace reset to ${derivedName || 'new project'}.`;
+                } else {
+                  toolResult.ok = false;
+                  toolResult.mutated = false;
+                  toolResult.observation = 'User confirmed creating a new project via UI, but creation failed: ' + String(response && response.message ? response.message : 'unknown error');
+                }
               }
             } else if (userChoice === 'use_existing_workspace') {
               toolResult.ok = true;
@@ -935,6 +1342,9 @@
             userChoice,
             toolResultObservation: String(toolResult.observation || ''),
           });
+          // Update the status in place so the narration the user already saw stays
+          // visible. Do NOT consume/remove the live row here — that wipes the prior
+          // activities (the "cut off" content) and starts a blank stream.
           setAgentProgress('Continuing...');
         }
         const clippedObservation = String(toolResult.observation || '').slice(0, deps.agentMaxToolOutputChars);
@@ -953,6 +1363,10 @@
             : (String(decision.tool || '').toLowerCase() === 'read_file'
               ? String(toolResult && typeof toolResult.readContent === 'string' ? toolResult.readContent : '')
               : ''),
+          // Read range — for the range-aware read-loop guard.
+          startLine: Number(decision.start_line) || 0,
+          endLine: Number(decision.end_line) || 0,
+          offset: Number(decision.offset) || 0,
           observation: clippedObservation,
         });
         if (toolEvents.length > 48) {
@@ -991,6 +1405,9 @@
           writtenContent: String(toolResult && toolResult.writtenContent ? toolResult.writtenContent : ''),
           readPath: String(toolResult && toolResult.readPath ? toolResult.readPath : ''),
           readContent: String(toolResult && toolResult.readContent ? toolResult.readContent : ''),
+          offset: Number(decision.offset || 0),
+          startLine: Number(decision.start_line || 0),
+          endLine: Number(decision.end_line || 0),
           validationPassed: toolResult && toolResult.validationPassed === true,
         });
         if (!toolResult.ok) {
@@ -1013,9 +1430,190 @@
           });
         }
         appendAgentActivity(deps.buildAgentActivityFromToolResult(decision, toolResult, toolEvents));
+        // Flag a path whose content returned to a prior state (oscillation).
+        if (toolResult && toolResult.ok && toolResult.mutated
+          && ['write_file', 'edit_file'].includes(String(decision.tool || '').toLowerCase())
+          && typeof toolResult.writtenContent === 'string') {
+          const mutatedPath = deps.normalizeWorkspacePath((toolResult.writtenPath || decision.path) || '');
+          if (mutatedPath) {
+            const stateHash = hashFileState(toolResult.writtenContent);
+            const seen = fileStateHistory.get(mutatedPath) || new Set();
+            if (seen.has(stateHash) && seen.size > 0) {
+              oscillatingEditPaths.add(mutatedPath);
+              recordDebugTrace('agent_edit_oscillation_detected', {
+                chatId: String(chatId || ''), step: String(step), path: mutatedPath,
+              }, { chatId: String(chatId || ''), step, path: mutatedPath });
+            }
+            seen.add(stateHash);
+            fileStateHistory.set(mutatedPath, seen);
+          }
+        }
+        // After real progress (an edit landed or validation ran), re-check the
+        // checklist: re-render it if an item just flipped to done, and surface the
+        // count so the user sees the agent working through the plan item by item.
+        if (toolResult && toolResult.ok
+          && (toolResult.mutated || String(decision.tool || '').toLowerCase() === 'validate_files')) {
+          const cl = refreshChecklist();
+          if (cl && cl.total) {
+            setAgentProgress(cl.allDone
+              ? `All ${cl.total} planned items addressed — finalizing...`
+              : `Progress ${cl.doneCount}/${cl.total} — continuing...`);
+          }
+        }
+        // A tool that hit the execution timeout will NOT recover on retry — the local
+        // model is simply too slow for this operation. Abandon immediately with a clean
+        // message instead of burning multiple 150s timeouts (that was the 11-minute hang).
+        if (toolResult && toolResult._toolTimedOut) {
+          // Kill the abandoned background inference (no ghost work after "Stopped").
+          if (typeof deps.abortInFlightInference === 'function') {
+            deps.abortInFlightInference('tool_timeout');
+          }
+          const timedOutPath = deps.normalizeWorkspacePath(decision.path || decision.srcPath || '/');
+          const keptList = [...new Set(toolEvents
+            .filter((event) => event && event.ok && ['write_file', 'edit_file'].includes(String(event.tool || '').toLowerCase()))
+            .map((event) => deps.normalizeWorkspacePath(event.path || ''))
+            .filter(Boolean))];
+          const keptSummary = keptList.length ? ` I kept the files that are already done: ${keptList.slice(0, 6).join(', ')}.` : '';
+          const stoppedText = `${decision.tool} for ${timedOutPath} took too long, so I stopped instead of retrying for several minutes.${keptSummary} Tell me the exact change you want for ${timedOutPath} and I'll continue from here.`;
+          appendAgentActivity({
+            kind: 'error',
+            title: 'Stopped (timed out)',
+            detail: `${decision.tool} for ${timedOutPath} exceeded the time limit`,
+            status: 'error',
+            openPath: timedOutPath.startsWith('/') ? timedOutPath : '',
+            openKind: 'file',
+          });
+          setAgentProgress('Stopped.');
+          deps.consumeLiveAssistantText();
+          if (agentHasWorkspaceMutations()) {
+            await deps.refreshWorkspaceTree(true);
+          }
+          deps.commitAssistantMessage(chatId, stoppedText, stoppedText, {
+            agentActivities,
+            agentMeta: { startedAt, completedAt: Date.now(), collapsed: true },
+            forceNeedsContinue: true,
+          });
+          recordDebugTrace('agent_stopped_after_tool_timeout', {
+            chatId: String(chatId || ''),
+            step: String(step),
+            tool: String(decision.tool || ''),
+            path: timedOutPath,
+          }, {
+            chatId: String(chatId || ''),
+            step,
+            tool: String(decision.tool || ''),
+            path: timedOutPath,
+            toolEvents,
+          });
+          return true;
+        }
+        // Bounded self-correction: when the same file keeps failing the same way,
+        // narrate the retry in real time, and after a few identical failures stop
+        // cleanly instead of looping until the step/token budget is exhausted. The
+        // streak is keyed on path + normalized issue, so a productive fix (different
+        // issue, or validation passing) naturally resets it.
+        {
+          const failTool = String(decision.tool || '').toLowerCase();
+          const failSig = deriveAgentFailureSignature(decision, toolResult, deps.normalizeWorkspacePath);
+          if (failSig) {
+            const { streakPath, shortReason, rawIssue, streakKey } = failSig;
+            if (streakKey === failureStreak.key) failureStreak.count += 1;
+            else { failureStreak.key = streakKey; failureStreak.count = 1; }
+
+            if (failureStreak.count >= sameFailureLimit) {
+              const keptList = [...new Set(toolEvents
+                .filter((event) => event && event.ok && ['write_file', 'edit_file'].includes(String(event.tool || '').toLowerCase()))
+                .map((event) => deps.normalizeWorkspacePath(event.path || ''))
+                .filter(Boolean))];
+              const keptSummary = keptList.length ? ` I kept the files that are already done: ${keptList.slice(0, 6).join(', ')}.` : '';
+              const stoppedText = `I tried ${streakPath} ${failureStreak.count} times and it kept failing the same way (${shortReason}). I'm stopping here instead of looping and using up the run.${keptSummary} Tell me how you want to handle ${streakPath} and I'll pick it back up.`;
+              appendAgentActivity({
+                kind: 'error',
+                title: 'Stopped after retries',
+                detail: `${streakPath} failed ${failureStreak.count}× — ${shortReason}`,
+                status: 'error',
+                openPath: streakPath.startsWith('/') ? streakPath : '',
+                openKind: 'file',
+              });
+              setAgentProgress('Stopped.');
+              deps.consumeLiveAssistantText();
+              if (agentHasWorkspaceMutations()) {
+                await deps.refreshWorkspaceTree(true);
+              }
+              deps.commitAssistantMessage(chatId, stoppedText, stoppedText, {
+                agentActivities,
+                agentMeta: { startedAt, completedAt: Date.now(), collapsed: true },
+                forceNeedsContinue: true,
+              });
+              recordDebugTrace('agent_stopped_after_repeated_failures', {
+                chatId: String(chatId || ''),
+                step: String(step),
+                path: streakPath,
+                count: String(failureStreak.count),
+                observationPreview: deps.debugPreview(rawIssue, 300),
+              }, {
+                chatId: String(chatId || ''),
+                step,
+                path: streakPath,
+                count: failureStreak.count,
+                observation: rawIssue,
+                toolEvents,
+              });
+              return true;
+            }
+
+            appendAgentActivity({
+              kind: 'validate',
+              title: 'Retrying',
+              detail: `${streakPath} didn't pass: ${shortReason}. Fixing it and trying again (attempt ${failureStreak.count + 1} of ${sameFailureLimit}).`,
+              status: 'running',
+              openPath: streakPath.startsWith('/') ? streakPath : '',
+              openKind: 'file',
+            });
+          } else if (failTool === 'validate_files' && toolResult.validationPassed === true) {
+            failureStreak.key = '';
+            failureStreak.count = 0;
+          }
+        }
         if (decision.tool === 'validate_files' && toolResult.validationPassed === false) {
-          const summary = Array.isArray(toolResult.validationIssues) && toolResult.validationIssues.length
-            ? toolResult.validationIssues.slice(0, 3).join('; ')
+          validationFailureCount += 1;
+          const issues = Array.isArray(toolResult.validationIssues) ? toolResult.validationIssues.filter(Boolean) : [];
+          const onlyMinorGaps = issues.length > 0 && issues.every(isMinorCrossFileIssue);
+          const expectedProjectFiles = Array.isArray(planSpec && planSpec.expectedFiles)
+            ? planSpec.expectedFiles.map((p) => deps.normalizeWorkspacePath(p || '')).filter((p) => p && p !== '/README.md' && p !== '/src')
+            : [];
+          const writtenSet = new Set(toolEvents
+            .filter((e) => e && e.ok && ['write_file', 'edit_file'].includes(String(e.tool || '').toLowerCase()))
+            .map((e) => deps.normalizeWorkspacePath(e.path || '')));
+          const allExpectedWritten = expectedProjectFiles.length > 0 && expectedProjectFiles.every((p) => writtenSet.has(p));
+          // After one repair attempt, ship if only minor cross-file gaps remain.
+          if (validationFailureCount >= 2 && onlyMinorGaps && allExpectedWritten) {
+            setAgentProgress('Finalizing...');
+            const workspaceLabel = deps.getWorkspaceRootName() || deps.deriveProjectNameFromTask(taskText) || 'project';
+            const baseText = String(await deps.generateAgentCompletionText(taskText, toolEvents, workspaceLabel, planSpec) || '').trim();
+            // Short summary only — gap details are in the steps above.
+            const gapCount = issues.length;
+            const gapNote = `\n\nIt runs, but ${gapCount} cross-file reference${gapCount === 1 ? '' : 's'} still need wiring (details in the steps above). Press Continue and I'll finish them.`;
+            const finalText = `${baseText}${gapNote}`;
+            if (agentHasWorkspaceMutations()) await deps.refreshWorkspaceTree(true);
+            deps.consumeLiveAssistantText();
+            deps.commitAssistantMessage(chatId, finalText, finalText, {
+              agentActivities,
+              agentMeta: { startedAt, completedAt: Date.now(), collapsed: true },
+              // Was false — so "continue" fell through to chat (which just
+              // re-summarized). True puts the chat in resume state so a bare
+              // "continue" re-enters the agent and wires up the gaps.
+              forceNeedsContinue: true,
+            });
+            recordDebugTrace('agent_shipped_with_minor_gaps', {
+              chatId: String(chatId || ''),
+              step: String(step),
+              gaps: String(issues.length),
+            }, { chatId: String(chatId || ''), step, issues, toolEvents });
+            return true;
+          }
+          const summary = issues.length
+            ? issues.slice(0, 3).join('; ')
             : clippedObservation.replace(/^validate_files found issues:\s*/i, '').trim();
           if (summary && summary !== lastCorrectionDetail) {
             appendAgentActivity(deps.buildAgentCorrectionActivity(summary));
@@ -1047,7 +1645,7 @@
             deps.commitAssistantMessage(chatId, stoppedText, stoppedText, {
               agentActivities,
               agentMeta: { startedAt, completedAt: Date.now(), collapsed: true },
-              forceNeedsContinue: false,
+              forceNeedsContinue: true,
             });
             recordDebugTrace('agent_stopped_after_blocked_file_generation', {
               chatId: String(chatId || ''),
@@ -1085,7 +1683,6 @@
             }
           }
           if (finalCheck.ok && !isWeakEditPlan()) {
-            deps.consumeLiveAssistantText();
             setAgentProgress('Finalizing...');
             const workspaceLabel = deps.getWorkspaceRootName() || deps.deriveProjectNameFromTask(taskText) || 'project';
             const finalText = await deps.generateAgentCompletionText(taskText, toolEvents, workspaceLabel, planSpec);
@@ -1113,7 +1710,11 @@
             return true;
           }
         }
-        if (!toolResult.ok) setAgentProgress('Adjusting...');
+        if (!toolResult.ok) {
+          setAgentProgress('Adjusting...');
+        } else if (decision.tool === 'validate_files' && String(toolResult.observation || '').includes('found issues')) {
+          setAgentProgress('Repairing...');
+        }
 
         if (toolResult.mutated) {
           await deps.refreshWorkspaceTree(true);
@@ -1121,7 +1722,36 @@
         }
       }
 
-      const fallback = 'I could not complete all tool steps in time. Tell me the exact file or folder changes you want next, and I will continue from the current workspace state.';
+      const fallbackChanged = [...new Set(toolEvents
+        .filter((e) => e && e.ok && ['write_file', 'edit_file'].includes(String(e.tool || '').toLowerCase()))
+        .map((e) => deps.normalizeWorkspacePath(e.path || ''))
+        .filter(Boolean))];
+      // Report checklist progress (done/left) and enable Continue.
+      const cl = refreshChecklist();
+      const changedClause = fallbackChanged.length
+        ? ` Changed: ${fallbackChanged.slice(0, 6).join(', ')}.`
+        : '';
+      const remainingClause = cl && cl.remaining && cl.remaining.length
+        ? ` Still to do: ${cl.remaining.join('; ')}.`
+        : '';
+      let fallback = '';
+      if (cl && cl.allDone) {
+        // Work is done — let the model write the wrap-up naturally rather than a template.
+        const workspaceLabel = deps.getWorkspaceRootName() || deps.deriveProjectNameFromTask(taskText) || 'project';
+        fallback = String(await deps.generateAgentCompletionText(taskText, toolEvents, workspaceLabel, planSpec) || '').trim();
+      }
+      if (!fallback) {
+        if (cl && cl.total && !cl.allDone) {
+          fallback = `I ran out of steps with ${cl.doneCount} of ${cl.total} planned items done.${changedClause}${remainingClause} Press Continue to finish the rest, or leave it here.`;
+        } else if (cl && cl.allDone) {
+          fallback = `Done — I made the planned changes.${changedClause}`;
+        } else if (fallbackChanged.length) {
+          fallback = `I ran out of steps before fully wrapping up.${changedClause} Press Continue to keep going, or tell me what to adjust.`;
+        } else {
+          fallback = 'I could not finish in time. Press Continue to keep going, or tell me the exact change you want.';
+        }
+      }
+      deps.setThinkingStatus('');
       setAgentProgress('Stopped.');
       deps.consumeLiveAssistantText();
       if (agentHasWorkspaceMutations()) {
@@ -1130,7 +1760,7 @@
       deps.commitAssistantMessage(chatId, fallback, fallback, {
         agentActivities,
         agentMeta: { startedAt, completedAt: Date.now(), collapsed: true },
-        forceNeedsContinue: false,
+        forceNeedsContinue: !(cl && cl.allDone),
       });
       recordDebugTrace('agent_done', {
         chatId: String(chatId || ''),
@@ -1143,6 +1773,45 @@
         toolEvents,
       });
       return true;
+      } catch (err) {
+        // Capture the actual exception so a leaked throw (e.g. in the edit/repair
+        // path that triggered the orphaned-stream finalizer) is diagnosable instead
+        // of swallowed. Re-thrown so the outer handler's state reset is unchanged.
+        recordDebugTrace('agent_run_exception', {
+          chatId: String(chatId || ''),
+          message: String(err && err.message ? err.message : err),
+          stack: typeof deps.debugPreview === 'function' ? deps.debugPreview(String(err && err.stack ? err.stack : ''), 600) : '',
+        }, {
+          chatId: String(chatId || ''),
+          error: String(err && err.stack ? err.stack : (err && err.message ? err.message : err)),
+          toolEvents,
+        });
+        throw err;
+      } finally {
+        // If we reach here with the live assistant stream still connected, no exit
+        // path committed it — finalize so the loader can't get stuck and the work so
+        // far is persisted (the workspace files already are). Best-effort: this must
+        // never throw or alter the function's return value.
+        try {
+          if (typeof deps.hasLiveAssistantRow === 'function' && deps.hasLiveAssistantRow()) {
+            if (typeof deps.setThinkingStatus === 'function') deps.setThinkingStatus('');
+            if (typeof deps.consumeLiveAssistantText === 'function') deps.consumeLiveAssistantText();
+            const stoppedText = 'The agent stopped before finishing. The files generated so far are saved in the workspace — say "continue" and I will pick up from the current state.';
+            deps.commitAssistantMessage(chatId, stoppedText, stoppedText, {
+              agentActivities,
+              agentMeta: { startedAt, completedAt: Date.now(), collapsed: true },
+              forceNeedsContinue: true,
+            });
+            recordDebugTrace('agent_finalized_orphaned_stream', {
+              chatId: String(chatId || ''),
+              activities: String(agentActivities.length),
+            }, {
+              chatId: String(chatId || ''),
+              toolEvents,
+            });
+          }
+        } catch (_) { /* best-effort finalize; never mask the original outcome */ }
+      }
     }
 
     return {
@@ -1152,5 +1821,8 @@
 
   global.AIExeAgentLoop = {
     createAgentLoop,
+    deriveAgentFailureSignature,
+    countInspectionsSinceMutation,
+    evaluateRepeatedRead,
   };
 })(window);

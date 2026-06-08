@@ -105,9 +105,9 @@
         menuBtn.title = 'Chat options';
         menuBtn.innerHTML = `
             <svg class="icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <circle cx="12" cy="5.5" r="1.2"></circle>
-              <circle cx="12" cy="12" r="1.2"></circle>
-              <circle cx="12" cy="18.5" r="1.2"></circle>
+              <circle cx="5" cy="12" r="1.5"></circle>
+              <circle cx="12" cy="12" r="1.5"></circle>
+              <circle cx="19" cy="12" r="1.5"></circle>
             </svg>
           `;
         menuBtn.addEventListener('click', (evt) => {

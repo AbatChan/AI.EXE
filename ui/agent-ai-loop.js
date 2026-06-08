@@ -120,7 +120,7 @@
           workspaceLines.push(`- ${String(entry.kind || 'file')} ${String(entry.path || entry.name || '')}`);
         });
       }
-      return [
+      const systemLines = [
         'You are AI.EXE Agent Experimental, an autonomous software-engineering agent.',
         '',
         'You own the workflow. Think like a practical software engineer.',
@@ -149,7 +149,7 @@
         '- mkdir, move, delete: filesystem operations.',
         '',
         'Response format:',
-        'You may write one short natural progress note before the JSON when it helps the user understand what you learned or what you are about to do.',
+        'Return exactly one JSON object. Use the "thought" field for a short forward-looking user note shown before the tool runs, e.g. "Reading style.css to find the dark mode variables." Do not write prose outside the JSON.',
         'Then return exactly one JSON object.',
         '',
         'For a tool step:',
@@ -157,7 +157,8 @@
         '',
         'For final:',
         '{"action":"final","tool":"none","message":"Natural final answer explaining what changed, what was verified, and how to run it if useful."}',
-        '',
+      ];
+      const userLines = [
         previousInvalidOutput ? `Previous invalid output to repair:\n${previousInvalidOutput.slice(0, 1200)}` : '',
         'Workspace:',
         workspaceLines.join('\n'),
@@ -167,7 +168,10 @@
         '',
         'User task:',
         String(taskText || ''),
-      ].filter(Boolean).join('\n');
+      ].filter(Boolean);
+      const systemPrompt = systemLines.join('\n');
+      const userPrompt = userLines.join('\n');
+      return { prompt: `${systemPrompt}\n\n${userPrompt}`, systemPrompt, userPrompt };
     }
 
     async function requestAiNativeAgentReply(requestToken, chatId, promptText) {
@@ -199,8 +203,8 @@
 
       let previousInvalidOutput = '';
       for (let step = 1; step <= maxSteps && now() < deadlineAt; step += 1) {
-        const prompt = buildAiNativePrompt(taskText, toolEvents, previousInvalidOutput);
-        const response = await deps.requestAgentPlannerInference(prompt, maxTokens, '');
+        const nativePrompt = buildAiNativePrompt(taskText, toolEvents, previousInvalidOutput);
+        const response = await deps.requestAgentPlannerInference(nativePrompt.prompt, maxTokens, '', nativePrompt.systemPrompt);
         const raw = String(response && response.output ? response.output : '');
         const thought = splitThoughtAndJson(raw);
         if (thought) {
@@ -262,6 +266,39 @@
         pushActivity(deps.buildAgentActivityFromToolResult(parsed, result || {}, toolEvents));
 
         if (result && (result.requiresUserInput || result.requiresProjectScopeConfirmation)) {
+          if (result.requiresProjectScopeConfirmation && typeof deps.requestProjectScopeConfirmation === 'function') {
+            setProgress('Waiting for confirmation...');
+            const userChoice = await deps.requestProjectScopeConfirmation(chatId, {
+              kind: 'project_scope',
+              originalTask: String(taskText || ''),
+              userMessage: String(result.userFacingMessage || ''),
+              workspaceOpen: result.workspaceOpen === false ? false : Boolean(result.workspaceOpen),
+            });
+            if (userChoice === 'create_new_project') {
+              const derivedName = String(typeof deps.deriveProjectNameFromTask === 'function' ? deps.deriveProjectNameFromTask(taskText) : '').trim();
+              const closeRes = await deps.invokeWorkspaceAction('workspaceCloseRoot', {});
+              if (closeRes && closeRes.ok) {
+                const createRes = await deps.invokeWorkspaceAction('workspaceNewProject', derivedName ? { name: derivedName } : {});
+                if (createRes && createRes.ok) {
+                  deps.resetWorkspaceForNewProject();
+                  void deps.syncWorkspaceStateFromNative('new_project_confirmed', { render: true, log: true });
+                  toolEvents[toolEvents.length - 1] = Object.assign({}, toolEvents[toolEvents.length - 1], {
+                    ok: true,
+                    observation: `User confirmed creating a new project via UI. Workspace reset to ${derivedName || 'new project'}.`,
+                  });
+                  setProgress('Continuing...');
+                  continue;
+                }
+              }
+            } else if (userChoice === 'use_existing_workspace') {
+              toolEvents[toolEvents.length - 1] = Object.assign({}, toolEvents[toolEvents.length - 1], {
+                ok: true,
+                observation: 'User chose to keep using the current workspace.',
+              });
+              setProgress('Continuing...');
+              continue;
+            }
+          }
           const text = deps.sanitizeAssistantText(result.userFacingMessage || result.observation || 'I need confirmation before continuing.');
           deps.consumeLiveAssistantText();
           deps.commitAssistantMessage(chatId, text, text, {
@@ -273,12 +310,9 @@
         }
       }
 
-      const finalPrompt = [
-        buildAiNativePrompt(taskText, toolEvents, ''),
-        '',
-        'The step budget or time budget is exhausted. Return a final JSON object only. Explain what was completed, what remains, and the real blocker if any.',
-      ].join('\n');
-      const finalResponse = await deps.requestAgentPlannerInference(finalPrompt, maxTokens, '');
+      const finalNative = buildAiNativePrompt(taskText, toolEvents, '');
+      const finalPrompt = `${finalNative.prompt}\n\nThe step budget or time budget is exhausted. Return a final JSON object only. Explain what was completed, what remains, and the real blocker if any.`;
+      const finalResponse = await deps.requestAgentPlannerInference(finalPrompt, maxTokens, '', finalNative.systemPrompt);
       const finalParsed = normalizeDecision(extractJsonObject(String(finalResponse && finalResponse.output ? finalResponse.output : '')));
       const finalText = deps.sanitizeAssistantText(
         finalParsed && finalParsed.message

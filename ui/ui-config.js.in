@@ -1,4 +1,9 @@
 window.AI_EXE_UI_CONFIG = Object.freeze({
+  app: Object.freeze({
+    version: '@AI_EXE_APP_VERSION@',
+    buildTag: '@AI_EXE_BUILD_TAG@',
+    buildLabel: '@AI_EXE_BUILD_LABEL@'
+  }),
   minWindowWidth: @AI_EXE_MIN_WIDTH@,
   minWindowHeight: @AI_EXE_MIN_HEIGHT@,
   defaultWindowWidth: @AI_EXE_DEFAULT_WIDTH@,

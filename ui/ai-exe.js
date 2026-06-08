@@ -328,6 +328,7 @@ function persistLayoutWidths() {
   const state = {
     left: getCssPx('--sidebar-w', sidebarDefaultWidth),
     right: getCssPx('--right-w', rightDefaultWidth),
+    rightCollapsed: Boolean(rightSidebar && rightSidebar.classList.contains('collapsed')),
   };
   localStorage.setItem(layoutStorageKey, JSON.stringify(state));
 }
@@ -335,8 +336,10 @@ function persistLayoutWidths() {
 function restoreLayoutWidths() {
   let left = sidebarDefaultWidth;
   let right = rightDefaultWidth;
+  let rightCollapsed = false;
   if (!rememberLayout) {
     applyLayoutWidths(left, right);
+    applyRightSidebarCollapsed(false);
     return;
   }
   try {
@@ -345,10 +348,12 @@ function restoreLayoutWidths() {
       const parsed = JSON.parse(raw);
       if (Number.isFinite(parsed.left)) left = parsed.left;
       if (Number.isFinite(parsed.right)) right = parsed.right;
+      rightCollapsed = Boolean(parsed.rightCollapsed);
     }
   } catch (_) { }
 
   applyLayoutWidths(left, right);
+  applyRightSidebarCollapsed(rightCollapsed);
 }
 
 function setResizerGlowFromClientY(resizer, clientY, top, height) {
@@ -476,6 +481,28 @@ function toggleSidebar() {
     applyLayoutWidths(getCssPx('--sidebar-w', sidebarDefaultWidth), getCssPx('--right-w', rightDefaultWidth));
     persistLayoutWidths();
   }
+}
+
+function applyRightSidebarCollapsed(collapsed) {
+  const isCollapsed = Boolean(collapsed);
+  if (rightSidebar) rightSidebar.classList.toggle('collapsed', isCollapsed);
+  document.body.classList.toggle('right-panel-collapsed', isCollapsed);
+  const btn = document.getElementById('rightCollapseBtn');
+  const icon = document.getElementById('rightCollapseIcon');
+  if (icon) {
+    // Point the chevrons toward where the panel will go: right when open
+    // (collapse outward), left when collapsed (expand back in).
+    icon.innerHTML = isCollapsed
+      ? '<path d="M11 18l-6-6 6-6"></path><path d="M18 18l-6-6 6-6"></path>'
+      : '<path d="M13 18l6-6-6-6"></path><path d="M6 18l6-6-6-6"></path>';
+  }
+  if (btn) btn.title = isCollapsed ? 'Expand Explorer' : 'Collapse Explorer';
+}
+
+function toggleRightSidebar() {
+  const next = !(rightSidebar && rightSidebar.classList.contains('collapsed'));
+  applyRightSidebarCollapsed(next);
+  persistLayoutWidths();
 }
 
 // ── Nav active
@@ -695,7 +722,6 @@ const canvasTitle = document.getElementById('canvasTitle');
 const projInput = document.getElementById('projInput');
 const projType = document.getElementById('projType');
 const thinkingStatus = document.getElementById('thinkingStatus');
-const charCount = document.getElementById('charCount');
 const composerStatusLine = document.querySelector('.composer-status-line');
 const folderArea = document.getElementById('folderArea');
 const emptyFolder = document.getElementById('emptyFolder');
@@ -819,12 +845,70 @@ let workspaceRenameFocusId = 0;
 let workspaceDraft = null;
 let workspaceDraftFocusId = 0;
 let workspaceRootName = '';
+// Absolute on-disk workspace root — for real file:// URLs on drag-out.
+let workspaceRootPath = '';
 let explorerImportMenuOpen = false;
 let explorerMoreMenuOpen = false;
 let modalChatId = null;
 let typingTimer = null;
 let thinkingInterval = null;
 let thinkingStartedAt = 0;
+// Independent elapsed timer for agent runs. The typing indicator (and its thinking
+// timer) gets cleared once the agent shows its activity stream, which used to freeze
+// the "Xs" counter below the input for the whole run. This keeps it ticking so the
+// user can see the run is alive (and notice when it stalls).
+let agentElapsedInterval = null;
+let agentElapsedStartedAt = 0;
+function formatTokenCount(n) {
+  if (n >= 1000) return `${(n / 1000).toFixed(1).replace(/\.0$/, '')}k`;
+  return String(n);
+}
+// Context window (tokens) by provider — 0 means unknown (∞). Drives the token ring.
+const MODEL_CONTEXT_WINDOWS = {
+  deepseek: 131072,
+  anthropic: 200000,
+  gemini: 1048576,
+  openai: 256000,
+  local: 32768,
+};
+function getModelContextWindow() {
+  try { return Number(MODEL_CONTEXT_WINDOWS[getSelectedInferenceProvider()]) || 0; } catch (_) { return 0; }
+}
+// Estimated tokens of the active chat's context (all messages + the in-flight stream
+// + what's typed), ~4 chars/token. Real-time numerator for the token ring.
+function getActiveChatTokenEstimate() {
+  let chars = 0;
+  try {
+    const chat = getActiveChat();
+    const thread = chat ? getChatActiveThread(chat) : null;
+    const msgs = thread && Array.isArray(thread.messages) ? thread.messages : [];
+    for (const m of msgs) chars += String((m && m.text) || '').length + String((m && m.thinking) || '').length;
+  } catch (_) { /* no active chat */ }
+  if (typeof mainInput !== 'undefined' && mainInput) chars += String(mainInput.value || '').length;
+  if (activeInferenceRequest && activeInferenceRequest.streamRaw) chars += String(activeInferenceRequest.streamRaw).length;
+  return Math.round(chars / 4);
+}
+const TOKEN_RING_CIRCUMFERENCE = 2 * Math.PI * 8; // r=8
+function updateTokenRing() {
+  const ring = document.getElementById('tokenRing');
+  const fg = document.getElementById('tokenRingFg');
+  if (!ring || !fg) return;
+  const tokens = getActiveChatTokenEstimate();
+  const ctx = getModelContextWindow();
+  const pct = ctx > 0 ? Math.min(1, tokens / ctx) : 0;
+  fg.style.strokeDashoffset = String(TOKEN_RING_CIRCUMFERENCE * (1 - pct));
+  ring.classList.toggle('warn', ctx > 0 && pct >= 0.8);
+  ring.classList.toggle('full', ctx > 0 && pct >= 0.98);
+  const denom = ctx > 0 ? formatTokenCount(ctx) : '∞';
+  const pctLabel = ctx > 0 ? ` (${Math.round(pct * 100)}%)` : '';
+  const label = `${formatTokenCount(tokens)} / ${denom} tokens${pctLabel}`;
+  // Use the app's custom tooltip system (global delegation on .ui-tooltip-anchor[data-tooltip]).
+  ring.classList.add('ui-tooltip-anchor');
+  ring.dataset.tooltip = label;
+  ring.setAttribute('aria-label', label);
+  if (ring.hasAttribute('title')) ring.removeAttribute('title');
+  if (window.AI_EXE_DEBUG_TOKENS) console.log('[token-ring]', label, { tokens, ctx, pct });
+}
 let activeStreamRow = null;
 let activeStreamRawText = '';
 let activeStreamText = '';
@@ -904,7 +988,7 @@ let appSettings = {
   geminiApiKey: '',
   geminiModel: 'gemini-2.5-pro',
   deepseekApiKey: '',
-  deepseekModel: 'deepseek-chat',
+  deepseekModel: 'deepseek-v4-flash',
   veniceApiKey: '',
   veniceModel: 'venice-uncensored',
   modelUrl: '',
@@ -954,6 +1038,7 @@ const inferenceProviderDefs = {
     helpText: 'Uses the official OpenAI Chat Completions API. Token stays in local app settings on this machine.',
     endpointUrl: 'https://api.openai.com/v1/chat/completions',
     protocol: 'openai',
+    supportsToolCalling: true,
   },
   anthropic: {
     label: 'Claude API',
@@ -978,6 +1063,7 @@ const inferenceProviderDefs = {
     helpText: 'Uses Gemini\'s OpenAI-compatible endpoint. Key stays in local app settings on this machine.',
     endpointUrl: 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions',
     protocol: 'openai',
+    supportsToolCalling: true,
   },
   deepseek: {
     label: 'DeepSeek API',
@@ -985,11 +1071,12 @@ const inferenceProviderDefs = {
     modelField: 'deepseekModel',
     keyLabel: 'DeepSeek API Key',
     keyPlaceholder: 'sk-...',
-    modelPlaceholder: 'deepseek-chat',
-    defaultModel: 'deepseek-chat',
+    modelPlaceholder: 'deepseek-v4-flash',
+    defaultModel: 'deepseek-v4-flash',
     helpText: 'Uses DeepSeek\'s OpenAI-compatible chat API. Key stays in local app settings on this machine.',
     endpointUrl: 'https://api.deepseek.com/chat/completions',
     protocol: 'openai',
+    supportsToolCalling: true,
   },
   venice: {
     label: 'Venice API',
@@ -1002,6 +1089,7 @@ const inferenceProviderDefs = {
     helpText: 'Uses Venice\'s OpenAI-compatible API. Key stays in local app settings on this machine.',
     endpointUrl: 'https://api.venice.ai/api/v1/chat/completions',
     protocol: 'openai',
+    supportsToolCalling: true,
   },
 };
 const inferenceProviderModelPresets = {
@@ -1042,6 +1130,8 @@ const inferenceProviderModelPresets = {
   deepseek: [
     'deepseek-v4-flash',
     'deepseek-v4-pro',
+    'deepseek-chat',
+    'deepseek-reasoner',
   ],
   venice: [
     'venice-uncensored',
@@ -1057,12 +1147,68 @@ const debugTraceMaxEntries = 120;
 const maxArtifactContentChars = 12000;
 const maxPendingAttachments = 6;
 const maxAttachmentTextChars = 7000;
-const agentMaxSteps = 16;
-const agentMaxToolOutputChars = 3200;
+const AI_EXE_APP_CONFIG = (window.AI_EXE_UI_CONFIG && window.AI_EXE_UI_CONFIG.app) || {};
+const AI_EXE_VERSION = String(AI_EXE_APP_CONFIG.version || 'dev');
+const AI_EXE_BUILD = String(AI_EXE_APP_CONFIG.buildLabel || `v${AI_EXE_VERSION}`);
+try {
+  console.log('%cAI.EXE build ' + AI_EXE_BUILD, 'color:#4ad; font-weight:bold;');
+  const applyBuildVer = () => {
+    document.querySelectorAll('[data-app-version]').forEach((el) => {
+      el.textContent = `v${AI_EXE_VERSION}`;
+      el.title = AI_EXE_BUILD;
+    });
+  };
+  applyBuildVer(); // element is above this script, so usually set right away
+  if (document.readyState === 'loading') {
+    window.addEventListener('DOMContentLoaded', applyBuildVer);
+  }
+  window.addEventListener('load', applyBuildVer); // re-apply if the topbar re-renders
+} catch (_) {}
+// Step budget. 16 was too tight for multi-item tasks (e.g. a 3-item checklist):
+// inspection + a couple of failed edit-anchor retries exhausted it before the
+// agent finished every item. The mechanical guards (inspection-budget, read-loop,
+// circuit breaker) still bound bad loops, so the extra headroom mostly helps
+// legitimate multi-step work reach completion.
+const agentMaxSteps = 24;
+// Read window. Sized so a typical single app file (HTML/CSS/JS up to ~25KB) is
+// returned whole in one read instead of being truncated — truncation forced the
+// model to page through the tail, which the read-loop guard then blocked, so it
+// never saw the rest. Files larger than this still paginate (and the range-aware
+// guard allows that), but the common case now needs no paging at all.
+const agentMaxToolOutputChars = 26000;
 const agentStepTimeoutMs = 45000;
+// Tool execution can run its own (slow) content-generation inference; bound it so a
+// stalled write/edit can't hang the agent loop. This is now an IDLE limit, not a
+// flat wall-clock: a large file is generated in several sequential inference passes,
+// and a flat 150s wrongly killed a legitimately long (but progressing) generation.
+// generateFullAgentFile heartbeats markAgentToolProgress() after each pass, so the
+// loop only abandons a tool that makes NO progress for this long (a true hang).
+const agentToolTimeoutMs = 150000;
+const agentToolIdleTimeoutMs = 130000;
+const agentToolHardCapMs = 420000;
 const agentTotalTimeoutMs = 600000;
-const agentDecisionMaxTokens = 220;
+// Heartbeat for in-progress tool generation (loop's idle watchdog reads this).
+let lastAgentToolProgressAt = 0;
+function markAgentToolProgress() { lastAgentToolProgressAt = Date.now(); }
+function getLastAgentToolProgressAt() { return lastAgentToolProgressAt; }
+const agentDecisionMaxTokens = 768;
 const agentFileContentMaxTokens = 5000;
+// Local GGUF context window (matches the native --ctx-size launch arg in
+// inference_engine.cpp). A single file-generation call's output must leave room for
+// the prompt within this.
+const agentLocalContextTokens = 32768;
+// Per-provider single-call output ceiling for file generation. Remote models have
+// large context windows, so the old flat 5000 needlessly truncated them; the
+// continuation loop still stitches anything that overflows a single call.
+const agentFileOutputCeilings = {
+  openai: 32000,
+  anthropic: 32000,
+  gemini: 32000,
+  huggingface: 16000,
+  customopenai: 8000,
+  deepseek: 16000,
+  venice: 16000,
+};
 const agentPlannerEndpoint = devPlannerEnabled ? 'http://127.0.0.1:8765/plan' : '';
 const agentPlannerRequestTimeoutMs = 7000;
 const agentFileGenerationRequestTimeoutMs = 120000;
@@ -1229,10 +1375,65 @@ function submitPendingPreflightChoice(chatId, mode) {
   enterChatView();
   chatAutoScrollPinned = true;
   beginInferenceRequest();
-  void requestAssistantReply(chat.id, rewrittenPrompt, true, {
-    latestUserOverride: String(pending.originalTask || rewrittenPrompt || '').trim(),
-    preflightChoiceResolved: normalizedMode,
-  });
+
+  const isCreateNewProject = normalizedMode === 'create_new_project';
+  const isUseExistingWorkspace = normalizedMode === 'use_existing_workspace';
+  const startReply = () => {
+    void requestAssistantReply(chat.id, String(pending.originalTask || '').trim() || rewrittenPrompt, true, {
+      latestUserOverride: String(pending.originalTask || '').trim() || rewrittenPrompt,
+      preflightChoiceResolved: normalizedMode,
+      approvedNewProject: isCreateNewProject,
+      skipNewProjectConfirmation: isCreateNewProject,
+      forceCurrentWorkspace: isUseExistingWorkspace,
+    });
+  };
+
+  // NOTE: read the live workspace via the accessor. There is no `workspace`
+  // variable in this scope — referencing one here used to throw ReferenceError
+  // right after beginInferenceRequest(), stranding the spinner forever (the close
+  // branch was never even reached).
+  const currentWorkspaceSnapshot = getWorkspaceDebugSnapshot();
+  if (isCreateNewProject && currentWorkspaceSnapshot && currentWorkspaceSnapshot.workspaceRootName) {
+    // Close the existing workspace before handing off to the agent so the
+    // planner sees a clean state from step 1 rather than wasting steps
+    // reading old workspace files before the new_project tool runs.
+    recordDebugTrace('preflight_close_workspace_started', {
+      chatId: String(chatId || ''),
+      workspaceRootName: String(currentWorkspaceSnapshot.workspaceRootName || ''),
+    }, { chatId: String(chatId || '') });
+    // Guard the native close with a timeout so a stalled bridge can never leave
+    // the UI stuck in an infinite "thinking" state.
+    Promise.race([
+      Promise.resolve(invokeWorkspaceAction('workspaceCloseRoot', {})),
+      new Promise((resolve) => setTimeout(() => resolve({ ok: false, timedOut: true }), 10000)),
+    ]).then((closeRes) => {
+      recordDebugTrace('preflight_preflight_close_workspace_result', {
+        chatId: String(chatId || ''),
+        ok: Boolean(closeRes && closeRes.ok),
+        timedOut: Boolean(closeRes && closeRes.timedOut),
+      }, { closeRes });
+      if (closeRes && closeRes.ok) {
+        resetWorkspaceForNewProject();
+        startReply();
+      } else {
+        // Close failed/stalled — do not start the agent with a live workspace.
+        // The executor would retry close, but starting here risks the planner
+        // inspecting the wrong project. Surface the error and let the user retry.
+        endInferenceRequest();
+        showAppNotification({
+          message: closeRes && closeRes.timedOut
+            ? 'Closing the current workspace timed out. Please close it manually and try again.'
+            : 'Could not close the current workspace. Please try again.',
+          kind: 'error',
+        });
+      }
+    }).catch(() => {
+      endInferenceRequest();
+      showAppNotification({ message: 'Could not close the current workspace. Please try again.', kind: 'error' });
+    });
+  } else {
+    startReply();
+  }
   return true;
 }
 
@@ -2256,6 +2457,33 @@ function setThinkingStatus(text) {
   thinkingStatus.classList.toggle('active', Boolean(clean));
 }
 
+function startAgentElapsedTimer(startedAtMs = 0) {
+  stopAgentElapsedTimer();
+  agentElapsedStartedAt = Number(startedAtMs) || Date.now();
+  const tick = () => {
+    if (!agentElapsedStartedAt) return;
+    const elapsed = ((Date.now() - agentElapsedStartedAt) / 1000).toFixed(1);
+    setThinkingStatus(`${elapsed}s`);
+  };
+  tick();
+  agentElapsedInterval = window.setInterval(tick, 200);
+}
+
+function stopAgentElapsedTimer() {
+  if (agentElapsedInterval) {
+    clearInterval(agentElapsedInterval);
+    agentElapsedInterval = null;
+  }
+  agentElapsedStartedAt = 0;
+  setThinkingStatus('');
+}
+
+// True while an agent run owns the below-input status (used to ignore the loop's
+// status-blanking so the live "Xs" counter isn't cleared between ticks).
+function isAgentElapsedTimerActive() {
+  return Boolean(agentElapsedInterval);
+}
+
 async function loadPromptTemplate(name) {
   return promptCoreApi.loadPromptTemplate
     ? promptCoreApi.loadPromptTemplate(name)
@@ -2692,6 +2920,12 @@ function getComposerPendingPreflightConfirmation() {
 }
 
 function getComposerPreflightConfirmationChoices(pending = null) {
+  if (pending && pending.kind === 'delete') {
+    return [
+      { mode: 'confirm_delete', label: 'Delete (move to Trash)' },
+      { mode: 'cancel_delete', label: 'Keep it' },
+    ];
+  }
   if (pending && pending.workspaceOpen === false) {
     return [
       { mode: 'create_new_project', label: 'Create a new project' },
@@ -2714,16 +2948,28 @@ function getActiveComposerPermissionRequest() {
     title,
     options: getComposerPreflightConfirmationChoices(pending),
     onSelect: (mode) => {
+      recordDebugTrace('preflight_confirmation_button_clicked', {
+        chatId: String(activeChatId || ''),
+        mode: String(mode || ''),
+        midFlightAgentResume: String(Boolean(pending && pending.midFlightAgentResume)),
+        hasResolver: String(typeof activeProjectScopeResolve === 'function'),
+        pendingInferenceCount: String(pendingInferenceCount),
+      }, {
+        chatId: String(activeChatId || ''),
+        mode,
+        pending,
+      });
       if (pending.midFlightAgentResume) {
-        setPendingPreflightConfirmation(activeChatId, null);
         if (typeof activeProjectScopeResolve === 'function') {
+          setPendingPreflightConfirmation(activeChatId, null);
           activeProjectScopeResolve(mode);
           activeProjectScopeResolve = null;
         } else {
-          const manualText = mode === 'create_new_project' ? 'create a new project' : 'use current project';
-          if (typeof window.submitTextPrompt === 'function') {
-            window.submitTextPrompt(activeChatId, manualText);
-          }
+          // activeProjectScopeResolve was lost (page transition, race condition).
+          // Cancel the stale inference so pendingInferenceCount drops to 0, then submit.
+          cancelActiveInference();
+          endInferenceRequest();
+          submitPendingPreflightChoice(activeChatId, mode);
         }
         return;
       }
@@ -3707,13 +3953,18 @@ function applyAgentProjectChatName(chatId, planSpec = null) {
     ? chat.messages.filter((msg) => msg && msg.role === 'user' && String(msg.text || '').trim()).length
     : 0;
   if (aiCount > 0 || userCount !== 1) return false;
+  // The project name IS the chat title for a project task. kebab-case slug ->
+  // spaced Title Case (e.g. "factory-logistics-simulator" -> "Factory Logistics
+  // Simulator"). Only fall back to a name derived from the user's message when
+  // there is somehow no usable project name (the user asked for this priority).
   const prettyName = normalizeChatName(toAutoTitleCase(sourceName.replace(/[-_]+/g, ' ')) || sourceName);
   const userDerivedName = deriveFallbackChatNameFromUser(chat, prettyName);
-  const displayName = normalizeChatName(userDerivedName && userDerivedName !== 'New Chat' ? userDerivedName : prettyName);
+  const displayName = normalizeChatName(prettyName || (userDerivedName && userDerivedName !== 'New Chat' ? userDerivedName : ''));
   if (!displayName) return false;
   chat.name = displayName;
   chat.isNaming = false;
   chat.autoNamed = true;
+  chat.smartTitleAttempted = true; // project name is final; smart-rename won't override
   chat.updatedAt = nowTs();
   saveChats();
   renderHistory();
@@ -3734,12 +3985,15 @@ function applyInlineChatNameFromResponse(chatId, text) {
     const validTitle = Boolean(parsed.title);
     if (validTitle) {
       chat.name = makeUniqueChatName(parsed.title, chatId, parsed.title);
+      // The model's own marker title is final — don't let smart-rename override it.
+      chat.autoNamed = false;
       pushDebugTrace('inline_namer_applied', {
         chatId: String(chatId || ''),
         title: chat.name,
       });
     } else {
       chat.name = deriveFallbackChatName(chat, text);
+      chat.autoNamed = true; // weak fallback — let smart-rename improve it
       pushDebugTrace('inline_namer_fallback', {
         chatId: String(chatId || ''),
         reason: 'marker_missing_or_invalid',
@@ -4321,12 +4575,35 @@ function saveAppSettings() {
   try {
     localStorage.setItem(settingsStorageKey, JSON.stringify(appSettings));
   } catch (_) { }
+  if (typeof updateTokenRing === 'function') updateTokenRing();
 }
 
 function getSelectedInferenceProvider() {
   const raw = String(appSettings && appSettings.inferenceProvider ? appSettings.inferenceProvider : 'local').trim().toLowerCase();
   if (!remoteProvidersEnabled && raw !== 'local') return 'local';
   return Object.prototype.hasOwnProperty.call(inferenceProviderDefs, raw) ? raw : 'local';
+}
+
+// Model-aware output budget for one file-generation call. Local: reserve room for
+// the prompt within the local context window. Remote: use the provider's large
+// ceiling instead of the legacy flat 5000. Continuation stitches any overflow.
+function getAgentFileOutputBudget() {
+  const provider = getSelectedInferenceProvider();
+  if (provider === 'local') {
+    return Math.max(1024, Math.min(agentFileContentMaxTokens, Math.floor(agentLocalContextTokens * 0.5)));
+  }
+  return agentFileOutputCeilings[provider] || agentFileContentMaxTokens;
+}
+
+// History/context char budget for assembling a chat prompt. The local GGUF runs at
+// ~8192 tokens and token-dense content (JSON/code ≈ 2–2.5 chars/token) can overflow
+// even a generous char budget — so keep the local prompt well under the window to
+// leave room for the response. Remote providers have large windows; keep the default.
+function getChatPromptContextBudgetChars() {
+  // Local runs at a 32K-token window (see --ctx-size). Use a generous char budget so
+  // chats remember a lot, while still leaving headroom so dense content can't exceed
+  // the window — older turns are trimmed automatically rather than overflowing.
+  return getSelectedInferenceProvider() === 'local' ? 40000 : 24576;
 }
 
 function isRemoteInferenceProviderEnabled() {
@@ -4495,6 +4772,15 @@ function getOpenAiCompatibleAuthHeader(provider, apiKey, endpointUrl = '') {
     return `Api-Key ${token}`;
   }
   return `Bearer ${token}`;
+}
+
+// DeepSeek V4 defaults to thinking mode (slow, stalls big generations). Disable it
+// via the documented toggle (api-docs.deepseek.com/guides/thinking_mode).
+function applyDeepseekThinkingOff(provider, req) {
+  if (String(provider || '').toLowerCase() === 'deepseek' && req && typeof req === 'object') {
+    req.thinking = { type: 'disabled' };
+  }
+  return req;
 }
 
 function shouldUseNativeCustomOpenAiRelay(provider) {
@@ -5065,9 +5351,10 @@ function commitInterruptedAgentRun(chatId, reason = 'Agent was interrupted befor
     detail: reason,
     status: 'error',
   });
-  commitAssistantMessage(String(chatId || ''), '', '', {
+  const startedAt = (activeAgentStreamState && activeAgentStreamState.startedAt) || Date.now();
+  commitAssistantMessage(String(chatId || ''), reason, reason, {
     agentActivities: interruptedActivities,
-    agentMeta: { startedAt: Date.now(), completedAt: Date.now(), collapsed: true },
+    agentMeta: { startedAt, completedAt: Date.now(), collapsed: true },
     forceNeedsContinue: true,
   });
   pushDebugTrace('interrupted_agent_committed', {
@@ -5075,6 +5362,47 @@ function commitInterruptedAgentRun(chatId, reason = 'Agent was interrupted befor
     activityCount: String(interruptedActivities.length),
   });
   return true;
+}
+
+// Stop the in-flight generation (stream + fetch) without the full cancel teardown —
+// for when the loop abandons an await on timeout but the inference keeps running.
+function abortInFlightInference(reason = 'abandoned') {
+  const token = activeInferenceRequest;
+  if (!token) return false;
+  if (token.streamId) {
+    try { nativeBridge.cancelStream(token.streamId); } catch (_) { }
+  }
+  if (token.abortController) {
+    try { token.abortController.abort(); } catch (_) { }
+  }
+  pushDebugTrace('inference_aborted', {
+    chatId: String(token.chatId || ''),
+    streamId: String(token.streamId || ''),
+    reason: String(reason || ''),
+  });
+  return true;
+}
+
+// Stall watchdog for chat/inspect streaming: if no delta for idleMs while pending,
+// abort the dead stream and resolve { _stalled: true } so the caller retries/fails.
+function awaitChatStreamWithStallGuard(streamPromise, requestToken, idleMs) {
+  return new Promise((resolve, reject) => {
+    let done = false;
+    let lastCount = Number(requestToken && requestToken.deltaCount) || 0;
+    let lastActivityAt = Date.now();
+    const settle = (fn, val) => { if (done) return; done = true; clearInterval(iv); fn(val); };
+    const iv = setInterval(() => {
+      if (done) return;
+      const c = Number(requestToken && requestToken.deltaCount) || 0;
+      if (c > lastCount) { lastCount = c; lastActivityAt = Date.now(); }
+      if (Date.now() - lastActivityAt >= idleMs) {
+        try { if (requestToken && requestToken.streamId) nativeBridge.cancelStream(requestToken.streamId); } catch (_) { }
+        try { if (requestToken && requestToken.abortController) requestToken.abortController.abort(); } catch (_) { }
+        settle(resolve, { _stalled: true });
+      }
+    }, 3000);
+    streamPromise.then((r) => settle(resolve, r), (e) => settle(reject, e));
+  });
 }
 
 function cancelActiveInference() {
@@ -5326,6 +5654,7 @@ async function streamOpenAiCompatibleChatCompletion(provider, prompt, handlers =
   if (maxTokens > 0) {
     req.max_tokens = maxTokens;
   }
+  applyDeepseekThinkingOff(provider, req);
   if (typeof handlers.onStart === 'function') {
     handlers.onStart(`${provider}_${Date.now()}`);
   }
@@ -5556,7 +5885,34 @@ async function streamRemoteChatCompletion(provider, prompt, handlers = {}, optio
   return streamOpenAiCompatibleChatCompletion(provider, prompt, handlers, options);
 }
 
-async function requestOpenAiCompatibleTextCompletion(provider, prompt, maxTokens) {
+const agentStepFunctionSchema = {
+  type: 'function',
+  function: {
+    name: 'agent_step',
+    description: 'Return the next agent step. Include thought only when you learned something new or are changing approach.',
+    parameters: {
+      type: 'object',
+      properties: {
+        thought: { type: 'string', description: 'Optional: one short sentence for the user. Omit if nothing new to say.' },
+        action: { type: 'string', enum: ['tool', 'final'] },
+        message: { type: 'string', description: 'User-facing message or final answer.' },
+        tool: { type: 'string', enum: ['none', 'new_project', 'list_dir', 'search_files', 'read_file', 'write_file', 'edit_file', 'validate_files', 'mkdir', 'move', 'delete'] },
+        path: { type: 'string' },
+        content: { type: 'string' },
+        src_path: { type: 'string' },
+        dst_path: { type: 'string' },
+        scope: { type: 'string', description: 'Optional path prefix or specific file to restrict search_files to, e.g. /ui or /ui/agent-executor.js.' },
+        offset: { type: 'number', description: 'Character offset for read_file pagination. Use when previous read was truncated.' },
+        limit: { type: 'number', description: 'Max characters to read from offset. Defaults to the standard cap.' },
+        start_line: { type: 'number', description: 'First line to read (1-based). Use with end_line for targeted code reads.' },
+        end_line: { type: 'number', description: 'Last line to read (inclusive). Use with start_line.' },
+      },
+      required: ['action', 'tool'],
+    },
+  },
+};
+
+async function requestOpenAiCompatibleTextCompletion(provider, prompt, maxTokens, systemPrompt = '') {
   if (!remoteProvidersEnabled) return null;
   const def = getInferenceProviderDef(provider);
   const apiKey = getProviderApiKey(provider);
@@ -5575,22 +5931,34 @@ async function requestOpenAiCompatibleTextCompletion(provider, prompt, maxTokens
         Authorization: getOpenAiCompatibleAuthHeader(provider, apiKey, endpointUrl),
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({
+      body: JSON.stringify(applyDeepseekThinkingOff(provider, {
         model,
-        messages: [{ role: 'user', content: String(prompt || '') }],
+        messages: systemPrompt
+          ? [{ role: 'system', content: String(systemPrompt) }, { role: 'user', content: String(prompt || '') }]
+          : [{ role: 'user', content: String(prompt || '') }],
         max_tokens: Math.max(1, Number(maxTokens) || agentFileContentMaxTokens),
-      }),
+        ...(systemPrompt && def && def.supportsToolCalling ? { tools: [agentStepFunctionSchema] } : {}),
+      })),
     });
-    if (!response.ok) return null;
+    if (!response.ok) {
+      const status = response.status;
+      const errBody = await response.json().catch(() => null);
+      const errMsg = errBody && errBody.error && (errBody.error.message || errBody.error.code);
+      if (status === 401 || status === 403) return { ok: false, httpStatus: status, message: `API key invalid or unauthorized (${status})` };
+      if (status === 402) return { ok: false, httpStatus: status, message: 'Insufficient API credits — please top up your account.' };
+      if (status === 429) return { ok: false, httpStatus: status, message: `Rate limit exceeded${errMsg ? ': ' + errMsg : ''}. Will retry.` };
+      return { ok: false, httpStatus: status, message: errMsg ? String(errMsg) : `API error (${status})` };
+    }
     const payload = await response.json().catch(() => null);
-    const text = payload
-      && Array.isArray(payload.choices)
-      && payload.choices[0]
-      && payload.choices[0].message
-      && typeof payload.choices[0].message.content === 'string'
-      ? payload.choices[0].message.content
-      : '';
-    return text ? { ok: true, output: text } : null;
+    const msg = payload && Array.isArray(payload.choices) && payload.choices[0] && payload.choices[0].message;
+    // Prefer function call arguments (structured output) over plain content.
+    const toolCall = msg && Array.isArray(msg.tool_calls) && msg.tool_calls[0];
+    const text = (toolCall && toolCall.function && typeof toolCall.function.arguments === 'string')
+      ? toolCall.function.arguments
+      : (msg && typeof msg.content === 'string' ? msg.content : '');
+    const choice0 = payload && Array.isArray(payload.choices) ? payload.choices[0] : null;
+    const truncated = choice0 ? String(choice0.finish_reason || '').toLowerCase() === 'length' : false;
+    return text ? { ok: true, output: text, truncated } : null;
   } catch (_) {
     return null;
   }
@@ -5624,14 +5992,15 @@ async function requestAnthropicTextCompletion(prompt, maxTokens) {
       .filter((block) => block && block.type === 'text' && typeof block.text === 'string')
       .map((block) => block.text)
       .join('');
-    return text ? { ok: true, output: text } : null;
+    const truncated = String((payload && payload.stop_reason) || '').toLowerCase() === 'max_tokens';
+    return text ? { ok: true, output: text, truncated } : null;
   } catch (_) {
     return null;
   }
 }
 
-async function requestSelectedRemoteTextCompletion(prompt, maxTokens) {
-  return requestRemoteTextCompletionForCapability('agent.writeFile', prompt, maxTokens);
+async function requestSelectedRemoteTextCompletion(prompt, maxTokens, systemPrompt = '') {
+  return requestRemoteTextCompletionForCapability('agent.writeFile', prompt, maxTokens, { systemPrompt });
 }
 
 async function requestRemoteTextCompletionForCapability(capability, prompt, maxTokens, options = {}) {
@@ -5661,7 +6030,7 @@ async function requestRemoteTextCompletionForCapability(capability, prompt, maxT
     const result = await requestAnthropicTextCompletion(prompt, maxTokens);
     return result ? { ...result, workerId: worker.id, provider, model: getProviderModel(provider) } : result;
   }
-  const result = await requestOpenAiCompatibleTextCompletion(provider, prompt, maxTokens);
+  const result = await requestOpenAiCompatibleTextCompletion(provider, prompt, maxTokens, options && options.systemPrompt ? options.systemPrompt : '');
   return result ? { ...result, workerId: worker.id, provider, model: getProviderModel(provider) } : result;
 }
 
@@ -5724,6 +6093,28 @@ async function invokeWorkspaceBridgeAction(action, data = {}) {
   return nativeBridge.invoke(action, data);
 }
 
+// Junk/noise workspace entries that should never be shown to the model: OS metadata
+// files (macOS .DS_Store etc.), AppleDouble (._*), and VCS/cache/dependency dirs that
+// are never user deliverables. Hidden to save tokens and avoid irrelevant mentions.
+// (The explorer UI applies its own hidden-files set in workspace-core.js.)
+const IGNORED_WORKSPACE_ENTRY_NAMES = new Set([
+  '.DS_Store', 'Thumbs.db', 'desktop.ini', '.Spotlight-V100', '.Trashes', '.fseventsd',
+  '.git', '.svn', '.hg', '__pycache__', '.cache', 'node_modules',
+]);
+function isIgnoredWorkspaceEntryName(name = '') {
+  const n = String(name || '').trim();
+  if (!n) return false;
+  if (n.startsWith('._')) return true;
+  return IGNORED_WORKSPACE_ENTRY_NAMES.has(n);
+}
+function workspaceEntryBaseName(entry) {
+  return String(
+    (entry && entry.name)
+      || ((entry && entry.path ? String(entry.path) : '').split('/').filter(Boolean).pop())
+      || '',
+  );
+}
+
 function summarizeWorkspaceListPayload(rawOutput) {
   let parsed = {};
   try {
@@ -5736,7 +6127,8 @@ function summarizeWorkspaceListPayload(rawOutput) {
     };
   }
   const path = normalizeWorkspacePath(parsed && parsed.path ? parsed.path : '/');
-  const entries = Array.isArray(parsed && parsed.entries) ? parsed.entries : [];
+  const entries = (Array.isArray(parsed && parsed.entries) ? parsed.entries : [])
+    .filter((entry) => !isIgnoredWorkspaceEntryName(workspaceEntryBaseName(entry)));
   const normalizedEntries = entries.slice(0, 120).map((entry) => ({
     kind: entry && entry.kind === 'folder' ? 'folder' : 'file',
     path: normalizeWorkspacePath(entry && entry.path ? entry.path : ''),
@@ -5818,6 +6210,70 @@ async function requestWorkspaceTurnModeDecision(chatId, latestUserMessage) {
   return 'inspect';
 }
 
+// Model-decided preflight route. The model classifies the user's intent; the
+// regex feature scoring in preflight-router.js is only a fallback for when this
+// call fails. Returns the parsed structured decision or null.
+async function requestPreflightRouteModelDecision(chatId, latestUserMessage, context = {}) {
+  const text = String(latestUserMessage || '').trim();
+  if (!text) return null;
+  const recentMessages = getChatDebugSnapshot(chatId, 6)
+    .map((msg) => `${msg.role}: ${String(msg.text || '').slice(0, 500)}`)
+    .join('\n\n');
+  const prompt = [
+    'Return exactly one JSON object. No prose. No markdown.',
+    'Keys: route, intent, needs_workspace, needs_file_mutation, confidence, reason',
+    'route: "chat" | "inspect" | "agent"',
+    'intent: "casual_chat" | "general_answer" | "workspace_question" | "create_or_build_deliverable" | "modify_existing_workspace" | "debug_existing_workspace"',
+    'needs_workspace: "yes" | "no"',
+    'needs_file_mutation: "yes" | "no"',
+    'confidence: number from 0 to 1',
+    'reason: one short sentence',
+    '',
+    'Rules (decide what the user wants DONE, not by keywords):',
+    '- Normal conversation, explanations, rewrites, or corrections to YOUR previous answer => route="chat".',
+    '- Asking PURELY to understand, explain, review, or learn how to run the OPEN workspace, with NO change wanted => route="inspect".',
+    '- Asking to create, build, generate, implement, scaffold a deliverable, or to modify/fix/refactor real files => route="agent".',
+    '- A pasted error message, stack trace, console/runtime error, OR a report that the open app is broken / not working / crashing / blank / "nothing happens" => route="agent", intent="debug_existing_workspace". The user wants it FIXED (and explained as you go), NOT merely diagnosed. Treat this by MEANING, not keywords — however they phrase it, a broken app or an error they pasted is a request to fix it. Use route="inspect" for an error ONLY if they explicitly ask just to understand it without changing anything.',
+    '- Agent being ON means file-producing or file-changing requests SHOULD go to route="agent". It does NOT mean every message goes to agent.',
+    '- Workspace being open means workspace questions can use route="inspect". It does NOT mean every message is about the workspace.',
+    '- If the user wants something fixed, improved, restyled, redesigned, polished, or made to look/work better in the open project, that is route="agent" (modify) EVEN IF they also say "check", "look at", or describe the symptoms first. "check and fix it" = agent, not inspect. Use route="inspect" only when the user asks purely to understand/explain/diagnose with no change requested.',
+    '- "build on your previous answer", "fix your explanation", "design it as a table" are route="chat" (they are about the conversation, not files).',
+    '',
+    'Examples:',
+    'User: "hello" => {"route":"chat","intent":"casual_chat","needs_workspace":"no","needs_file_mutation":"no","confidence":0.99,"reason":"Greeting."}',
+    'User: "make snake game" => {"route":"agent","intent":"create_or_build_deliverable","needs_workspace":"yes","needs_file_mutation":"yes","confidence":0.95,"reason":"User wants a runnable deliverable built."}',
+    'User: "I want a playable snake thing in python" => {"route":"agent","intent":"create_or_build_deliverable","needs_workspace":"yes","needs_file_mutation":"yes","confidence":0.92,"reason":"User wants a working program created."}',
+    'User: "build on your last answer" => {"route":"chat","intent":"general_answer","needs_workspace":"no","needs_file_mutation":"no","confidence":0.93,"reason":"About the conversation, not files."}',
+    'User: "how do I run this?" => {"route":"inspect","intent":"workspace_question","needs_workspace":"yes","needs_file_mutation":"no","confidence":0.94,"reason":"Asking how to run the open project."}',
+    'User: "fix the button in this app" => {"route":"agent","intent":"modify_existing_workspace","needs_workspace":"yes","needs_file_mutation":"yes","confidence":0.95,"reason":"Wants a real code change."}',
+    'User: "the styling isn\'t perfect, can you check and fix it? the close icon is too big" => {"route":"agent","intent":"modify_existing_workspace","needs_workspace":"yes","needs_file_mutation":"yes","confidence":0.9,"reason":"Wants the styling actually fixed, not just reviewed."}',
+    'User: "script.js:11 Uncaught ReferenceError: SimulationGrid is not defined" => {"route":"agent","intent":"debug_existing_workspace","needs_workspace":"yes","needs_file_mutation":"yes","confidence":0.9,"reason":"A runtime error in the open app is a request to fix it."}',
+    'User: "why is the app broken? nothing happens when I click play" => {"route":"agent","intent":"debug_existing_workspace","needs_workspace":"yes","needs_file_mutation":"yes","confidence":0.88,"reason":"Reporting broken behavior — fix it, then explain."}',
+    'User: "explain what this error means, do not change anything" => {"route":"inspect","intent":"workspace_question","needs_workspace":"yes","needs_file_mutation":"no","confidence":0.9,"reason":"Explicitly wants explanation only, no change."}',
+    '',
+    `Agent mode: ${context.agentEnabled ? 'ON' : 'OFF'}`,
+    `Workspace open: ${context.workspaceOpen ? 'yes' : 'no'}${context.workspaceRootName ? ` (root: ${context.workspaceRootName})` : ''}`,
+    `This chat created/owns the open workspace: ${context.chatOwnsWorkspace ? 'yes' : 'no'}`,
+    `Recent chat:\n${recentMessages || '(none)'}`,
+    '',
+    `Latest user message:\n${text}`,
+    '',
+    'JSON:',
+  ].join('\n');
+
+  try {
+    const remote = await requestSelectedRemoteTextCompletion(prompt, 160);
+    let parsed = extractFirstJsonObject(remote && remote.ok ? remote.output : '');
+    if (!parsed && nativeBridge.available()) {
+      const nativeRes = await nativeBridge.invoke('infer', { prompt, maxTokens: 160, max_tokens: 160 });
+      parsed = extractFirstJsonObject(nativeRes && nativeRes.ok ? nativeRes.output : '');
+    }
+    return parsed || null;
+  } catch (_) {
+    return null;
+  }
+}
+
 async function requestPreflightRouteDecision(chatId, latestUserMessage, options = {}) {
   const workspaceDebugSnapshot = getWorkspaceDebugSnapshot();
   const workspaceStatusSnapshot = await requestWorkspaceStatusSnapshot();
@@ -5845,7 +6301,30 @@ async function requestPreflightRouteDecision(chatId, latestUserMessage, options 
       rootEntries: [],
     };
   const agentEnabled = Boolean(options && options.agentEnabled);
-  const advisoryDecision = normalizePreflightRouteDecision({ route: 'chat' });
+  const chatOwnsWorkspace = chatHasPriorAgentWorkspaceWork(chatId);
+  const workspaceOpen = Boolean(
+    String(workspace.workspaceRootName || '').trim()
+    || normalizeWorkspacePath(workspace.currentPath || '/') !== '/'
+  );
+  // Provider-aware routing: the model-route classification is a SEPARATE inference
+  // call. On a remote provider it's cheap and worth it (model-primary routing). On
+  // the LOCAL model it would double every turn's latency (route call + response
+  // call), so skip it and let the deterministic router handle local routing. Remote
+  // gets the model's judgment; local gets speed.
+  const useModelRouting = getSelectedInferenceProvider() !== 'local';
+  const modelDecision = useModelRouting
+    ? await requestPreflightRouteModelDecision(chatId, latestUserMessage, {
+      agentEnabled,
+      workspaceOpen,
+      workspaceRootName: workspace.workspaceRootName || '',
+      chatOwnsWorkspace,
+    })
+    : null;
+  const advisoryDecision = normalizePreflightRouteDecision({
+    route: (modelDecision && ['chat', 'inspect', 'agent'].includes(String(modelDecision.route || '').toLowerCase()))
+      ? String(modelDecision.route).toLowerCase()
+      : 'chat',
+  });
   const router = window.AIExePreflightRouter && typeof window.AIExePreflightRouter.evaluate === 'function'
     ? window.AIExePreflightRouter
     : null;
@@ -5854,15 +6333,16 @@ async function requestPreflightRouteDecision(chatId, latestUserMessage, options 
   }
   const evaluated = router.evaluate({
     advisoryDecision,
+    modelDecision,
     latestUserMessage,
     workspace,
     agentEnabled,
     normalizeWorkspacePath,
+    chatOwnsWorkspace,
   });
   const decision = normalizePreflightRouteDecision(evaluated && evaluated.decision ? evaluated.decision : advisoryDecision);
   const sameChatWorkspaceFollowup = Boolean(chatHasPriorAgentWorkspaceWork(chatId) && workspace.workspaceRootName);
-  const followupLooksLikeEdit = /\b(improve|update|edit|modify|change|fix|polish|modern|responsive|dark mode|design|style|styles|styling|css|layout|add|with)\b/i.test(String(latestUserMessage || ''));
-  if (sameChatWorkspaceFollowup && followupLooksLikeEdit && decision.route === 'confirm') {
+  if (sameChatWorkspaceFollowup && decision.route === 'confirm' && !decision.shouldCreateProject) {
     decision.route = agentEnabled ? 'agent' : 'chat';
     decision.shouldAskUser = false;
     decision.shouldCreateProject = false;
@@ -5871,6 +6351,14 @@ async function requestPreflightRouteDecision(chatId, latestUserMessage, options 
       ? 'Same-chat follow-up in an existing workspace should continue in Agent mode without asking project scope again.'
       : 'Agent mode is disabled, so the same-chat workspace follow-up stays in chat.';
     decision.userMessage = '';
+    if (evaluated && evaluated.debug) {
+      evaluated.debug.finalRoute = decision.route;
+      evaluated.debug.overridden = true;
+      evaluated.debug.overrideReason = decision.reason;
+      evaluated.debug.signals = Object.assign({}, evaluated.debug.signals || {}, {
+        sameChatWorkspaceFollowup,
+      });
+    }
   }
   if (evaluated && evaluated.debug) {
     decision._debug = evaluated.debug;
@@ -5929,6 +6417,7 @@ async function requestWorkspaceInspectAnswer(chatId, latestUserMessage, inspectC
     'Schema: {"answer":"final user-facing answer"}',
     'Answer the user using only the inspected workspace context below.',
     'Do not invent repository URLs, clone steps, or generic setup advice unless the inspected files explicitly show that information.',
+    'Base run/setup/install instructions STRICTLY on the file contents and the DETECTED_DEPENDENCIES block. Never assume the standard library. Never claim a module/library is used unless it appears in the file imports. If DETECTED_DEPENDENCIES lists a third-party package, tell the user to install it.',
     'If the inspected files are insufficient, say what is missing briefly.',
     'Prefer direct grounded answers over generic programming advice.',
     'This is inspect mode only. Do not claim that you changed files, will edit code, or applied an improvement.',
@@ -6077,6 +6566,43 @@ async function requestWorkspaceInspectAnswer(chatId, latestUserMessage, inspectC
   return { ok: false, message: 'No available inference path for workspace inspection.' };
 }
 
+// Deterministically parse dependencies from inspected files so the inspect-answer
+// model can't hallucinate the wrong stack (e.g. claim a pygame game "uses turtle,
+// no install needed"). Mechanical extraction only — anchors the model in fact.
+const THIRD_PARTY_PY_MODULES = new Set([
+  'pygame', 'numpy', 'pandas', 'requests', 'flask', 'django', 'fastapi', 'pil', 'pillow',
+  'matplotlib', 'scipy', 'torch', 'tensorflow', 'pydantic', 'sqlalchemy', 'aiohttp', 'bs4',
+  'selenium', 'openai', 'anthropic', 'rich', 'typer', 'click', 'pytest', 'yaml', 'dotenv',
+]);
+function summarizeInspectedDependencies(inspectedFiles = []) {
+  const lines = [];
+  for (const file of (Array.isArray(inspectedFiles) ? inspectedFiles : [])) {
+    const path = String(file && file.path || '');
+    const content = String(file && file.content || '');
+    if (/\.py$/i.test(path)) {
+      const mods = new Set();
+      for (const m of content.matchAll(/^\s*import\s+([a-zA-Z0-9_]+)/gm)) mods.add(m[1]);
+      for (const m of content.matchAll(/^\s*from\s+([a-zA-Z0-9_]+)\s+import/gm)) mods.add(m[1]);
+      if (!mods.size) continue;
+      const thirdParty = [...mods].filter((m) => THIRD_PARTY_PY_MODULES.has(String(m).toLowerCase()));
+      const parts = [`${path}: imports ${[...mods].join(', ')}.`];
+      parts.push(thirdParty.length
+        ? `Third-party (MUST be installed): ${thirdParty.join(', ')} — run \`pip install ${thirdParty.join(' ')}\`.`
+        : 'All imports are Python standard library (no pip install needed).');
+      lines.push(parts.join(' '));
+    } else if (/\.(js|mjs|cjs|ts|jsx|tsx)$/i.test(path)) {
+      const pkgs = new Set();
+      for (const m of content.matchAll(/require\(\s*['"]([^'".][^'"]*)['"]\s*\)/g)) pkgs.add(String(m[1]).split('/')[0]);
+      for (const m of content.matchAll(/from\s+['"]([^'".][^'"]*)['"]/g)) pkgs.add(String(m[1]).split('/')[0]);
+      const ext = [...pkgs].filter(Boolean);
+      if (ext.length) lines.push(`${path}: imports npm packages ${ext.join(', ')} — install with \`npm install ${ext.join(' ')}\`.`);
+    }
+  }
+  return lines.length
+    ? `DETECTED_DEPENDENCIES (parsed directly from the files — treat as ground truth, do NOT contradict):\n${lines.map((l) => `- ${l}`).join('\n')}`
+    : '';
+}
+
 async function performWorkspaceInspectReply(chatId, promptText, requestToken, onProgress = null) {
   const reportProgress = (text) => {
     if (typeof onProgress === 'function') {
@@ -6107,8 +6633,10 @@ async function performWorkspaceInspectReply(chatId, promptText, requestToken, on
       content: clipDebugText(String(readResponse.output || ''), 18000),
     });
   }
+  const dependencySummary = summarizeInspectedDependencies(inspectedFiles);
   const inspectContextText = [
     listInfo.summary,
+    dependencySummary,
     '',
     ...inspectedFiles.map((file) => `FILE: ${file.path}\n${file.content}`),
   ].filter(Boolean).join('\n\n');
@@ -6225,7 +6753,14 @@ function isLikelyIncompleteResponse(text) {
   const fences = (clean.match(/```/g) || []).length;
   if (fences % 2 !== 0) return true;
 
-  if (/[,:;(\[{`"]$/.test(clean)) return true;
+  // Ends mid-clause or with an open bracket/separator -> genuinely incomplete.
+  if (/[,:;(\[{]$/.test(clean)) return true;
+  // A trailing quote or backtick means "incomplete" ONLY when it is UNbalanced (an
+  // open string / code span). A balanced closing " or ` is a normal ending — treating
+  // it as truncated was firing a wasteful second generation (auto-continue) on
+  // complete answers that simply ended in a quoted phrase or `code`.
+  if (clean.endsWith('"') && (clean.match(/"/g) || []).length % 2 !== 0) return true;
+  if (clean.endsWith('`') && (clean.match(/`/g) || []).length % 2 !== 0) return true;
   if (!/[.!?'"`)\]}]$/.test(clean) && !/[\p{Extended_Pictographic}\p{Emoji_Presentation}]$/u.test(clean) && clean.length >= 320) return true;
   return false;
 }
@@ -6301,6 +6836,45 @@ function findLastAssistantMessage(chat) {
     }
   }
   return null;
+}
+
+// A bare "retry / try again / continue / finish it" carries no build
+// instructions on its own. Detect those so we can resume the original task.
+function isBareAgentResumeRequest(text) {
+  const t = String(text || '').trim().toLowerCase().replace(/[\s.!]+$/g, '');
+  if (!t) return false;
+  return /^(?:(?:ok(?:ay)?|yes|yeah|yep|sure|please|pls|now|just|then|so|and|can you|could you)\s+)*(?:retry|retry it|try again|try it again|try once more|once more|redo|redo it|do it again|again|continue|continue building|keep going|carry on|go on|go ahead|proceed|resume|finish|finish it|finish up|finish the project|finish building|complete it|complete the project)$/.test(t);
+}
+
+function lastAssistantLooksIncompleteAgentRun(chat) {
+  if (chat && chat.needsContinue) return true;
+  const msg = findLastAssistantMessage(chat);
+  const text = String(msg && msg.text ? msg.text : '');
+  if (!text) return false;
+  return /did not pass the project quality check|continue or retry without losing|left in its current state|hit an error before finishing|timed out before finishing|returned an invalid planning step|could not complete all tool steps|continue from the current (?:project|workspace) state/i.test(text);
+}
+
+// When the user just says "retry"/"continue" after an interrupted agent build,
+// re-run the ORIGINAL task (recovered from history) instead of the resume word —
+// otherwise the planner sees a contentless "retry" and finalizes as a no-op.
+function resolveAgentResumeTaskText(chatId, promptText) {
+  const raw = String(promptText || '');
+  if (!isBareAgentResumeRequest(raw)) return raw;
+  const chat = findChatById(chatId);
+  if (!chat || !Array.isArray(chat.messages) || !lastAssistantLooksIncompleteAgentRun(chat)) return raw;
+  for (let i = chat.messages.length - 1; i >= 0; i -= 1) {
+    const msg = chat.messages[i];
+    if (!msg || msg.role !== 'user') continue;
+    const candidate = String(msg.text || '').trim();
+    if (!candidate || candidate.length < 8 || isBareAgentResumeRequest(candidate)) continue;
+    recordDebugTrace('agent_resume_task_recovered', {
+      chatId: String(chatId || ''),
+      resumeWordPreview: debugPreview(raw, 60),
+      recoveredTaskPreview: debugPreview(candidate, 220),
+    }, { chatId: String(chatId || ''), resumeWord: raw, recoveredTask: candidate });
+    return candidate;
+  }
+  return raw;
 }
 
 function findContinuationOverlap(leftText, rightText, minProbe = 24, maxProbe = 480) {
@@ -6470,6 +7044,7 @@ function applyRuntimeStatus(status) {
   // Track workspace root folder name (like VSCode shows real folder name in explorer)
   if (typeof status.rootPath === 'string') {
     const rp = status.rootPath.replace(/[/\\]+$/, '');
+    workspaceRootPath = rp;
     workspaceRootName = rp ? rp.split(/[/\\]/).pop() || '' : '';
   }
 }
@@ -6594,8 +7169,9 @@ function refreshWorkspaceForCurrentUser() {
       mainInput.style.height = 'auto';
     }
     if (projInput) projInput.value = '';
-    const charCount = document.getElementById('charCount');
-    if (charCount) charCount.textContent = '0 / ∞';
+    const cc = document.getElementById('charCount');
+    if (cc) cc.textContent = '0 / ∞';
+    updateTokenRing();
   }
   updateContinueButtonVisibility();
   void loadStoredFileTabs(fileTabsRestoreToken);
@@ -7505,11 +8081,14 @@ const workspaceActions = window.AIExeWorkspaceActions && typeof window.AIExeWork
     getWorkspaceDraft: () => workspaceDraft,
     setWorkspaceDraft: (value) => { workspaceDraft = value; },
     getWorkspaceDraftFocusId: () => workspaceDraftFocusId,
-    setWorkspaceDraftFocusId: (value) => { workspaceDraftFocusId = Number(value) || 0; },
+    // IDs are strings (draft_…/rename_…); keep them as-is. Coercing with Number()
+    // turned every id into 0, so the renderer's focus guard never matched and the
+    // new-item name was never auto-focused/selected.
+    setWorkspaceDraftFocusId: (value) => { workspaceDraftFocusId = value || 0; },
     getWorkspaceRenameDraft: () => workspaceRenameDraft,
     setWorkspaceRenameDraft: (value) => { workspaceRenameDraft = value; },
     getWorkspaceRenameFocusId: () => workspaceRenameFocusId,
-    setWorkspaceRenameFocusId: (value) => { workspaceRenameFocusId = Number(value) || 0; },
+    setWorkspaceRenameFocusId: (value) => { workspaceRenameFocusId = value || 0; },
     getWorkspaceSelectedPaths: () => workspaceSelectedPaths,
     getWorkspaceTreeState: () => workspaceTreeState,
     normalizeWorkspaceName,
@@ -7523,6 +8102,7 @@ const workspaceActions = window.AIExeWorkspaceActions && typeof window.AIExeWork
     clearWorkspaceDragExpandTimers,
     invokeWorkspaceAction,
     getWorkspaceNodeState,
+    removeWorkspaceTreeEntry,
     loadWorkspaceChildren,
     setWorkspaceSelection,
     renderArtifacts: (...args) => renderArtifacts(...args),
@@ -7549,6 +8129,7 @@ const workspaceRenderer = window.AIExeWorkspaceRenderer && typeof window.AIExeWo
     getWorkspaceSelectedPaths: () => workspaceSelectedPaths,
     getSelectedWorkspacePathsForAction,
     getWorkspaceRootName: () => workspaceRootName,
+    getWorkspaceRootPath: () => workspaceRootPath,
     getWorkspaceDraft: () => workspaceDraft,
     setWorkspaceDraft: (value) => { workspaceDraft = value; },
     getWorkspaceDraftFocusId: () => workspaceDraftFocusId,
@@ -7811,9 +8392,19 @@ function applyWorkspaceStatusSnapshot(statusSnapshot, options = {}) {
   const hasRoot = Boolean(String(canonicalRootName || rootPath).trim());
   const nextPath = normalizeWorkspacePath(snapshot.currentPath || '/');
   const rootChanged = String(workspaceRootName || '').trim() !== (hasRoot ? canonicalRootName : '');
+  // Background/focus polls report only native's cwd, not the user's explorer
+  // selection. Adopting it here was clearing the selection every 2.5s — which
+  // is why Delete reported "nothing selected" moments after a click. On those
+  // syncs (preserveSelection) keep whatever the user has selected.
+  const preserveSelection = Boolean(options.preserveSelection) && hasRoot && !rootChanged;
+  const priorCurrentPath = normalizeWorkspacePath(workspaceCurrentPath || '/');
+  const priorCurrentKind = workspaceCurrentKind === 'file' ? 'file' : 'folder';
+  const priorSelectedPaths = Array.from(workspaceSelectedPaths || []);
   workspaceRootName = hasRoot ? canonicalRootName : '';
-  workspaceCurrentPath = hasRoot ? nextPath : '/';
-  workspaceCurrentKind = snapshot.currentKind === 'file' && hasRoot ? 'file' : 'folder';
+  workspaceCurrentPath = preserveSelection ? priorCurrentPath : (hasRoot ? nextPath : '/');
+  workspaceCurrentKind = preserveSelection
+    ? priorCurrentKind
+    : (snapshot.currentKind === 'file' && hasRoot ? 'file' : 'folder');
   if (!hasRoot) {
     workspaceItems = [];
     const expandedPaths = new Set();
@@ -7838,8 +8429,14 @@ function applyWorkspaceStatusSnapshot(statusSnapshot, options = {}) {
       freshRoot.loaded = false;
       workspaceItems = [];
     }
-    workspaceSelectedPaths.clear();
-    workspaceSelectedPaths.add(workspaceCurrentPath || '/');
+    if (preserveSelection) {
+      workspaceSelectedPaths.clear();
+      priorSelectedPaths.forEach((path) => workspaceSelectedPaths.add(normalizeWorkspacePath(path)));
+      if (!workspaceSelectedPaths.size) workspaceSelectedPaths.add(workspaceCurrentPath || '/');
+    } else {
+      workspaceSelectedPaths.clear();
+      workspaceSelectedPaths.add(workspaceCurrentPath || '/');
+    }
     if (options.persistRootPath !== false) {
       saveWorkspaceRootPath(rootPath);
     }
@@ -7884,22 +8481,54 @@ async function syncWorkspaceStateFromNative(reason = 'manual', options = {}) {
   }
 }
 
+// Lightweight fingerprint of every folder that is currently loaded in the tree.
+// We fold in each child's kind/name/size/mtime so the signature changes whenever
+// a file or folder is added, removed, renamed, moved, or edited on disk.
+function workspaceTreeChangeSignature() {
+  const parts = [];
+  Array.from(workspaceTreeState.values())
+    .filter((node) => node && node.loaded)
+    .sort((a, b) => String(a.path).localeCompare(String(b.path)))
+    .forEach((node) => {
+      const childSig = (node.children || [])
+        .map((child) => `${child.kind}:${child.name}:${child.sizeBytes || 0}:${child.updatedAt || 0}`)
+        .sort()
+        .join('|');
+      parts.push(`${node.path}=>${childSig}`);
+    });
+  return parts.join('\n');
+}
+
 async function refreshWorkspaceFromExternalChange(reason = 'external_change') {
   if (!nativeBridge.available() || document.hidden || !String(workspaceRootName || '').trim()) return null;
   if (workspaceDraft || workspaceRenameDraft) return null;
   if (workspaceExternalRefreshPromise) return workspaceExternalRefreshPromise;
   workspaceExternalRefreshPromise = (async () => {
-    await syncWorkspaceStateFromNative(reason, { render: false, log: false });
+    await syncWorkspaceStateFromNative(reason, { render: false, log: false, preserveSelection: true });
     if (!String(workspaceRootName || '').trim()) {
       closeAllWorkspaceTabs();
       await renderArtifacts();
       return null;
     }
-    workspaceTreeState.clear();
-    const freshRoot = getWorkspaceNodeState('/');
-    freshRoot.expanded = true;
-    freshRoot.loaded = false;
-    await renderArtifacts();
+    // Re-list folders in place instead of clearing the whole tree. Because we
+    // never wipe node state, every folder the user expanded stays expanded —
+    // and we only re-render when the on-disk listing actually changed, which
+    // removes the constant collapse/flicker the blind 2.5s poll used to cause.
+    const loadedPaths = Array.from(workspaceTreeState.values())
+      .filter((node) => node && node.loaded)
+      .map((node) => node.path);
+    if (!loadedPaths.length) {
+      getWorkspaceNodeState('/').expanded = true;
+      loadedPaths.push('/');
+    }
+    const before = workspaceTreeChangeSignature();
+    for (const path of loadedPaths) {
+      if (!workspaceTreeState.get(path)) continue;
+      await loadWorkspaceChildren(path, true);
+    }
+    if (workspaceTreeChangeSignature() !== before) {
+      await renderArtifacts();
+    }
     await refreshOpenFileTabsFromWorkspace();
     return null;
   })();
@@ -8016,6 +8645,8 @@ const agentCore = window.AIExeAgentCore && typeof window.AIExeAgentCore.createAg
     normalizeWorkspaceName,
     normalizeWorkspacePath,
     getWorkspaceContext,
+    getActiveChatId: () => activeChatId,
+    chatHasPriorAgentWorkspaceWork,
     looksLikePlaceholderImplementation: (content) => /\b(todo:|coming soon|implement this|placeholder code|placeholder content)\b/i.test(String(content || '')),
   })
   : null;
@@ -8034,6 +8665,8 @@ const {
   deriveFallbackAgentDecision,
   parseAgentEditProgram,
   applyAgentEditProgram,
+  computeAgentChecklistProgress,
+  renderAgentChecklist,
   buildFallbackExpectedFiles,
   shouldFallbackPlanNeedReadme,
   isExplicitReadmeOrDocsTask,
@@ -8062,7 +8695,7 @@ async function requestNativeAgentPlannerInference(prompt, maxTokens, grammar = '
     : { ok: false, message: 'No planner response from native runtime.', model: plannerModel };
 }
 
-async function requestAgentPlannerInference(prompt, maxTokens, grammar = '') {
+async function requestAgentPlannerInference(prompt, maxTokens, grammar = '', systemPrompt = '') {
   if (agentRuntime && typeof agentRuntime.requestExternalAgentPlanner === 'function') {
     const external = await agentRuntime.requestExternalAgentPlanner(prompt, maxTokens);
     if (external && external.ok) {
@@ -8072,13 +8705,24 @@ async function requestAgentPlannerInference(prompt, maxTokens, grammar = '') {
       };
     }
   }
-  const remote = await requestSelectedRemoteTextCompletion(prompt, maxTokens);
-  if (remote && remote.ok) {
-    return {
-      ok: true,
-      output: String(remote.output || ''),
-      model: String((remote && remote.model) || getProviderModel(getSelectedInferenceProvider()) || '').trim(),
-    };
+  const remoteProvider = isRemoteInferenceProviderEnabled() ? getSelectedInferenceProvider() : null;
+  if (remoteProvider) {
+    let remote = await requestSelectedRemoteTextCompletion(prompt, maxTokens, systemPrompt);
+    // Only retry for transient failures (rate limit / network). Skip retry for auth/credits errors.
+    const hardFail = remote && !remote.ok && remote.httpStatus && (remote.httpStatus === 401 || remote.httpStatus === 402 || remote.httpStatus === 403);
+    if ((!remote || !remote.ok) && !hardFail) {
+      await new Promise((resolve) => setTimeout(resolve, 2500));
+      remote = await requestSelectedRemoteTextCompletion(prompt, maxTokens, systemPrompt);
+    }
+    if (remote && remote.ok) {
+      return {
+        ok: true,
+        output: String(remote.output || ''),
+        model: String((remote && remote.model) || getProviderModel(remoteProvider) || '').trim(),
+      };
+    }
+    const remoteMsg = (remote && remote.message) || `${remoteProvider} API unavailable — check your connection.`;
+    return { ok: false, message: remoteMsg };
   }
   return requestNativeAgentPlannerInference(prompt, maxTokens, grammar);
 }
@@ -8132,6 +8776,7 @@ const agentRuntime = window.AIExeAgentRuntime && typeof window.AIExeAgentRuntime
     agentPlannerRequestTimeoutMs,
     agentDecisionMaxTokens,
     agentFileContentMaxTokens,
+    getAgentFileOutputBudget,
     agentFileGenerationRequestTimeoutMs,
     loadPromptTemplate,
     renderPromptTemplate,
@@ -8141,6 +8786,7 @@ const agentRuntime = window.AIExeAgentRuntime && typeof window.AIExeAgentRuntime
     sanitizeAgentGeneratedFileContent,
     sanitizeAgentGeneratedEditProgram,
     requestSelectedRemoteTextCompletion,
+    markAgentToolProgress,
     nativeBridge,
     normalizeWorkspacePath,
     deriveProjectNameFromTask,
@@ -8161,6 +8807,7 @@ const agentExecutor = window.AIExeAgentExecutor && typeof window.AIExeAgentExecu
   ? window.AIExeAgentExecutor.createAgentExecutor({
     normalizeWorkspacePath,
     mapWorkspaceEntry,
+    isIgnoredWorkspaceEntryName,
     deriveProjectNameFromTask,
     invokeWorkspaceAction,
     saveWorkspaceRootPath,
@@ -8171,6 +8818,7 @@ const agentExecutor = window.AIExeAgentExecutor && typeof window.AIExeAgentExecu
     getWorkspaceContext,
     getWorkspaceStateComparison,
     requestWorkspaceStatusSnapshot,
+    chatHasPriorAgentWorkspaceWork,
     recordDebugTrace,
     debugPreview,
     syncFileTabFromWorkspaceWrite,
@@ -8212,6 +8860,11 @@ const agentLoop = window.AIExeAgentLoop && typeof window.AIExeAgentLoop.createAg
   ? window.AIExeAgentLoop.createAgentLoop({
     nativeBridge,
     agentTotalTimeoutMs,
+    agentToolTimeoutMs,
+    agentToolIdleTimeoutMs,
+    agentToolHardCapMs,
+    markAgentToolProgress,
+    getLastAgentToolProgressAt,
     agentMaxSteps,
     agentDecisionMaxTokens,
     agentDecisionGrammar,
@@ -8221,6 +8874,7 @@ const agentLoop = window.AIExeAgentLoop && typeof window.AIExeAgentLoop.createAg
     pushActiveAgentStreamActivity,
     scheduleLiveStreamRender,
     isInferenceActive,
+    abortInFlightInference,
     hasLiveAssistantRow: hasConnectedLiveAssistantRow,
     createLiveAssistantRow,
     setActiveAgentStreamStatus,
@@ -8239,7 +8893,15 @@ const agentLoop = window.AIExeAgentLoop && typeof window.AIExeAgentLoop.createAg
     debugPreview,
     resetActiveAgentStreamState,
     buildAgentPlanActivity,
-    setThinkingStatus,
+    computeAgentChecklistProgress,
+    renderAgentChecklist,
+    setThinkingStatus: (text) => {
+      // While the agent elapsed timer owns the below-input status, ignore the
+      // loop's blanking calls so the live "Xs" counter keeps ticking. Honor any
+      // real (non-empty) status text.
+      if (isAgentElapsedTimerActive() && !String(text || '').trim()) return;
+      setThinkingStatus(text);
+    },
     buildAgentDecisionPrompt,
     requestAgentPlannerInference,
     parseAgentDecision,
@@ -8265,6 +8927,8 @@ const agentLoop = window.AIExeAgentLoop && typeof window.AIExeAgentLoop.createAg
     deriveProjectNameFromTask,
     generateAgentCompletionText,
     requestProjectScopeConfirmation,
+    invokeWorkspaceAction,
+    resetWorkspaceForNewProject,
     scheduleWorkspaceExplorerBackgroundRefresh,
     sanitizeAssistantText,
     describeAgentToolPhase,
@@ -8285,6 +8949,7 @@ const aiNativeAgentLoop = window.AIExeAiNativeAgentLoop && typeof window.AIExeAi
     pushActiveAgentStreamActivity,
     scheduleLiveStreamRender,
     isInferenceActive,
+    abortInFlightInference,
     hasLiveAssistantRow: hasConnectedLiveAssistantRow,
     createLiveAssistantRow,
     setActiveAgentStreamStatus,
@@ -8307,6 +8972,11 @@ const aiNativeAgentLoop = window.AIExeAiNativeAgentLoop && typeof window.AIExeAi
     commitAssistantMessage,
     consumeLiveAssistantText,
     sanitizeAssistantText,
+    requestProjectScopeConfirmation,
+    invokeWorkspaceAction,
+    deriveProjectNameFromTask,
+    resetWorkspaceForNewProject,
+    syncWorkspaceStateFromNative,
   })
   : null;
 const {
@@ -8319,14 +8989,18 @@ window.AIExeExperimentalAgent = {
 };
 
 function shouldUseExperimentalAgentLoop(promptText = '') {
-  const explicit = /^\/ai-agent\b/i.test(String(promptText || '').trim());
-  let enabled = false;
+  const text = String(promptText || '').trim();
+  // Explicit per-message overrides win regardless of the stored setting.
+  if (/^\/dev-agent\b/i.test(text)) return false;
+  const explicit = /^\/ai-agent\b/i.test(text);
+  // AI-native loop is now the default. Opt out by setting the flag to '0'.
+  let disabled = false;
   try {
-    enabled = String(localStorage.getItem('aiExeExperimentalAgent') || '') === '1';
+    disabled = String(localStorage.getItem('aiExeExperimentalAgent') || '') === '0';
   } catch (_) {
-    enabled = false;
+    disabled = false;
   }
-  return Boolean(requestAiNativeAgentReply) && (explicit || enabled);
+  return Boolean(requestAiNativeAgentReply) && (explicit || !disabled);
 }
 
 function getExperimentalAgentTaskText(promptText = '') {
@@ -8334,20 +9008,29 @@ function getExperimentalAgentTaskText(promptText = '') {
   return text.replace(/^\/ai-agent\b\s*/i, '').trim() || text;
 }
 
-async function requestSelectedDeveloperAgentReply(requestToken, chatId, promptText) {
-  if (shouldUseExperimentalAgentLoop(promptText)) {
-    recordDebugTrace('experimental_agent_route', {
-      chatId: String(chatId || ''),
-      explicit: String(/^\/ai-agent\b/i.test(String(promptText || '').trim())),
-      latestUserPreview: debugPreview(promptText, 220),
-    }, {
-      chatId: String(chatId || ''),
-      latestUserInput: String(promptText || ''),
-      workspace: getWorkspaceDebugSnapshot(),
-    });
-    return requestAiNativeAgentReply(requestToken, chatId, getExperimentalAgentTaskText(promptText));
+async function requestSelectedDeveloperAgentReply(requestToken, chatId, rawPromptText) {
+  const promptText = resolveAgentResumeTaskText(chatId, rawPromptText);
+  // Keep a live elapsed counter below the input for the whole agent run, and make
+  // sure it is always torn down when the run ends (success, stop, or throw).
+  startAgentElapsedTimer();
+  try {
+    if (shouldUseExperimentalAgentLoop(promptText)) {
+      recordDebugTrace('experimental_agent_route', {
+        chatId: String(chatId || ''),
+        explicit: String(/^\/ai-agent\b/i.test(String(promptText || '').trim())),
+        latestUserPreview: debugPreview(promptText, 220),
+      }, {
+        chatId: String(chatId || ''),
+        latestUserInput: String(promptText || ''),
+        workspace: getWorkspaceDebugSnapshot(),
+      });
+      return await requestAiNativeAgentReply(requestToken, chatId, getExperimentalAgentTaskText(promptText));
+    }
+    const devTaskText = String(promptText || '').replace(/^\/dev-agent\b\s*/i, '');
+    return await requestDeveloperAgentReply(requestToken, chatId, devTaskText);
+  } finally {
+    stopAgentElapsedTimer();
   }
-  return requestDeveloperAgentReply(requestToken, chatId, promptText);
 }
 
 function hasConnectedLiveAssistantRow() {
@@ -9833,6 +10516,30 @@ if (fileViewerSearchClose) {
   });
 }
 document.addEventListener('keydown', (e) => {
+  // Inline explorer drafts (new file/folder, rename): the embedded webview does
+  // not always focus the draft input, so its own Enter/Escape handlers can't
+  // fire. Handle them here independently of focus, and preventDefault so macOS
+  // doesn't beep on the unfocused keystroke. If the input IS focused, let its
+  // own handler do the work to avoid double-committing.
+  if ((workspaceDraft || workspaceRenameDraft) && (e.key === 'Enter' || e.key === 'Escape')) {
+    const active = document.activeElement;
+    const activeIsDraftInput = Boolean(
+      active && active.classList && active.classList.contains('ws-draft-input'),
+    );
+    if (!activeIsDraftInput) {
+      e.preventDefault();
+      const liveInput = (rightSidebar || document).querySelector('.ws-draft-input');
+      if (e.key === 'Escape') {
+        if (workspaceRenameDraft) cancelWorkspaceRenameDraft();
+        if (workspaceDraft) cancelWorkspaceDraft();
+      } else if (workspaceRenameDraft) {
+        void commitWorkspaceRenameDraft(liveInput ? liveInput.value : workspaceRenameDraft.name);
+      } else if (workspaceDraft) {
+        void commitWorkspaceDraft(liveInput ? liveInput.value : workspaceDraft.name);
+      }
+      return;
+    }
+  }
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'f') {
     const activeFileTab = getActiveFileTab();
     if (activeFileTab) {
@@ -9865,6 +10572,7 @@ document.addEventListener('keydown', (e) => {
     closeAuthModal();
     closeSettingsModal();
     cancelWorkspaceRenameDraft(false);
+    cancelWorkspaceDraft();
     clearWorkspaceDragExpandTimers();
   }
   if (e.key === 'F2') {
@@ -9892,6 +10600,38 @@ document.addEventListener('keydown', (e) => {
     openWorkspaceProject();
   }
 });
+
+// New-file/folder and rename are inline inputs in the explorer. Focus can be
+// unreliable in the embedded webview, so don't depend solely on the input's
+// blur to discard them — cancel a pending draft on any pointerdown that lands
+// outside the draft input. This guarantees click-away removes an unconfirmed
+// draft even when the input never received focus (and so never blurred).
+document.addEventListener('pointerdown', (evt) => {
+  if (!workspaceDraft && !workspaceRenameDraft) return;
+  const target = evt.target;
+  const insideDraft = target && typeof target.closest === 'function'
+    && target.closest('.ws-draft, .ws-draft-input');
+  if (insideDraft) return;
+  if (workspaceDraft) cancelWorkspaceDraft();
+  if (workspaceRenameDraft) cancelWorkspaceRenameDraft();
+}, true);
+
+// Clicking empty space in the explorer (not on a row) selects the root folder,
+// so the next New File/Folder lands at the project root by default.
+if (folderArea) {
+  folderArea.addEventListener('click', (evt) => {
+    const target = evt.target;
+    if (target && typeof target.closest === 'function'
+      && target.closest('.ws-row, .ws-draft-input, .exp-icon-btn, .exp-menu')) {
+      return;
+    }
+    if (workspaceDraft || workspaceRenameDraft) return;
+    if (!String(workspaceRootName || '').trim()) return;
+    if (workspaceCurrentPath === '/' && workspaceSelectedPaths.has('/') && workspaceSelectedPaths.size === 1) return;
+    setWorkspaceSelection('/', 'folder');
+    void renderArtifacts();
+  });
+}
 
 function renderHistory() {
   if (chatShell && typeof chatShell.renderHistory === 'function') {
@@ -10110,6 +10850,7 @@ function buildMsgNode(...args) {
 }
 
 function renderActiveChat(...args) {
+  updateTokenRing();
   if (chatRendererApi.renderActiveChat) {
     return chatRendererApi.renderActiveChat(...args);
   }
@@ -10215,7 +10956,8 @@ function appendMessageToChat(chatId, role, text, forcedTs = 0, options = {}) {
       message.loopDetected = true;
     }
     const aiCount = activeThread.messages.filter((m) => m && m.role === 'ai' && String(m.text || '').trim()).length;
-    shouldScheduleSmartRename = false;
+    // After the first reply, smart-rename the chat (it skips already-final names).
+    shouldScheduleSmartRename = aiCount === 1;
   } else if (role === 'error') {
     activeThread.needsContinue = false;
     if (chat.isNaming && !chat.customName) {
@@ -10275,13 +11017,17 @@ function handleKey(e) {
 function autoResize(el) {
   el.style.height = 'auto';
   el.style.height = Math.min(el.scrollHeight, 160) + 'px';
-  document.getElementById('charCount').textContent = el.value.length + ' / ∞';
+  const cc = document.getElementById('charCount');
+  if (cc) cc.textContent = `${el.value.length} / ∞`;
+  updateTokenRing();
 }
 
 function clearInputBox() {
   mainInput.value = '';
   mainInput.style.height = 'auto';
-  document.getElementById('charCount').textContent = '0 / ∞';
+  const cc = document.getElementById('charCount');
+  if (cc) cc.textContent = '0 / ∞';
+  updateTokenRing();
 }
 
 function setMicListeningState(listening) {
@@ -10832,6 +11578,8 @@ function continueMessage() {
   const lastAssistant = findLastAssistantMessage(chat);
   const lastWasAgentRun = Boolean(lastAssistant && Array.isArray(lastAssistant.agentActivities) && lastAssistant.agentActivities.length > 0);
   chat.needsContinue = false;
+  // Show a visible "Continue" bubble (resume still recovers the original task).
+  appendMessageToChat(chat.id, 'user', 'Continue');
   chatAutoScrollPinned = true;
   if (developerAgentEnabled && lastWasAgentRun) {
     void requestAssistantReply(chat.id, 'continue', false, {
@@ -10937,9 +11685,17 @@ function stripCanvasBlocksForDisplay(text) {
 }
 
 function sanitizeAssistantText(text) {
+  // The local llama.cpp server returns a raw error string as the "completion" when
+  // the prompt overflows its context window. Don't show that to the user verbatim —
+  // surface a clear, actionable message instead.
+  if (/exceeds the available context size|send_error:\s*task id|tokens?\)\s*exceeds/i.test(String(text || ''))) {
+    return 'This conversation got too long for the local model\'s context window (32K tokens). Start a new chat to continue, or switch to a larger-context model in Settings.';
+  }
   const normalizedSource = normalizeImplicitThinkingTrace(text);
   const hadThinkingTrace = /<(thinking|think)>[\s\S]*?<\/\1>/i.test(normalizedSource);
   let clean = sanitizeAssistantDelta(text);
+  // Strip leaked prompt-template markers that wrap the prior assistant turn.
+  clean = clean.replace(/<\/?LAST_ASSISTANT_TAIL>/gi, '');
   clean = clean.replace(/^\s*__?AGENT_PROGRESS__?:\s*(?:Thinking|Working|Planning|Inspecting|Creating|Writing|Editing|Saving|Checking|Continuing|Starting|Finalizing|Adjusting|Stopped)\b(?:[^.\n]*\.\.\.)?\s*/gim, '');
   clean = clean.replace(/^\s*__?AGENT_PROGRESS__?:[^\n]*(?:\n|$)/gim, '');
   clean = clean.replace(/^\s*(?:Writing answer|Preparing grounded answer|Choosing relevant files|Inspecting workspace|Planning changes|Creating project workspace)\.\.\.\s*/gim, '');
@@ -10953,6 +11709,14 @@ function sanitizeAssistantText(text) {
   // Some local-model outputs leak prompt transcript markers inline
   // (e.g. "... | [USER] ... FINAL_RESPONSE: ..."). Drop leaked tail.
   clean = clean.replace(/\|\s*\[(?:USER|ASSISTANT)\][\s\S]*$/gi, '');
+  // Strip leaked model-native tool-call markup that some models emit as plain text
+  // when the agent decision parser doesn't consume it (DeepSeek DSML / special-token
+  // tool calls, generic <tool_calls>/<function_calls>/<invoke> blocks). These trail
+  // the prose, so cut from the first opener to the end. [^A-Za-z0-9\s]{0,4} tolerates
+  // the surrounding pipe characters (ASCII | or full-width ｜).
+  clean = clean.replace(/<[^A-Za-z0-9\s]{0,4}\s*DSML[\s\S]*$/i, '');
+  clean = clean.replace(/<\s*(?:\/\s*)?(?:tool_calls?|function_calls?|antml:invoke|antml:parameter|invoke\s+name=)\b[\s\S]*$/i, '');
+  clean = clean.replace(/<[^A-Za-z0-9\s]{1,3}\s*tool[▁_\s-]*calls?[▁_\s-]*(?:begin|end)[\s\S]*$/i, '');
   clean = clean
     .replace(/^\s*assistant\s*$/gim, '')
     .replace(/^\s*user\s*$/gim, '')
@@ -11184,6 +11948,7 @@ function scheduleLiveStreamRender() {
       liveStreamRenderRaf = 0;
       liveStreamLastRenderAt = Date.now();
       renderLiveStreamNow();
+      updateTokenRing();
     });
   };
   if (elapsed >= minIntervalMs) {
@@ -11370,6 +12135,9 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
     maxTokens: Math.max(0, Number(options && options.maxTokens) || 0),
     nextAction: null,
     preflightChoiceResolved: String(options && options.preflightChoiceResolved ? options.preflightChoiceResolved : '').trim(),
+    approvedNewProject: Boolean(options && options.approvedNewProject),
+    skipNewProjectConfirmation: Boolean(options && options.skipNewProjectConfirmation),
+    forceCurrentWorkspace: Boolean(options && options.forceCurrentWorkspace),
   };
   activeInferenceRequest = requestToken;
   thinkingStartedByChatId.set(String(chatId || ''), Number(requestToken.startedAt || Date.now()));
@@ -11432,10 +12200,13 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
       const workspaceStateComparison = getWorkspaceStateComparison();
       const workspaceStatusSnapshot = await requestWorkspaceStatusSnapshot();
       const continuationChat = findChatById(chatId);
-      const continuationText = String(promptText || '').trim().toLowerCase();
-      const continuationOnly = /^(continue|carry on|keep going|go on|resume|continue from here|continue from current state)$/i.test(continuationText);
+      // Treat short "continue"/"retry"/"redo"/"finish it" replies as a resume.
+      // This only gates INTO agent resume below when the assistant actually
+      // stopped mid-build (lastAssistantAskedContinue) or needsContinue is set,
+      // so a loose match here is safe — it never hijacks an unrelated request.
+      const continuationOnly = isBareAgentResumeRequest(promptText);
       const lastAssistantForContinuation = findLastAssistantMessage(continuationChat);
-      const lastAssistantAskedContinue = /ask me to continue|continue from the current project state|continue from the current workspace state/i.test(
+      const lastAssistantAskedContinue = /ask me to continue|continue from the current (?:project|workspace) state|did not pass the project quality check|continue or retry without losing/i.test(
         String(lastAssistantForContinuation && lastAssistantForContinuation.text ? lastAssistantForContinuation.text : ''),
       );
       if (
@@ -11487,6 +12258,17 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
             latestUserInput: String(promptText || ''),
           });
         }
+      } else if (!developerAgentEnabled) {
+        // Agent mode OFF => there is no routing decision to make. inspect/agent/confirm
+        // all require agent mode, so the answer is ALWAYS plain chat. Skip the preflight
+        // entirely (no extra model call, no deterministic scoring, zero misroute risk)
+        // and fall through to the normal chat completion below.
+        recordDebugTrace('preflight_skipped_agent_off', {
+          chatId: requestToken.chatId,
+        }, {
+          chatId: requestToken.chatId,
+          latestUserInput: String(promptText || ''),
+        });
       } else {
         const preflightDecision = await requestPreflightRouteDecision(chatId, promptText, {
           agentEnabled: developerAgentEnabled,
@@ -11516,6 +12298,11 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
           reasonPreview: debugPreview(preflightDecision.reason, 220),
           advisoryRoute: debugPreview(preflightDebug && preflightDebug.advisoryRoute ? preflightDebug.advisoryRoute : '', 80),
           overridden: String(Boolean(preflightDebug && preflightDebug.overridden)),
+          overrideReason: debugPreview(preflightDebug && preflightDebug.overrideReason ? preflightDebug.overrideReason : '', 160),
+          usedModelDecision: String(Boolean(preflightDebug && preflightDebug.usedModelDecision)),
+          modelRoute: debugPreview(preflightDebug && preflightDebug.modelRoute ? preflightDebug.modelRoute : '', 40),
+          modelIntent: debugPreview(preflightDebug && preflightDebug.modelIntent ? preflightDebug.modelIntent : '', 60),
+          modelConfidence: String(preflightDebug && Number.isFinite(Number(preflightDebug.modelConfidence)) ? Number(preflightDebug.modelConfidence).toFixed(2) : ''),
           confidence: String(preflightDebug && Number.isFinite(Number(preflightDebug.confidence)) ? Number(preflightDebug.confidence).toFixed(2) : ''),
           workspaceOpen: String(workspaceHasOpenProjectForLog),
           workspaceRootName: debugPreview(workspaceRootNameForLog, 120),
@@ -11585,7 +12372,13 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
             scheduleLiveStreamRender();
           };
           setInspectProgress('Inspecting workspace...');
-          const inspected = await performWorkspaceInspectReply(chatId, promptText, requestToken, setInspectProgress);
+          startAgentElapsedTimer(); // show the live "Xs" timer for inspect too (consistent with agent)
+          let inspected;
+          try {
+            inspected = await performWorkspaceInspectReply(chatId, promptText, requestToken, setInspectProgress);
+          } finally {
+            stopAgentElapsedTimer();
+          }
           if (!isInferenceActive(requestToken)) {
             return;
           }
@@ -11690,6 +12483,7 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
         canvasModeOverride,
         latestUserOverride: requestToken.latestUserOverride,
         suppressChatNameInstruction: requestToken.appendToLastAssistant || requestToken.suppressChatNameInstruction,
+        contextWindowChars: getChatPromptContextBudgetChars(),
       });
       requestToken.promptPreview = debugPreview(fullPrompt, 1600);
       requestToken.abortController = new AbortController();
@@ -11722,7 +12516,7 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
         chatHistory: getChatDebugSnapshot(chatId),
         workspace: getWorkspaceDebugSnapshot(),
       });
-      const res = await streamRemoteChatCompletion(inferenceProvider, fullPrompt, {
+      const remoteStreamHandlers = {
         onStart: (streamId) => {
           requestToken.streamId = String(streamId || '');
           recordDebugTrace('stream_start', {
@@ -11751,10 +12545,42 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
           }
           appendLiveDelta(chatId, delta);
         },
-      }, {
+      };
+      const remoteStreamOptions = {
         abortController: requestToken.abortController,
         maxTokens: requestToken.maxTokens,
-      });
+      };
+      // No token for 70s = dropped connection: abort, retry once, then fail cleanly.
+      const chatStallIdleMs = 70000;
+      let res = null;
+      let chatStallRetried = false;
+      for (;;) {
+        res = await awaitChatStreamWithStallGuard(
+          streamRemoteChatCompletion(inferenceProvider, fullPrompt, remoteStreamHandlers, remoteStreamOptions),
+          requestToken,
+          chatStallIdleMs,
+        );
+        if (!(res && res._stalled) || chatStallRetried || !isInferenceActive(requestToken)) break;
+        chatStallRetried = true;
+        recordDebugTrace('chat_stream_stall_retry', {
+          chatId: requestToken.chatId, streamId: requestToken.streamId,
+        }, { chatId: requestToken.chatId });
+        consumeLiveAssistantText(); // discard the partial that stalled
+        requestToken.streamRaw = '';
+        requestToken.deltaCount = 0;
+        requestToken.streamId = '';
+        requestToken.abortController = new AbortController(); // the old one was aborted
+        remoteStreamOptions.abortController = requestToken.abortController;
+      }
+      if (res && res._stalled) {
+        clearTypingIndicator();
+        consumeLiveAssistantText();
+        recordDebugTrace('chat_stream_stalled', {
+          chatId: requestToken.chatId,
+        }, { chatId: requestToken.chatId, deltaCount: requestToken.deltaCount });
+        appendErrorMessageToChat(chatId, 'The model stopped responding mid-answer (the connection dropped). Please try again.');
+        return;
+      }
       if (!isInferenceActive(requestToken)) {
         consumeLiveAssistantText();
         return;
@@ -11904,6 +12730,7 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
         canvasModeOverride,
         latestUserOverride: requestToken.latestUserOverride,
         suppressChatNameInstruction: requestToken.appendToLastAssistant || requestToken.suppressChatNameInstruction,
+        contextWindowChars: getChatPromptContextBudgetChars(),
       });
       requestToken.promptPreview = debugPreview(fullPrompt, 1600);
       recordDebugTrace('request_start', {

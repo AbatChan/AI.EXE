@@ -6,6 +6,20 @@ Keys: action, message, tool, path, content, src_path, dst_path
 action: "tool" or "final"
 tool: "none" | "new_project" | "list_dir" | "search_files" | "read_file" | "write_file" | "edit_file" | "validate_files" | "mkdir" | "move" | "delete"
 
+Valid output examples (your reply is ONE ```json block shaped like these — use your real values, not these):
+A tool step:
+```json
+{"action":"tool","tool":"read_file","path":"/script.js"}
+```
+An edit (note: the edit program is a JSON string inside "content"):
+```json
+{"action":"tool","tool":"edit_file","path":"/style.css","content":"{\"edits\":[{\"op\":\"replace\",\"find\":\".form{display:none}\",\"replace\":\".form{display:none}\\n.form.active{display:block}\"}]}"}
+```
+Finishing:
+```json
+{"action":"final","tool":"none","message":"Added the active-form rule in /style.css — the signup form shows now."}
+```
+
 Rules:
 - For write_file, keep content empty unless a short literal payload is necessary.
 - For edit_file, put the JSON edit program inside content.

@@ -18,9 +18,11 @@ function workspace(overrides = {}) {
 function evaluate(message, options = {}) {
   return router.evaluate({
     advisoryDecision: options.advisoryDecision || { route: 'chat' },
+    modelDecision: options.modelDecision,
     latestUserMessage: message,
     workspace: options.workspace || workspace(),
     agentEnabled: options.agentEnabled !== false,
+    chatOwnsWorkspace: options.chatOwnsWorkspace,
   });
 }
 
@@ -91,11 +93,11 @@ const cases = [
     expectedRoute: 'agent',
   },
   {
-    name: 'agent disabled blocks agent route',
+    name: 'agent disabled: action request answers in chat without reading files',
     message: 'add dark mode to this project',
     workspace: workspace({ workspaceRootName: 'demo-app', rootEntryCount: 5, rootLoaded: true }),
     agentEnabled: false,
-    expectedRoute: 'inspect',
+    expectedRoute: 'chat',
   },
   {
     name: 'chat advisory overridden for create intent',
@@ -132,6 +134,123 @@ const cases = [
     }),
     expectedRoute: 'agent',
   },
+  // --- model-decision path (intent classified by the model, not regex) ---
+  {
+    name: 'model: build request the regex missed routes to agent (no workspace)',
+    message: 'write me a playable snake thing in python',
+    modelDecision: { route: 'agent', intent: 'create_or_build_deliverable', needs_file_mutation: 'yes', confidence: 0.95 },
+    expectedRoute: 'agent',
+  },
+  {
+    name: 'model: build request in a foreign open workspace asks for scope confirmation',
+    message: 'write me a playable snake thing in python',
+    modelDecision: { route: 'agent', intent: 'create_or_build_deliverable', needs_file_mutation: 'yes', confidence: 0.95 },
+    workspace: workspace({ workspaceRootName: 'markdown site', rootEntryCount: 5, rootLoaded: true }),
+    expectedRoute: 'confirm',
+  },
+  {
+    name: 'model: "build on your last answer" stays chat despite the word build',
+    message: 'build on your last answer',
+    modelDecision: { route: 'chat', intent: 'general_answer', needs_file_mutation: 'no', confidence: 0.93 },
+    workspace: workspace({ workspaceRootName: 'markdown site', rootEntryCount: 5, rootLoaded: true }),
+    expectedRoute: 'chat',
+  },
+  {
+    name: 'model: how do I run this routes to inspect',
+    message: 'how do I run this?',
+    modelDecision: { route: 'inspect', intent: 'workspace_question', needs_file_mutation: 'no', confidence: 0.94 },
+    workspace: workspace({ workspaceRootName: 'markdown site', rootEntryCount: 5, rootLoaded: true }),
+    expectedRoute: 'inspect',
+  },
+  {
+    name: 'pasted error overrides model inspect -> agent (fix it)',
+    message: 'script.js:11 Uncaught ReferenceError: SimulationGrid is not defined',
+    modelDecision: { route: 'inspect', intent: 'workspace_question', needs_file_mutation: 'no', confidence: 0.85 },
+    workspace: workspace({ workspaceRootName: 'factory-logistics-simulator', rootEntryCount: 4, rootLoaded: true }),
+    expectedRoute: 'agent',
+  },
+  {
+    name: '"why is it broken" overrides model inspect -> agent',
+    message: 'why is the app broken? nothing happens when I click',
+    modelDecision: { route: 'inspect', intent: 'workspace_question', needs_file_mutation: 'no', confidence: 0.9 },
+    workspace: workspace({ workspaceRootName: 'demo-app', rootEntryCount: 5, rootLoaded: true }),
+    expectedRoute: 'agent',
+  },
+  {
+    name: 'genuine understanding question (no error) stays inspect',
+    message: 'how does the tick loop work in this code?',
+    modelDecision: { route: 'inspect', intent: 'workspace_question', needs_file_mutation: 'no', confidence: 0.9 },
+    workspace: workspace({ workspaceRootName: 'demo-app', rootEntryCount: 5, rootLoaded: true }),
+    expectedRoute: 'inspect',
+  },
+  {
+    name: 'pasted error with NO open workspace does not force agent',
+    message: 'TypeError: cannot read properties of null',
+    modelDecision: { route: 'chat', intent: 'general_answer', needs_file_mutation: 'no', confidence: 0.9 },
+    expectedRoute: 'chat',
+  },
+  {
+    name: 'model: agent OFF cannot create files, so build request falls back to chat',
+    message: 'write me a snake game',
+    modelDecision: { route: 'agent', intent: 'create_or_build_deliverable', needs_file_mutation: 'yes', confidence: 0.95 },
+    workspace: workspace({ workspaceRootName: 'markdown site', rootEntryCount: 5, rootLoaded: true }),
+    agentEnabled: false,
+    expectedRoute: 'chat',
+  },
+  {
+    name: 'model: agent OFF + modify request answers in chat (no file reads) in open workspace',
+    message: 'fix the title bug in site.py',
+    modelDecision: { route: 'agent', intent: 'modify_existing_workspace', needs_file_mutation: 'yes', confidence: 0.95 },
+    workspace: workspace({ workspaceRootName: 'markdown site', rootEntryCount: 5, rootLoaded: true }),
+    agentEnabled: false,
+    expectedRoute: 'chat',
+  },
+  {
+    name: 'agent OFF: even a workspace QUESTION stays in chat (no file reads when agent is off)',
+    message: 'how does the theme toggle work in this project?',
+    modelDecision: { route: 'inspect', intent: 'workspace_question', needs_file_mutation: 'no', confidence: 0.95 },
+    workspace: workspace({ workspaceRootName: 'markdown site', rootEntryCount: 5, rootLoaded: true }),
+    agentEnabled: false,
+    expectedRoute: 'chat',
+  },
+  {
+    name: 'model: low-confidence decision is ignored (falls back to regex features)',
+    message: 'make me a calculator website',
+    modelDecision: { route: 'chat', intent: 'casual_chat', confidence: 0.1 },
+    expectedRoute: 'agent',
+  },
+  {
+    name: 'model: question in a chat-owned workspace routes to inspect, not agent',
+    message: "why'd you name the project that?",
+    modelDecision: { route: 'inspect', intent: 'workspace_question', needs_file_mutation: 'no', confidence: 0.94 },
+    workspace: workspace({ workspaceRootName: 'snakegame', rootEntryCount: 1, rootLoaded: true }),
+    chatOwnsWorkspace: true,
+    expectedRoute: 'inspect',
+  },
+  {
+    name: 'model: actionable follow-up in a chat-owned workspace still routes to agent',
+    message: 'add a high score display',
+    modelDecision: { route: 'agent', intent: 'modify_existing_workspace', needs_file_mutation: 'yes', confidence: 0.95 },
+    workspace: workspace({ workspaceRootName: 'snakegame', rootEntryCount: 1, rootLoaded: true }),
+    chatOwnsWorkspace: true,
+    expectedRoute: 'agent',
+  },
+  {
+    name: 'chat-owned workspace: a create-intent follow-up (add a file) goes straight to agent, NOT confirm',
+    message: 'can you add a dummy csv file i can test with?',
+    modelDecision: { route: 'agent', intent: 'create_or_build_deliverable', needs_file_mutation: 'yes', confidence: 0.95 },
+    workspace: workspace({ workspaceRootName: 'budget tracker', rootEntryCount: 4, rootLoaded: true }),
+    chatOwnsWorkspace: true,
+    expectedRoute: 'agent',
+  },
+  {
+    name: 'foreign (unowned) workspace: a create-intent request still asks for scope confirmation',
+    message: 'build a calculator',
+    modelDecision: { route: 'agent', intent: 'create_or_build_deliverable', needs_file_mutation: 'yes', confidence: 0.95 },
+    workspace: workspace({ workspaceRootName: 'invoicing app', rootEntryCount: 6, rootLoaded: true }),
+    chatOwnsWorkspace: false,
+    expectedRoute: 'confirm',
+  },
 ];
 
 let failures = 0;
@@ -139,8 +258,10 @@ let failures = 0;
 cases.forEach((testCase) => {
   const result = evaluate(testCase.message, {
     advisoryDecision: testCase.advisoryDecision,
+    modelDecision: testCase.modelDecision,
     workspace: testCase.workspace,
     agentEnabled: testCase.agentEnabled,
+    chatOwnsWorkspace: testCase.chatOwnsWorkspace,
   });
 
   try {

@@ -97,7 +97,10 @@
         .replace(/[^a-z0-9\s_-]+/gi, ' ')
         .replace(/\s+/g, ' ')
         .trim();
-      if (!clean) return '';
+      // This regex extractor is only a last-resort fallback; the project name should
+      // come from the model's plan (project_name). Keep just a mechanical guard: a
+      // 1-character scrap is not a name, so let the caller fall back to the model name.
+      if (!clean || clean.trim().length < 2) return '';
       return sanitizeProjectSlug(clean, projectKind);
     }
 
@@ -161,32 +164,29 @@
         hints.push('Reference the actual source file names and commands from RECENT_TOOL_RESULTS. Do not invent a different main file name.');
       }
       if (isAgentTaskSoftwareProject(lower)) {
-        hints.push('Prefer a self-contained offline MVP with as few external runtime requirements as possible unless the user explicitly requested a stack.');
-        hints.push('Treat this as a first-pass implementation: complete the core working file within a bounded size, then rely on later edit passes for extra polish.');
-      }
-      if (isAgentBudgetTrackerTask(lower)) {
-        hints.push('Include real budget tracking features such as add expense or income, listing entries, totals, and category or date fields.');
-        hints.push('Persist data locally if the task says offline.');
+        hints.push('Build the complete, working feature the request describes. Match the quality and depth you would produce answering this in a normal chat — do not ship a reduced stub or "first pass".');
+        hints.push('Prefer self-contained code with as few external runtime requirements as possible unless the user explicitly requested a stack.');
       }
       if (/offline/.test(lower)) {
         hints.push('Use local storage or local files for persistence instead of any network service.');
       }
-      if (/\bsmall business|businesses\b/.test(lower)) {
-        hints.push('Make the MVP practical for a small business workflow, with categories and summary totals.');
-      }
+      hints.push('Problem-solving (apply with judgment when something is wrong): read the actual error — its message + file:line is the real failure point; fix THAT, not a guess. Trace to the ROOT cause (where the bad value originates), not the symptom. When two things must agree (markup↔styles↔script, code↔its data, a function↔its caller), make them follow ONE shared contract and fix it consistently on a single side — do not ping-pong edits between files. Make the smallest change that fixes the cause; prefer a guard/normalize at the source over patching every consumer; then verify and stop.');
       if (/\.html?$/i.test(normalized)) {
         hints.push('Return only HTML markup for this file.');
         hints.push('Do not output CSS rules as the main body of this file.');
         hints.push('Do not output JavaScript as the main body of this file.');
         hints.push('If the project has separate style.css or script.js files, prefer linking them instead of embedding large inline <style> or <script> blocks.');
         hints.push('Keep markup semantic and compact. Use reusable classes and stable IDs that CSS and JS can share.');
+        hints.push('Guideline: for UI control icons, prefer clean inline SVG over emoji (emoji render inconsistently and look less polished). Not a hard rule — any consistent icon approach is fine.');
       }
       if (/\.css$/i.test(normalized)) {
         hints.push('Return only CSS for this file.');
         hints.push('Do not output HTML, <html>, <head>, <body>, <script>, or full document markup.');
+        hints.push('Define a style rule for EVERY class and id the HTML and JS reference — see PROJECT_STATE "HTML classes", "HTML ids", "JS class mutations", and "JS queried classes". Include dynamic state classes such as toast/modal/open/visible/active/hiding/hidden so no referenced selector is left unstyled (the validator flags any toggled class with no matching CSS rule).');
         hints.push('Keep CSS complete and bounded: prefer a polished concise stylesheet over excessive effects, and ensure every opened block, string, and comment is closed.');
         hints.push('For multi-section landing pages, style the requested sections with reusable selectors instead of generating oversized repeated CSS.');
         hints.push('Use a small animation system: a few reusable keyframes and transitions, not unique animations for every block.');
+        hints.push('Styling guidelines (apply with judgment, skip what does not fit the request): target selectors that actually exist in the HTML; size elements to their content so text is never clipped or overlapping; keep layouts responsive (flex/grid with gaps, allow wrapping); use consistent spacing, hierarchy, and contrast. e.g. a button with a text label should grow to fit the label, not sit in a fixed icon-sized box.');
       }
       if (/\.(js|ts|jsx|tsx)$/i.test(normalized)) {
         hints.push('Return only JavaScript or TypeScript source for this file.');
@@ -283,6 +283,10 @@
       let srcPath = '';
       let dstPath = '';
       let content = '';
+      let offset = 0;
+      let startLine = 0;
+      let endLine = 0;
+      let scope = '';
 
       if (typeof DOMParser !== 'undefined' && /<decision>/i.test(candidate)) {
         try {
@@ -363,6 +367,11 @@
           srcPath = String(parsed.src_path || parsed.srcPath || '');
           dstPath = String(parsed.dst_path || parsed.dstPath || '');
           content = String(parsed.content || '');
+          if (String(parsed.thought || '').trim()) thought = String(parsed.thought).trim();
+          if (parsed.offset != null) offset = Number(parsed.offset) || 0;
+          if (parsed.start_line != null) startLine = Number(parsed.start_line) || 0;
+          if (parsed.end_line != null) endLine = Number(parsed.end_line) || 0;
+          if (parsed.scope != null) scope = String(parsed.scope || '');
         }
       }
 
@@ -384,6 +393,13 @@
         message = readStringValue('message');
         srcPath = readStringValue('src_path') || readStringValue('srcPath');
         dstPath = readStringValue('dst_path') || readStringValue('dstPath');
+        const readNumberValue = (key) => {
+          const m = jsonish.match(new RegExp(`"${key}"\\s*:\\s*(\\d+)`, 'i'));
+          return m ? (Number(m[1]) || 0) : 0;
+        };
+        if (!offset) offset = readNumberValue('offset');
+        if (!startLine) startLine = readNumberValue('start_line');
+        if (!endLine) endLine = readNumberValue('end_line');
       }
 
       if (!action && !tool && !path && !message && !srcPath && !dstPath && !content) {
@@ -397,6 +413,16 @@
       if (!['tool', 'final'].includes(resolvedAction) && validTools.includes(resolvedAction)) {
         resolvedTool = resolvedAction;
         resolvedAction = 'tool';
+      }
+      // Auto-repair: planner emitted a path-only / line-range object with no
+      // action and no tool — e.g. {"path":"/script.js","start_line":35,"end_line":120}.
+      // The intent is unambiguously a read; infer read_file instead of hard-failing
+      // the whole run (returning null here surfaces as agent_parse_error and STOPS
+      // the agent). A read is non-destructive, so this recovery is always safe, and
+      // the read-loop guard still steers the model toward acting if it over-reads.
+      if (!['tool', 'final'].includes(resolvedAction) && !resolvedTool && String(path || '').trim()) {
+        resolvedAction = 'tool';
+        resolvedTool = 'read_file';
       }
       if (!['tool', 'final'].includes(resolvedAction)) {
         return null;
@@ -413,6 +439,10 @@
         srcPath: String(srcPath || '').trim(),
         dstPath: String(dstPath || '').trim(),
         thought: String(thought || '').trim(),
+        offset: Math.max(0, Number(offset) || 0),
+        start_line: Math.max(0, Number(startLine) || 0),
+        end_line: Math.max(0, Number(endLine) || 0),
+        scope: String(scope || '').trim(),
         raw,
       };
     }
@@ -510,11 +540,25 @@
             };
           }
         }
-        const nextPath = expectedFiles.find((path) => {
-          const normalized = normalizeWorkspacePath(path || '');
-          return normalized && normalized !== '/README.md' && !writtenPaths.includes(normalized);
-        }) || expectedFiles.find((path) => normalizeWorkspacePath(path || '') === '/README.md' && !writtenPaths.includes('/README.md'))
-          || '';
+        // Generate in dependency order so files cohere on the first pass instead of
+        // needing a repair: markup first (defines structure + IDs), then scripts
+        // (which query those IDs and introduce dynamic state classes like
+        // .toast-visible / .modal-open), then stylesheets LAST — so the CSS can see
+        // and style every class/ID the HTML and JS actually use, rather than being
+        // written blind before the JS exists. README always last so it references
+        // real, finished files.
+        const fileWritePriority = (p) => {
+          const n = normalizeWorkspacePath(p || '');
+          if (n === '/README.md') return 5;
+          if (/\.(css|scss|sass|less)$/i.test(n)) return 4;
+          if (/\.(js|mjs|cjs|ts|jsx|tsx)$/i.test(n)) return 3;
+          if (/\.html?$/i.test(n)) return 1;
+          return 2;
+        };
+        const nextPath = expectedFiles
+          .map((path) => normalizeWorkspacePath(path || ''))
+          .filter((path) => path && path !== '/src' && !writtenPaths.includes(path))
+          .sort((a, b) => fileWritePriority(a) - fileWritePriority(b))[0] || '';
         if (nextPath) {
           const lastAttemptForPath = Array.isArray(toolEvents)
             ? [...toolEvents].reverse().find((event) => (
@@ -903,10 +947,116 @@
       return { edits: normalizedEdits };
     }
 
+    // Collapse interior whitespace runs and trim, so a line compares equal
+    // regardless of indentation style (tabs vs spaces) or trailing whitespace.
+    function normalizeEditLine(line) {
+      return String(line || '').replace(/\s+/g, ' ').trim();
+    }
+
+    // Bounded Levenshtein distance between two short (single-line) strings.
+    function editLevenshtein(a, b) {
+      const m = a.length;
+      const n = b.length;
+      if (m === 0) return n;
+      if (n === 0) return m;
+      let prev = new Array(n + 1);
+      for (let j = 0; j <= n; j += 1) prev[j] = j;
+      for (let i = 1; i <= m; i += 1) {
+        const cur = new Array(n + 1);
+        cur[0] = i;
+        const ca = a.charCodeAt(i - 1);
+        for (let j = 1; j <= n; j += 1) {
+          const cost = ca === b.charCodeAt(j - 1) ? 0 : 1;
+          cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost);
+        }
+        prev = cur;
+      }
+      return prev[n];
+    }
+
+    function editLineSimilarity(a, b) {
+      if (a === b) return 1;
+      const maxLen = Math.max(a.length, b.length);
+      if (maxLen === 0) return 1;
+      return 1 - editLevenshtein(a, b) / maxLen;
+    }
+
+    // Fuzzy-locate an edit's `find` text, tolerating weak-model anchor imperfections
+    // (indentation/whitespace/stray char). Returns {start,end,mode} or null.
+    function findEditAnchor(source, find) {
+      const src = String(source || '');
+      const needle = String(find || '');
+      if (!needle) return null;
+
+      // Tier 1: exact substring — the dominant, cheapest case (unchanged behavior).
+      const exactIdx = src.indexOf(needle);
+      if (exactIdx >= 0) return { start: exactIdx, end: exactIdx + needle.length, mode: 'exact' };
+
+      const srcLines = src.split('\n');
+      const offsets = new Array(srcLines.length);
+      let acc = 0;
+      for (let i = 0; i < srcLines.length; i += 1) {
+        offsets[i] = acc;
+        acc += srcLines[i].length + 1;
+      }
+
+      const needleLines = needle.split('\n');
+      while (needleLines.length && needleLines[0].trim() === '') needleLines.shift();
+      while (needleLines.length && needleLines[needleLines.length - 1].trim() === '') needleLines.pop();
+      if (!needleLines.length) return null;
+      const needleNorm = needleLines.map(normalizeEditLine);
+      const n = needleNorm.length;
+      if (n > srcLines.length) return null;
+
+      // Tier 2/3 replace whole lines, so the span runs from the first matched
+      // line's start to the last matched line's end (excluding the trailing \n).
+      const spanFor = (i) => {
+        const last = i + n - 1;
+        return { start: offsets[i], end: offsets[last] + srcLines[last].length };
+      };
+
+      // Tier 2: whitespace-normalized exact block match.
+      for (let i = 0; i + n <= srcLines.length; i += 1) {
+        let matched = true;
+        for (let j = 0; j < n; j += 1) {
+          if (normalizeEditLine(srcLines[i + j]) !== needleNorm[j]) { matched = false; break; }
+        }
+        if (matched) {
+          const span = spanFor(i);
+          return { start: span.start, end: span.end, mode: 'whitespace' };
+        }
+      }
+
+      // Tier 3: best fuzzy block above a conservative similarity threshold.
+      // Per-line Levenshtein keeps each comparison to single-line length; guard
+      // against pathological O(lines×needle) cost on very large inputs.
+      if ((srcLines.length - n + 1) * n > 200000) return null;
+      let bestScore = 0;
+      let bestStart = -1;
+      for (let i = 0; i + n <= srcLines.length; i += 1) {
+        let total = 0;
+        for (let j = 0; j < n; j += 1) {
+          total += editLineSimilarity(normalizeEditLine(srcLines[i + j]), needleNorm[j]);
+        }
+        const score = total / n;
+        if (score > bestScore) { bestScore = score; bestStart = i; }
+      }
+      if (bestStart >= 0 && bestScore >= 0.9) {
+        const span = spanFor(bestStart);
+        return { start: span.start, end: span.end, mode: 'fuzzy', score: bestScore };
+      }
+      return null;
+    }
+
     function applyAgentEditProgram(sourceText, program) {
       let output = String(sourceText || '');
       const edits = Array.isArray(program && program.edits) ? program.edits : [];
       let appliedCount = 0;
+      let fuzzyCount = 0;
+      const noteAnchor = (anchor) => {
+        appliedCount += 1;
+        if (anchor && anchor.mode && anchor.mode !== 'exact') fuzzyCount += 1;
+      };
       for (const edit of edits) {
         if (!edit || !edit.op) continue;
         if (edit.op === 'prepend') {
@@ -921,34 +1071,91 @@
         }
         const find = String(edit.find || '');
         if (!find) continue;
-        if (edit.op === 'replace') {
-          if (!output.includes(find)) continue;
-          output = output.replace(find, String(edit.replace || ''));
-          appliedCount += 1;
+        if (edit.op === 'replace_all') {
+          // Exact replace-all stays exact (a fuzzy global match is unsafe);
+          // if the literal is absent, degrade to a single fuzzy replacement.
+          if (output.includes(find)) {
+            output = output.split(find).join(String(edit.replace || ''));
+            appliedCount += 1;
+            continue;
+          }
+          const anchor = findEditAnchor(output, find);
+          if (!anchor) continue;
+          output = `${output.slice(0, anchor.start)}${String(edit.replace || '')}${output.slice(anchor.end)}`;
+          noteAnchor(anchor);
           continue;
         }
-        if (edit.op === 'replace_all') {
-          if (!output.includes(find)) continue;
-          output = output.split(find).join(String(edit.replace || ''));
-          appliedCount += 1;
+        if (edit.op === 'replace') {
+          const anchor = findEditAnchor(output, find);
+          if (!anchor) continue;
+          output = `${output.slice(0, anchor.start)}${String(edit.replace || '')}${output.slice(anchor.end)}`;
+          noteAnchor(anchor);
           continue;
         }
         if (edit.op === 'insert_before') {
-          const index = output.indexOf(find);
-          if (index < 0) continue;
-          output = `${output.slice(0, index)}${String(edit.text || '')}${output.slice(index)}`;
-          appliedCount += 1;
+          const anchor = findEditAnchor(output, find);
+          if (!anchor) continue;
+          output = `${output.slice(0, anchor.start)}${String(edit.text || '')}${output.slice(anchor.start)}`;
+          noteAnchor(anchor);
           continue;
         }
         if (edit.op === 'insert_after') {
-          const index = output.indexOf(find);
-          if (index < 0) continue;
-          const insertAt = index + find.length;
-          output = `${output.slice(0, insertAt)}${String(edit.text || '')}${output.slice(insertAt)}`;
-          appliedCount += 1;
+          const anchor = findEditAnchor(output, find);
+          if (!anchor) continue;
+          output = `${output.slice(0, anchor.end)}${String(edit.text || '')}${output.slice(anchor.end)}`;
+          noteAnchor(anchor);
         }
       }
-      return { output, appliedCount };
+      return { output, appliedCount, fuzzyCount };
+    }
+
+    // Mechanically mark a doneCriteria item done when a successful edit's target or
+    // content matches its distinctive keywords (generic items: any shipped+validated work).
+    const AGENT_CHECKLIST_STOPWORDS = new Set([
+      'the', 'and', 'for', 'with', 'that', 'this', 'are', 'should', 'must', 'into',
+      'from', 'have', 'has', 'use', 'using', 'make', 'made', 'fix', 'fixed', 'fixing',
+      'add', 'added', 'ensure', 'works', 'work', 'working', 'when', 'then', 'all',
+      'any', 'its', 'their', 'them', 'they', 'each', 'good', 'great', 'look', 'looks',
+      'right', 'correct', 'properly', 'exist', 'exists', 'show', 'shows', 'display',
+    ]);
+
+    function agentChecklistKeywords(text) {
+      return Array.from(new Set(
+        String(text || '')
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, ' ')
+          .split(/\s+/)
+          .filter((w) => w.length >= 4 && !AGENT_CHECKLIST_STOPWORDS.has(w))
+      ));
+    }
+
+    function computeAgentChecklistProgress(items, toolEvents) {
+      const list = Array.isArray(items) ? items.map((t) => String(t || '').trim()).filter(Boolean) : [];
+      const events = Array.isArray(toolEvents) ? toolEvents : [];
+      const mutations = events.filter((e) => e && e.ok
+        && ['write_file', 'edit_file'].includes(String(e.tool || '').toLowerCase()));
+      const anyValidationPassed = events.some((e) => e
+        && String(e.tool || '').toLowerCase() === 'validate_files' && e.validationPassed === true);
+      const haystacks = mutations.map((e) => `${String(e.path || '')} ${String(e.content || '')} ${String(e.observation || '')}`.toLowerCase());
+      return list.map((text) => {
+        const keywords = agentChecklistKeywords(text);
+        let done = false;
+        if (keywords.length) {
+          done = haystacks.some((h) => keywords.some((k) => h.includes(k)));
+        } else if (mutations.length > 0 && anyValidationPassed) {
+          // Generic criterion (no distinctive keyword) — credited once work shipped.
+          done = true;
+        }
+        return { text, done };
+      });
+    }
+
+    function renderAgentChecklist(progress) {
+      const rows = Array.isArray(progress) ? progress : [];
+      if (!rows.length) return '';
+      const doneCount = rows.filter((r) => r && r.done).length;
+      const lines = rows.map((r) => `- [${r && r.done ? 'x' : ' '}] ${String(r && r.text ? r.text : '').trim()}`);
+      return `**Plan (${doneCount}/${rows.length})**\n${lines.join('\n')}`;
     }
 
     function parseAgentExpectedFiles(raw) {
@@ -992,6 +1199,13 @@
       return base ? [`/${base}.txt`] : ['/main.txt'];
     }
 
+    function isSingleHtmlFileRequest(taskText = '') {
+      const lower = String(taskText || '').toLowerCase();
+      return /\b(?:one|single|1)\s+(?:self[-\s]*contained\s+)?(?:html|\.html)\s+file\b/.test(lower)
+        || /\bin\s+(?:one|a single|1)\s+(?:html|\.html)\s+file\b/.test(lower)
+        || (/\bsingle[-\s]*file\b/.test(lower) && /\b(?:html|web\s+app|page)\b/.test(lower));
+    }
+
     function getPlannedFileRoles(expectedFiles = []) {
       const files = Array.isArray(expectedFiles) ? expectedFiles.map((path) => normalizeWorkspacePath(path || '')).filter(Boolean) : [];
       return {
@@ -1009,28 +1223,31 @@
       const lower = String(taskText || '').toLowerCase();
       const lines = [];
       lines.push(`Planned files: ${files.join(', ') || '(none)'}`);
-      lines.push('Generation budget contract:');
-      lines.push('- First pass must prioritize a complete working MVP over exhaustive polish.');
-      lines.push('- Keep each file compact enough to finish cleanly in one response; add optional polish in later edit passes after validation.');
-      lines.push('- Do not spend the whole budget on decoration. Reuse shared classes, helpers, and patterns.');
+      lines.push('Quality contract:');
+      lines.push('- Build the complete, working feature the request describes. Match the quality and depth you would produce answering this in a normal chat — do not ship a reduced stub or "first pass".');
+      lines.push('- Reuse shared classes, helpers, and patterns so each file stays coherent and finishes cleanly.');
       if (String(primaryStack || '').toLowerCase() === 'web' || htmlFile) {
         lines.push('Web project contract:');
+        if (htmlFile && !cssFile && !scriptFile) {
+          lines.push(`- ${htmlFile} is the entire web app: include CSS in a <style> block and JavaScript in a <script> block.`);
+          lines.push('- Do not reference style.css or script.js unless those files are explicitly planned.');
+        }
         if (htmlFile) {
-          lines.push(`- ${htmlFile} budget: semantic structure, requested sections, shared classes, and stable IDs only; avoid unnecessary markup.`);
+          lines.push(`- ${htmlFile}: semantic structure with the requested sections, shared classes, and stable IDs.`);
         }
         if (htmlFile && cssFile) {
           const cssHref = cssFile.replace(/^\//, '');
           lines.push(`- ${htmlFile} must include <link rel="stylesheet" href="${cssHref}"> in <head>.`);
           lines.push(`- ${htmlFile} must not contain a <style> block or large inline style attributes.`);
           lines.push(`- ${cssFile} must contain the visual design and only CSS.`);
-          lines.push(`- ${cssFile} budget: design tokens, layout, responsive basics, and a small reusable animation set; avoid one-off decorative selectors for every element.`);
+          lines.push(`- ${cssFile}: design tokens, layout, responsive rules, and a reusable animation set; prefer shared selectors over a unique one-off style for every element.`);
         }
         if (htmlFile && scriptFile) {
           const scriptSrc = scriptFile.replace(/^\//, '');
           lines.push(`- ${htmlFile} must include <script src="${scriptSrc}" defer></script>.`);
           lines.push(`- ${htmlFile} must not contain inline JavaScript.`);
           lines.push(`- ${scriptFile} must only reference IDs/classes that exist in ${htmlFile}.`);
-          lines.push(`- ${scriptFile} budget: core interactions only; avoid large decorative systems unless essential.`);
+          lines.push(`- ${scriptFile}: implement the full behavior the request needs, organized with reusable functions.`);
         }
         if (/\bsurprise|reveal|secret|easter egg\b/.test(lower)) {
           lines.push(`- Shared interaction contract: include a primary button with id="surprise-btn" and a reveal region with id="surprise-panel"${htmlFile ? ` in ${htmlFile}` : ''}.`);
@@ -1041,11 +1258,11 @@
       }
       if (String(primaryStack || '').toLowerCase() === 'python') {
         lines.push('Python project contract:');
-        lines.push('- First pass should include a complete runnable script with clear functions and minimal dependencies.');
+        lines.push('- Include a complete, runnable script with clear functions and minimal dependencies.');
         lines.push('- Split into additional files only when the plan explicitly includes them or the project needs modules.');
       }
       if (files.includes('/README.md')) {
-        lines.push('README budget: concise project purpose, local run instructions, and actual file names only.');
+        lines.push('README: project purpose, local run instructions, and the actual file names.');
       }
       return lines.join('\n');
     }
@@ -1090,6 +1307,16 @@
       return /\b(add|update|edit|modify|change|fix|delete|remove|rename|refactor|improve|implement|polish|modern|responsive|dark mode|design|style|styles|styling|css|layout|calculator)\b/.test(lower);
     }
 
+    function chatOwnsOpenWorkspace(chatId = '') {
+      if (!hasOpenWorkspaceContext()) return false;
+      const id = String(chatId || (typeof deps.getActiveChatId === 'function' ? deps.getActiveChatId() : '') || '').trim();
+      return Boolean(
+        id
+        && typeof deps.chatHasPriorAgentWorkspaceWork === 'function'
+        && deps.chatHasPriorAgentWorkspaceWork(id)
+      );
+    }
+
     function hasOpenWorkspaceContext() {
       if (typeof deps.getWorkspaceContext !== 'function') return false;
       const workspace = deps.getWorkspaceContext() || {};
@@ -1102,9 +1329,10 @@
       );
     }
 
-    function normalizeAgentPlanSpec(parsed, taskText = '') {
+    function normalizeAgentPlanSpec(parsed, taskText = '', options = {}) {
       const lower = String(taskText || '').toLowerCase();
       const explicitFreshWorkspaceIntent = /\b(new project|new workspace|fresh workspace|from scratch|start from scratch|separate project|brand new)\b/.test(lower);
+      const sameChatWorkspaceFollowup = chatOwnsOpenWorkspace(options && options.chatId);
       const projectLikeFallback = (
         /\b(create|build|make|start|setup|set up|design|develop|generate|craft)\b/.test(lower)
         && /\b(project|app|site|website|page|tool|game|dashboard|calculator|frontend|ui)\b/.test(lower)
@@ -1121,18 +1349,28 @@
       if (explicitFreshWorkspaceIntent && projectLikeFallback && !docsOnlyTask) {
         taskKind = 'project';
       }
+      if (sameChatWorkspaceFollowup && !explicitFreshWorkspaceIntent && taskKind !== 'analysis') {
+        taskKind = 'edit';
+      }
       if (openWorkspaceFollowupMutation && !explicitFreshWorkspaceIntent && taskKind !== 'analysis') {
         taskKind = 'edit';
       }
-      if (!workspaceScopedMutation && !openWorkspaceFollowupMutation && projectLikeFallback && taskKind !== 'analysis') {
+      if (!sameChatWorkspaceFollowup && !workspaceScopedMutation && !openWorkspaceFollowupMutation && projectLikeFallback && taskKind !== 'analysis') {
         taskKind = 'project';
       }
-      if ((docsOnlyTask || workspaceScopedMutation || openWorkspaceFollowupMutation) && taskKind === 'project' && !explicitFreshWorkspaceIntent) {
+      if ((docsOnlyTask || sameChatWorkspaceFollowup || workspaceScopedMutation || openWorkspaceFollowupMutation) && taskKind === 'project' && !explicitFreshWorkspaceIntent) {
         if (!isWorkspaceEmpty) {
           taskKind = 'edit';
         }
       }
       if (taskKind === 'edit' && isWorkspaceEmpty) {
+        taskKind = 'project';
+      }
+      // The user explicitly approved creating a new project at preflight. Force
+      // project scope BEFORE the derived fields (expectedFiles, finalRequiresRealFiles)
+      // are computed, so the plan is coherent — not just a relabelled edit/analysis
+      // plan that the agent considers "done" after only creating an empty project.
+      if (options && options.forceProjectScope) {
         taskKind = 'project';
       }
       let primaryStack = ['python', 'web', 'generic'].includes(String(parsed && parsed.primary_stack || '').toLowerCase())
@@ -1153,15 +1391,36 @@
       expectedFiles = expectedFiles.filter((path) => !/\.(?:png|jpe?g|gif|webp|bmp|ico|tiff?)$/i.test(String(path || '')));
       let affectedFiles = parseAgentPlanPathList(parsed && parsed.affected_files ? parsed.affected_files : '');
       let filesToInspect = parseAgentPlanPathList(parsed && parsed.files_to_inspect ? parsed.files_to_inspect : '');
-      const doneCriteria = parseAgentPlanTextList(parsed && parsed.done_criteria ? parsed.done_criteria : '');
+      const doneCriteria = parseAgentPlanTextList(parsed && parsed.done_criteria ? parsed.done_criteria : '', 5); // cap 5
       const validationSteps = parseAgentPlanTextList(parsed && parsed.validation ? parsed.validation : '', 6);
       const looksLikeWebProjectTask = taskKind === 'project' && (WEB_TASK_HINT_REGEX.test(lower) || /\bcalculator\b/.test(lower));
+      const singleHtmlFileProject = taskKind === 'project' && isSingleHtmlFileRequest(taskText);
+      if (singleHtmlFileProject) {
+        primaryStack = 'web';
+        expectedFiles = ['/index.html'];
+        affectedFiles = [];
+        filesToInspect = [];
+      }
       const rootEntries = Array.isArray(workspaceContext.rootEntries) ? workspaceContext.rootEntries : [];
       const rootFilePaths = rootEntries
         .filter((entry) => String(entry && entry.kind || '').toLowerCase() !== 'folder')
         .map((entry) => normalizeWorkspacePath((entry && entry.path) || (entry && entry.name ? `/${entry.name}` : '')))
         .filter(Boolean);
       const findRootFile = (regex) => rootFilePaths.find((path) => regex.test(path)) || '';
+      if (sameChatWorkspaceFollowup && taskKind === 'edit' && rootFilePaths.length > 0) {
+        const existingExpectedFiles = expectedFiles.filter((path) => rootFilePaths.includes(normalizeWorkspacePath(path || '')));
+        const existingAffectedFiles = affectedFiles.filter((path) => rootFilePaths.includes(normalizeWorkspacePath(path || '')));
+        const existingInspectFiles = filesToInspect.filter((path) => rootFilePaths.includes(normalizeWorkspacePath(path || '')));
+        // Only trust files the model actually named as mutation targets. Do NOT
+        // fabricate affected/expected files from the root listing — that turns a
+        // vague edit (or a misclassified question) into "update <file>" demands the
+        // user never made. Root files are still fine to READ for context.
+        affectedFiles = existingAffectedFiles;
+        expectedFiles = existingExpectedFiles;
+        filesToInspect = existingInspectFiles.length > 0
+          ? existingInspectFiles
+          : (affectedFiles.length > 0 ? affectedFiles.slice() : rootFilePaths.slice());
+      }
       const webEditNeedsCoordinatedFiles = taskKind === 'edit'
         && hasOpenWorkspaceContext()
         && /\b(design|style|layout|responsive|mobile|dark\s*mode|light\s*mode|theme|toggle|calculator|modern|polish|ui|frontend)\b/i.test(lower);
@@ -1210,7 +1469,7 @@
       if (taskKind === 'project' && expectedFiles.length === 0) {
         expectedFiles = buildFallbackExpectedFiles(taskKind, primaryStack, projectName || deriveProjectNameFromTask(taskText));
       }
-      if (taskKind === 'project' && (primaryStack === 'web' || looksLikeWebProjectTask)) {
+      if (taskKind === 'project' && !singleHtmlFileProject && !simpleSingleFileProject && (primaryStack === 'web' || looksLikeWebProjectTask)) {
         ['/index.html', '/style.css', '/script.js'].forEach((path) => {
           if (!expectedFiles.includes(path) && !expectedFiles.some((item) => new RegExp(`\\.${path.split('.').pop()}$`, 'i').test(item))) {
             expectedFiles.push(path);
@@ -1238,12 +1497,13 @@
       };
     }
 
-    function buildFallbackAgentPlanSpec(taskText = '') {
+    function buildFallbackAgentPlanSpec(taskText = '', options = {}) {
       const lower = String(taskText || '').toLowerCase();
       const explicitDocsTask = isExplicitReadmeOrDocsTask(taskText);
       const docsOnlyTask = isDocsOnlyTask(taskText);
       const workspaceScopedMutation = hasOpenWorkspaceContext() && isExistingProjectMutationRequest(taskText);
       const openWorkspaceFollowupMutation = isOpenWorkspaceFollowupMutation(taskText);
+      const sameChatWorkspaceFollowup = chatOwnsOpenWorkspace(options && options.chatId);
       const projectLikeFallback = (
         /\b(create|build|make|start|setup|set up|design|develop|generate|craft)\b/.test(lower)
         && /\b(project|app|site|website|page|tool|game|dashboard|calculator|frontend|ui)\b/.test(lower)
@@ -1252,7 +1512,7 @@
       const isWorkspaceEmpty = hasOpenWorkspaceContext() && Number(workspaceContext.rootEntryCount) === 0;
       let taskKind = docsOnlyTask
         ? 'edit'
-        : (workspaceScopedMutation || openWorkspaceFollowupMutation)
+        : (sameChatWorkspaceFollowup || workspaceScopedMutation || openWorkspaceFollowupMutation)
         ? 'edit'
         : projectLikeFallback
         ? 'project'
@@ -1260,12 +1520,30 @@
       if (taskKind === 'edit' && isWorkspaceEmpty) {
         taskKind = 'project';
       }
-      const primaryStack = /python|pygame|\.py\b/.test(lower)
+      // User explicitly approved a new project at preflight — force project scope
+      // before deriving expectedFiles/finalRequiresRealFiles below.
+      if (options && options.forceProjectScope) {
+        taskKind = 'project';
+      }
+      let primaryStack = /python|pygame|\.py\b/.test(lower)
         ? 'python'
         : (((WEB_TASK_HINT_REGEX.test(lower) || /\bcalculator\b/.test(lower))) ? 'web' : 'generic');
       const needsReadme = shouldFallbackPlanNeedReadme(taskText);
       const projectName = deriveProjectNameFromTask(taskText);
-      const fallbackExpectedFiles = docsOnlyTask ? ['/README.md'] : buildFallbackExpectedFiles(taskKind, primaryStack, projectName);
+      const singleHtmlFileProject = taskKind === 'project' && isSingleHtmlFileRequest(taskText);
+      if (singleHtmlFileProject) primaryStack = 'web';
+      const rootEntries = Array.isArray(workspaceContext.rootEntries) ? workspaceContext.rootEntries : [];
+      const rootFilePaths = rootEntries
+        .filter((entry) => String(entry && entry.kind || '').toLowerCase() !== 'folder')
+        .map((entry) => normalizeWorkspacePath((entry && entry.path) || (entry && entry.name ? `/${entry.name}` : '')))
+        .filter(Boolean);
+      const fallbackExpectedFiles = docsOnlyTask
+        ? ['/README.md']
+        : sameChatWorkspaceFollowup && taskKind === 'edit' && rootFilePaths.length > 0
+        ? rootFilePaths.slice()
+        : singleHtmlFileProject
+        ? ['/index.html']
+        : buildFallbackExpectedFiles(taskKind, primaryStack, projectName);
       if (taskKind === 'project' && needsReadme && !fallbackExpectedFiles.includes('/README.md')) {
         fallbackExpectedFiles.push('/README.md');
       }
@@ -1277,8 +1555,10 @@
         needsRunInstructions: needsReadme,
         finalRequiresRealFiles: docsOnlyTask ? false : taskKind === 'project',
         expectedFiles: fallbackExpectedFiles,
+        // Never fabricate mutation targets for an edit we have no model signal for —
+        // the root files are for inspection context only, not forced "update" demands.
         affectedFiles: taskKind === 'edit' ? [] : fallbackExpectedFiles.slice(),
-        filesToInspect: [],
+        filesToInspect: taskKind === 'edit' ? fallbackExpectedFiles.slice() : [],
         doneCriteria: [],
         validationSteps: taskKind === 'project' ? ['validate_files'] : [],
         projectContract: buildAgentProjectContract(taskText, taskKind, primaryStack, fallbackExpectedFiles),
@@ -1301,6 +1581,8 @@
       deriveFallbackAgentDecision,
       parseAgentEditProgram,
       applyAgentEditProgram,
+      computeAgentChecklistProgress,
+      renderAgentChecklist,
       buildFallbackExpectedFiles,
       buildAgentProjectContract,
       getPlannedFileRoles,

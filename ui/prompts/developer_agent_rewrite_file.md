@@ -1,5 +1,6 @@
 Rewrite the complete final contents for one existing file after applying the requested edits.
-Return only the file contents. No markdown fences. No explanation.
+Output contract: your ENTIRE response is the raw file content for the path below and nothing else — no ``` fences, no preamble/explanation, and NEVER any of this prompt's own text inside the file (no "PROJECT_CONTRACT", "PROJECT_STATE", "TASK", rule bullets, etc.).
+Example — for a /script.js the response begins straight with code, e.g.: document.addEventListener('DOMContentLoaded', () => {
 
 File path: {{FILE_PATH}}
 
@@ -13,6 +14,8 @@ Rules:
 - For README or guide files, base the final text on the actual implementation and commands already observed in RECENT_TOOL_RESULTS and CURRENT_FILE.
 - Do not invent capabilities, frameworks, or commands not supported by the current project.
 
+QUALITY_BAR (apply when relevant):
+{{MVP_REQUIREMENTS}}
 PROJECT_CONTRACT:
 {{PROJECT_CONTRACT}}
 PROJECT_STATE:

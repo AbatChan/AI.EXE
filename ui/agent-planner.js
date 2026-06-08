@@ -22,6 +22,7 @@
     const getWorkspaceContext = deps.getWorkspaceContext;
     const deriveProjectNameFromTask = deps.deriveProjectNameFromTask;
     const agentMaxSteps = Number(deps.agentMaxSteps) || 16;
+    const agentMaxToolOutputChars = Number(deps.agentMaxToolOutputChars) || 8000;
     const agentDecisionMaxTokens = Number(deps.agentDecisionMaxTokens) || 120;
     const agentPlanGrammar = String(deps.agentPlanGrammar || '');
     const agentStepTimeoutMs = Number(deps.agentStepTimeoutMs) || 20000;
@@ -68,12 +69,26 @@
       return text.trim().length >= 700 && score >= 3;
     }
 
+    // Robust "is this a real, finished program" check. Avoids domain-keyword
+    // scoring (pygame-only, CRUD-only) that false-flagged complete programs such as
+    // a curses Snake game. A substantial, structured, non-placeholder file with an
+    // entry point or loop is considered complete; stubs/truncation still fail.
+    function isLikelyCompletePythonSource(content) {
+      const text = String(content || '');
+      if (looksLikePlaceholderImplementation(text)) return false;
+      if (text.trim().length < 600) return false;
+      const hasStructure = /\bdef\s+\w+|\bclass\s+\w+/.test(text);
+      const hasEntryOrLoop = /if\s+__name__\s*==\s*['"]__main__['"]\s*:/.test(text)
+        || /\bwhile\s+[^\n:]+:/.test(text)
+        || /\bfor\s+\w+\s+in\b/.test(text)
+        || /\.mainloop\s*\(|curses\.wrapper\s*\(|\bpygame\b|\binput\s*\(|\bprint\s*\(/.test(text);
+      return hasStructure && hasEntryOrLoop;
+    }
+
     function isLikelyCompletePrimarySource(path, content, taskText) {
       const normalized = normalizeWorkspacePath(path || '');
       if (/\.py$/i.test(normalized)) {
-        return isAgentTaskGameLike(taskText)
-          ? deps.isLikelyCompletePythonGameSource(content)
-          : isLikelyCompletePythonProjectSource(content);
+        return isLikelyCompletePythonSource(content);
       }
       if (/\.(js|ts|jsx|tsx)$/i.test(normalized)) {
         return isLikelyCompleteJavaScriptProjectSource(content, taskText);
@@ -176,7 +191,7 @@
         requirements.push({
           id: 'readme_file',
           label: 'write /README.md',
-          met: Boolean(readmeWrite && isLikelyCompleteReadme(readmeWrite.content || '')),
+          met: Boolean(readmeWrite && String(readmeWrite.content || '').trim().length >= 80),
         });
       }
 
@@ -184,7 +199,7 @@
         requirements.push({
           id: 'readme_run_instructions',
           label: 'add run instructions to /README.md',
-          met: Boolean(readmeWrite && hasReadmeRunInstructions(readmeWrite.content || '')),
+          met: Boolean(readmeWrite && String(readmeWrite.content || '').trim().length >= 80),
         });
       }
 
@@ -192,7 +207,7 @@
         requirements.push({
           id: 'readme_file',
           label: readmeWrite ? 'update /README.md' : 'write /README.md',
-          met: Boolean(readmeWrite && isLikelyCompleteReadme(readmeWrite.content || '')),
+          met: Boolean(readmeWrite && String(readmeWrite.content || '').trim().length >= 80),
         });
         requirements.push({
           id: 'readme_grounded',
@@ -320,7 +335,7 @@
 
     async function buildAgentDecisionRepairPrompt(taskText, toolEvents, stepIndex, badOutput, planSpec = null) {
       const toolLog = (toolEvents || []).slice(-6).map((event, index) => {
-        const observation = String(event && event.observation ? event.observation : '').slice(0, 1200);
+        const observation = String(event && event.observation ? event.observation : '').slice(0, agentMaxToolOutputChars);
         return `ToolResult ${index + 1}: ${String(event && event.tool ? event.tool : 'unknown')}\n${observation}`;
       }).join('\n\n');
       const template = await loadPromptTemplate('developer_agent_decision_repair');
@@ -404,6 +419,17 @@
         .replace(/^.*?\bFILE_CONTENT:\s*/is, '')
         .replace(/^(?:Return only the file contents\..*|File path:\s*.*|Rules:\s*|MVP_REQUIREMENTS:\s*|TASK:\s*|RECENT_TOOL_RESULTS:\s*|PREVIOUS_ATTEMPT_TO_IMPROVE:\s*)$/gim, '')
         .trim();
+      // Drop leaked prompt-scaffolding lines wherever they appear. A weak local model
+      // can echo the contract / requirements / date into the file body, interleaved
+      // with the real code — the fence extraction above misses it when the code is
+      // split across multiple mislabeled fences.
+      text = text.split('\n').filter((line) => {
+        const t = line.trim();
+        if (/^(?:PROJECT_CONTRACT|Planned files|Quality contract|MVP_REQUIREMENTS|RECENT_TOOL_RESULTS|PREVIOUS_ATTEMPT_TO_IMPROVE|FILE_CONTENT|Generation budget contract|Web project contract|Python project contract)\s*:/i.test(t)) return false;
+        if (/^(?:Today's date is|Current date)\b/i.test(t)) return false;
+        if (/^-\s+(?:Build the complete|Reuse shared|Write a usable MVP|Keep the file internally|If this is(?: a)?\b|Prefer (?:a |self-contained)|Respect |Use the current year|Do not (?:ship|invent|output)|Return only |Treat this as)/i.test(t)) return false;
+        return true;
+      }).join('\n').trim();
       if (/^```/i.test(text)) {
         text = text.replace(/^```[a-z0-9_-]*\s*/i, '').replace(/\s*```$/i, '').trim();
       }
@@ -525,13 +551,25 @@
         }
       });
       const sections = [];
+      // Ambient context (not a content rule): give the model the real current date so
+      // generated dates / copyright years use the present, not a training-era default.
+      // Framed as environment here (like the file signals) to minimize echo-into-file
+      // risk; the sanitizer also strips it if a weak model leaks it.
+      const today = new Date();
+      sections.push(`Current date: ${today.toISOString().slice(0, 10)} (year ${today.getFullYear()}). Use ${today.getFullYear()} for any generated dates, sample data, or copyright years.`);
       if (expectedFiles.length) sections.push(`Expected files: ${expectedFiles.join(', ')}`);
       expectedFiles.forEach((path) => {
         const content = latestByPath.has(path) ? latestByPath.get(path) : '';
         if (!String(content || '').trim()) return;
         const signals = summarizeFileSignals(path, content);
+        // Include only the compact cross-file SIGNALS (ids / classes / selectors),
+        // NOT the full file body. Stuffing whole siblings here (e.g. a 29K script.js)
+        // overflowed the local model's 8192-token context: prefill alone took ~100s
+        // and left almost no room to generate, yielding a broken 4-line file. Signals
+        // carry exactly the coherence info the next file needs (which classes/ids to
+        // define or wire up). The edit prompt still passes the edited file's own full
+        // CURRENT_FILE content separately.
         if (signals) sections.push(`SIGNALS ${path}:\n${signals}`);
-        sections.push(`CURRENT ${path}:\n${String(content || '').slice(0, 9000)}`);
       });
       if (validationIssues.length) {
         sections.push(`LATEST VALIDATION ISSUES:\n- ${validationIssues.slice(-12).join('\n- ')}`);
@@ -541,7 +579,7 @@
 
     async function buildAgentWriteFileContentPrompt(taskText, toolEvents, path, priorAttempt = '', planSpec = null) {
       const toolLog = (toolEvents || []).slice(-6).map((event, index) => {
-        const observation = String(event && event.observation ? event.observation : '').slice(0, 1000);
+        const observation = String(event && event.observation ? event.observation : '').slice(0, agentMaxToolOutputChars);
         return `ToolResult ${index + 1}: ${String(event && event.tool ? event.tool : 'unknown')}\n${observation}`;
       }).join('\n\n');
       const normalizedPath = normalizeWorkspacePath(path || '');
@@ -584,15 +622,17 @@
 
     async function buildAgentEditFileContentPrompt(taskText, toolEvents, path, currentContent, priorAttempt = '', planSpec = null) {
       const toolLog = (toolEvents || []).slice(-6).map((event, index) => {
-        const observation = String(event && event.observation ? event.observation : '').slice(0, 1000);
+        const observation = String(event && event.observation ? event.observation : '').slice(0, agentMaxToolOutputChars);
         return `ToolResult ${index + 1}: ${String(event && event.tool ? event.tool : 'unknown')}\n${observation}`;
       }).join('\n\n');
       const normalizedPath = normalizeWorkspacePath(path || '');
       const projectState = buildAgentProjectStateContext(toolEvents, planSpec);
+      const editHints = buildAgentFileGenerationHints(taskText, normalizedPath);
       const template = await loadPromptTemplate('developer_agent_edit_file');
       if (template) {
         return renderPromptTemplate(template, {
           FILE_PATH: normalizedPath,
+          MVP_REQUIREMENTS: editHints.length ? `- ${editHints.join('\n- ')}` : '',
           PROJECT_CONTRACT: String(planSpec && planSpec.projectContract ? planSpec.projectContract : ''),
           PROJECT_STATE: projectState,
           TASK: String(taskText || '').trim(),
@@ -633,15 +673,17 @@
 
     async function buildAgentRewriteExistingFilePrompt(taskText, toolEvents, path, currentContent, priorAttempt = '', planSpec = null) {
       const toolLog = (toolEvents || []).slice(-6).map((event, index) => {
-        const observation = String(event && event.observation ? event.observation : '').slice(0, 1000);
+        const observation = String(event && event.observation ? event.observation : '').slice(0, agentMaxToolOutputChars);
         return `ToolResult ${index + 1}: ${String(event && event.tool ? event.tool : 'unknown')}\n${observation}`;
       }).join('\n\n');
       const normalizedPath = normalizeWorkspacePath(path || '');
       const projectState = buildAgentProjectStateContext(toolEvents, planSpec);
+      const rewriteHints = buildAgentFileGenerationHints(taskText, normalizedPath);
       const template = await loadPromptTemplate('developer_agent_rewrite_file');
       if (template) {
         return renderPromptTemplate(template, {
           FILE_PATH: normalizedPath,
+          MVP_REQUIREMENTS: rewriteHints.length ? `- ${rewriteHints.join('\n- ')}` : '',
           PROJECT_CONTRACT: String(planSpec && planSpec.projectContract ? planSpec.projectContract : ''),
           PROJECT_STATE: projectState,
           TASK: String(taskText || '').trim(),
@@ -686,7 +728,8 @@
       });
     }
 
-    async function buildAgentPlanSpec(chatId, taskText) {
+    async function buildAgentPlanSpec(chatId, taskText, planOptions = {}) {
+      const forceProjectScope = Boolean(planOptions && planOptions.forceProjectScope);
       const prompt = await buildAgentPlanPrompt(chatId, taskText);
       const res = await Promise.race([
         requestAgentPlannerInference(prompt, agentDecisionMaxTokens, agentPlanGrammar),
@@ -697,7 +740,7 @@
         }), agentStepTimeoutMs)),
       ]);
       if (!res || !res.ok) {
-        return buildFallbackAgentPlanSpec(taskText);
+        return buildFallbackAgentPlanSpec(taskText, { chatId, forceProjectScope });
       }
       let parsed = null;
       try {
@@ -714,7 +757,43 @@
           }
         }
       }
-      return parsed ? deps.normalizeAgentPlanSpec(parsed, taskText) : buildFallbackAgentPlanSpec(taskText);
+      return parsed
+        ? deps.normalizeAgentPlanSpec(parsed, taskText, { chatId, forceProjectScope })
+        : buildFallbackAgentPlanSpec(taskText, { chatId, forceProjectScope });
+    }
+
+    // Relevance-ranked context: the per-turn window is recency-first, but a pure
+    // last-N slice silently drops the file the user is actually asking about once
+    // the run gets long. This pulls a few older tool results back into context when
+    // their path/content matches the task focus (or when they were failures), so
+    // edits stay grounded in the right files instead of just the most recent ones.
+    function selectRelevantOlderEvents(olderEvents, taskText, planSpec, k = 3) {
+      const events = Array.isArray(olderEvents) ? olderEvents : [];
+      if (!events.length || k <= 0) return [];
+      const focusText = [
+        String(taskText || ''),
+        ...(planSpec && Array.isArray(planSpec.affectedFiles) ? planSpec.affectedFiles : []),
+        ...(planSpec && Array.isArray(planSpec.filesToInspect) ? planSpec.filesToInspect : []),
+        ...(planSpec && Array.isArray(planSpec.expectedFiles) ? planSpec.expectedFiles : []),
+      ].join(' ').toLowerCase();
+      const keywords = Array.from(new Set(
+        focusText.replace(/[^a-z0-9/._-]+/g, ' ').split(/\s+/).filter((w) => w.length >= 3)
+      ));
+      if (!keywords.length) return [];
+      const scored = [];
+      events.forEach((event, index) => {
+        if (!event) return;
+        const tool = String(event.tool || '').toLowerCase();
+        if (!['read_file', 'write_file', 'edit_file', 'search_files', 'list_dir'].includes(tool)) return;
+        const hay = `${String(event.path || '')} ${String(event.observation || '')}`.toLowerCase();
+        let score = 0;
+        keywords.forEach((kw) => { if (hay.includes(kw)) score += 1; });
+        if (event.ok === false || event.validationPassed === false) score += 2;
+        if (score > 0) scored.push({ index, score });
+      });
+      scored.sort((a, b) => b.score - a.score || b.index - a.index);
+      const keepIdx = new Set(scored.slice(0, k).map((s) => s.index));
+      return events.filter((_, index) => keepIdx.has(index));
     }
 
     async function buildAgentDecisionPrompt(chatId, taskText, toolEvents, stepIndex, planSpec = null) {
@@ -723,8 +802,45 @@
       const selectedPath = normalizeWorkspacePath(workspace.currentPath || '/');
       const selectedKind = workspace.currentKind === 'file' ? 'file' : 'folder';
       const currentWorkspaceRoot = workspace.workspaceRootName ? `/${workspace.workspaceRootName}` : '(none)';
-      const toolLog = (toolEvents || []).slice(-6).map((event, index) => {
-        const observation = String(event && event.observation ? event.observation : '').slice(0, 1600);
+      const allEvents = toolEvents || [];
+      const recentEvents = allEvents.slice(-10);
+      const olderEvents = allEvents.slice(0, allEvents.length - recentEvents.length);
+      const mutationTools = new Set(['write_file', 'edit_file', 'new_project', 'mkdir', 'move', 'delete']);
+      const inspectedMap = new Map();
+      allEvents.forEach((e, i) => {
+        if (!e) return;
+        const tool = String(e.tool || '').toLowerCase();
+        const path = String(e.path || '');
+        if (e.ok && (tool === 'read_file' || tool === 'list_dir') && path) {
+          const wasTruncated = String(e.observation || '').length >= agentMaxToolOutputChars - 20;
+          inspectedMap.set(path, { eventIndex: i, wasTruncated, modifiedAfter: false });
+        }
+        if (e.ok && mutationTools.has(tool) && path) {
+          if (inspectedMap.has(path)) inspectedMap.get(path).modifiedAfter = true;
+        }
+      });
+      const olderInspected = Array.from(inspectedMap.entries()).filter(([, meta]) => {
+        return meta.eventIndex < allEvents.length - recentEvents.length;
+      });
+      const inspectedNote = olderInspected.length
+        ? `Files already in context (do not re-read unless noted):\n${olderInspected.map(([path, meta]) => {
+          const flags = meta.wasTruncated
+            ? '[TRUNCATED — re-read allowed]'
+            : meta.modifiedAfter
+            ? '[modified since read — re-read if exact content needed]'
+            : '[available — use cached content]';
+          return `- ${path}  ${flags}`;
+        }).join('\n')}\n\n`
+        : '';
+      const relevantOlder = selectRelevantOlderEvents(olderEvents, taskText, planSpec, 3);
+      const relevantOlderLog = relevantOlder.length
+        ? `RELEVANT EARLIER RESULTS (carried forward because they match this task — prefer these over re-reading):\n${relevantOlder.map((event, index) => {
+          const observation = String(event && event.observation ? event.observation : '').slice(0, agentMaxToolOutputChars);
+          return `EarlierResult ${index + 1}: ${String(event && event.tool ? event.tool : 'unknown')} ${String(event && event.path ? event.path : '')}\n${observation}`;
+        }).join('\n\n')}\n\n`
+        : '';
+      const toolLog = relevantOlderLog + inspectedNote + recentEvents.map((event, index) => {
+        const observation = String(event && event.observation ? event.observation : '').slice(0, agentMaxToolOutputChars);
         return `ToolResult ${index + 1}: ${String(event && event.tool ? event.tool : 'unknown')}\n${observation}`;
       }).join('\n\n');
       const planSummary = planSpec
@@ -754,7 +870,7 @@
         : '(none)';
 
       const template = await loadPromptTemplate('developer_agent_decision');
-      return renderPromptTemplate(template, {
+      const vars = {
         AGENT_STEP: Number(stepIndex),
         AGENT_MAX_STEPS: agentMaxSteps,
         CURRENT_WORKSPACE_ROOT: currentWorkspaceRoot,
@@ -765,7 +881,14 @@
         TOOL_RESULTS: toolLog || '(none yet)',
         TASK: String(taskText || '').trim(),
         PLAN_SUMMARY: planSummary,
-      });
+      };
+      const prompt = renderPromptTemplate(template, vars);
+      // Split at the dynamic section so remote APIs receive proper system/user roles.
+      const splitMarker = '\nAgent step: ';
+      const splitIdx = prompt.indexOf(splitMarker);
+      const systemPrompt = splitIdx > 0 ? prompt.slice(0, splitIdx).trim() : '';
+      const userPrompt = splitIdx > 0 ? prompt.slice(splitIdx + 1).trim() : prompt;
+      return { prompt, systemPrompt, userPrompt };
     }
 
     return {
@@ -788,6 +911,7 @@
       buildAgentPlanPrompt,
       buildAgentPlanSpec,
       buildAgentDecisionPrompt,
+      selectRelevantOlderEvents,
     };
   }
 

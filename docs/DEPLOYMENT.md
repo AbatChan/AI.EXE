@@ -7,7 +7,7 @@ cmake -S . -B build -G "Visual Studio 17 2022" -A x64
 cmake --build build --config Release
 ```
 
-Release builds default to offline-only UI behavior. Hosted/API inference provider controls are disabled unless CMake is configured with `-DAI_EXE_ENABLE_REMOTE_PROVIDERS=ON` for a development build. The localhost planner bridge is also disabled unless CMake is configured with `-DAI_EXE_ENABLE_DEV_PLANNER=ON`.
+Release builds enable hosted/API inference provider selection by default. Configure CMake with `-DAI_EXE_ENABLE_REMOTE_PROVIDERS=OFF` only when producing a strictly offline-only build. The localhost planner bridge remains disabled unless CMake is configured with `-DAI_EXE_ENABLE_DEV_PLANNER=ON`.
 
 ## Create bundle
 

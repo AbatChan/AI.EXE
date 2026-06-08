@@ -1,5 +1,7 @@
 Write the complete final contents for one project file.
-Return only the file contents. No markdown fences. No explanation.
+Output contract: your ENTIRE response is the raw file content for the path below and nothing else — no ``` fences, no preamble/explanation, and NEVER any of this prompt's own text inside the file (no "PROJECT_CONTRACT", "MVP_REQUIREMENTS", "TASK", "Current date", rule bullets, etc.).
+Example — for a /script.js the response begins straight with code, e.g.: document.addEventListener('DOMContentLoaded', () => {
+Do NOT do: a ```javascript fence, a "Here is the file:" preamble, or contract/requirement/date lines pasted into the code.
 
 File path: {{FILE_PATH}}
 
