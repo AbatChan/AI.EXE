@@ -4,6 +4,14 @@
     const agentPlannerRequestTimeoutMs = Number(deps.agentPlannerRequestTimeoutMs) || 15000;
     const agentDecisionMaxTokens = Number(deps.agentDecisionMaxTokens) || 120;
     const agentFileContentMaxTokens = Number(deps.agentFileContentMaxTokens) || 5000;
+    // Model-aware per-call output budget (provider/context dependent); falls back to
+    // the flat cap when the host doesn't supply one.
+    const getAgentFileOutputBudget = typeof deps.getAgentFileOutputBudget === 'function'
+      ? deps.getAgentFileOutputBudget
+      : () => agentFileContentMaxTokens;
+    const recordDebugTrace = typeof deps.recordDebugTrace === 'function'
+      ? deps.recordDebugTrace
+      : () => {};
     const agentFileGenerationRequestTimeoutMs = Number(deps.agentFileGenerationRequestTimeoutMs) || 30000;
 
     async function requestExternalAgentPlanner(prompt, maxTokens, timeoutMs = agentPlannerRequestTimeoutMs) {
@@ -36,26 +44,129 @@
       }
     }
 
+    // Detect a file cut off by the per-call output token cap (the dominant cause of
+    // "unclosed CSS blocks" / mid-function truncation that then traps the agent in a
+    // repair loop). Brace/bracket imbalance or an obviously mid-token ending are
+    // strong, language-agnostic signals.
+    function looksTruncatedFileContent(content, path) {
+      const text = String(content || '');
+      if (!text.trim()) return false;
+      const ext = ((String(path || '').match(/\.([a-z0-9]+)$/i) || [])[1] || '').toLowerCase();
+      if (['css', 'scss', 'less', 'js', 'mjs', 'cjs', 'ts', 'jsx', 'tsx', 'json'].includes(ext)) {
+        const bal = (o, c) => (text.split(o).length - 1) - (text.split(c).length - 1);
+        if (bal('{', '}') > 0 || bal('(', ')') > 0 || bal('[', ']') > 0) return true;
+      }
+      if (['css', 'scss', 'less', 'js', 'mjs', 'cjs', 'ts', 'jsx', 'tsx'].includes(ext)) {
+        // Unterminated /* block comment */ — a common mid-comment truncation.
+        if ((text.match(/\/\*/g) || []).length > (text.match(/\*\//g) || []).length) return true;
+      }
+      if (['html', 'htm'].includes(ext)) {
+        if (/<html[\s>]/i.test(text) && !/<\/html\s*>/i.test(text)) return true;
+      }
+      const tail = text.replace(/\s+$/, '');
+      const lastChar = tail.slice(-1);
+      if (tail.length > 400 && /[A-Za-z0-9_,:(\[{]/.test(lastChar) && !/[}\])>;]$/.test(tail)) return true;
+      return false;
+    }
+
+    // Append a continuation chunk, dropping a repeated seam: find the largest
+    // suffix of the base that the continuation re-emitted as its prefix and trim it,
+    // so "continue from where you stopped" doesn't duplicate the overlap.
+    function stitchFileContinuation(base, addition) {
+      const b = String(base || '');
+      let add = String(addition || '');
+      if (!add) return b;
+      if (!b) return add;
+      const max = Math.min(b.length, add.length, 240);
+      for (let n = max; n > 0; n -= 1) {
+        if (b.slice(-n) === add.slice(0, n)) {
+          add = add.slice(n);
+          break;
+        }
+      }
+      return b + add;
+    }
+
+    // Returns { output, truncated }. `truncated` prefers the provider's real signal
+    // (OpenAI finish_reason==='length' / Anthropic stop_reason==='max_tokens'); the
+    // native path has no such flag, so completeness there is judged structurally.
+    async function runRawAgentFileInference(prompt) {
+      const budget = Math.max(1, Number(getAgentFileOutputBudget()) || agentFileContentMaxTokens);
+      const remote = await deps.requestSelectedRemoteTextCompletion(prompt, budget);
+      if (remote && remote.ok && String(remote.output || '').trim()) {
+        return { output: String(remote.output || ''), truncated: Boolean(remote.truncated) };
+      }
+      const external = await requestExternalAgentPlanner(prompt, budget, agentFileGenerationRequestTimeoutMs);
+      if (external && external.ok && String(external.output || '').trim()) {
+        return { output: String(external.output || ''), truncated: Boolean(external.truncated) };
+      }
+      if (!deps.nativeBridge.available()) return { output: '', truncated: false };
+      const res = await deps.nativeBridge.invoke('infer', { prompt, maxTokens: budget, max_tokens: budget });
+      if (!res || !res.ok) return { output: '', truncated: false };
+      return { output: String(res.output || ''), truncated: Boolean(res.truncated) };
+    }
+
+    // Generate a full file, continuing across multiple capped calls when a large
+    // file overflows a single response, then sanitize the stitched result once.
+    // Continues on either the provider's truncation signal or a structural check.
+    // Emits an `agent_file_generation` trace (prompt size, output size, #continuations)
+    // so under-generation / context-overflow is visible instead of silent.
+    async function generateFullAgentFile(prompt, path) {
+      const promptChars = String(prompt || '').length;
+      // Heartbeat so the loop's idle-timeout knows this slow multi-pass generation
+      // is actually progressing (not hung) and lets it finish a large file.
+      const beat = () => { if (typeof deps.markAgentToolProgress === 'function') deps.markAgentToolProgress(); };
+      beat();
+      const first = await runRawAgentFileInference(prompt);
+      beat();
+      let raw = first.output;
+      if (!raw) {
+        recordAgentFileGenTrace(path, promptChars, 0, 0, first.truncated, 'empty_output');
+        return '';
+      }
+      let wasTruncated = first.truncated;
+      let guard = 0;
+      while (guard < 3 && (wasTruncated || looksTruncatedFileContent(raw, path))) {
+        guard += 1;
+        const continuationPrompt = `${prompt}\n\nPARTIAL_OUTPUT_ALREADY_SAVED (do NOT repeat any of this):\n${raw.slice(-1600)}\n\nContinue the file from exactly where it stopped. Output ONLY the remaining content — no repetition, no commentary, no code fences.`;
+        const next = await runRawAgentFileInference(continuationPrompt);
+        beat();
+        if (!next.output || !next.output.trim()) break;
+        const before = raw.length;
+        raw = stitchFileContinuation(raw, next.output);
+        wasTruncated = next.truncated;
+        if (raw.length <= before) break;
+      }
+      const finalContent = deps.sanitizeAgentGeneratedFileContent(raw, path);
+      recordAgentFileGenTrace(path, promptChars, String(finalContent || '').length, guard, wasTruncated,
+        guard >= 3 ? 'continuation_exhausted' : 'ok');
+      return finalContent;
+    }
+
+    // Visibility into file generation: a tiny output next to a large prompt (as when
+    // sibling-file bloat overflowed the local 8192-token context) is now diagnosable.
+    function recordAgentFileGenTrace(path, promptChars, outputChars, continuations, truncated, status) {
+      recordDebugTrace('agent_file_generation', {
+        path: String(path || ''),
+        promptChars: String(promptChars),
+        approxPromptTokens: String(Math.round(Number(promptChars) / 3.7)),
+        outputChars: String(outputChars),
+        continuations: String(continuations),
+        truncatedSignal: String(Boolean(truncated)),
+        status: String(status || ''),
+      }, {
+        path: String(path || ''),
+        promptChars,
+        outputChars,
+        continuations,
+        truncated: Boolean(truncated),
+        status,
+      });
+    }
+
     async function generateAgentWriteFileContent(taskText, toolEvents, path, priorAttempt = '', planSpec = null) {
       const prompt = await deps.buildAgentWriteFileContentPrompt(taskText, toolEvents, path, priorAttempt, planSpec);
-      const remote = await deps.requestSelectedRemoteTextCompletion(prompt, agentFileContentMaxTokens);
-      if (remote && remote.ok) {
-        const cleaned = deps.sanitizeAgentGeneratedFileContent(remote.output || '', path);
-        if (cleaned) return cleaned;
-      }
-      const external = await requestExternalAgentPlanner(prompt, agentFileContentMaxTokens, agentFileGenerationRequestTimeoutMs);
-      if (external && external.ok) {
-        const cleaned = deps.sanitizeAgentGeneratedFileContent(external.output || '', path);
-        if (cleaned) return cleaned;
-      }
-      if (!deps.nativeBridge.available()) return '';
-      const res = await deps.nativeBridge.invoke('infer', {
-        prompt,
-        maxTokens: agentFileContentMaxTokens,
-        max_tokens: agentFileContentMaxTokens,
-      });
-      if (!res || !res.ok) return '';
-      return deps.sanitizeAgentGeneratedFileContent(res.output || '', path);
+      return generateFullAgentFile(prompt, path);
     }
 
     async function generateAgentEditFileProgram(taskText, toolEvents, path, currentContent, priorAttempt = '', planSpec = null) {
@@ -82,24 +193,7 @@
 
     async function generateAgentRewriteExistingFileContent(taskText, toolEvents, path, currentContent, priorAttempt = '', planSpec = null) {
       const prompt = await deps.buildAgentRewriteExistingFilePrompt(taskText, toolEvents, path, currentContent, priorAttempt, planSpec);
-      const remote = await deps.requestSelectedRemoteTextCompletion(prompt, agentFileContentMaxTokens);
-      if (remote && remote.ok) {
-        const cleaned = deps.sanitizeAgentGeneratedFileContent(remote.output || '', path);
-        if (cleaned) return cleaned;
-      }
-      const external = await requestExternalAgentPlanner(prompt, agentFileContentMaxTokens, agentFileGenerationRequestTimeoutMs);
-      if (external && external.ok) {
-        const cleaned = deps.sanitizeAgentGeneratedFileContent(external.output || '', path);
-        if (cleaned) return cleaned;
-      }
-      if (!deps.nativeBridge.available()) return '';
-      const res = await deps.nativeBridge.invoke('infer', {
-        prompt,
-        maxTokens: agentFileContentMaxTokens,
-        max_tokens: agentFileContentMaxTokens,
-      });
-      if (!res || !res.ok) return '';
-      return deps.sanitizeAgentGeneratedFileContent(res.output || '', path);
+      return generateFullAgentFile(prompt, path);
     }
 
     const loadPromptTemplate = typeof deps.loadPromptTemplate === 'function'
@@ -237,6 +331,8 @@
       generateAgentWriteFileContent,
       generateAgentEditFileProgram,
       generateAgentRewriteExistingFileContent,
+      looksTruncatedFileContent,
+      stitchFileContinuation,
       buildAgentCompletionFallbackText,
       generateAgentCompletionText,
       buildAgentProgressMarkdown,

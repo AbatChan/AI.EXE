@@ -343,7 +343,9 @@
       const codeEl = d.getFileViewerHighlightCode ? d.getFileViewerHighlightCode() : null;
       if (!tab) return;
       tab.dirty = String(tab.content || '') !== String(tab.savedContent || '');
-      if (fvFilename) fvFilename.textContent = formatFileViewerBreadcrumb(tab.path || tab.name || 'file');
+      if (fvFilename) {
+        fvFilename.textContent = `${formatFileViewerBreadcrumb(tab.path || tab.name || 'file')}${tab.deletedOnDisk ? ' (deleted)' : ''}`;
+      }
       void ensureCodeMirrorFileEditor().then((cm) => {
         if (!cm || getActiveFileTab() !== tab) return;
         if (surface) surface.classList.add('cm-active');
@@ -400,6 +402,7 @@
       }
       target.savedContent = String(target.content || '');
       target.dirty = false;
+      target.deletedOnDisk = false;
       renderTabBar();
       if (getActiveTabId() === target.path) refreshActiveFileTabView();
       persistFileTabsStateNow();
@@ -535,9 +538,11 @@
       }
       getOpenFileTabs().forEach((tab) => {
         const el = document.createElement('div');
-        el.className = `middle-tab${getActiveTabId() === tab.path ? ' active' : ''}${tab.dirty ? ' dirty' : ''}`;
+        el.className = `middle-tab${getActiveTabId() === tab.path ? ' active' : ''}${tab.dirty ? ' dirty' : ''}${tab.deletedOnDisk ? ' deleted' : ''}`;
         el.dataset.tab = tab.path;
-        el.title = tab.path;
+        el.title = tab.deletedOnDisk
+          ? `${tab.path}\nDeleted on disk. Save to recreate it, or close the tab.`
+          : tab.path;
         const label = document.createElement('span');
         label.className = 'middle-tab-label';
         label.textContent = tab.name || 'file';
@@ -562,13 +567,16 @@
       });
     }
 
-    function syncFileTabFromWorkspaceWrite(path, content, name = '') {
+    function syncFileTabFromWorkspaceWrite(path, content, name = '', options = {}) {
       const normalized = normalizeWorkspacePath(path);
       if (!normalized || normalized === '/') return;
       const nextContent = String(content || '');
+      const openIfMissing = Boolean(options && options.openIfMissing);
+      const activate = Boolean(options && options.activate);
       const tabs = getOpenFileTabs();
       let tab = tabs.find((entry) => entry.path === normalized) || null;
       if (!tab) {
+        if (!openIfMissing) return;
         tab = {
           path: normalized,
           name: String(name || workspaceBaseName(normalized) || 'file'),
@@ -581,14 +589,82 @@
         tabs.push(tab);
       } else {
         tab.name = String(name || tab.name || workspaceBaseName(normalized) || 'file');
+        if (tab.dirty) {
+          renderTabBar();
+          return;
+        }
         tab.content = nextContent;
         tab.savedContent = nextContent;
         tab.dirty = false;
+        tab.deletedOnDisk = false;
         tab.language = inferFileViewerLanguage(normalized);
         tab.highlightEnabled = new Blob([nextContent]).size <= Number(d.fileViewerHighlightLimitBytes || 0);
       }
-      if (typeof d.setMiddleViewMode === 'function') d.setMiddleViewMode('chat');
-      switchToTab(normalized);
+      persistFileTabsStateNow();
+      renderTabBar();
+      if (activate) {
+        if (typeof d.setMiddleViewMode === 'function') d.setMiddleViewMode('chat');
+        switchToTab(normalized);
+      } else if (getActiveTabId() === normalized) {
+        refreshActiveFileTabView();
+      }
+    }
+
+    async function refreshOpenFileTabsFromWorkspace() {
+      const tabs = getOpenFileTabs();
+      if (!Array.isArray(tabs) || !tabs.length || typeof d.invokeWorkspaceAction !== 'function') return;
+      let changed = false;
+      const nextTabs = [];
+      for (const tab of tabs) {
+        if (!tab || !tab.path) continue;
+        const normalized = normalizeWorkspacePath(tab.path);
+        if (!normalized || normalized === '/') continue;
+        let response = null;
+        try {
+          response = await d.invokeWorkspaceAction('workspaceReadFile', { path: normalized });
+        } catch (_) {
+          response = null;
+        }
+        if (!response || !response.ok) {
+          if (tab.dirty) {
+            if (!tab.deletedOnDisk) {
+              tab.deletedOnDisk = true;
+              changed = true;
+            }
+            nextTabs.push(tab);
+          } else {
+            changed = true;
+            if (getActiveTabId() === normalized) setActiveTabId('chat');
+          }
+          continue;
+        }
+        const content = String(response.output || '');
+        if (tab.deletedOnDisk) {
+          tab.deletedOnDisk = false;
+          changed = true;
+        }
+        if (!tab.dirty && content !== String(tab.content || '')) {
+          tab.content = content;
+          tab.savedContent = content;
+          tab.language = inferFileViewerLanguage(normalized);
+          tab.highlightEnabled = new Blob([content]).size <= Number(d.fileViewerHighlightLimitBytes || 0);
+          changed = true;
+        }
+        nextTabs.push(tab);
+      }
+      if (nextTabs.length !== tabs.length) changed = true;
+      if (!changed) return;
+      setOpenFileTabs(nextTabs);
+      if (getActiveTabId() !== 'chat' && !nextTabs.some((tab) => tab.path === getActiveTabId())) {
+        setActiveTabId('chat');
+      }
+      persistFileTabsStateNow();
+      renderTabBar();
+      if (getActiveTabId() === 'chat') {
+        if (typeof d.renderMiddleView === 'function') d.renderMiddleView();
+      } else {
+        refreshActiveFileTabView();
+      }
     }
 
     function switchToTab(tabId) {
@@ -685,6 +761,7 @@
       loadStoredFileTabs,
       renderTabBar,
       syncFileTabFromWorkspaceWrite,
+      refreshOpenFileTabsFromWorkspace,
       switchToTab,
       openFileTab,
       closeFileTab,

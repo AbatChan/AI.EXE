@@ -117,7 +117,7 @@
 
       if (deps.getWorkspaceCurrentPath() !== '/') {
         deps.emptyFolder.innerHTML = buildBaseContent(
-          '<path d="M3 7h5l2 2h11v10a2 2 0 0 1-2 2H3z"></path><path d="M3 7V5a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2"></path>',
+          '<path d="M4 7.5a2 2 0 0 1 2-2h3.6a1 1 0 0 1 .7.3l1.4 1.4a1 1 0 0 0 .7.3H18a2 2 0 0 1 2 2v6.5a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"></path>',
           'Empty Folder',
           'Use the <b>+</b> buttons above to create a file or folder here.'
         );
@@ -125,7 +125,7 @@
       }
 
       deps.emptyFolder.innerHTML = buildBaseContent(
-        '<path d="M3 7h5l2 2h11v10a2 2 0 0 1-2 2H3z"></path><path d="M3 7V5a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2"></path>',
+        '<path d="M4 7.5a2 2 0 0 1 2-2h3.6a1 1 0 0 1 .7.3l1.4 1.4a1 1 0 0 0 .7.3H18a2 2 0 0 1 2 2v6.5a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"></path>',
         'Empty Project',
         'Use the <b>+</b> buttons above to create your first file or folder.'
       );
@@ -133,16 +133,37 @@
 
     function workspaceFileIconSvg(fileName = '') {
       const lower = String(fileName || '').toLowerCase();
-      if (/\.(js|jsx|ts|tsx)$/.test(lower)) {
-        return '<path d="M8 4h8l4 4v12H8z"></path><path d="M16 4v4h4"></path><path d="M10 16c.7 1 2.3 1 3 0"></path>';
+      const ext = lower.includes('.') ? lower.split('.').pop() : '';
+      // Modern document silhouette shared by all text-based files; a small inner
+      // marker distinguishes the category so the tree is scannable at a glance.
+      const page = '<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"></path><path d="M14 3v5h5"></path>';
+
+      // Images get their own picture-frame glyph (no document page).
+      if (/^(png|jpe?g|gif|webp|bmp|ico|svg|avif|tiff?)$/.test(ext)) {
+        return '<rect x="3" y="4" width="18" height="16" rx="2"></rect><circle cx="9" cy="10" r="1.8"></circle><path d="M21 16l-4.5-4L7 20"></path>';
       }
-      if (/\.(json|ya?ml|toml|xml|ini)$/.test(lower)) {
-        return '<path d="M8 4h8l4 4v12H8z"></path><path d="M16 4v4h4"></path><path d="M11 13h6"></path><path d="M11 16h6"></path>';
+      // Archives get a zipped-box glyph.
+      if (/^(zip|rar|7z|gz|tar|tgz|bz2|xz)$/.test(ext)) {
+        return '<path d="M21 8v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8"></path><path d="M3 4h18v4H3z"></path><path d="M11 11h2"></path><path d="M11 14h2"></path><path d="M11 17h2"></path>';
       }
-      if (/\.(md|txt|rtf|docx?|pdf)$/.test(lower)) {
-        return '<path d="M8 4h8l4 4v12H8z"></path><path d="M16 4v4h4"></path><path d="M11 13h6"></path>';
+      // Code: page + angle brackets.
+      if (/^(js|jsx|ts|tsx|mjs|cjs|py|rb|go|rs|c|cc|cpp|cxx|h|hpp|java|kt|cs|php|swift|sh|bash|zsh|sql|lua|dart)$/.test(ext)) {
+        return `${page}<path d="M10.5 12.5l-2 2.5 2 2.5"></path><path d="M13.5 12.5l2 2.5-2 2.5"></path>`;
       }
-      return '<path d="M8 4h8l4 4v12H8z"></path><path d="M16 4v4h4"></path>';
+      // Web markup: page + a slashed bracket pair.
+      if (/^(html?|xml|vue|svelte|astro|jsx|hbs)$/.test(ext)) {
+        return `${page}<path d="M11 12.5l-2 2.5 2 2.5"></path><path d="M15 12.5l-1.5 5"></path>`;
+      }
+      // Stylesheets: page + hash mark.
+      if (/^(css|scss|sass|less|styl)$/.test(ext)) {
+        return `${page}<path d="M10.5 12.5l-1 5"></path><path d="M14 12.5l-1 5"></path><path d="M8.8 14.3h6"></path><path d="M8.4 16.3h6"></path>`;
+      }
+      // Structured data / config: page + key-value rows (leading dots).
+      if (/^(json|ya?ml|toml|ini|env|conf|lock|properties|csv|tsv)$/.test(ext)) {
+        return `${page}<path d="M9 13h.01"></path><path d="M11.5 13h4"></path><path d="M9 16h.01"></path><path d="M11.5 16h4"></path>`;
+      }
+      // Default (docs/text/markdown/unknown): page + text lines.
+      return `${page}<path d="M9 13h6"></path><path d="M9 16h6"></path><path d="M9 19h3"></path>`;
     }
 
     function buildWorkspaceDraftRow(parentPath, depth = 0) {
@@ -164,7 +185,7 @@
       const icon = document.createElement('span');
       icon.className = 'ws-icon';
       icon.innerHTML = workspaceDraft.kind === 'folder'
-        ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7h5l2 2h11v10a2 2 0 0 1-2 2H3z"></path><path d="M3 7V5a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2"></path></svg>'
+        ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7.5a2 2 0 0 1 2-2h3.6a1 1 0 0 1 .7.3l1.4 1.4a1 1 0 0 0 .7.3H18a2 2 0 0 1 2 2v6.5a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"></path></svg>'
         : `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">${workspaceFileIconSvg(workspaceDraft.name)}</svg>`;
       row.appendChild(icon);
 
@@ -177,32 +198,37 @@
 
       const draftId = workspaceDraft.id;
       let didAutoSelect = false;
+      // Focus can be flaky in the embedded webview, so retry across a few frames
+      // and keep the focus token until focus actually lands (instead of consuming
+      // it on the first attempt). Without a focused input, blur/Enter never fire.
       const autoSelectDraftName = () => {
-        if (didAutoSelect) return;
         const latestDraft = deps.getWorkspaceDraft();
-        if (!latestDraft || latestDraft.id !== draftId) return;
-        if (!input.isConnected) return;
-        didAutoSelect = true;
-        input.focus();
-        input.setSelectionRange(0, input.value.length);
+        if (!latestDraft || latestDraft.id !== draftId || !input.isConnected) return;
+        if (document.activeElement !== input) {
+          try { input.focus({ preventScroll: true }); } catch (_) { input.focus(); }
+        }
+        if (document.activeElement === input) {
+          if (!didAutoSelect) {
+            didAutoSelect = true;
+            input.setSelectionRange(0, input.value.length);
+          }
+          deps.setWorkspaceDraftFocusId(0);
+        }
       };
       const scheduleDraftAutoSelect = () => {
-        const attempts = [0, 16, 48, 96];
-        attempts.forEach((delay) => {
-          window.setTimeout(() => {
-            autoSelectDraftName();
-          }, delay);
-        });
+        requestAnimationFrame(autoSelectDraftName);
+        [0, 30, 80, 160, 300, 480, 700].forEach((delay) => window.setTimeout(autoSelectDraftName, delay));
       };
       if (deps.getWorkspaceDraftFocusId() === draftId) {
         scheduleDraftAutoSelect();
-        deps.setWorkspaceDraftFocusId(0);
       }
 
       input.addEventListener('focus', () => {
         if (!didAutoSelect) {
-          scheduleDraftAutoSelect();
+          didAutoSelect = true;
+          input.setSelectionRange(0, input.value.length);
         }
+        deps.setWorkspaceDraftFocusId(0);
       });
       input.addEventListener('mouseup', (evt) => {
         if (!didAutoSelect) {
@@ -268,7 +294,7 @@
       const icon = document.createElement('span');
       icon.className = 'ws-icon';
       icon.innerHTML = entry.kind === 'folder'
-        ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7h5l2 2h11v10a2 2 0 0 1-2 2H3z"></path><path d="M3 7V5a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2"></path></svg>'
+        ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7.5a2 2 0 0 1 2-2h3.6a1 1 0 0 1 .7.3l1.4 1.4a1 1 0 0 0 .7.3H18a2 2 0 0 1 2 2v6.5a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"></path></svg>'
         : `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">${workspaceFileIconSvg(entry.name)}</svg>`;
       row.appendChild(icon);
 
@@ -283,15 +309,30 @@
         row.appendChild(renameInput);
 
         const renameId = workspaceRenameDraft.id;
-        if (deps.getWorkspaceRenameFocusId() === renameId) {
-          queueMicrotask(() => {
-            const latestDraft = deps.getWorkspaceRenameDraft();
-            if (!latestDraft || latestDraft.id !== renameId) return;
-            renameInput.focus();
-            renameInput.select();
+        let renameSelected = false;
+        const selectRenameName = () => {
+          if (renameSelected) return;
+          renameSelected = true;
+          const dot = renameInput.value.lastIndexOf('.');
+          if (dot > 0) renameInput.setSelectionRange(0, dot);
+          else renameInput.select();
+        };
+        const focusRenameInput = () => {
+          const latestDraft = deps.getWorkspaceRenameDraft();
+          if (!latestDraft || latestDraft.id !== renameId || !renameInput.isConnected) return;
+          if (document.activeElement !== renameInput) {
+            try { renameInput.focus({ preventScroll: true }); } catch (_) { renameInput.focus(); }
+          }
+          if (document.activeElement === renameInput) {
+            selectRenameName();
             deps.setWorkspaceRenameFocusId(0);
-          });
+          }
+        };
+        if (deps.getWorkspaceRenameFocusId() === renameId) {
+          requestAnimationFrame(focusRenameInput);
+          [0, 30, 80, 160, 300, 480, 700].forEach((delay) => window.setTimeout(focusRenameInput, delay));
         }
+        renameInput.addEventListener('focus', selectRenameName);
 
         renameInput.addEventListener('keydown', (evt) => {
           if (evt.key === 'Enter') {
@@ -389,7 +430,26 @@
           }
           evt.dataTransfer.effectAllowed = 'move';
           evt.dataTransfer.setData('application/x-aiexe-paths', JSON.stringify(dragPaths));
-          evt.dataTransfer.setData('text/plain', entry.path);
+          // Hand external apps (browser, Finder) the REAL on-disk file:// URL.
+          // Workspace paths are root-relative (/index.html), which a browser would
+          // resolve as file:///index.html — wrong. Map to <rootPath>/<path> and
+          // percent-encode each segment (so spaces become %20). Keep text/plain set
+          // to the same URL for drop targets that read plain text; internal moves
+          // use application/x-aiexe-paths, so this does not affect in-app DnD.
+          const rootPath = typeof deps.getWorkspaceRootPath === 'function'
+            ? String(deps.getWorkspaceRootPath() || '')
+            : '';
+          const toFileUrl = (wsPath) => {
+            const abs = `${rootPath}${wsPath}`;
+            return `file://${abs.split('/').map((seg) => encodeURIComponent(seg)).join('/')}`;
+          };
+          if (rootPath) {
+            const uriList = dragPaths.map(toFileUrl).join('\n');
+            evt.dataTransfer.setData('text/uri-list', uriList);
+            evt.dataTransfer.setData('text/plain', toFileUrl(entry.path));
+          } else {
+            evt.dataTransfer.setData('text/plain', entry.path);
+          }
         }
       });
       row.addEventListener('dragend', () => {
@@ -551,7 +611,7 @@
           <button type="button" class="ws-chevron expanded">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 6 15 12 9 18"></polyline></svg>
           </button>
-          <span class="ws-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7h5l2 2h11v10a2 2 0 0 1-2 2H3z"></path><path d="M3 7V5a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2"></path></svg></span>
+          <span class="ws-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7.5a2 2 0 0 1 2-2h3.6a1 1 0 0 1 .7.3l1.4 1.4a1 1 0 0 0 .7.3H18a2 2 0 0 1 2 2v6.5a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"></path></svg></span>
           <span class="ws-label" title="${rootLabel}">${rootLabel}</span>
         `;
       const rootChev = rootRow.querySelector('.ws-chevron');

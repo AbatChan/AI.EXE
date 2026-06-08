@@ -456,6 +456,9 @@
         } catch (_) { }
       }
       const single = dataTransfer.getData('text/plain');
+      // text/plain now carries an external file:// URL on drag-out; that is not a
+      // workspace path, so don't try to move it as one.
+      if (/^file:\/\//i.test(String(single || '').trim())) return [];
       return deps.normalizeWorkspacePathList([single]);
     }
 
@@ -558,6 +561,7 @@
       deps.getWorkspaceSelectedPaths().clear();
       deps.setWorkspaceSelection('/', 'folder');
       deps.getWorkspaceTreeState().clear();
+      if (typeof deps.closeAllWorkspaceTabs === 'function') deps.closeAllWorkspaceTabs();
       const freshRoot = deps.getWorkspaceNodeState('/');
       freshRoot.expanded = true;
       freshRoot.loaded = false;
@@ -597,6 +601,7 @@
       }
       deps.setWorkspaceSelection('/', 'folder');
       deps.getWorkspaceTreeState().clear();
+      if (typeof deps.closeAllWorkspaceTabs === 'function') deps.closeAllWorkspaceTabs();
       const freshRoot = deps.getWorkspaceNodeState('/');
       freshRoot.expanded = true;
       freshRoot.loaded = false;
@@ -638,6 +643,7 @@
           failures.push((response && response.message) || `Failed to delete "${path}".`);
           continue;
         }
+        if (typeof deps.removeWorkspaceTab === 'function') deps.removeWorkspaceTab(path);
         deletedCount += 1;
       }
 
@@ -645,7 +651,22 @@
         const fallbackPath = deps.parentWorkspacePath(paths[0]);
         deps.getWorkspaceSelectedPaths().clear();
         deps.setWorkspaceSelection(fallbackPath, 'folder');
-        deps.getWorkspaceTreeState().clear();
+        // Remove only the deleted entries from the tree. Clearing the whole tree
+        // state forced a full root re-list whose result could briefly come back
+        // empty right after the trash op — blanking the rest of the project
+        // (the "empty, use +" state) until the app was reloaded.
+        const treeState = deps.getWorkspaceTreeState();
+        paths.forEach((path) => {
+          const normalized = deps.normalizeWorkspacePath(path);
+          if (typeof deps.removeWorkspaceTreeEntry === 'function') {
+            deps.removeWorkspaceTreeEntry(normalized);
+          }
+          // Drop the deleted node and any descendant nodes so a stale path is
+          // never re-listed by the background refresh.
+          Array.from(treeState.keys()).forEach((key) => {
+            if (key === normalized || key.startsWith(`${normalized}/`)) treeState.delete(key);
+          });
+        });
         deps.getWorkspaceNodeState('/').expanded = true;
         await deps.renderArtifacts();
       }

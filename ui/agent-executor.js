@@ -1,5 +1,22 @@
 (function initAIExeAgentExecutor(global) {
   function createAgentExecutor(deps) {
+    // Strip placeholder repository URLs / clone commands from a README so an
+    // otherwise-complete file the model wrote is not discarded just because it
+    // included a fake "github.com/yourusername" link.
+    function sanitizeReadmeContent(content) {
+      const lines = String(content || '').split(/\r?\n/);
+      const cleaned = [];
+      for (const line of lines) {
+        if (/git\s+clone\s+https?:\/\/github\.com\/yourusername/i.test(line)) continue;
+        cleaned.push(
+          line
+            .replace(/https?:\/\/github\.com\/yourusername[^\s)`'"]*/gi, '')
+            .replace(/[ \t]+$/, '')
+        );
+      }
+      return cleaned.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+    }
+
     function summarizeWorkspaceListForAgent(rawOutput) {
       let parsed = {};
       try {
@@ -8,7 +25,13 @@
         return 'Directory listing parse failed.';
       }
       const path = deps.normalizeWorkspacePath(parsed && parsed.path ? parsed.path : '/');
-      const entries = Array.isArray(parsed && parsed.entries) ? parsed.entries : [];
+      const rawEntries = Array.isArray(parsed && parsed.entries) ? parsed.entries : [];
+      const entries = typeof deps.isIgnoredWorkspaceEntryName === 'function'
+        ? rawEntries.filter((entry) => {
+          const name = String((entry && entry.name) || ((entry && entry.path ? String(entry.path) : '').split('/').filter(Boolean).pop()) || '');
+          return !deps.isIgnoredWorkspaceEntryName(name);
+        })
+        : rawEntries;
       if (entries.length === 0) {
         return `Directory ${path} is empty.`;
       }
@@ -238,6 +261,9 @@
             issues.push(`has a JavaScript syntax error: ${String(err && err.message ? err.message : err || 'unknown error')}`);
           }
         }
+        // new Function() only catches parse errors; catch const-reassignment (a runtime error) statically.
+        const constIssue = getJsReassignedConstIssue(text);
+        if (constIssue) issues.push(constIssue);
       }
       if (/\.(html|js|ts|jsx|tsx|py)$/i.test(normalized) && !deps.isLikelyCompletePrimarySource(normalized, text, taskText)) {
         issues.push('still looks incomplete for the requested MVP');
@@ -291,6 +317,45 @@
       return '';
     }
 
+    // Static detection of the "Assignment to constant variable" regression:
+    // a simple `const NAME = …` that is later reassigned with a bare `NAME = …`.
+    // Strings/comments are stripped first so matches inside them don't false-flag,
+    // and a NAME declared more than once is skipped (likely block-scoped shadowing,
+    // which we can't resolve cheaply and don't want to over-report).
+    function getJsReassignedConstIssue(jsText) {
+      const src = String(jsText || '');
+      const stripped = src
+        .replace(/\/\*[\s\S]*?\*\//g, ' ')
+        .replace(/\/\/[^\n]*/g, ' ')
+        .replace(/`(?:\\.|[^`\\])*`/g, '``')
+        .replace(/'(?:\\.|[^'\\])*'/g, "''")
+        .replace(/"(?:\\.|[^"\\])*"/g, '""');
+      const declCount = {};
+      const firstDeclIndex = {};
+      const declRe = /\bconst\s+([A-Za-z_$][\w$]*)\s*=/g;
+      let m;
+      while ((m = declRe.exec(stripped))) {
+        const name = m[1];
+        declCount[name] = (declCount[name] || 0) + 1;
+        if (firstDeclIndex[name] == null) firstDeclIndex[name] = m.index;
+      }
+      for (const name of Object.keys(firstDeclIndex)) {
+        if (declCount[name] > 1) continue;
+        // A bare assignment `name =` (not ==, ===, =>, or a property/.name), after
+        // the declaration, and not itself a const/let/var declaration.
+        const assignRe = new RegExp(`(^|[^.\\w$=!<>])(${name})\\s*=(?![=>])`, 'g');
+        let a;
+        while ((a = assignRe.exec(stripped))) {
+          const nameAt = a.index + a[1].length;
+          if (nameAt <= firstDeclIndex[name]) continue;
+          const before = stripped.slice(Math.max(0, nameAt - 7), nameAt);
+          if (/\b(?:const|let|var)\s*$/.test(before)) continue;
+          return `reassigns the const variable \`${name}\` (declared with const but later assigned — this throws "Assignment to constant variable" at runtime)`;
+        }
+      }
+      return '';
+    }
+
     function extractHtmlIds(html) {
       return Array.from(String(html || '').matchAll(/\bid=["']([^"']+)["']/gi)).map((match) => String(match[1] || '').trim()).filter(Boolean);
     }
@@ -316,8 +381,14 @@
         .replace(/url\s*\((?:[^)(]|\([^)(]*\))*\)/gi, ' ')
         .replace(/(["'])(?:\\.|(?!\1)[\s\S])*\1/g, ' ');
       const junkTokens = new Set(['css', 'com', 'http', 'https', 'org', 'svg', 'w3', 'www', 'xmlns']);
-      return Array.from(cleaned.matchAll(/(^|[,{>+~\s.])\.([a-z_][a-z0-9_-]*)/gi))
-        .map((match) => String(match[2] || '').trim())
+      // Match EVERY class token, including chained/compound selectors like
+      // `.toast.toast-visible` and `.a.b.c`. The previous leading-delimiter form
+      // captured only the FIRST class in a chain, so every subsequent class
+      // (.toast-visible, .dialog-open, .toast-hiding, …) was falsely reported as
+      // "undefined", triggering a phantom repair loop. A class must start with a
+      // letter/underscore, so CSS decimals in values (`0.5`, `.25s`) stay excluded.
+      return Array.from(cleaned.matchAll(/\.([a-z_][a-z0-9_-]*)/gi))
+        .map((match) => String(match[1] || '').trim())
         .filter((name) => name && !junkTokens.has(name.toLowerCase()));
     }
 
@@ -422,25 +493,17 @@
           pushIssue(`${scriptFile || 'script file'}: queries .${className}, but ${htmlFile} does not define that class`);
         }
       });
-      jsExpectations.classMutations.forEach((className) => {
-        if (!cssClasses.has(className) && !htmlClasses.has(className) && !jsExpectations.createdClasses.includes(className)) {
-          pushIssue(`${scriptFile || 'script file'}: toggles .${className}, but neither ${htmlFile} nor ${cssFile || 'stylesheet'} define that class`);
-        }
-      });
-
-      const unusedCssIds = Array.from(cssIds).filter((id) => !htmlIds.has(id));
-      unusedCssIds.slice(0, 4).forEach((id) => {
-        pushIssue(`${cssFile || 'stylesheet'}: styles #${id}, but ${htmlFile} does not define that id`);
-      });
-      const jsUsedClasses = new Set([
-        ...jsExpectations.classMutations,
-        ...jsExpectations.createdClasses,
-        ...jsExpectations.queriedClasses,
-      ]);
-      const unusedCssClasses = Array.from(cssClasses).filter((className) => !htmlClasses.has(className) && !jsUsedClasses.has(className));
-      if (unusedCssClasses.length > Math.max(3, Math.floor(cssClasses.size * 0.35))) {
-        pushIssue(`${cssFile || 'stylesheet'}: many class selectors do not match ${htmlFile} (${unusedCssClasses.slice(0, 6).map((name) => `.${name}`).join(', ')})`);
-      }
+      // Removed (advisory, not crash-class — drove repair loops): "JS toggles .X" and
+      // "CSS styles #id" with no matching element are dead/no-op, not bugs. The
+      // crash-class `queries .X` / `references #id` checks (querySelector -> null) stay.
+      // NOTE: a "many CSS class selectors don't appear in HTML/JS" heuristic used to
+      // live here. It was net-negative: a rich, correct stylesheet legitimately has
+      // far more classes than the static markup mentions (state/hover/:not variants,
+      // descendant selectors, classes rendered via interpolated JS template strings
+      // like `class="movie-card ${watched}"`). It false-flagged good CSS, the model
+      // "repaired" correct code into worse code, re-failed, and timed out. Removed —
+      // the targeted checks below (JS toggles an undefined class; important HTML
+      // classes left unstyled) catch the cases that actually matter.
       const importantHtmlClasses = Array.from(htmlClasses).filter((className) => (
         /hero|panel|button|btn|card|section|content|title|subtitle|footer|nav|header|quote|badge|logo|overlay/i.test(className)
       ));
@@ -458,7 +521,7 @@
       return issues;
     }
 
-    async function executeDeveloperToolCall(chatId, decision, taskText, toolEvents = [], planSpec = null) {
+    async function executeDeveloperToolCall(chatId, decision, taskText, toolEvents = [], planSpec = null, runOptions = {}) {
       const tool = String(decision && decision.tool ? decision.tool : '').toLowerCase();
       const taskLower = String(taskText || '').toLowerCase();
       const mustExplicitlyDelete = /\b(delete|remove|trash)\b/.test(taskLower);
@@ -549,33 +612,88 @@
             workspaceStatusSnapshot,
           });
         }
-        if (hasOpenWorkspace && canonicalWorkspaceRootName && openWorkspaceEntryCount > 0 && !explicitSeparateWorkspaceIntent) {
-          const confirmationMessage = `A project is already open in the workspace explorer (${canonicalWorkspaceRootName}). I can keep working in that project, or create a separate new project if you want. Say "use current project" or "create a new project".`;
-          if (typeof deps.recordDebugTrace === 'function') {
-            deps.recordDebugTrace('agent_new_project_confirmation_required', {
-              chatId: String(chatId || ''),
-              workspaceRootName: canonicalWorkspaceRootName,
-              taskPreview: deps.debugPreview(taskText, 220),
-            }, {
-              chatId: String(chatId || ''),
-              taskText: String(taskText || ''),
-              workspaceContext,
-              openWorkspaceEntryCount,
-              explicitSeparateWorkspaceIntent,
-              confirmationMessage,
-            });
-          }
+        // If this chat already did agent workspace work, it owns the open
+        // project, so a "new or current?" prompt makes no sense for a follow-up.
+        // Silently continue in the current workspace instead of asking.
+        const chatOwnsOpenWorkspace = typeof deps.chatHasPriorAgentWorkspaceWork === 'function'
+          && deps.chatHasPriorAgentWorkspaceWork(chatId);
+        if (hasOpenWorkspace && canonicalWorkspaceRootName && openWorkspaceEntryCount > 0 && !explicitSeparateWorkspaceIntent && chatOwnsOpenWorkspace) {
           return {
             ok: false,
             mutated,
-            requiresProjectScopeConfirmation: true,
-            observation: `new_project blocked: an existing non-empty workspace (${canonicalWorkspaceRootName}) is already open, so confirmation is required before creating another project.`,
-            userFacingMessage: confirmationMessage,
-            workspaceOpen: true,
+            observation: `new_project blocked: this chat is already working in "${canonicalWorkspaceRootName}". Continue by creating or editing files inside the current workspace instead of starting a new project.`,
           };
         }
+        if (hasOpenWorkspace && canonicalWorkspaceRootName && openWorkspaceEntryCount > 0 && !explicitSeparateWorkspaceIntent) {
+          if (runOptions.approvedNewProject || runOptions.skipNewProjectConfirmation) {
+            if (typeof deps.recordDebugTrace === 'function') {
+              deps.recordDebugTrace('agent_new_project_approved', {
+                chatId: String(chatId || ''),
+                previousWorkspace: canonicalWorkspaceRootName,
+              }, { chatId: String(chatId || ''), taskText: String(taskText || '') });
+            }
+          } else {
+            const confirmationMessage = `A project is already open in the workspace explorer (${canonicalWorkspaceRootName}). I can keep working in that project, or create a separate new project if you want.`;
+            if (typeof deps.recordDebugTrace === 'function') {
+              deps.recordDebugTrace('agent_new_project_confirmation_required', {
+                chatId: String(chatId || ''),
+                workspaceRootName: canonicalWorkspaceRootName,
+                taskPreview: deps.debugPreview(taskText, 220),
+              }, {
+                chatId: String(chatId || ''),
+                taskText: String(taskText || ''),
+                workspaceContext,
+                openWorkspaceEntryCount,
+                explicitSeparateWorkspaceIntent,
+                confirmationMessage,
+              });
+            }
+            return {
+              ok: false,
+              mutated,
+              requiresProjectScopeConfirmation: true,
+              observation: `new_project blocked: an existing non-empty workspace (${canonicalWorkspaceRootName}) is already open, so confirmation is required before creating another project.`,
+              userFacingMessage: confirmationMessage,
+              workspaceOpen: true,
+            };
+          }
+        }
         const projectName = String(planSpec && planSpec.projectName ? planSpec.projectName : deps.deriveProjectNameFromTask(taskText)).trim();
+        if (hasOpenWorkspace) {
+          if (typeof deps.recordDebugTrace === 'function') {
+            deps.recordDebugTrace('agent_new_project_closing_workspace', {
+              chatId: String(chatId || ''),
+              previousWorkspace: canonicalWorkspaceRootName,
+              projectName,
+            }, { chatId: String(chatId || ''), projectName, taskText: String(taskText || '') });
+          }
+          const closeRes = await deps.invokeWorkspaceAction('workspaceCloseRoot', {});
+          if (typeof deps.recordDebugTrace === 'function') {
+            deps.recordDebugTrace('agent_new_project_close_result', {
+              chatId: String(chatId || ''),
+              ok: String(Boolean(closeRes && closeRes.ok)),
+              message: String(closeRes && closeRes.message ? closeRes.message : ''),
+            }, { chatId: String(chatId || ''), closeRes });
+          }
+          if (closeRes && !closeRes.ok) {
+            return { ok: false, mutated, observation: `new_project failed: could not close current workspace — ${closeRes.message || 'unknown error'}` };
+          }
+        }
+        if (typeof deps.recordDebugTrace === 'function') {
+          deps.recordDebugTrace('agent_new_project_creating', {
+            chatId: String(chatId || ''),
+            projectName,
+          }, { chatId: String(chatId || ''), projectName, taskText: String(taskText || '') });
+        }
         const response = await deps.invokeWorkspaceAction('workspaceNewProject', projectName ? { name: projectName } : {});
+        if (typeof deps.recordDebugTrace === 'function') {
+          deps.recordDebugTrace('agent_new_project_create_result', {
+            chatId: String(chatId || ''),
+            ok: String(Boolean(response && response.ok)),
+            projectName,
+            message: String(response && response.message ? response.message : ''),
+          }, { chatId: String(chatId || ''), response, projectName });
+        }
         if (!response || !response.ok) {
           return { ok: false, mutated, observation: `new_project failed: ${(response && response.message) || 'unknown error'}` };
         }
@@ -637,7 +755,22 @@
         if (!needles.length) {
           return { ok: false, mutated, observation: 'search_files requires search text in content.' };
         }
-        const files = await collectSearchableWorkspaceFiles(path || '/', 80);
+        let files = await collectSearchableWorkspaceFiles(path || '/', 80);
+        if (files.length === 0) {
+          const lastSeg = (path || '').split('/').pop();
+          if (lastSeg && lastSeg.includes('.')) files = [path];
+        }
+        const scopeRaw = String(decision.scope || '').trim();
+        if (scopeRaw) {
+          const scopePath = deps.normalizeWorkspacePath(scopeRaw);
+          if (files.includes(scopePath)) {
+            files = [scopePath];
+          } else {
+            const prefix = scopePath.endsWith('/') ? scopePath : `${scopePath}/`;
+            files = files.filter((f) => f === scopePath || String(f).startsWith(prefix));
+            if (files.length === 0) files = [scopePath];
+          }
+        }
         const results = [];
         if (queryLooksLikeFilenameSearch(query, needles)) {
           for (const filePath of files) {
@@ -675,15 +808,50 @@
           return { ok: false, mutated, observation: `read_file failed for ${path}: ${(response && response.message) || 'unknown error'}` };
         }
         const body = String(response.output || '');
-        const searchHitLines = getRecentSearchHitLines(toolEvents, path);
-        const focusedRead = body.length > deps.agentMaxToolOutputChars && searchHitLines.length > 0
-          ? buildFocusedReadFromLineHits(path, body, searchHitLines, deps.agentMaxToolOutputChars)
+        const requestedLimit = Number(decision.limit || 0);
+        const cap = requestedLimit > 0 ? Math.min(requestedLimit, deps.agentMaxToolOutputChars) : deps.agentMaxToolOutputChars;
+        const rawOffset = Number(decision.offset || 0);
+        const charOffset = Number.isFinite(rawOffset) ? Math.max(0, rawOffset) : 0;
+        const startLine = Number(decision.start_line || 0);
+        const endLine = Number(decision.end_line || 0);
+        let slice = body;
+        let rangeNote = '';
+        let lineMode = false;
+        let fromLine = 0;
+        let totalLines = 0;
+        let continuationHint = '';
+        if (startLine > 0) {
+          const lines = body.split(/\r?\n/);
+          totalLines = lines.length;
+          fromLine = Math.max(0, startLine - 1);
+          const maxLinesPerRead = Math.max(1, Math.min(Number(decision.limit_lines || 200), 400));
+          const requestedTo = endLine > 0 ? Math.min(totalLines, endLine) : totalLines;
+          const cappedTo = Math.min(requestedTo, fromLine + maxLinesPerRead);
+          slice = lines.slice(fromLine, cappedTo).join('\n');
+          rangeNote = ` (lines ${fromLine + 1}–${cappedTo} of ${totalLines})`;
+          lineMode = true;
+          if (cappedTo < totalLines) {
+            const nextStart = cappedTo + 1;
+            const nextEnd = Math.min(totalLines, nextStart + maxLinesPerRead - 1);
+            continuationHint = `\n...[file continues — call read_file with start_line:${nextStart} end_line:${nextEnd} (total ${totalLines} lines)]`;
+          }
+        } else if (charOffset > 0) {
+          slice = body.slice(charOffset);
+          rangeNote = ` (chars ${charOffset}–${Math.min(charOffset + cap, body.length)} of ${body.length})`;
+        }
+        const searchHitLines = !lineMode && charOffset === 0 ? getRecentSearchHitLines(toolEvents, path) : [];
+        const focusedRead = !lineMode && slice.length > cap && searchHitLines.length > 0
+          ? buildFocusedReadFromLineHits(path, slice, searchHitLines, cap)
           : '';
-        const clipped = focusedRead || (body.length > deps.agentMaxToolOutputChars
-          ? `${body.slice(0, deps.agentMaxToolOutputChars)}\n...[truncated]`
-          : body);
+        const isTruncated = !lineMode && !focusedRead && slice.length > cap;
+        const chunk = isTruncated ? slice.slice(0, cap) : slice;
+        if (isTruncated) {
+          const nextOffset = charOffset + chunk.length;
+          continuationHint = `\n...[file continues — call read_file with offset:${nextOffset} (total ${body.length} chars)]`;
+        }
+        const clipped = focusedRead || (chunk + continuationHint);
         deps.syncFileTabFromWorkspaceWrite(path, body, deps.workspaceBaseName(path));
-        observation = `read_file ${path}\n${clipped || '(empty file)'}`;
+        observation = `read_file ${path}${rangeNote}\n${clipped || '(empty file)'}`;
         return { ok: true, mutated, observation, readPath: path, readContent: body };
       }
 
@@ -736,11 +904,18 @@
               observation: `write_file blocked for ${path}: this file already exists in the current run. Read it first, then use edit_file to change it instead of blindly rewriting it.`,
             };
           }
-          return {
-            ok: false,
-            mutated,
-            observation: `write_file blocked for ${path}: this file already exists in the current run. Use edit_file for repairs or follow-up changes after reading it.`,
-          };
+          const editFailCount = Array.isArray(toolEvents) ? toolEvents.filter((e) => (
+            e && !e.ok
+            && String(e.tool || '').toLowerCase() === 'edit_file'
+            && deps.normalizeWorkspacePath(e.path || '') === path
+          )).length : 0;
+          if (editFailCount < 2) {
+            return {
+              ok: false,
+              mutated,
+              observation: `write_file blocked for ${path}: this file already exists in the current run. Use edit_file for repairs or follow-up changes after reading it.`,
+            };
+          }
         }
         deps.setActiveAgentStreamStatus(chatId, `${creatingNewFile ? 'Writing' : 'Editing'} ${path}...`);
         let content = String(decision.content || '');
@@ -759,6 +934,7 @@
             observation: `write_file blocked for ${path}: content is empty. When creating a new file from scratch, use write_file with the complete final contents.`,
           };
         }
+        let primaryQualityNote = '';
         const projectStyleTask = deps.isAgentTaskSoftwareProject(taskText) || /\bcomplete\b/.test(taskLower);
         const gameLikeTask = deps.isAgentTaskGameLike(taskText);
         const primaryTarget = /\.(py|js|ts|jsx|tsx|html)$/i.test(path);
@@ -779,20 +955,13 @@
             observation: `write_file blocked for ${path}: write the main implementation file first, then create the README so it can reference the actual file names and run commands.`,
           };
         }
-        if (projectStyleTask && readmeTarget && !deps.isLikelyCompleteReadme(content)) {
-          const generated = await deps.generateAgentWriteFileContent(taskText, toolEvents, path, content, planSpec);
-          if (generated) content = generated;
-          if (!deps.isLikelyCompleteReadme(content)) {
-            const strengthened = await deps.generateAgentWriteFileContent(taskText, toolEvents, path, content, planSpec);
-            if (strengthened) content = strengthened;
-          }
-          if (!deps.isLikelyCompleteReadme(content)) {
-            return {
-              ok: false,
-              mutated,
-              observation: `write_file blocked for ${path}: README still looks incomplete. Include a short project description plus clear local setup and run instructions without fake repository URLs.`,
-            };
-          }
+        if (readmeTarget) {
+          // Trust the model's README the way chat mode does. The only safe,
+          // non-destructive cleanup is stripping invented placeholder repo URLs.
+          // Never block, regenerate, or halt the run over a keyword "completeness"
+          // heuristic — that discards good content the model wrote correctly.
+          const sanitized = sanitizeReadmeContent(content);
+          if (sanitized) content = sanitized;
         }
         if (projectStyleTask && cssTarget) {
           let cssIssues = validateGeneratedFile(path, content, taskText, planSpec);
@@ -807,23 +976,10 @@
             if (generated) content = generated;
             cssIssues = validateGeneratedFile(path, content, taskText, planSpec);
           }
+          // Advisory, not a veto: write the stylesheet and flag any remaining
+          // concern instead of discarding the model's work or halting the run.
           if (cssIssues.length) {
-            const strengthened = await deps.generateAgentWriteFileContent(
-              taskText,
-              toolEvents,
-              path,
-              `Rewrite complete valid CSS. Fix:\n${cssIssues.join('\n')}`,
-              planSpec
-            );
-            if (strengthened) content = strengthened;
-            cssIssues = validateGeneratedFile(path, content, taskText, planSpec);
-          }
-          if (cssIssues.length) {
-            return {
-              ok: false,
-              mutated,
-              observation: `write_file blocked for ${path}: generated CSS did not pass validation: ${cssIssues.join('; ')}`,
-            };
+            primaryQualityNote = ` Note: the generated CSS may still have issues (${cssIssues.join('; ')}); refine it with an edit pass if the page looks off.`;
           }
         }
         if (projectStyleTask && primaryTarget) {
@@ -845,14 +1001,13 @@
           const validAfterExpansion = shouldUsePythonGameGate
             ? deps.isLikelyCompletePythonGameSource(content)
             : deps.isLikelyCompletePrimarySource(path, content, taskText);
+          // Advisory, not a veto: heuristics misjudge valid minimal files, so we
+          // write the content and flag it instead of blocking. The model can
+          // choose to expand it based on this note or its own judgment.
           if (!validAfterExpansion) {
-            return {
-              ok: false,
-              mutated,
-              observation: shouldUsePythonGameGate
-                ? `write_file blocked for ${path}: the content still looks too small or incomplete for a runnable game implementation. Write a real MVP game with a loop, controls, rendering, and state handling.`
-                : `write_file blocked for ${path}: the content still looks too small or placeholder-like for a usable project file. Write a real MVP implementation, not a stub.`,
-            };
+            primaryQualityNote = shouldUsePythonGameGate
+              ? ' Note: this still looks small for a runnable game; expand it (loop, controls, rendering, state) if the request needs more.'
+              : ' Note: this looks thin for a usable project file; expand it into a real MVP if the request needs more than a stub.';
           }
         }
         const parentPath = deps.parentWorkspacePath(path);
@@ -882,7 +1037,7 @@
         });
         deps.syncFileTabFromWorkspaceWrite(path, content, deps.workspaceBaseName(path));
         mutated = true;
-        observation = `write_file ok: ${path} (${content.length} chars)`;
+        observation = `write_file ok: ${path} (${content.length} chars)${primaryQualityNote}`;
         return {
           ok: true,
           mutated,
@@ -953,7 +1108,16 @@
         }
         if (!program) {
           const rewritten = await deps.generateAgentRewriteExistingFileContent(taskText, toolEvents, path, originalContent, decision.content || '', planSpec);
-          if (String(rewritten || '').trim() && rewritten !== originalContent) {
+          const rewrittenTrim = String(rewritten || '').trim();
+          const origLen = originalContent.trim().length;
+          // Guard against a DESTRUCTIVE rewrite. When the model emits an instruction
+          // instead of a valid edit program, the whole-file rewrite fallback can
+          // collapse a substantial file back to a stub (this is exactly how a 140-line
+          // README reverted to its 5-line file tree). If the rewrite drops most of a
+          // non-trivial file, treat it as a revert, keep the current content, and ask
+          // for a precise edit instead of silently destroying work.
+          const wouldShrinkDrastically = origLen > 400 && rewrittenTrim.length < origLen * 0.6;
+          if (rewrittenTrim && rewritten !== originalContent && !wouldShrinkDrastically) {
             const rewriteResponse = await deps.invokeWorkspaceAction('workspaceWriteFile', { path, content: rewritten });
             if (rewriteResponse && rewriteResponse.ok) {
               deps.setActiveAgentStreamStatus(chatId, `Saving edits to ${path}...`);
@@ -980,6 +1144,20 @@
               };
             }
           }
+          if (wouldShrinkDrastically) {
+            if (typeof deps.recordDebugTrace === 'function') {
+              deps.recordDebugTrace('agent_rewrite_revert_blocked', {
+                path,
+                origLen: String(origLen),
+                newLen: String(rewrittenTrim.length),
+              }, { path, origLen, newLen: rewrittenTrim.length });
+            }
+            return {
+              ok: false,
+              mutated,
+              observation: `edit_file blocked for ${path}: the rewrite fallback returned far less content (${rewrittenTrim.length} vs ${origLen} chars) and would have reverted your changes, so I kept the current file. Provide a precise find/replace edit (anchor text + replacement) instead of an instruction.`,
+            };
+          }
           return {
             ok: false,
             mutated,
@@ -993,6 +1171,11 @@
             mutated,
             observation: `edit_file blocked for ${path}: no edits were applied. Use exact existing text in find/anchor fields.`,
           };
+        }
+        if (applied.fuzzyCount > 0 && typeof deps.recordDebugTrace === 'function') {
+          deps.recordDebugTrace('agent_edit_fuzzy_applied', {
+            path, fuzzyCount: String(applied.fuzzyCount), appliedCount: String(applied.appliedCount),
+          }, { path, fuzzyCount: applied.fuzzyCount, appliedCount: applied.appliedCount });
         }
         const response = await deps.invokeWorkspaceAction('workspaceWriteFile', { path, content: applied.output });
         if (!response || !response.ok) {
@@ -1024,9 +1207,16 @@
 
       if (tool === 'validate_files') {
         const expectedFiles = Array.isArray(planSpec && planSpec.expectedFiles) ? planSpec.expectedFiles : [];
-        const targets = expectedFiles.filter((path) => path && path !== '/README.md' && path !== '/src');
+        let targets = expectedFiles.filter((path) => path && path !== '/README.md' && path !== '/src');
         if (!targets.length) {
-          return { ok: false, mutated, observation: 'validate_files blocked: there are no planned project files to validate yet.' };
+          const mutatedPaths = Array.isArray(toolEvents) ? toolEvents
+            .filter((e) => e && e.ok && ['write_file', 'edit_file'].includes(String(e.tool || '').toLowerCase()) && e.path)
+            .map((e) => String(e.path))
+            .filter((p, i, arr) => arr.indexOf(p) === i) : [];
+          if (!mutatedPaths.length) {
+            return { ok: false, mutated, observation: 'validate_files blocked: there are no planned project files to validate yet.' };
+          }
+          targets = mutatedPaths;
         }
         const issues = [];
         const fileContents = {};
@@ -1146,16 +1336,17 @@
         if (!path || path === '/') {
           return { ok: false, mutated, observation: 'delete requires a valid file/folder path.' };
         }
-        const response = await deps.invokeWorkspaceAction('workspaceTrash', { path });
-        if (!response || !response.ok) {
-          return { ok: false, mutated, observation: `delete failed for ${path}: ${(response && response.message) || 'unknown error'}` };
-        }
-        deps.setWorkspaceSelection(deps.parentWorkspacePath(path), 'folder');
-        deps.removeWorkspaceTreeEntry(path);
-        deps.removeWorkspaceTab(path);
-        mutated = true;
-        observation = `delete ok: moved ${path} to Trash`;
-        return { ok: true, mutated, observation };
+        // Human-in-the-loop guard for an irreversible op (OWASP "Excessive Agency"):
+        // never delete without explicit per-action user approval. Pause and surface
+        // exactly what will be removed; the loop performs the trash only if approved.
+        return {
+          ok: false,
+          mutated,
+          requiresDeleteConfirmation: true,
+          deletePath: path,
+          userFacingMessage: `Delete \`${path}\`? It will be moved to your system Trash (recoverable). Confirm to proceed.`,
+          observation: `delete of ${path} is paused for user confirmation.`,
+        };
       }
 
       return { ok: false, mutated, observation: `Unknown tool "${tool}".` };
@@ -1186,6 +1377,7 @@
       summarizeWorkspaceListForAgent,
       executeDeveloperToolCall,
       describeAgentToolPhase,
+      getJsReassignedConstIssue,
     };
   }
 

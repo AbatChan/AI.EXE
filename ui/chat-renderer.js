@@ -118,6 +118,17 @@
           const meta = String(item.meta || '').trim().slice(0, 120);
           if (!title && !detail && !meta) return null;
           const status = String(item.status || '').trim().toLowerCase();
+          // Structured checklist rows (for kind:'checklist') survive normalization
+          // so the plan renders as a real UI element, not raw markdown text, and is
+          // preserved across clone/persist/reload (which all re-run this normalizer).
+          const checklistItems = Array.isArray(item.items)
+            ? item.items
+                .map((row) => (row && typeof row === 'object'
+                  ? { text: String(row.text || '').trim().slice(0, 160), done: row.done === true }
+                  : null))
+                .filter((row) => row && row.text)
+                .slice(0, 12)
+            : null;
           const openPath = normalizeWorkspacePath(item.openPath || item.path || '');
           const rawDiff = item.diff && typeof item.diff === 'object' ? item.diff : null;
           const added = Math.max(0, Number(rawDiff && rawDiff.added) || 0);
@@ -150,11 +161,12 @@
             openPath: openPath && openPath !== '/' ? openPath : '',
             openKind: String(item.openKind || '').trim().toLowerCase() === 'folder' ? 'folder' : 'file',
             status: status === 'error' ? 'error' : (status === 'pending' ? 'pending' : 'done'),
+            items: checklistItems && checklistItems.length ? checklistItems : null,
             ts: Number(item.ts) || nowTs(),
           };
         })
         .filter(Boolean)
-        .slice(-24);
+        .slice(-120);
     }
 
     function normalizeAgentMeta(meta) {
@@ -179,6 +191,19 @@
       const normalized = normalizeAgentActivities([activity])[0];
       if (!normalized) return list;
       const target = Array.isArray(list) ? list : [];
+      // The plan checklist is a single live element: when it re-renders with an
+      // item newly ticked, replace the existing one in place rather than stacking
+      // a fresh copy on every progress update.
+      if (normalized.kind === 'checklist') {
+        for (let i = target.length - 1; i >= 0; i -= 1) {
+          if (target[i] && target[i].kind === 'checklist') {
+            target[i] = normalized;
+            return target;
+          }
+        }
+        target.push(normalized);
+        return target;
+      }
       const previous = target.length > 0 ? target[target.length - 1] : null;
       const sameTarget = previous && (
         (previous.openPath && normalized.openPath && previous.openPath === normalized.openPath)
@@ -260,7 +285,7 @@
       const key = String(chatId || '');
       let state = getActiveAgentStreamState();
       if (!state || String(state.chatId || '') !== key) {
-        state = { chatId: key, statusText: 'Working...', activities: [] };
+        state = { chatId: key, statusText: 'Working...', activities: [], startedAt: Date.now() };
         setActiveAgentStreamState(state);
       }
       return state;
@@ -286,8 +311,8 @@
     function pushActiveAgentStreamActivity(chatId, activity) {
       const state = ensureActiveAgentStreamState(chatId);
       mergeAgentActivityIntoList(state.activities, activity);
-      if (state.activities.length > 24) {
-        state.activities = state.activities.slice(state.activities.length - 24);
+      if (state.activities.length > 80) {
+        state.activities = state.activities.slice(state.activities.length - 80);
       }
       setActiveAgentStreamState(state);
     }
@@ -424,13 +449,25 @@
         });
       }
       if (tool === 'read_file') {
+        // Show WHICH part was read so repeated/partial reads of the same file are
+        // visually distinct instead of a row of identical "Read script.js" lines.
+        // Matches how Roo Code / Cursor / Claude Code label ranged reads.
+        const startLine = Number(decision && decision.start_line) || 0;
+        const endLine = Number(decision && decision.end_line) || 0;
+        const charOffset = Number(decision && decision.offset) || 0;
+        let rangeLabel = '';
+        if (startLine > 0) {
+          rangeLabel = endLine > startLine ? `lines ${startLine}–${endLine}` : `from line ${startLine}`;
+        } else if (charOffset > 0) {
+          rangeLabel = 'continued';
+        }
         return buildInlineAgentActivityBase({
           kind: 'read',
           title: 'Read',
           detail: formatAgentActivityPathLabel(targetInfo || 'workspace file'),
           openPath: targetInfo,
           openKind: 'file',
-          meta: 'Open file',
+          meta: rangeLabel || 'Open file',
           status: 'done',
         });
       }
@@ -624,8 +661,10 @@
       if (!plan) return null;
       const detail = String(plan.summary || '').trim();
       if (!detail) return null;
+      // Render the goal summary as a 'thought' so it matches the narration lines
+      // below the plan (same style + DOM), instead of the distinct 'plan' note style.
       return {
-        kind: 'plan',
+        kind: 'thought',
         title: '',
         detail,
         meta: '',
@@ -664,6 +703,37 @@
           item.textContent = String(activity.detail || '').trim();
         }
         return item;
+      }
+      if (activity && activity.kind === 'checklist' && Array.isArray(activity.items) && activity.items.length) {
+        const wrap = document.createElement('div');
+        wrap.className = 'msg-agent-checklist';
+        const doneCount = activity.items.filter((row) => row && row.done).length;
+        const head = document.createElement('div');
+        head.className = 'msg-agent-checklist-head';
+        const headLabel = document.createElement('span');
+        headLabel.className = 'msg-agent-checklist-title';
+        headLabel.textContent = String(activity.title || 'Plan').trim() || 'Plan';
+        const headCount = document.createElement('span');
+        headCount.className = 'msg-agent-checklist-count';
+        headCount.textContent = `${doneCount}/${activity.items.length}`;
+        head.appendChild(headLabel);
+        head.appendChild(headCount);
+        wrap.appendChild(head);
+        activity.items.forEach((row) => {
+          const li = document.createElement('div');
+          li.className = `msg-agent-checklist-item${row && row.done ? ' done' : ''}`;
+          const box = document.createElement('span');
+          box.className = 'msg-agent-checklist-box';
+          box.setAttribute('aria-hidden', 'true');
+          box.textContent = row && row.done ? '✓' : '';
+          const text = document.createElement('span');
+          text.className = 'msg-agent-checklist-text';
+          text.textContent = String(row && row.text ? row.text : '').trim();
+          li.appendChild(box);
+          li.appendChild(text);
+          wrap.appendChild(li);
+        });
+        return wrap;
       }
       const hasDiffDrawer = Boolean(activity && activity.diffPreview && activity.diffPreview.length);
       const clickable = Boolean(activity && activity.status === 'done' && activity.openPath && !hasDiffDrawer);
@@ -1194,6 +1264,128 @@
       return wrapper;
     }
 
+    function classifyActivityPhase(activity) {
+      if (!activity || activity.kind === 'thought' || activity.kind === 'error') return 'other';
+      if (activity.phase) return String(activity.phase);
+      const kind = String(activity.kind || '').toLowerCase();
+      const tool = String(activity.tool || '').toLowerCase();
+      if (kind === 'project' || kind === 'mkdir') return 'setup';
+      if (kind === 'read' || kind === 'scan' || kind === 'search' || kind === 'search_files') return 'explore';
+      if (kind === 'write') return 'create';
+      if (kind === 'edit') return 'edit';
+      if (kind === 'validate') return 'validate';
+      if (kind === 'move' || kind === 'delete') return 'cleanup';
+      if (tool === 'new_project' || tool === 'mkdir') return 'setup';
+      if (tool === 'read_file' || tool === 'search_files' || tool === 'list_dir') return 'explore';
+      if (tool === 'write_file') return 'create';
+      if (tool === 'edit_file') return 'edit';
+      if (tool === 'validate_files') return 'validate';
+      if (tool === 'move' || tool === 'delete') return 'cleanup';
+      return 'other';
+    }
+
+    function groupActivitiesByPhase(rows) {
+      const groups = [];
+      for (const activity of rows) {
+        const phase = classifyActivityPhase(activity);
+        const last = groups[groups.length - 1];
+        if (phase !== 'other' && last && last.phase === phase) {
+          last.items.push(activity);
+        } else {
+          groups.push({ phase, items: [activity] });
+        }
+      }
+      return groups;
+    }
+
+    function buildActivitySubgroup(chatId, group, startExpanded) {
+      const { phase, items } = group;
+      const runningItem = items.find((a) => a && a.status === 'running');
+      const errorItem = items.find((a) => a && a.status === 'error');
+      const groupStatus = runningItem ? 'running' : (errorItem ? 'error' : 'done');
+      const count = items.length;
+      const validateHasIssues = phase === 'validate' && items.some((a) => /issue|error|fail|problem|warn/i.test(String(a.detail || '')));
+      const labelsByPhase = {
+        setup: { running: 'Preparing workspace', done: 'Created workspace' },
+        create: { running: 'Generating files', done: `Generated ${count} file${count !== 1 ? 's' : ''}` },
+        explore: {
+          running: 'Inspecting files',
+          done: (() => {
+            const reads = items.filter((a) => a && a.kind === 'read').length;
+            const searches = items.filter((a) => a && (a.kind === 'search' || a.kind === 'search_files')).length;
+            if (reads && !searches && reads === count) return `Read ${count} file${count !== 1 ? 's' : ''}`;
+            if (searches && !reads) return `Searched ${searches} pattern${searches !== 1 ? 's' : ''}`;
+            return `Inspected ${count} item${count !== 1 ? 's' : ''}`;
+          })()
+        },
+        edit: { running: 'Applying changes', done: `Updated ${count} file${count !== 1 ? 's' : ''}` },
+        validate: { running: 'Checking files', done: validateHasIssues ? 'Checked files \u2014 issues found' : 'Checked files \u2014 no issues found' },
+        cleanup: { running: 'Cleaning up', done: `Cleaned up ${count} item${count !== 1 ? 's' : ''}` },
+      };
+      const labels = labelsByPhase[phase] || { running: 'Working', done: `${count} steps` };
+      const label = groupStatus === 'running' ? labels.running : labels.done;
+      const expanded = Boolean(startExpanded);
+
+      const subgroup = document.createElement('div');
+      subgroup.className = `msg-agent-subgroup${groupStatus === 'error' ? ' error' : ''}`;
+      subgroup.dataset.expanded = expanded ? 'true' : 'false';
+
+      const toggle = document.createElement('button');
+      toggle.type = 'button';
+      toggle.className = 'msg-agent-subgroup-toggle';
+      toggle.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+
+      const labelEl = document.createElement('span');
+      labelEl.className = 'msg-agent-subgroup-label';
+      labelEl.textContent = label;
+      toggle.appendChild(labelEl);
+
+      const chevron = document.createElement('span');
+      chevron.className = 'msg-agent-subgroup-chevron';
+      chevron.innerHTML = `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.5 6.5 8 10l3.5-3.5"></path></svg>`;
+      toggle.appendChild(chevron);
+      subgroup.appendChild(toggle);
+
+      const drawer = document.createElement('div');
+      drawer.className = 'msg-agent-subgroup-drawer';
+      items.forEach((activity) => drawer.appendChild(buildAgentActivityRow(chatId, activity)));
+      subgroup.appendChild(drawer);
+      if (!expanded) {
+        drawer.hidden = true;
+        drawer.style.maxHeight = '0px';
+        drawer.style.opacity = '0';
+      }
+
+      toggle.addEventListener('click', () => {
+        const isExpanded = subgroup.dataset.expanded === 'true';
+        const next = !isExpanded;
+        subgroup.dataset.expanded = next ? 'true' : 'false';
+        toggle.setAttribute('aria-expanded', next ? 'true' : 'false');
+        if (next) {
+          drawer.hidden = false;
+          drawer.style.maxHeight = '0px';
+          drawer.style.opacity = '0';
+          requestAnimationFrame(() => {
+            drawer.style.maxHeight = `${drawer.scrollHeight}px`;
+            drawer.style.opacity = '1';
+          });
+          const settle = () => { drawer.style.maxHeight = 'none'; drawer.removeEventListener('transitionend', settle); };
+          drawer.addEventListener('transitionend', settle);
+        } else {
+          drawer.style.maxHeight = `${drawer.scrollHeight}px`;
+          drawer.style.opacity = '1';
+          requestAnimationFrame(() => {
+            drawer.style.maxHeight = '0px';
+            drawer.style.opacity = '0';
+          });
+          const settle = () => { drawer.hidden = true; drawer.removeEventListener('transitionend', settle); };
+          drawer.addEventListener('transitionend', settle);
+        }
+      });
+
+      return subgroup;
+    }
+
     function buildAgentActivityPanel(chatId, activities, options = {}) {
       const normalizedRows = normalizeAgentActivities(activities);
       const meta = normalizeAgentMeta(options.agentMeta);
@@ -1210,8 +1402,18 @@
         const list = document.createElement('div');
         list.className = 'msg-agent-activity-list';
         if (completed) wrapper.appendChild(buildAgentActivitySummaryToggle(chatId, Number(options.messageTs) || 0, meta));
-        rows.forEach((activity) => {
-          list.appendChild(buildAgentActivityRow(chatId, activity));
+        const alwaysGroupPhases = new Set(['setup', 'validate', 'cleanup']);
+        const groups = groupActivitiesByPhase(rows);
+        groups.forEach((group, groupIndex) => {
+          const isLastGroup = groupIndex === groups.length - 1;
+          const groupHasRunning = group.items.some((a) => a && a.status === 'running');
+          const groupHasError = group.items.some((a) => a && a.status === 'error');
+          const groupStartExpanded = completed ? groupHasError : (groupHasRunning || isLastGroup);
+          if (group.phase === 'other' || (group.items.length < 2 && !alwaysGroupPhases.has(group.phase))) {
+            group.items.forEach((activity) => list.appendChild(buildAgentActivityRow(chatId, activity)));
+          } else {
+            list.appendChild(buildActivitySubgroup(chatId, group, groupStartExpanded));
+          }
         });
         if (completed) {
           const drawer = document.createElement('div');
@@ -1315,6 +1517,44 @@
       content.innerHTML = d.renderMarkdownHtml ? d.renderMarkdownHtml(contentText) : contentText;
       bubble.appendChild(content);
       if (typeof d.attachCodeCopyButtons === 'function') d.attachCodeCopyButtons(content);
+    }
+
+    function populateUserBubble(bubble, text) {
+      const source = String(text || '').trim();
+      const lineCount = source ? source.split(/\n/).length : 0;
+      const shouldCollapse = source.length > 280 || lineCount > 5;
+      if (!shouldCollapse) {
+        bubble.textContent = source;
+        return;
+      }
+
+      const body = document.createElement('div');
+      body.className = 'msg-user-text is-collapsed';
+      body.textContent = source;
+      bubble.appendChild(body);
+
+      const toggle = document.createElement('button');
+      toggle.type = 'button';
+      toggle.className = 'msg-user-expand-toggle';
+      toggle.setAttribute('aria-expanded', 'false');
+      toggle.innerHTML = `
+        <span class="msg-user-expand-label">Show more</span>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="m6 9 6 6 6-6"></path>
+        </svg>
+      `;
+      toggle.addEventListener('click', (evt) => {
+        evt.preventDefault();
+        evt.stopPropagation();
+        const expanded = toggle.getAttribute('aria-expanded') === 'true';
+        const nextExpanded = !expanded;
+        body.classList.toggle('is-collapsed', !nextExpanded);
+        body.classList.toggle('is-expanded', nextExpanded);
+        toggle.setAttribute('aria-expanded', nextExpanded ? 'true' : 'false');
+        const label = toggle.querySelector('.msg-user-expand-label');
+        if (label) label.textContent = nextExpanded ? 'Show less' : 'Show more';
+      });
+      bubble.appendChild(toggle);
     }
 
     function buildMsgNode(role, text, chatId = '', messageTs = 0, loopDetected = false, thinkingText = '', branchAnchorTs = 0, agentActivities = [], agentMeta = null, displayTs = 0, thinkingMeta = null) {
@@ -1427,7 +1667,7 @@
         shell.appendChild(footer);
         bubble.appendChild(shell);
       } else {
-        bubble.textContent = renderText;
+        populateUserBubble(bubble, renderText);
       }
       const rawText = [renderText, canvasFollowUp].filter(Boolean).join('\n');
 

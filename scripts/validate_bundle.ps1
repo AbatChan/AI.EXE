@@ -88,8 +88,8 @@ foreach ($cssRef in $cssRefs) {
 
 $uiConfigPath = Join-Path $bundleDir "ui\\ui-config.js"
 $uiConfig = Get-Content -Path $uiConfigPath -Raw
-if ($uiConfig -notmatch "remoteProvidersEnabled\s*:\s*false") {
-  Write-Warning "Packaged UI config does not explicitly disable remote providers."
+if ($uiConfig -notmatch "remoteProvidersEnabled\s*:\s*true") {
+  Write-Warning "Packaged UI config does not explicitly enable remote provider selection."
 }
 if ($uiConfig -notmatch "devPlannerEnabled\s*:\s*false") {
   throw "Packaged UI config must disable the localhost development planner for release validation."

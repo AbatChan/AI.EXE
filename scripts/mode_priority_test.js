@@ -79,7 +79,8 @@ async function testPromptCombinations() {
     thinkMode: true,
   });
   assert.ok(thinkPrompt.includes('THINK_MODE: ON'));
-  assert.ok(thinkPrompt.includes('<thinking>...</thinking>'));
+  assert.ok(thinkPrompt.includes('first non-empty output token must be <thinking>'));
+  assert.ok(thinkPrompt.includes('If you omit the <thinking> block, the response is malformed'));
 
   const canvasPrompt = await buildPrompt({
     messages: baseMessages,
@@ -109,6 +110,42 @@ async function testPromptCombinations() {
   assert.ok(routedChatPrompt.includes('routed to normal chat'));
   assert.ok(!routedChatPrompt.includes('CANVAS_MODE: ON'));
   assert.ok(!routedChatPrompt.includes('[respond using <AIcanvas'));
+}
+
+async function testInlineChatNamingOnlyBeforeFirstAssistant() {
+  const namingDeps = {
+    shouldInlineNameChatResponse: (chat) => Boolean(chat && chat.isNaming),
+  };
+  const firstTurnPrompt = await buildPrompt({
+    isNaming: true,
+    messages: [
+      { role: 'user', text: 'between 9.9 and 9.11 which is bigger?' },
+    ],
+  }, namingDeps);
+  assert.ok(firstTurnPrompt.includes('CHAT TITLE PREFIX:'));
+
+  const thinkNamingPrompt = await buildPrompt({
+    isNaming: true,
+    thinkMode: true,
+    messages: [
+      { role: 'user', text: 'between 9.9 and 9.11 which is bigger?' },
+    ],
+  }, namingDeps);
+  assert.ok(thinkNamingPrompt.includes('THINK_MODE: ON'));
+  assert.ok(thinkNamingPrompt.includes('CHAT NAME PREFIX FOR THIS RESPONSE:'));
+  assert.ok(!thinkNamingPrompt.includes('First line must be exactly: [[CHAT_NAME: 2-6 word title]]'));
+  assertOrder(thinkNamingPrompt, 'THINK_MODE: ON', 'CHAT NAME PREFIX FOR THIS RESPONSE:');
+
+  const laterTurnPrompt = await buildPrompt({
+    isNaming: true,
+    messages: [
+      { role: 'user', text: 'between 9.9 and 9.11 which is bigger?' },
+      { role: 'ai', text: 'Between 9.9 and 9.11, 9.11 is bigger.' },
+      { role: 'user', text: 'what is the difference?' },
+    ],
+  }, namingDeps);
+  assert.ok(!laterTurnPrompt.includes('CHAT TITLE PREFIX:'));
+  assert.ok(!laterTurnPrompt.includes('[[CHAT_NAME: 2-6 word title]]'));
 }
 
 function testDeterministicCanvasRouting() {
@@ -164,6 +201,7 @@ async function testContextBudgetStress() {
 
 (async () => {
   await testPromptCombinations();
+  await testInlineChatNamingOnlyBeforeFirstAssistant();
   testDeterministicCanvasRouting();
   testAgentCanvasGuard();
   await testContextBudgetStress();

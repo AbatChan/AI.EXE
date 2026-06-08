@@ -292,6 +292,9 @@
         }
       }
       await deps.renderArtifacts();
+      if (typeof deps.refreshOpenFileTabsFromWorkspace === 'function') {
+        await deps.refreshOpenFileTabsFromWorkspace();
+      }
     }
 
     function guessWorkspaceTargetKind(path) {

@@ -5,7 +5,7 @@
   <key>CFBundleDevelopmentRegion</key>
   <string>en</string>
   <key>CFBundleExecutable</key>
-  <string>${EXECUTABLE_NAME}</string>
+  <string>ai_exe_gui_mac</string>
   <key>CFBundleIdentifier</key>
   <string>com.aiexe.desktop</string>
   <key>CFBundleInfoDictionaryVersion</key>
@@ -15,9 +15,9 @@
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>1.0.0</string>
+  <string>@AI_EXE_APP_VERSION@</string>
   <key>CFBundleVersion</key>
-  <string>1.0.0</string>
+  <string>@AI_EXE_APP_VERSION@</string>
   <key>LSMinimumSystemVersion</key>
   <string>10.15</string>
   <key>NSMicrophoneUsageDescription</key>
