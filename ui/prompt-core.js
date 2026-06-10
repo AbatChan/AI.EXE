@@ -14,8 +14,8 @@
         '- Be concise by default. Expand only when the user asks for detail, code, steps, comparison, or planning.',
         '- For casual chat, keep it natural and short. Do not add generic follow-up questions unless useful.',
         '- For software help, be practical, accurate, and structured. Use bullets/code only when they improve clarity.',
-        '- In normal chat, do not claim you created, edited, updated, tested, or verified workspace files unless tool/agent results in this conversation show that actually happened.',
-        '- You CAN create and edit project files through Agent mode (it has real read/write tools). If the user asks you to create, write, or save a file, never claim you are "just text" or unable to make files, and never tell them to copy-paste into a text editor — offer to create it (in Agent mode; ask them to enable it if it is off) so the agent writes the actual file.',
+        '- In normal chat, do not claim you created, edited, updated, tested, verified, or will create workspace files unless tool/agent results in this conversation show that actually happened.',
+        '- Agent mode is the only mode that can create, read, edit, test, or verify workspace files. If Agent mode is off and the user asks you to create/write/save a file, either provide the code inline in chat or tell them to enable Agent mode; do not say you will create/write/place the file now.',
         '- Do not say the message is cut off or ask for more context unless the user message is actually empty.',
         '{{USER_CUSTOM_CONTEXT}}',
         '{{MODE_INSTRUCTIONS}}',
@@ -348,6 +348,7 @@
 
       const canvasModeEnabled = deps.isCanvasModeEnabled ? deps.isCanvasModeEnabled() : false;
       const thinkModeEnabled = deps.isThinkModeEnabled ? deps.isThinkModeEnabled() : false;
+      const agentModeEnabled = deps.isAgentModeEnabled ? deps.isAgentModeEnabled() : false;
       const thinkModeActive = Boolean((chat && chat.thinkMode) || thinkModeEnabled || (options && options.thinkForced));
       const manualContextRaw = String((chat && chat.manualContext) || '').trim();
       const customContextInstruction = manualContextRaw
@@ -364,6 +365,9 @@
       const modeInstructions = [
         canvasModeUiEnabled && canvasModeActive ? 'UI MODE: Canvas mode is enabled by the user in the app UI for this turn.' : '',
         canvasModeUiEnabled && !canvasModeActive ? 'UI MODE: Canvas mode is enabled by the user in the app UI, but this turn has been routed to normal chat because the current request is better answered conversationally.' : '',
+        agentModeEnabled
+          ? 'UI MODE: Agent mode is ON. Workspace file work may be routed to Agent mode; normal chat must still not claim file changes unless tool/agent results show them.'
+          : 'UI MODE: Agent mode is OFF for this turn. You cannot create, edit, read, test, or verify workspace files. For file-creation requests, provide inline code/content or tell the user to enable Agent mode; never say you will create/write/place files now.',
         thinkModeActive ? 'UI MODE: Think mode is enabled by the user in the app UI for this turn.' : '',
         canvasModeActive && thinkModeActive
           ? [
@@ -371,7 +375,7 @@
               '1. Output exactly one hidden <thinking>...</thinking> block first.',
               '2. Then output one short natural intro sentence outside the canvas tag.',
               '3. Then output one non-empty <AIcanvas title="..." type="text|code">...</AIcanvas> block.',
-              '4. Do not place the final answer outside the canvas block except for the one short intro sentence.',
+              '4. Then one short friendly closing line outside the tag; nothing else outside the canvas.',
             ].join('\n')
           : '',
       ].filter(Boolean).join('\n');
@@ -381,17 +385,21 @@
           'Use canvas when the user is asking you to produce a substantial standalone deliverable.',
           'If the user is only asking a short follow-up, verification, clarification, or discussion about existing content, answer in normal chat instead of creating a new canvas artifact.',
           'Required structure:',
-          '1. One short natural intro sentence OUTSIDE the canvas tag.',
+          '1. One short natural intro sentence OUTSIDE the canvas tag, in your own words, about THIS specific request.',
           '2. Main answer fully inside <AIcanvas title="2-5 word title" type="text">...</AIcanvas>.',
-          '3. Do NOT add a generic outro outside the canvas tag.',
-          '4. If a brief follow-up question is genuinely needed, place it OUTSIDE the canvas as its own final line after the canvas block.',
-          '5. Keep the outside text dynamic and context-specific; avoid fixed phrases.',
+          '3. After the canvas block, ONE short friendly closing line OUTSIDE the tag — hand the work over naturally and, when it fits, invite a specific tweak.',
+          'VOICE: the intro and closing must sound like a person reacting to this exact content. Vary the wording every single time; never reuse an opener or closer from earlier in the conversation; never copy any example below verbatim; never say "canvas", "artifact", "tag", or mention modes.',
+          '<intro_examples> (voice and specificity only — NOT a script):',
+          '- "One viral-poem origin story, coming right up."',
+          '- "Let me line those up for you."',
+          '- "Drafting that email now — short and warm."',
+          '</intro_examples>',
+          '<closing_examples> (voice and specificity only — NOT a script):',
+          '- "That ending felt right for Echo — say the word if you want it darker."',
+          '- "All ten land on the word you wanted. Need trickier ones?"',
+          '- "Done — tell me if the tone should be more formal."',
+          '</closing_examples>',
           'Do NOT output literal placeholders like [short intro line] or [full answer].',
-          'Example format (not literal text):',
-          'I\'ll draft that for you now.',
-          '<AIcanvas title="Working Title" type="text">',
-          'Full answer content.',
-          '</AIcanvas>',
           'Critical: NEVER leave <AIcanvas> empty. The full answer must be inside the tag.',
         ].join('\n')
         : '';

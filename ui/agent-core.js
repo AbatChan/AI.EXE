@@ -176,7 +176,9 @@
         hints.push('Do not output CSS rules as the main body of this file.');
         hints.push('Do not output JavaScript as the main body of this file.');
         hints.push('If the project has separate style.css or script.js files, prefer linking them instead of embedding large inline <style> or <script> blocks.');
-        hints.push('Keep markup semantic and compact. Use reusable classes and stable IDs that CSS and JS can share.');
+        hints.push('Pages are opened directly from disk (file://). Inter-page and asset links must be RELATIVE (menu.html, ./style.css, ../style.css from a subfolder) — root-relative paths like /menu.html resolve to the filesystem root and break.');
+        hints.push('Keep markup semantic and compact. Use reusable classes and stable IDs that CSS and JS can share. IDs must be unique — never leave two copies of a section.');
+        hints.push('If a change replaces an existing structure (e.g. moving inline sections into separate pages), remove the superseded markup and links in the same pass — never leave two competing implementations.');
         hints.push('Guideline: for UI control icons, prefer clean inline SVG over emoji (emoji render inconsistently and look less polished). Not a hard rule — any consistent icon approach is fine.');
       }
       if (/\.css$/i.test(normalized)) {
@@ -187,11 +189,13 @@
         hints.push('For multi-section landing pages, style the requested sections with reusable selectors instead of generating oversized repeated CSS.');
         hints.push('Use a small animation system: a few reusable keyframes and transitions, not unique animations for every block.');
         hints.push('Styling guidelines (apply with judgment, skip what does not fit the request): target selectors that actually exist in the HTML; size elements to their content so text is never clipped or overlapping; keep layouts responsive (flex/grid with gaps, allow wrapping); use consistent spacing, hierarchy, and contrast. e.g. a button with a text label should grow to fit the label, not sit in a fixed icon-sized box.');
+        hints.push('Layout rules act on DIRECT children: to place blocks side by side (or change their stacking), the flex/grid rule must be on their actual direct parent in the HTML — check the real nesting before choosing the selector.');
       }
       if (/\.(js|ts|jsx|tsx)$/i.test(normalized)) {
         hints.push('Return only JavaScript or TypeScript source for this file.');
         hints.push('Do not output HTML, <script> tags, or CSS rules.');
         hints.push('Keep script focused on core behavior and DOM interactions. Avoid large decorative systems unless required.');
+        hints.push('Keep one source of truth per setting: a script default must match the corresponding HTML control\'s min/max/value and the unit the code applies (0–1 vs 0–100, px vs unitless), and must not conflict with a CSS variable default. Drive effects through ONE mechanism (either CSS variables or inline styles), and give interactive effects visible non-zero defaults so the result shows before any control is touched.');
       }
       return hints;
     }
@@ -393,6 +397,7 @@
         message = readStringValue('message');
         srcPath = readStringValue('src_path') || readStringValue('srcPath');
         dstPath = readStringValue('dst_path') || readStringValue('dstPath');
+        if (!String(content || '').trim()) content = readStringValue('content');
         const readNumberValue = (key) => {
           const m = jsonish.match(new RegExp(`"${key}"\\s*:\\s*(\\d+)`, 'i'));
           return m ? (Number(m[1]) || 0) : 0;
@@ -414,15 +419,19 @@
         resolvedTool = resolvedAction;
         resolvedAction = 'tool';
       }
-      // Auto-repair: planner emitted a path-only / line-range object with no
-      // action and no tool — e.g. {"path":"/script.js","start_line":35,"end_line":120}.
-      // The intent is unambiguously a read; infer read_file instead of hard-failing
-      // the whole run (returning null here surfaces as agent_parse_error and STOPS
-      // the agent). A read is non-destructive, so this recovery is always safe, and
-      // the read-loop guard still steers the model toward acting if it over-reads.
+      // Auto-repair: planner emitted a path object with no action and no tool.
+      // With substantial content attached — e.g. {"path":"/index.html","content":
+      // "<!DOCTYPE html>..."} — the intent is unambiguously a write; inferring
+      // read_file here turned recovery rewrites into blocked re-reads. A bare
+      // path / line-range object is unambiguously a read; infer read_file instead
+      // of hard-failing the whole run (null surfaces as agent_parse_error and
+      // STOPS the agent). The write/read guards still police either inference.
       if (!['tool', 'final'].includes(resolvedAction) && !resolvedTool && String(path || '').trim()) {
+        const trimmedContent = String(content || '').trim();
         resolvedAction = 'tool';
-        resolvedTool = 'read_file';
+        resolvedTool = /^\{\s*"edits"\s*:/.test(trimmedContent)
+          ? 'edit_file'
+          : (trimmedContent.length >= 80 ? 'write_file' : 'read_file');
       }
       if (!['tool', 'final'].includes(resolvedAction)) {
         return null;
@@ -925,24 +934,47 @@
       if (/^```/i.test(cleaned)) {
         cleaned = cleaned.replace(/^```[a-z0-9_-]*\s*/i, '').replace(/\s*```$/i, '').trim();
       }
-      const start = cleaned.indexOf('{');
-      const end = cleaned.lastIndexOf('}');
-      if (start >= 0 && end > start) {
-        cleaned = cleaned.slice(start, end + 1).trim();
-      }
       let parsed = null;
-      try {
-        parsed = JSON.parse(cleaned);
-      } catch (_) {
-        return null;
+      // Top-level array form — [{"find":...,"replace":...}, ...] — is a common
+      // model variant of the documented {"edits":[...]} shape; accept it.
+      const arrayStart = cleaned.indexOf('[');
+      const objectStart = cleaned.indexOf('{');
+      if (arrayStart >= 0 && (objectStart < 0 || arrayStart < objectStart)) {
+        const arrayEnd = cleaned.lastIndexOf(']');
+        if (arrayEnd > arrayStart) {
+          try {
+            const arr = JSON.parse(cleaned.slice(arrayStart, arrayEnd + 1));
+            if (Array.isArray(arr)) parsed = { edits: arr };
+          } catch (_) {
+            parsed = null;
+          }
+        }
+      }
+      if (!parsed) {
+        const start = cleaned.indexOf('{');
+        const end = cleaned.lastIndexOf('}');
+        if (start >= 0 && end > start) {
+          cleaned = cleaned.slice(start, end + 1).trim();
+        }
+        try {
+          parsed = JSON.parse(cleaned);
+        } catch (_) {
+          return null;
+        }
       }
       const edits = Array.isArray(parsed && parsed.edits) ? parsed.edits : [];
-      const normalizedEdits = edits.map((edit) => ({
-        op: String(edit && edit.op ? edit.op : '').toLowerCase(),
-        find: String(edit && edit.find ? edit.find : ''),
-        replace: String(edit && edit.replace ? edit.replace : ''),
-        text: String(edit && edit.text ? edit.text : ''),
-      })).filter((edit) => ['replace', 'replace_all', 'insert_before', 'insert_after', 'prepend', 'append'].includes(edit.op));
+      const normalizedEdits = edits.map((edit) => {
+        let op = String(edit && edit.op ? edit.op : '').toLowerCase();
+        // Default the op when the shape is unambiguous (find+replace / bare text).
+        if (!op && edit && edit.find != null && edit.replace != null) op = 'replace';
+        if (!op && edit && edit.find == null && edit.replace == null && edit.text != null) op = 'append';
+        return {
+          op,
+          find: String(edit && edit.find ? edit.find : ''),
+          replace: String(edit && edit.replace ? edit.replace : ''),
+          text: String(edit && edit.text ? edit.text : ''),
+        };
+      }).filter((edit) => ['replace', 'replace_all', 'insert_before', 'insert_after', 'prepend', 'append'].includes(edit.op));
       if (!normalizedEdits.length) return null;
       return { edits: normalizedEdits };
     }
@@ -1016,15 +1048,20 @@
       };
 
       // Tier 2: whitespace-normalized exact block match.
+      let whitespaceMatch = -1;
       for (let i = 0; i + n <= srcLines.length; i += 1) {
         let matched = true;
         for (let j = 0; j < n; j += 1) {
           if (normalizeEditLine(srcLines[i + j]) !== needleNorm[j]) { matched = false; break; }
         }
         if (matched) {
-          const span = spanFor(i);
-          return { start: span.start, end: span.end, mode: 'whitespace' };
+          if (whitespaceMatch >= 0) return null;
+          whitespaceMatch = i;
         }
+      }
+      if (whitespaceMatch >= 0) {
+        const span = spanFor(whitespaceMatch);
+        return { start: span.start, end: span.end, mode: 'whitespace' };
       }
 
       // Tier 3: best fuzzy block above a conservative similarity threshold.
@@ -1033,15 +1070,23 @@
       if ((srcLines.length - n + 1) * n > 200000) return null;
       let bestScore = 0;
       let bestStart = -1;
+      let secondScore = 0;
       for (let i = 0; i + n <= srcLines.length; i += 1) {
         let total = 0;
         for (let j = 0; j < n; j += 1) {
           total += editLineSimilarity(normalizeEditLine(srcLines[i + j]), needleNorm[j]);
         }
         const score = total / n;
-        if (score > bestScore) { bestScore = score; bestStart = i; }
+        if (score > bestScore) {
+          secondScore = bestScore;
+          bestScore = score;
+          bestStart = i;
+        } else if (score > secondScore) {
+          secondScore = score;
+        }
       }
       if (bestStart >= 0 && bestScore >= 0.9) {
+        if (secondScore >= 0.9 && bestScore - secondScore < 0.04) return null;
         const span = spanFor(bestStart);
         return { start: span.start, end: span.end, mode: 'fuzzy', score: bestScore };
       }

@@ -23,15 +23,18 @@
     const deriveProjectNameFromTask = deps.deriveProjectNameFromTask;
     const agentMaxSteps = Number(deps.agentMaxSteps) || 16;
     const agentMaxToolOutputChars = Number(deps.agentMaxToolOutputChars) || 8000;
+    const getAgentExpandedReadChars = typeof deps.getAgentExpandedReadChars === 'function'
+      ? deps.getAgentExpandedReadChars
+      : () => 0;
     const agentDecisionMaxTokens = Number(deps.agentDecisionMaxTokens) || 120;
     const agentPlanGrammar = String(deps.agentPlanGrammar || '');
     const agentStepTimeoutMs = Number(deps.agentStepTimeoutMs) || 20000;
 
     function looksLikePlaceholderImplementation(content) {
       const text = String(content || '').toLowerCase();
+      // 'todo:' removed — it collides with real domain code (kanban `todo:` keys).
       return [
         'functionality here',
-        'todo:',
         'placeholder code',
         'placeholder for',
         'placeholder content',
@@ -530,10 +533,11 @@
       return '';
     }
 
-    function buildAgentProjectStateContext(toolEvents = [], planSpec = null) {
+    function buildAgentProjectStateContext(toolEvents = [], planSpec = null, excludePath = '') {
       const expectedFiles = Array.isArray(planSpec && planSpec.expectedFiles)
         ? planSpec.expectedFiles.map((path) => normalizeWorkspacePath(path || '')).filter(Boolean)
         : [];
+      const normalizedExclude = normalizeWorkspacePath(excludePath || '');
       const latestByPath = new Map();
       const validationIssues = [];
       (Array.isArray(toolEvents) ? toolEvents : []).forEach((event) => {
@@ -558,17 +562,27 @@
       const today = new Date();
       sections.push(`Current date: ${today.toISOString().slice(0, 10)} (year ${today.getFullYear()}). Use ${today.getFullYear()} for any generated dates, sample data, or copyright years.`);
       if (expectedFiles.length) sections.push(`Expected files: ${expectedFiles.join(', ')}`);
+      // Sibling context, window-driven: full content when it fits (chat-grade
+      // coherence), the file's head + signals when it doesn't, signals only as
+      // the last resort on tiny budgets.
+      const expandedCap = Math.max(0, Number(getAgentExpandedReadChars()) || 0);
+      let fullContentBudget = expandedCap > 20000 ? Math.min(expandedCap, 60000) : 0;
       expectedFiles.forEach((path) => {
-        const content = latestByPath.has(path) ? latestByPath.get(path) : '';
-        if (!String(content || '').trim()) return;
+        if (path === normalizedExclude) return;
+        const content = latestByPath.has(path) ? String(latestByPath.get(path) || '') : '';
+        if (!content.trim()) return;
+        if (fullContentBudget > 0 && content.length <= fullContentBudget) {
+          fullContentBudget -= content.length;
+          sections.push(`CURRENT ${path} (full current content — make your file agree with it exactly: same ids, classes, defaults, units):\n${content}`);
+          return;
+        }
         const signals = summarizeFileSignals(path, content);
-        // Include only the compact cross-file SIGNALS (ids / classes / selectors),
-        // NOT the full file body. Stuffing whole siblings here (e.g. a 29K script.js)
-        // overflowed the local model's 8192-token context: prefill alone took ~100s
-        // and left almost no room to generate, yielding a broken 4-line file. Signals
-        // carry exactly the coherence info the next file needs (which classes/ids to
-        // define or wire up). The edit prompt still passes the edited file's own full
-        // CURRENT_FILE content separately.
+        if (fullContentBudget > 2400) {
+          const headChars = Math.min(fullContentBudget - 400, 12000);
+          fullContentBudget -= headChars;
+          sections.push(`CURRENT ${path} (first ${headChars} chars — defaults/vars/refs live here; the rest is summarized below):\n${content.slice(0, headChars)}${signals ? `\nSIGNALS ${path} (rest of file):\n${signals}` : ''}`);
+          return;
+        }
         if (signals) sections.push(`SIGNALS ${path}:\n${signals}`);
       });
       if (validationIssues.length) {
@@ -584,7 +598,7 @@
       }).join('\n\n');
       const normalizedPath = normalizeWorkspacePath(path || '');
       const generationHints = buildAgentFileGenerationHints(taskText, normalizedPath);
-      const projectState = buildAgentProjectStateContext(toolEvents, planSpec);
+      const projectState = buildAgentProjectStateContext(toolEvents, planSpec, normalizedPath);
       const template = await loadPromptTemplate('developer_agent_write_file');
       if (template) {
         return renderPromptTemplate(template, {
@@ -626,7 +640,7 @@
         return `ToolResult ${index + 1}: ${String(event && event.tool ? event.tool : 'unknown')}\n${observation}`;
       }).join('\n\n');
       const normalizedPath = normalizeWorkspacePath(path || '');
-      const projectState = buildAgentProjectStateContext(toolEvents, planSpec);
+      const projectState = buildAgentProjectStateContext(toolEvents, planSpec, normalizedPath);
       const editHints = buildAgentFileGenerationHints(taskText, normalizedPath);
       const template = await loadPromptTemplate('developer_agent_edit_file');
       if (template) {
@@ -677,7 +691,7 @@
         return `ToolResult ${index + 1}: ${String(event && event.tool ? event.tool : 'unknown')}\n${observation}`;
       }).join('\n\n');
       const normalizedPath = normalizeWorkspacePath(path || '');
-      const projectState = buildAgentProjectStateContext(toolEvents, planSpec);
+      const projectState = buildAgentProjectStateContext(toolEvents, planSpec, normalizedPath);
       const rewriteHints = buildAgentFileGenerationHints(taskText, normalizedPath);
       const template = await loadPromptTemplate('developer_agent_rewrite_file');
       if (template) {
@@ -796,6 +810,125 @@
       return events.filter((_, index) => keepIdx.has(index));
     }
 
+    function agentLineColAt(text, index) {
+      const src = String(text || '');
+      const pos = Math.max(0, Math.min(src.length, Number(index) || 0));
+      let line = 1;
+      let col = 1;
+      for (let i = 0; i < pos; i += 1) {
+        if (src[i] === '\n') {
+          line += 1;
+          col = 1;
+        } else {
+          col += 1;
+        }
+      }
+      return { line, col };
+    }
+
+    function getPlannerJsSyntaxDiagnostic(path, jsText, parseError = null) {
+      const src = String(jsText || '');
+      const parseMessage = String(parseError && parseError.message ? parseError.message : parseError || '').trim();
+      const stack = [];
+      let quote = '';
+      let inLineComment = false;
+      let inBlockComment = false;
+      let inTemplate = false;
+      let escaped = false;
+      const pairs = { '(': ')', '[': ']', '{': '}' };
+      const closers = { ')': '(', ']': '[', '}': '{' };
+      for (let i = 0; i < src.length; i += 1) {
+        const ch = src[i];
+        const next = src[i + 1] || '';
+        if (inLineComment) {
+          if (ch === '\n') inLineComment = false;
+          continue;
+        }
+        if (inBlockComment) {
+          if (ch === '*' && next === '/') {
+            inBlockComment = false;
+            i += 1;
+          }
+          continue;
+        }
+        if (quote) {
+          if (escaped) escaped = false;
+          else if (ch === '\\') escaped = true;
+          else if (ch === quote) quote = '';
+          continue;
+        }
+        if (inTemplate) {
+          if (escaped) escaped = false;
+          else if (ch === '\\') escaped = true;
+          else if (ch === '`') inTemplate = false;
+          continue;
+        }
+        if (ch === '/' && next === '/') {
+          inLineComment = true;
+          i += 1;
+          continue;
+        }
+        if (ch === '/' && next === '*') {
+          inBlockComment = true;
+          i += 1;
+          continue;
+        }
+        if (ch === '"' || ch === "'") {
+          quote = ch;
+          continue;
+        }
+        if (ch === '`') {
+          inTemplate = true;
+          continue;
+        }
+        if (pairs[ch]) {
+          stack.push({ ch, index: i });
+          continue;
+        }
+        if (closers[ch]) {
+          const top = stack[stack.length - 1];
+          if (!top || top.ch !== closers[ch]) {
+            const loc = agentLineColAt(src, i);
+            const found = top ? `expected ${pairs[top.ch]} for ${top.ch} opened at line ${agentLineColAt(src, top.index).line}` : 'nothing is open here';
+            return `${path}:${loc.line}:${loc.col}: ${parseMessage || `unexpected ${ch}`} (${found})`;
+          }
+          stack.pop();
+        }
+      }
+      if (stack.length) {
+        const top = stack[stack.length - 1];
+        const loc = agentLineColAt(src, top.index);
+        return `${path}:${loc.line}:${loc.col}: ${parseMessage || `missing ${pairs[top.ch]}`} (${top.ch} opened here)`;
+      }
+      return parseMessage ? `${path}: ${parseMessage}` : '';
+    }
+
+    function buildAgentDiagnosticsLog(toolEvents) {
+      const byPath = new Map();
+      for (const event of Array.isArray(toolEvents) ? toolEvents : []) {
+        if (!event || !event.ok) continue;
+        const tool = String(event.tool || '').toLowerCase();
+        const path = normalizeWorkspacePath(event.path || '');
+        const content = String(event.content || '');
+        if (!path || !content || !['read_file', 'write_file', 'edit_file'].includes(tool)) continue;
+        byPath.set(path, content);
+      }
+      const diagnostics = [];
+      byPath.forEach((content, path) => {
+        if (!/\.(?:js|mjs|cjs)$/i.test(path)) return;
+        if (/\b(import|export)\b/.test(content)) return;
+        try {
+          // eslint-disable-next-line no-new, no-new-func
+          new Function(content);
+        } catch (err) {
+          const detail = getPlannerJsSyntaxDiagnostic(path, content, err);
+          if (detail) diagnostics.push(detail);
+        }
+      });
+      if (!diagnostics.length) return '';
+      return `CURRENT_CODE_DIAGNOSTICS (content-derived; fix these before broad inspection):\n${diagnostics.slice(0, 6).map((d) => `- ${d}`).join('\n')}\n\n`;
+    }
+
     async function buildAgentDecisionPrompt(chatId, taskText, toolEvents, stepIndex, planSpec = null) {
       const transcript = buildAgentHistoryTranscript(chatId, 14);
       const workspace = typeof getWorkspaceContext === 'function' ? getWorkspaceContext() : {};
@@ -827,19 +960,41 @@
           const flags = meta.wasTruncated
             ? '[TRUNCATED — re-read allowed]'
             : meta.modifiedAfter
-            ? '[modified since read — re-read if exact content needed]'
+            ? '[updated by your own edit — the edit result in TOOL_RESULTS is the current content; do not re-read]'
             : '[available — use cached content]';
           return `- ${path}  ${flags}`;
         }).join('\n')}\n\n`
         : '';
       const relevantOlder = selectRelevantOlderEvents(olderEvents, taskText, planSpec, 3);
+      const diagnosticsLog = buildAgentDiagnosticsLog(allEvents);
+      const expandedReadCap = Math.max(0, Number(getAgentExpandedReadChars()) || 0);
+      const expandedReadEvent = !diagnosticsLog && expandedReadCap > agentMaxToolOutputChars
+        ? [...allEvents].reverse().find((event) => {
+          const tool = String(event && event.tool ? event.tool : '').toLowerCase();
+          const path = normalizeWorkspacePath(event && event.path ? event.path : '');
+          const content = String(event && event.content ? event.content : '');
+          if (!event || !event.ok || tool !== 'read_file' || !path || !content) return false;
+          if (!/\.(?:js|mjs|cjs|ts|tsx|jsx|html|css|py|java|go|rs|rb|php|json|md)$/i.test(path)) return false;
+          return content.length > agentMaxToolOutputChars;
+        })
+        : null;
+      const expandedReadLog = expandedReadEvent
+        ? (() => {
+          const path = normalizeWorkspacePath(expandedReadEvent.path || '');
+          const content = String(expandedReadEvent.content || '');
+          const clipped = content.length > expandedReadCap
+            ? `${content.slice(0, expandedReadCap)}\n...[expanded read clipped at ${expandedReadCap} chars of ${content.length}]`
+            : content;
+          return `EXPANDED CURRENT READ CONTENT (use this instead of re-reading ${path}):\nFile: ${path}\n${clipped}\n\n`;
+        })()
+        : '';
       const relevantOlderLog = relevantOlder.length
         ? `RELEVANT EARLIER RESULTS (carried forward because they match this task — prefer these over re-reading):\n${relevantOlder.map((event, index) => {
           const observation = String(event && event.observation ? event.observation : '').slice(0, agentMaxToolOutputChars);
           return `EarlierResult ${index + 1}: ${String(event && event.tool ? event.tool : 'unknown')} ${String(event && event.path ? event.path : '')}\n${observation}`;
         }).join('\n\n')}\n\n`
         : '';
-      const toolLog = relevantOlderLog + inspectedNote + recentEvents.map((event, index) => {
+      const toolLog = diagnosticsLog + expandedReadLog + relevantOlderLog + inspectedNote + recentEvents.map((event, index) => {
         const observation = String(event && event.observation ? event.observation : '').slice(0, agentMaxToolOutputChars);
         return `ToolResult ${index + 1}: ${String(event && event.tool ? event.tool : 'unknown')}\n${observation}`;
       }).join('\n\n');
@@ -912,6 +1067,8 @@
       buildAgentPlanSpec,
       buildAgentDecisionPrompt,
       selectRelevantOlderEvents,
+      buildAgentDiagnosticsLog,
+      buildAgentProjectStateContext,
     };
   }
 

@@ -6,13 +6,16 @@
   "scripts": {
     "build:codemirror": "rollup -c rollup.codemirror.config.mjs",
     "test:preflight-router": "node scripts/preflight_router_test.js",
+    "test:chat-prompt-mode": "node scripts/chat_prompt_mode_test.js",
     "test:mode-priority": "node scripts/mode_priority_test.js",
     "test:agent-plan": "node scripts/agent_plan_classification_test.js",
     "test:agent-retry-context": "node scripts/agent_retry_context_test.js",
     "test:agent-fuzzy-edit": "node scripts/agent_fuzzy_edit_test.js",
     "test:agent-decision-parse": "node scripts/agent_decision_parse_test.js",
     "test:agent-checklist": "node scripts/agent_checklist_test.js",
-    "test:agent-const-reassign": "node scripts/agent_const_reassign_test.js"
+    "test:agent-const-reassign": "node scripts/agent_const_reassign_test.js",
+    "test:agent-planner-diagnostics": "node scripts/agent_planner_diagnostics_test.js",
+    "test:agent-grounding": "node scripts/agent_change_grounding_test.js"
   },
   "dependencies": {
     "@codemirror/commands": "^6.10.2",

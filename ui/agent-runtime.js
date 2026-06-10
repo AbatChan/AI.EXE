@@ -203,6 +203,172 @@
       ? deps.renderPromptTemplate
       : null;
 
+    // Bounded JSON-returning inference (remote -> external -> native) with a hard
+    // timeout. Used by the advisory verifiers; any failure resolves to null so the
+    // caller treats the check as skipped rather than blocking the run.
+    async function runBoundedAgentJsonInference(prompt, maxTokens, timeoutMs) {
+      const attempt = (async () => {
+        const remote = await deps.requestSelectedRemoteTextCompletion(prompt, maxTokens);
+        if (remote && remote.ok && String(remote.output || '').trim()) return String(remote.output || '');
+        const external = await requestExternalAgentPlanner(prompt, maxTokens, timeoutMs);
+        if (external && external.ok && String(external.output || '').trim()) return String(external.output || '');
+        if (!deps.nativeBridge.available()) return '';
+        const res = await deps.nativeBridge.invoke('infer', { prompt, maxTokens, max_tokens: maxTokens });
+        return res && res.ok ? String(res.output || '') : '';
+      })();
+      const raw = await Promise.race([
+        attempt,
+        new Promise((resolve) => setTimeout(() => resolve(''), timeoutMs)),
+      ]);
+      if (!raw) return null;
+      const start = raw.indexOf('{');
+      const end = raw.lastIndexOf('}');
+      if (start < 0 || end <= start) return null;
+      try {
+        return JSON.parse(raw.slice(start, end + 1));
+      } catch (_) {
+        return null;
+      }
+    }
+
+    // Single-hunk line diff (common prefix/suffix) — compact, mechanical evidence of
+    // what an edit actually changed, for grounding completion text and criteria checks.
+    function buildCompactLineDiff(before, after, maxChars = 1400) {
+      const a = String(before || '').split('\n');
+      const b = String(after || '').split('\n');
+      let start = 0;
+      while (start < a.length && start < b.length && a[start] === b[start]) start += 1;
+      let endA = a.length;
+      let endB = b.length;
+      while (endA > start && endB > start && a[endA - 1] === b[endB - 1]) {
+        endA -= 1;
+        endB -= 1;
+      }
+      const removed = a.slice(start, endA);
+      const added = b.slice(start, endB);
+      if (!removed.length && !added.length) {
+        return { text: '', removedCount: 0, addedCount: 0, startLine: start + 1 };
+      }
+      const lines = [];
+      removed.slice(0, 24).forEach((line) => lines.push(`- ${line}`));
+      if (removed.length > 24) lines.push(`- …(${removed.length - 24} more removed lines)`);
+      added.slice(0, 36).forEach((line) => lines.push(`+ ${line}`));
+      if (added.length > 36) lines.push(`+ …(${added.length - 36} more added lines)`);
+      let text = lines.join('\n');
+      if (text.length > maxChars) text = `${text.slice(0, maxChars)}\n…(diff clipped)`;
+      return { text, removedCount: removed.length, addedCount: added.length, startLine: start + 1 };
+    }
+
+    // The real modifications made this run, per file: baseline = content before the
+    // first touch, current = content after the last. Created files report size only.
+    function buildAgentChangeSummaries(toolEvents, maxFiles = 6) {
+      const byPath = new Map();
+      (Array.isArray(toolEvents) ? toolEvents : []).forEach((event) => {
+        if (!event || !event.ok) return;
+        const tool = String(event.tool || '').toLowerCase();
+        if (!['write_file', 'edit_file'].includes(tool)) return;
+        const path = deps.normalizeWorkspacePath(event.path || '');
+        if (!path || typeof event.content !== 'string' || !event.content) return;
+        const prior = byPath.get(path);
+        byPath.set(path, {
+          original: prior
+            ? prior.original
+            : (typeof event.originalContent === 'string' ? event.originalContent : null),
+          current: event.content,
+        });
+      });
+      const sections = [];
+      Array.from(byPath.entries()).slice(-maxFiles).forEach(([path, state]) => {
+        if (state.original == null || !String(state.original).trim()) {
+          const lineCount = String(state.current || '').split('\n').length;
+          sections.push(`Created ${path} (${lineCount} lines).`);
+          return;
+        }
+        const diff = buildCompactLineDiff(state.original, state.current);
+        if (!diff.text) {
+          sections.push(`Edited ${path} (no net content change).`);
+          return;
+        }
+        sections.push(`Edited ${path} (around line ${diff.startLine}, -${diff.removedCount}/+${diff.addedCount} lines):\n${diff.text}`);
+      });
+      return sections.join('\n\n');
+    }
+
+    // Model-judged finish audit: do the actual diffs satisfy the plan's done
+    // criteria? Replaces phrasing-keyword requirement gates with evidence-based
+    // judgment. Advisory by design — any infra failure means "skipped", never block.
+    async function verifyAgentDoneCriteria(taskText, toolEvents, planSpec) {
+      const criteria = (planSpec && Array.isArray(planSpec.doneCriteria) ? planSpec.doneCriteria : [])
+        .map((item) => String(item || '').trim())
+        .filter(Boolean)
+        .slice(0, 8);
+      const changes = buildAgentChangeSummaries(toolEvents);
+      if (!criteria.length || !changes) return { ok: true, skipped: true };
+      const prompt = [
+        'You are auditing whether the code changes below actually satisfy each done criterion.',
+        'Judge ONLY from the evidence in CHANGES — the real diffs applied this run.',
+        'Return EXACTLY one JSON object, nothing else: {"unmet":[{"criterion":"...","why":"..."}]}',
+        'Rules:',
+        '- List a criterion as unmet ONLY when the evidence clearly cannot produce the required outcome (no change addresses it, or the change targets something that cannot have the described effect).',
+        '- "why" is one short sentence citing the concrete evidence gap.',
+        '- When a change plausibly satisfies a criterion, count it as met — do not nitpick style or speculate beyond the diffs.',
+        '- If everything is addressed, return {"unmet":[]}.',
+        `TASK:\n${String(taskText || '').trim()}`,
+        `DONE_CRITERIA:\n- ${criteria.join('\n- ')}`,
+        `CHANGES:\n${changes}`,
+        'JSON:',
+      ].join('\n');
+      const parsed = await runBoundedAgentJsonInference(prompt, 360, 18000);
+      if (!parsed || !Array.isArray(parsed.unmet)) {
+        recordDebugTrace('agent_criteria_check', { status: 'skipped' }, { taskText, criteria });
+        return { ok: true, skipped: true };
+      }
+      const unmet = parsed.unmet
+        .map((item) => ({
+          criterion: String(item && item.criterion ? item.criterion : '').trim(),
+          why: String(item && item.why ? item.why : '').trim(),
+        }))
+        .filter((item) => item.criterion)
+        .slice(0, 4);
+      recordDebugTrace('agent_criteria_check', {
+        status: unmet.length ? 'unmet' : 'met',
+        unmetCount: String(unmet.length),
+      }, { taskText, criteria, unmet });
+      return { ok: unmet.length === 0, unmet };
+    }
+
+    // Model-driven cross-file review for the functional-incoherence class static
+    // checks can't express (unit mismatches, conflicting defaults, dead wiring).
+    // Advisory: returns short issue strings, never blocks.
+    async function reviewAgentProjectCoherence(fileContents, taskText) {
+      const entries = Object.entries(fileContents || {})
+        .filter(([path, content]) => /\.(html?|css|js|mjs|cjs|ts|jsx|tsx|json)$/i.test(path) && String(content || '').trim())
+        .slice(0, 4);
+      if (entries.length < 2) return [];
+      const filesBlock = entries
+        .map(([path, content]) => `FILE ${path}:\n${String(content).slice(0, 6000)}`)
+        .join('\n\n');
+      const prompt = [
+        'Review this small multi-file project for REAL cross-file functional defects that a syntax check cannot see.',
+        'The defect class: a control\'s HTML min/max/value disagreeing with the script default or the unit the script applies; the same setting initialized to different values in different files; styles or variables defined in one file but never driven by the file meant to drive them; a layout rule on an element that cannot affect the elements it is meant to arrange; script wiring that targets markup that does not exist.',
+        'Return EXACTLY one JSON object, nothing else: {"issues":["/file.ext: one concrete sentence", ...]}',
+        'Rules:',
+        '- At most 5 issues, ordered by user-visible impact.',
+        '- Only report defects you can point to in the provided code. No style opinions, no speculation.',
+        '- If nothing qualifies, return {"issues":[]}.',
+        taskText ? `TASK CONTEXT:\n${String(taskText).trim().slice(0, 600)}` : '',
+        `PROJECT FILES:\n${filesBlock}`,
+        'JSON:',
+      ].filter(Boolean).join('\n');
+      const parsed = await runBoundedAgentJsonInference(prompt, 320, 18000);
+      if (!parsed || !Array.isArray(parsed.issues)) return [];
+      const issues = parsed.issues.map((item) => String(item || '').trim()).filter(Boolean).slice(0, 5);
+      recordDebugTrace('agent_coherence_review', {
+        issueCount: String(issues.length),
+      }, { issues });
+      return issues;
+    }
+
     function buildAgentCompletionFallbackText(taskText, toolEvents, workspaceLabel) {
       const rows = Array.isArray(toolEvents) ? toolEvents.filter((item) => item && item.ok) : [];
       const writtenPaths = rows
@@ -241,6 +407,7 @@
         .filter(Boolean)
         .slice(-6);
       const deterministicCompletion = buildAgentCompletionFallbackText(taskText, toolEvents, workspaceLabel);
+      const changeSummaries = buildAgentChangeSummaries(toolEvents);
       const readResults = rows
         .filter((item) => String(item.tool || '').toLowerCase() === 'read_file')
         .slice(-2)
@@ -257,10 +424,12 @@
         'Mention changed files when they help the user understand what happened.',
         'For multi-file app work, short bullets are allowed.',
         'Keep it concise and specific to the actual work. Prefer under 120 words.',
+        'CHANGES below lists the only real modifications made this run. Describe an outcome ONLY if those diffs actually implement it; if part of the request has no supporting change there, say plainly that it was not changed.',
         `Workspace name: ${workspaceLabel || deps.deriveProjectNameFromTask(taskText) || 'project'}`,
         `Task: ${String(taskText || '').trim()}`,
         planSpec && planSpec.summary ? `Plan summary: ${planSpec.summary}` : '',
         writtenPaths.length ? `Written files: ${Array.from(new Set(writtenPaths)).slice(0, 6).join(', ')}` : '',
+        changeSummaries ? `CHANGES:\n${changeSummaries}` : '',
         readResults ? `READ_RESULTS:\n${readResults}` : '',
         'Completion message:',
       ].filter(Boolean).join('\n');
@@ -271,7 +440,10 @@
             WORKSPACE_NAME: workspaceLabel || deps.deriveProjectNameFromTask(taskText) || 'project',
             TASK: String(taskText || '').trim(),
             PLAN_SUMMARY: planSpec && planSpec.summary ? planSpec.summary : '',
-            WRITTEN_FILES: writtenPaths.length ? Array.from(new Set(writtenPaths)).slice(0, 6).join(', ') : '',
+            WRITTEN_FILES: writtenPaths.length
+              ? Array.from(new Set(writtenPaths)).slice(0, 6).join(', ')
+              : '(none — NO files were created or modified this run)',
+            CHANGES: changeSummaries || '(none — nothing was changed)',
             READ_RESULTS: readResults || '(none)',
           });
         }
@@ -337,6 +509,10 @@
       generateAgentCompletionText,
       buildAgentProgressMarkdown,
       describeAgentToolTarget,
+      buildCompactLineDiff,
+      buildAgentChangeSummaries,
+      verifyAgentDoneCriteria,
+      reviewAgentProjectCoherence,
     };
   }
 

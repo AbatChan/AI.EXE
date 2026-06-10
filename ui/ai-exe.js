@@ -874,9 +874,62 @@ const MODEL_CONTEXT_WINDOWS = {
 function getModelContextWindow() {
   try { return Number(MODEL_CONTEXT_WINDOWS[getSelectedInferenceProvider()]) || 0; } catch (_) { return 0; }
 }
+// Agent-run inference accounting for the token ring; depth guard prevents
+// double-counting nested calls.
+let agentInferenceDepth = 0;
+let agentLiveInferencePromptChars = 0;
+let agentLastInferenceChars = 0;
+let agentRunInferenceChars = 0;
+// Survives across runs: "last run" stays readable in the tooltip after a run
+// ends (it used to be wiped at stop, so the counter looked like it lost the
+// run), and the session total keeps accumulating.
+let agentSessionInferenceChars = 0;
+function resetAgentInferenceTokenStats() {
+  agentInferenceDepth = 0;
+  agentLiveInferencePromptChars = 0;
+  agentLastInferenceChars = 0;
+  agentRunInferenceChars = 0;
+}
+function noteAgentInferenceStart(promptChars) {
+  if (!isAgentElapsedTimerActive()) return;
+  agentInferenceDepth += 1;
+  if (agentInferenceDepth > 1) return;
+  agentLiveInferencePromptChars = Number(promptChars) || 0;
+  agentLastInferenceChars = agentLiveInferencePromptChars;
+  agentRunInferenceChars += agentLiveInferencePromptChars;
+  agentSessionInferenceChars += agentLiveInferencePromptChars;
+  updateTokenRing();
+}
+function noteAgentInferenceEnd(outputChars) {
+  if (agentInferenceDepth <= 0) return;
+  agentInferenceDepth -= 1;
+  if (agentInferenceDepth > 0) return;
+  const out = Number(outputChars) || 0;
+  agentLastInferenceChars = agentLiveInferencePromptChars + out;
+  agentRunInferenceChars += out;
+  agentSessionInferenceChars += out;
+  if (typeof recordDebugTrace === 'function') {
+    recordDebugTrace('agent_inference_usage', {
+      promptChars: String(agentLiveInferencePromptChars),
+      outputChars: String(out),
+      approxCallTokens: String(Math.round(agentLastInferenceChars / 4)),
+      approxRunTokens: String(Math.round(agentRunInferenceChars / 4)),
+    }, {
+      promptChars: agentLiveInferencePromptChars,
+      outputChars: out,
+      runChars: agentRunInferenceChars,
+    });
+  }
+  agentLiveInferencePromptChars = 0;
+  updateTokenRing();
+}
 // Estimated tokens of the active chat's context (all messages + the in-flight stream
 // + what's typed), ~4 chars/token. Real-time numerator for the token ring.
 function getActiveChatTokenEstimate() {
+  if (isAgentElapsedTimerActive() && agentLastInferenceChars > 0
+    && typeof isViewingAgentRunChat === 'function' && isViewingAgentRunChat()) {
+    return Math.round(agentLastInferenceChars / 4);
+  }
   let chars = 0;
   try {
     const chat = getActiveChat();
@@ -901,12 +954,23 @@ function updateTokenRing() {
   ring.classList.toggle('full', ctx > 0 && pct >= 0.98);
   const denom = ctx > 0 ? formatTokenCount(ctx) : '∞';
   const pctLabel = ctx > 0 ? ` (${Math.round(pct * 100)}%)` : '';
-  const label = `${formatTokenCount(tokens)} / ${denom} tokens${pctLabel}`;
+  let label = `${formatTokenCount(tokens)} / ${denom} tokens${pctLabel}`;
+  if (agentRunInferenceChars > 0 && typeof isViewingAgentRunChat === 'function' && isViewingAgentRunChat()) {
+    label += isAgentElapsedTimerActive()
+      ? ` · run ≈${formatTokenCount(Math.round(agentRunInferenceChars / 4))} tok`
+      : ` · last agent run ≈${formatTokenCount(Math.round(agentRunInferenceChars / 4))} tok`;
+  }
+  if (agentSessionInferenceChars > agentRunInferenceChars) {
+    label += ` · session ≈${formatTokenCount(Math.round(agentSessionInferenceChars / 4))} tok`;
+  }
   // Use the app's custom tooltip system (global delegation on .ui-tooltip-anchor[data-tooltip]).
   ring.classList.add('ui-tooltip-anchor');
   ring.dataset.tooltip = label;
   ring.setAttribute('aria-label', label);
   if (ring.hasAttribute('title')) ring.removeAttribute('title');
+  if (activeTooltipTarget === ring) {
+    updateGlobalTooltipPosition(ring);
+  }
   if (window.AI_EXE_DEBUG_TOKENS) console.log('[token-ring]', label, { tokens, ctx, pct });
 }
 let activeStreamRow = null;
@@ -2142,7 +2206,7 @@ function focusInlineMessageEditor(chatId, messageTs) {
 }
 
 function enterMessageEditMode(chatId, messageTs) {
-  if (pendingInferenceCount > 0) return;
+  if (pendingInferenceCount > 0 && isCurrentViewInferenceChat()) return;
   const chat = findChatById(chatId);
   if (!chat || !Array.isArray(chat.messages)) return;
   const target = chat.messages.find((msg) => msg && msg.role === 'user' && Number(msg.ts) === Number(messageTs));
@@ -2185,7 +2249,12 @@ function editUserMessage(chatId, messageTs) {
 }
 
 function saveEditedUserMessage(chatId, messageTs, nextText) {
-  if (pendingInferenceCount > 0) return;
+  if (pendingInferenceCount > 0) {
+    if (typeof showComposerNotice === 'function' && !isCurrentViewInferenceChat()) {
+      showComposerNotice('Another chat is still responding — wait for it to finish before editing.');
+    }
+    return;
+  }
   maybeStopDictationForSend();
   if (!ensureSignedIn()) return;
   const chat = findChatById(chatId);
@@ -2282,7 +2351,12 @@ function removeArtifactsForChatAfter(chatId, minMessageTs) {
 }
 
 function retryAssistantMessage(chatId, messageTs) {
-  if (pendingInferenceCount > 0) return;
+  if (pendingInferenceCount > 0) {
+    if (typeof showComposerNotice === 'function' && !isCurrentViewInferenceChat()) {
+      showComposerNotice('Another chat is still responding — wait for it to finish before retrying.');
+    }
+    return;
+  }
   maybeStopDictationForSend();
   if (!ensureSignedIn()) return;
   const chat = findChatById(chatId);
@@ -2457,11 +2531,32 @@ function setThinkingStatus(text) {
   thinkingStatus.classList.toggle('active', Boolean(clean));
 }
 
-function startAgentElapsedTimer(startedAtMs = 0) {
+// Chat that owns the current/last agent run. The timer text and the run token
+// stats are scoped to it so other chats aren't painted with a foreign run's UI.
+let agentRunChatId = '';
+function isViewingAgentRunChat() {
+  return !agentRunChatId || String(activeChatId || '') === agentRunChatId;
+}
+// On chat switch: clear a foreign run's "Xs" status from the composer, or
+// repaint it immediately when returning to the running chat.
+function syncAgentElapsedStatusForActiveChat() {
+  if (!agentElapsedInterval) return;
+  if (!isViewingAgentRunChat()) {
+    setThinkingStatus('');
+  } else if (agentElapsedStartedAt) {
+    setThinkingStatus(`${((Date.now() - agentElapsedStartedAt) / 1000).toFixed(1)}s`);
+  }
+}
+function startAgentElapsedTimer(startedAtMs = 0, chatId = '') {
   stopAgentElapsedTimer();
+  resetAgentInferenceTokenStats();
+  agentRunChatId = String(chatId || activeChatId || '');
   agentElapsedStartedAt = Number(startedAtMs) || Date.now();
   const tick = () => {
     if (!agentElapsedStartedAt) return;
+    // Only the owning chat shows the live timer; never blank here so transient
+    // composer notices in other chats aren't overwritten every 200ms.
+    if (!isViewingAgentRunChat()) return;
     const elapsed = ((Date.now() - agentElapsedStartedAt) / 1000).toFixed(1);
     setThinkingStatus(`${elapsed}s`);
   };
@@ -2475,6 +2570,12 @@ function stopAgentElapsedTimer() {
     agentElapsedInterval = null;
   }
   agentElapsedStartedAt = 0;
+  // Keep agentRunInferenceChars as the readable "last run" total; it resets on
+  // the next run start. Only the in-flight call state is cleared here.
+  agentInferenceDepth = 0;
+  agentLiveInferencePromptChars = 0;
+  agentLastInferenceChars = 0;
+  updateTokenRing();
   setThinkingStatus('');
 }
 
@@ -3453,7 +3554,7 @@ async function parseAttachmentFile(file) {
 }
 
 function openAttachPicker() {
-  if (pendingInferenceCount > 0) return;
+  if (pendingInferenceCount > 0 && isCurrentViewInferenceChat()) return;
   if (!ensureSignedIn()) return;
   if (attachFileInput) {
     attachFileInput.accept = attachAcceptTypes;
@@ -3522,7 +3623,7 @@ async function handleAttachSelection(fileList) {
 }
 
 function editManualContext() {
-  if (pendingInferenceCount > 0) return;
+  if (pendingInferenceCount > 0 && isCurrentViewInferenceChat()) return;
   if (!ensureSignedIn()) return;
   openUrlContextModal('manual');
 }
@@ -4189,7 +4290,7 @@ function buildPromptWithInputAugments(basePrompt) {
 }
 
 function toggleCanvasMode() {
-  if (pendingInferenceCount > 0) return;
+  if (pendingInferenceCount > 0 && isCurrentViewInferenceChat()) return;
   setCanvasMode(!canvasModeEnabled);
 }
 
@@ -4595,6 +4696,19 @@ function getAgentFileOutputBudget() {
   return agentFileOutputCeilings[provider] || agentFileContentMaxTokens;
 }
 
+// Window-driven for every provider. Local gets a lower cap for prefill speed;
+// unknown models (e.g. custom HF) default conservatively since the window is unconfirmed.
+function getAgentExpandedReadChars() {
+  const provider = getSelectedInferenceProvider();
+  const ctx = getModelContextWindow();
+  if (provider === 'local') {
+    const localCtx = ctx > 0 ? ctx : 32768;
+    return Math.max(agentMaxToolOutputChars, Math.min(24000, Math.floor(localCtx * 0.75)));
+  }
+  if (ctx <= 0) return Math.max(agentMaxToolOutputChars, 16000);
+  return Math.max(agentMaxToolOutputChars, Math.min(60000, Math.floor(ctx * 1.4)));
+}
+
 // History/context char budget for assembling a chat prompt. The local GGUF runs at
 // ~8192 tokens and token-dense content (JSON/code ≈ 2–2.5 chars/token) can overflow
 // even a generous char budget — so keep the local prompt well under the window to
@@ -4772,6 +4886,44 @@ function getOpenAiCompatibleAuthHeader(provider, apiKey, endpointUrl = '') {
     return `Api-Key ${token}`;
   }
   return `Bearer ${token}`;
+}
+
+// Map raw provider HTTP errors to plain-language messages; raw detail stays in
+// the debug trace via the generic branch only.
+function humanizeProviderErrorMessage(label, status, rawBody = '') {
+  const name = String(label || 'The AI provider').replace(/\s*Test$/i, '').trim() || 'The AI provider';
+  let detail = String(rawBody || '').trim();
+  try {
+    const parsed = JSON.parse(detail);
+    const inner = parsed && (parsed.error || parsed.message);
+    detail = String((inner && (inner.message || inner)) || detail);
+  } catch (_) { }
+  detail = detail.replace(/\s+/g, ' ').slice(0, 220);
+  const code = Number(status) || 0;
+  const lower = detail.toLowerCase();
+  if (code === 402 || /credit|quota exceeded|billing|payment required|subscribe to pro/.test(lower)) {
+    return `${name} says this account is out of credits. Top up the account (or switch the provider/model in Settings), then try again.`;
+  }
+  if (code === 401 || code === 403) {
+    return `${name} rejected the API key. Open Settings and check the ${name} key.`;
+  }
+  if (code === 404 || /model.{0,20}(not found|does not exist|not supported)/.test(lower)) {
+    return `${name} doesn't recognize the selected model. Pick a different model in Settings.`;
+  }
+  if (code === 429) {
+    return `${name} is rate-limiting requests right now. Wait a moment and try again.`;
+  }
+  if (code >= 500) {
+    return `${name} is having a temporary problem on its side (${code}). Try again in a bit.`;
+  }
+  return `${name} couldn't complete the request${code ? ` (${code})` : ''}${detail ? ` — ${detail}` : ''}. Try again, or switch the provider/model in Settings.`;
+}
+
+function humanizeAssistantErrorText(text) {
+  const value = String(text || '');
+  const match = value.match(/^(.+?) request failed \((\d{3})\):\s*([\s\S]*)$/);
+  if (match) return humanizeProviderErrorMessage(match[1], Number(match[2]), match[3]);
+  return value;
 }
 
 // DeepSeek V4 defaults to thinking mode (slow, stalls big generations). Disable it
@@ -5189,59 +5341,61 @@ function setButtonLoading(btn, loading) {
   delete btn.dataset.prevDisabled;
 }
 
-function setSendLoading(loading) {
+// Cancel-mode and composer lockout apply only in the chat that owns the run
+// (loadingHere); Continue stays globally gated.
+function setSendLoading(loading, loadingHere = loading) {
   if (!sendBtn) return;
-  sendBtn.classList.toggle('loading', loading);
-  sendBtn.classList.toggle('cancel-mode', loading);
-  sendBtn.title = loading ? 'Stop generation' : 'Send';
-  sendBtn.setAttribute('aria-label', loading ? 'Stop generation' : 'Send message');
+  sendBtn.classList.toggle('loading', loadingHere);
+  sendBtn.classList.toggle('cancel-mode', loadingHere);
+  sendBtn.title = loadingHere ? 'Stop generation' : (loading ? 'Another chat is still responding' : 'Send');
+  sendBtn.setAttribute('aria-label', loadingHere ? 'Stop generation' : 'Send message');
   sendBtn.disabled = false;
   if (continueBtn) {
     continueBtn.disabled = loading;
   }
   if (canvasBtn) {
-    canvasBtn.disabled = loading;
+    canvasBtn.disabled = loadingHere;
   }
   if (attachBtn) {
-    attachBtn.disabled = loading;
+    attachBtn.disabled = loadingHere;
   }
   if (agentBtn) {
-    agentBtn.disabled = loading;
+    agentBtn.disabled = loadingHere;
   }
   if (thinkBtn) {
-    thinkBtn.disabled = loading;
+    thinkBtn.disabled = loadingHere;
   }
   if (contextBtn) {
-    contextBtn.disabled = loading;
+    contextBtn.disabled = loadingHere;
   }
   if (composerPlusBtn) {
-    composerPlusBtn.disabled = loading;
+    composerPlusBtn.disabled = loadingHere;
   }
   if (menuCanvasBtn) {
-    menuCanvasBtn.disabled = loading;
+    menuCanvasBtn.disabled = loadingHere;
   }
   if (menuAttachBtn) {
-    menuAttachBtn.disabled = loading;
+    menuAttachBtn.disabled = loadingHere;
   }
   if (menuAgentBtn) {
-    menuAgentBtn.disabled = loading;
+    menuAgentBtn.disabled = loadingHere;
   }
   if (menuThinkBtn) {
-    menuThinkBtn.disabled = loading;
+    menuThinkBtn.disabled = loadingHere;
   }
   if (menuContextBtn) {
-    menuContextBtn.disabled = loading;
+    menuContextBtn.disabled = loadingHere;
   }
   if (micBtn) {
-    micBtn.disabled = loading;
+    micBtn.disabled = loadingHere;
   }
   if (dictationCancelBtn) {
-    dictationCancelBtn.disabled = loading;
+    dictationCancelBtn.disabled = loadingHere;
   }
   if (dictationApplyBtn) {
-    dictationApplyBtn.disabled = loading;
+    dictationApplyBtn.disabled = loadingHere;
   }
-  if (loading && composerMenuOpen) {
+  if (loadingHere && composerMenuOpen) {
     setComposerMenuOpen(false);
   }
   updateContinueButtonVisibility();
@@ -5254,6 +5408,11 @@ function isCurrentViewInferenceChat() {
     if (!requestChatId) return false;
     return Boolean(!inNewChatMode && middleViewMode === 'chat' && activeChatId === requestChatId);
   }
+  // Between agent inference calls there is no live token — use the run owner so
+  // a different chat being viewed is not mistaken for the running one.
+  if (pendingInferenceCount > 0 && isAgentElapsedTimerActive() && agentRunChatId) {
+    return Boolean(!inNewChatMode && middleViewMode === 'chat' && String(activeChatId || '') === agentRunChatId);
+  }
   // Pre-stream window: request is counted, token may not be attached yet.
   return Boolean(pendingInferenceCount > 0 && !inNewChatMode && middleViewMode === 'chat' && activeChatId);
 }
@@ -5265,9 +5424,7 @@ function syncLiveInferenceUiState() {
 
   const operationRunning = Boolean(pendingInferenceCount > 0);
   const loadingHere = Boolean(operationRunning && isCurrentViewInferenceChat());
-  // The send button is global and there is only one active operation at a time,
-  // so keep it in cancel mode for the whole duration of the request.
-  setSendLoading(operationRunning);
+  setSendLoading(operationRunning, loadingHere);
   renderHistory();
 
   const hasTyping = Boolean(document.getElementById('typingIndicator'));
@@ -5312,6 +5469,7 @@ function endInferenceRequest() {
   syncLiveInferenceUiState();
   if (pendingInferenceCount === 0) {
     notifyInferenceIdle();
+    if (queuedSends.length) window.setTimeout(dispatchNextQueuedSend, 50);
   }
   if (pendingInferenceCount === 0 && !activeStreamRow) {
     clearTypingIndicator();
@@ -5654,7 +5812,8 @@ async function streamOpenAiCompatibleChatCompletion(provider, prompt, handlers =
   if (maxTokens > 0) {
     req.max_tokens = maxTokens;
   }
-  applyDeepseekThinkingOff(provider, req);
+  // Think mode keeps the model's native reasoning on; otherwise off for speed.
+  if (!options.thinkActive) applyDeepseekThinkingOff(provider, req);
   if (typeof handlers.onStart === 'function') {
     handlers.onStart(`${provider}_${Date.now()}`);
   }
@@ -5670,17 +5829,17 @@ async function streamOpenAiCompatibleChatCompletion(provider, prompt, handlers =
     });
     if (!response.ok) {
       const body = await response.text().catch(() => '');
-      let message = `${def.label} request failed (${response.status}): ${body || response.statusText || 'unknown error'}`;
+      let message = humanizeProviderErrorMessage(def.label, response.status, body || response.statusText || '');
       try {
         const parsed = JSON.parse(body || '{}');
         const code = String(parsed && parsed.error && parsed.error.code ? parsed.error.code : '').trim();
-        const apiMessage = String(parsed && parsed.error && parsed.error.message ? parsed.error.message : '').trim();
         if (code === 'model_not_supported') {
-          message = `${def.label} model is not currently available through your enabled Hugging Face providers. Choose a supported preset or use a local model.${apiMessage ? ` Details: ${apiMessage}` : ''}`;
+          message = `${def.label} model is not currently available through your enabled Hugging Face providers. Choose a supported preset or use a local model.`;
         }
       } catch (_) { }
       return {
         ok: false,
+        httpStatus: response.status,
         message,
       };
     }
@@ -5688,6 +5847,7 @@ async function streamOpenAiCompatibleChatCompletion(provider, prompt, handlers =
       return { ok: false, message: `${def.label} response body is empty.` };
     }
     let output = '';
+    let reasoningOpen = false;
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
@@ -5710,12 +5870,23 @@ async function streamOpenAiCompatibleChatCompletion(provider, prompt, handlers =
           } catch (_) {
             continue;
           }
-          const delta = parsed
-            && Array.isArray(parsed.choices)
-            && parsed.choices[0]
-            && parsed.choices[0].delta
-            && typeof parsed.choices[0].delta.content === 'string'
-            ? parsed.choices[0].delta.content
+          const deltaObj = parsed && Array.isArray(parsed.choices) && parsed.choices[0]
+            ? parsed.choices[0].delta
+            : null;
+          // Native reasoning (deepseek-reasoner etc.) arrives in reasoning_content;
+          // wrap it as <thinking> so the existing Thoughts UI renders it.
+          const reasoningDelta = deltaObj && typeof deltaObj.reasoning_content === 'string'
+            ? deltaObj.reasoning_content
+            : '';
+          if (reasoningDelta) {
+            const wrapped = `${reasoningOpen ? '' : '<thinking>'}${reasoningDelta}`;
+            reasoningOpen = true;
+            output += wrapped;
+            if (typeof handlers.onDelta === 'function') handlers.onDelta(wrapped);
+            continue;
+          }
+          const delta = deltaObj && typeof deltaObj.content === 'string'
+            ? deltaObj.content
             : parsed
               && Array.isArray(parsed.choices)
               && parsed.choices[0]
@@ -5724,12 +5895,18 @@ async function streamOpenAiCompatibleChatCompletion(provider, prompt, handlers =
               ? parsed.choices[0].message.content
             : '';
           if (!delta) continue;
-          output += delta;
+          const closing = reasoningOpen ? '</thinking>' : '';
+          reasoningOpen = false;
+          output += closing + delta;
           if (typeof handlers.onDelta === 'function') {
-            handlers.onDelta(delta);
+            handlers.onDelta(closing + delta);
           }
         }
       }
+    }
+    if (reasoningOpen) {
+      output += '</thinking>';
+      if (typeof handlers.onDelta === 'function') handlers.onDelta('</thinking>');
     }
     if (!output.trim()) {
       return { ok: false, message: `${def.label} streamed response was empty.` };
@@ -5801,7 +5978,8 @@ async function streamAnthropicChatCompletion(prompt, handlers = {}, options = {}
       const body = await response.text().catch(() => '');
       return {
         ok: false,
-        message: `${def.label} request failed (${response.status}): ${body || response.statusText || 'unknown error'}`,
+        httpStatus: response.status,
+        message: humanizeProviderErrorMessage(def.label, response.status, body || response.statusText || ''),
       };
     }
     if (!response.body) {
@@ -5944,10 +6122,11 @@ async function requestOpenAiCompatibleTextCompletion(provider, prompt, maxTokens
       const status = response.status;
       const errBody = await response.json().catch(() => null);
       const errMsg = errBody && errBody.error && (errBody.error.message || errBody.error.code);
-      if (status === 401 || status === 403) return { ok: false, httpStatus: status, message: `API key invalid or unauthorized (${status})` };
-      if (status === 402) return { ok: false, httpStatus: status, message: 'Insufficient API credits — please top up your account.' };
-      if (status === 429) return { ok: false, httpStatus: status, message: `Rate limit exceeded${errMsg ? ': ' + errMsg : ''}. Will retry.` };
-      return { ok: false, httpStatus: status, message: errMsg ? String(errMsg) : `API error (${status})` };
+      return {
+        ok: false,
+        httpStatus: status,
+        message: humanizeProviderErrorMessage(def && def.label, status, errMsg ? String(errMsg) : ''),
+      };
     }
     const payload = await response.json().catch(() => null);
     const msg = payload && Array.isArray(payload.choices) && payload.choices[0] && payload.choices[0].message;
@@ -6000,7 +6179,14 @@ async function requestAnthropicTextCompletion(prompt, maxTokens) {
 }
 
 async function requestSelectedRemoteTextCompletion(prompt, maxTokens, systemPrompt = '') {
-  return requestRemoteTextCompletionForCapability('agent.writeFile', prompt, maxTokens, { systemPrompt });
+  noteAgentInferenceStart(String(prompt || '').length + String(systemPrompt || '').length);
+  let result = null;
+  try {
+    result = await requestRemoteTextCompletionForCapability('agent.writeFile', prompt, maxTokens, { systemPrompt });
+  } finally {
+    noteAgentInferenceEnd(result && result.ok ? String(result.output || '').length : 0);
+  }
+  return result;
 }
 
 async function requestRemoteTextCompletionForCapability(capability, prompt, maxTokens, options = {}) {
@@ -6042,15 +6228,12 @@ function normalizeReplyModeDecision(text) {
   return '';
 }
 
-function inferReplyModeDeterministically(latestUserMessage) {
-  const lower = String(latestUserMessage || '').toLowerCase();
-  const asksForArtifact = /\b(write|draft|create|make|build|generate|design|compose|produce|prepare)\b/.test(lower);
-  const artifactNoun = /\b(document|doc|essay|story|article|report|plan|proposal|email|letter|script|code|website|site|page|app|component|landing page|readme|guide|checklist|template|table|canvas)\b/.test(lower);
-  const shortFollowUp = /\b(explain|why|how|what|where|when|who|can you|could you|is it|does it|do you|tell me|summarize|review|fix this|change that|continue|yes|no|ok|okay|thanks|thank you)\b/.test(lower);
-  if (asksForArtifact && artifactNoun && !shortFollowUp) {
-    return 'canvas';
-  }
-  return 'chat';
+function inferReplyModeDeterministically() {
+  // No keyword guessing (phrasing-dependent and brittle). The model router is
+  // primary; when no model judgment is available, trust the user's explicit
+  // Canvas toggle — the canvas prompt already lets the model answer
+  // conversationally when the message is really a follow-up.
+  return 'canvas';
 }
 
 function normalizePreflightRouteDecision(rawDecision = {}) {
@@ -6683,10 +6866,10 @@ async function requestReplyModeDecision(chatId, latestUserMessage) {
   const prompt = [
     'Decide the response mode for the next assistant turn.',
     'Return exactly one word: CANVAS or CHAT.',
-    'Canvas mode is enabled by the user in the app UI, so canvas is allowed but not mandatory.',
-    'Choose CANVAS only when the user is asking for a substantial standalone deliverable that should live as an artifact, document, code block, or structured canvas output.',
-    'Choose CHAT for conversational replies, short follow-ups, verification, clarification, correction, explanation, or discussion about existing content.',
-    'Prefer CHAT unless a new artifact-like deliverable is clearly needed.',
+    'The user enabled Canvas mode in the app UI, so they EXPECT deliverables as canvas artifacts.',
+    'Choose CANVAS whenever the user asks you to write, create, draft, or produce content of any kind (story, document, essay, code, plan, email, poem, list, etc.), including with typos.',
+    'Choose CHAT only for conversation: greetings, questions, verification, clarification, or discussion about existing content.',
+    'When in doubt about a request that produces new content, choose CANVAS.',
     '',
     'RECENT_CHAT:',
     history || '(none)',
@@ -6715,8 +6898,23 @@ async function requestReplyModeDecision(chatId, latestUserMessage) {
   return deterministic;
 }
 
+// Transient note in the composer status slot (the agent timer never paints over
+// other chats, so this stays readable there).
+let composerNoticeTimer = 0;
+function showComposerNotice(text, ms = 4000) {
+  const note = String(text || '').trim();
+  if (!note) return;
+  setThinkingStatus(note);
+  if (composerNoticeTimer) clearTimeout(composerNoticeTimer);
+  composerNoticeTimer = window.setTimeout(() => {
+    composerNoticeTimer = 0;
+    if (thinkingStatus && thinkingStatus.textContent === note) setThinkingStatus('');
+  }, ms);
+}
+
 function handleSendButtonClick() {
-  if (pendingInferenceCount > 0) {
+  // Stop only the run the user is looking at; sends from other chats queue.
+  if (pendingInferenceCount > 0 && isCurrentViewInferenceChat()) {
     cancelActiveInference();
     return;
   }
@@ -6972,6 +7170,91 @@ function updateAssistantAgentMeta(chatId, messageTs, updater, options = {}) {
       renderActiveChat();
     }
   }
+  return true;
+}
+
+// Workspace events (reverts/re-applies) surfaced to the agent's next run.
+function appendAgentWorkspaceNote(chatId, text) {
+  const chat = findChatById(chatId);
+  const note = String(text || '').trim();
+  if (!chat || !note) return;
+  if (!Array.isArray(chat.agentWorkspaceNotes)) chat.agentWorkspaceNotes = [];
+  chat.agentWorkspaceNotes.push({ ts: nowTs(), text: note });
+  if (chat.agentWorkspaceNotes.length > 8) chat.agentWorkspaceNotes = chat.agentWorkspaceNotes.slice(-8);
+  saveChats();
+}
+
+function getAgentWorkspaceNotesText(chatId) {
+  const chat = findChatById(chatId);
+  const notes = chat && Array.isArray(chat.agentWorkspaceNotes) ? chat.agentWorkspaceNotes.slice(-4) : [];
+  if (!notes.length) return '';
+  return `WORKSPACE EVENTS (authoritative — the current files on disk already reflect these):\n${notes.map((note) => `- ${note.text}`).join('\n')}`;
+}
+
+// Revert (or re-apply) every file change a completed agent response made.
+// Reverting restores each touched file's pre-run snapshot (created files are
+// trashed) after capturing the current contents so the action is reversible.
+async function revertAgentMessageEdits(chatId, messageTs) {
+  const message = findChatMessage(chatId, messageTs, 'ai');
+  const meta = message && message.agentMeta;
+  const revert = meta && meta.revert;
+  if (!revert || !Array.isArray(revert.files) || !revert.files.length) return false;
+  const reverting = meta.reverted !== true;
+  const touched = [];
+  if (reverting) {
+    const restored = [];
+    for (const file of revert.files) {
+      try {
+        const res = await invokeWorkspaceAction('workspaceReadFile', { path: file.path });
+        if (res && res.ok) restored.push({ path: file.path, existedBefore: true, content: String(res.output || '') });
+      } catch (_) { }
+    }
+    for (const file of revert.files) {
+      try {
+        if (file.existedBefore) {
+          const res = await invokeWorkspaceAction('workspaceWriteFile', { path: file.path, content: file.content });
+          if (res && res.ok) {
+            touched.push(file.path);
+            syncFileTabFromWorkspaceWrite(file.path, file.content, workspaceBaseName(file.path));
+          }
+        } else {
+          const res = await invokeWorkspaceAction('workspaceTrash', { path: file.path });
+          if (res && res.ok) {
+            touched.push(file.path);
+            if (typeof removeWorkspaceTab === 'function') removeWorkspaceTab(file.path);
+          }
+        }
+      } catch (_) { }
+    }
+    updateAssistantAgentMeta(chatId, messageTs, (current) => ({
+      ...(current || {}),
+      revert: { ...revert, restored },
+      reverted: true,
+    }));
+    appendAgentWorkspaceNote(chatId, `The user REVERTED all edits from the assistant response at ${new Date(messageTs).toLocaleString()} — these files were restored to their pre-response state: ${(touched.length ? touched : revert.files.map((file) => file.path)).join(', ')}. Treat the current file contents as the source of truth; do not re-apply those edits unless explicitly asked.`);
+  } else {
+    for (const file of (revert.restored || [])) {
+      try {
+        const res = await invokeWorkspaceAction('workspaceWriteFile', { path: file.path, content: file.content });
+        if (res && res.ok) {
+          touched.push(file.path);
+          syncFileTabFromWorkspaceWrite(file.path, file.content, workspaceBaseName(file.path));
+        }
+      } catch (_) { }
+    }
+    updateAssistantAgentMeta(chatId, messageTs, (current) => ({
+      ...(current || {}),
+      reverted: false,
+    }));
+    appendAgentWorkspaceNote(chatId, `The user RE-APPLIED the previously reverted edits from the assistant response at ${new Date(messageTs).toLocaleString()} (files: ${touched.join(', ')}).`);
+  }
+  recordDebugTrace('agent_edits_reverted', {
+    chatId: String(chatId || ''),
+    messageTs: String(messageTs),
+    mode: reverting ? 'revert' : 'restore',
+    files: String(touched.length),
+  }, { chatId, messageTs, mode: reverting ? 'revert' : 'restore', files: touched });
+  await refreshWorkspaceTree(true);
   return true;
 }
 
@@ -7691,7 +7974,12 @@ function commitAssistantMessage(chatId, text, rawTextForArtifacts = '', options 
   const sourceForArtifacts = String(rawTextForArtifacts || text || '');
   const thinkingState = buildThinkingState(sourceForArtifacts);
   const parsed = extractCanvasBlocksFromReply(sourceForArtifacts);
-  if (canvasModeEnabled && parsed.payloads.length === 0) {
+  // Only canvas-wrap plain text when this turn actually resolved to canvas;
+  // a turn soft-routed to chat must display as chat.
+  const canvasWrapAllowed = typeof options.canvasModeResolved === 'boolean'
+    ? options.canvasModeResolved
+    : canvasModeEnabled;
+  if (canvasWrapAllowed && parsed.payloads.length === 0) {
     const fallbackBody = String(parsed.displayText || text || '').trim();
     if (fallbackBody) {
       parsed.payloads.push({
@@ -8181,6 +8469,7 @@ const chatRenderer = window.AIExeChatRenderer && typeof window.AIExeChatRenderer
     getWorkspaceNodeState,
     renderArtifacts: (...args) => renderArtifacts(...args),
     updateAssistantAgentMeta,
+    revertAgentMessageEdits,
     renderMarkdownHtml,
     attachCodeCopyButtons,
     getArtifactsForMessage,
@@ -8304,6 +8593,7 @@ const promptCore = window.AIExePromptCore && typeof window.AIExePromptCore.creat
     normalizeUsername,
     isCanvasModeEnabled: () => canvasModeEnabled,
     isThinkModeEnabled: () => thinkModeEnabled,
+    isAgentModeEnabled: () => developerAgentEnabled,
     shouldInlineNameChatResponse,
   })
   : null;
@@ -8696,6 +8986,17 @@ async function requestNativeAgentPlannerInference(prompt, maxTokens, grammar = '
 }
 
 async function requestAgentPlannerInference(prompt, maxTokens, grammar = '', systemPrompt = '') {
+  noteAgentInferenceStart(String(prompt || '').length + String(systemPrompt || '').length);
+  let result = null;
+  try {
+    result = await requestAgentPlannerInferenceInner(prompt, maxTokens, grammar, systemPrompt);
+  } finally {
+    noteAgentInferenceEnd(result && result.ok ? String(result.output || '').length : 0);
+  }
+  return result;
+}
+
+async function requestAgentPlannerInferenceInner(prompt, maxTokens, grammar = '', systemPrompt = '') {
   if (agentRuntime && typeof agentRuntime.requestExternalAgentPlanner === 'function') {
     const external = await agentRuntime.requestExternalAgentPlanner(prompt, maxTokens);
     if (external && external.ok) {
@@ -8739,11 +9040,20 @@ const agentPlanner = window.AIExeAgentPlanner && typeof window.AIExeAgentPlanner
     buildAgentFileGenerationHints,
     loadPromptTemplate,
     renderPromptTemplate,
-    buildAgentHistoryTranscript: (...args) => (promptCoreApi.buildAgentHistoryTranscript ? promptCoreApi.buildAgentHistoryTranscript(...args) : ''),
+    buildAgentHistoryTranscript: (...args) => {
+      const base = promptCoreApi.buildAgentHistoryTranscript ? promptCoreApi.buildAgentHistoryTranscript(...args) : '';
+      // Surface user revert/re-apply events so the agent knows why current files
+      // differ from its earlier responses.
+      const notes = getAgentWorkspaceNotesText(args[0]);
+      if (!notes) return base;
+      return base ? `${base}\n\n${notes}` : notes;
+    },
     requestAgentPlannerInference,
     getWorkspaceContext,
     deriveProjectNameFromTask,
     agentMaxSteps,
+    agentMaxToolOutputChars,
+    getAgentExpandedReadChars,
     agentDecisionMaxTokens,
     agentPlanGrammar,
     agentStepTimeoutMs,
@@ -8801,6 +9111,8 @@ const {
   generateAgentCompletionText,
   buildAgentProgressMarkdown,
   describeAgentToolTarget,
+  verifyAgentDoneCriteria,
+  reviewAgentProjectCoherence,
 } = agentRuntime || {};
 
 const agentExecutor = window.AIExeAgentExecutor && typeof window.AIExeAgentExecutor.createAgentExecutor === 'function'
@@ -8849,6 +9161,7 @@ const agentExecutor = window.AIExeAgentExecutor && typeof window.AIExeAgentExecu
     guessWorkspaceTargetKind,
     syncMovedFileTab,
     removeWorkspaceTab,
+    reviewAgentProjectCoherence,
   })
   : null;
 const {
@@ -8885,6 +9198,7 @@ const agentLoop = window.AIExeAgentLoop && typeof window.AIExeAgentLoop.createAg
       }
       activeStreamRawText = buildAgentProgressMarker(text || 'Working...');
       activeStreamText = '';
+      updateTokenRing();
     },
     buildAgentPlanSpec,
     applyAgentProjectChatName,
@@ -8926,6 +9240,8 @@ const agentLoop = window.AIExeAgentLoop && typeof window.AIExeAgentLoop.createAg
     getWorkspaceRootName: () => workspaceRootName,
     deriveProjectNameFromTask,
     generateAgentCompletionText,
+    verifyAgentDoneCriteria,
+    getChatManualContext: (chatId) => String((findChatById(chatId) || {}).manualContext || ''),
     requestProjectScopeConfirmation,
     invokeWorkspaceAction,
     resetWorkspaceForNewProject,
@@ -9012,7 +9328,7 @@ async function requestSelectedDeveloperAgentReply(requestToken, chatId, rawPromp
   const promptText = resolveAgentResumeTaskText(chatId, rawPromptText);
   // Keep a live elapsed counter below the input for the whole agent run, and make
   // sure it is always torn down when the run ends (success, stop, or throw).
-  startAgentElapsedTimer();
+  startAgentElapsedTimer(0, chatId);
   try {
     if (shouldUseExperimentalAgentLoop(promptText)) {
       recordDebugTrace('experimental_agent_route', {
@@ -10263,13 +10579,13 @@ if (composerPlusBtn) {
   composerPlusBtn.addEventListener('click', (evt) => {
     evt.preventDefault();
     evt.stopPropagation();
-    if (pendingInferenceCount > 0) return;
+    if (pendingInferenceCount > 0 && isCurrentViewInferenceChat()) return;
     setComposerMenuOpen(!composerMenuOpen);
   });
 }
 if (menuCanvasBtn) {
   menuCanvasBtn.addEventListener('click', () => {
-    if (pendingInferenceCount > 0) return;
+    if (pendingInferenceCount > 0 && isCurrentViewInferenceChat()) return;
     setCanvasMode(!canvasModeEnabled);
     syncInputAugmentState();
     setComposerMenuOpen(false);
@@ -10277,14 +10593,14 @@ if (menuCanvasBtn) {
 }
 if (menuAttachBtn) {
   menuAttachBtn.addEventListener('click', () => {
-    if (pendingInferenceCount > 0) return;
+    if (pendingInferenceCount > 0 && isCurrentViewInferenceChat()) return;
     void openAttachPicker();
     setComposerMenuOpen(false);
   });
 }
 if (menuAgentBtn) {
   menuAgentBtn.addEventListener('click', () => {
-    if (pendingInferenceCount > 0) return;
+    if (pendingInferenceCount > 0 && isCurrentViewInferenceChat()) return;
     setDeveloperAgentMode(!developerAgentEnabled);
     syncInputAugmentState();
     setComposerMenuOpen(false);
@@ -10292,7 +10608,7 @@ if (menuAgentBtn) {
 }
 if (menuThinkBtn) {
   menuThinkBtn.addEventListener('click', () => {
-    if (pendingInferenceCount > 0) return;
+    if (pendingInferenceCount > 0 && isCurrentViewInferenceChat()) return;
     setThinkMode(!thinkModeEnabled);
     syncInputAugmentState();
     setComposerMenuOpen(false);
@@ -10300,7 +10616,7 @@ if (menuThinkBtn) {
 }
 if (menuContextBtn) {
   menuContextBtn.addEventListener('click', () => {
-    if (pendingInferenceCount > 0) return;
+    if (pendingInferenceCount > 0 && isCurrentViewInferenceChat()) return;
     editManualContext();
     setComposerMenuOpen(false);
   });
@@ -10323,34 +10639,34 @@ if (expMoreBtn) {
 }
 if (canvasBtn) {
   canvasBtn.addEventListener('click', () => {
-    if (pendingInferenceCount > 0) return;
+    if (pendingInferenceCount > 0 && isCurrentViewInferenceChat()) return;
     setCanvasMode(false);
     syncInputAugmentState();
   });
 }
 if (attachBtn) {
   attachBtn.addEventListener('click', () => {
-    if (pendingInferenceCount > 0) return;
+    if (pendingInferenceCount > 0 && isCurrentViewInferenceChat()) return;
     clearPendingAttachments();
   });
 }
 if (agentBtn) {
   agentBtn.addEventListener('click', () => {
-    if (pendingInferenceCount > 0) return;
+    if (pendingInferenceCount > 0 && isCurrentViewInferenceChat()) return;
     setDeveloperAgentMode(false);
     syncInputAugmentState();
   });
 }
 if (thinkBtn) {
   thinkBtn.addEventListener('click', () => {
-    if (pendingInferenceCount > 0) return;
+    if (pendingInferenceCount > 0 && isCurrentViewInferenceChat()) return;
     setThinkMode(false);
     syncInputAugmentState();
   });
 }
 if (contextBtn) {
   contextBtn.addEventListener('click', (event) => {
-    if (pendingInferenceCount > 0) return;
+    if (pendingInferenceCount > 0 && isCurrentViewInferenceChat()) return;
     const clearTarget = event && event.target && typeof event.target.closest === 'function'
       ? event.target.closest('.close-on-hover')
       : null;
@@ -10851,10 +11167,16 @@ function buildMsgNode(...args) {
 
 function renderActiveChat(...args) {
   updateTokenRing();
+  let result;
   if (chatRendererApi.renderActiveChat) {
-    return chatRendererApi.renderActiveChat(...args);
+    result = chatRendererApi.renderActiveChat(...args);
   }
-  return undefined;
+  // After the chat is drawn, re-evaluate per-view inference gating: the composer
+  // lockout and cancel-mode belong only to the chat that owns the run, and
+  // returning to that chat reattaches its live progress row.
+  syncAgentElapsedStatusForActiveChat();
+  syncLiveInferenceUiState();
+  return result;
 }
 
 function createChat(seedText) {
@@ -10901,7 +11223,7 @@ function startNewChat() {
 }
 
 function appendErrorMessageToChat(chatId, text, forcedTs = 0) {
-  return appendMessageToChat(chatId, 'error', text, forcedTs);
+  return appendMessageToChat(chatId, 'error', humanizeAssistantErrorText(text), forcedTs);
 }
 
 function appendMessageToChat(chatId, role, text, forcedTs = 0, options = {}) {
@@ -11005,7 +11327,9 @@ function handleKey(e) {
       return;
     }
   }
-  if (pendingInferenceCount > 0) {
+  // Swallow Enter only in the chat that owns the running op; elsewhere
+  // sendMessage queues the message.
+  if (pendingInferenceCount > 0 && isCurrentViewInferenceChat()) {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
     }
@@ -11521,8 +11845,25 @@ function resolveQuickStartPrompt(rawLabel) {
   return quickStartPromptMap[label] || String(rawLabel || '').trim();
 }
 
+// Sends from other chats while an operation runs are queued (single-operation
+// engine) and dispatched when it finishes. In-memory only: lost on reload.
+const queuedSends = [];
+function dispatchNextQueuedSend() {
+  while (queuedSends.length) {
+    const job = queuedSends.shift();
+    if (!findChatById(job.chatId)) continue;
+    beginInferenceRequest();
+    void requestAssistantReply(job.chatId, job.prompt, true, job.options);
+    return;
+  }
+}
+
 function sendMessage() {
-  if (pendingInferenceCount > 0) return;
+  const operationRunning = pendingInferenceCount > 0;
+  if (operationRunning && isCurrentViewInferenceChat()) {
+    showComposerNotice('Still responding in this chat — press stop to interrupt, or wait.');
+    return;
+  }
   const rawVal = mainInput.value.trim();
   if (!rawVal) return;
   maybeStopDictationForSend();
@@ -11547,14 +11888,28 @@ function sendMessage() {
   clearPendingAttachments();
   const chat = (inNewChatMode || !getActiveChat()) ? createChat(userText) : getActiveChat();
   if (!chat) return;
-  beginInferenceRequest();
   chatAutoScrollPinned = true;
   appendMessageToChat(chat.id, 'user', userText);
+  if (operationRunning) {
+    queuedSends.push({
+      chatId: chat.id,
+      prompt: modelPrompt,
+      options: { thinkForced: Boolean(thinkControl.thinkForced) },
+    });
+    showComposerNotice("Queued — I'll answer here as soon as the other chat finishes.");
+    recordDebugTrace('send_queued', {
+      chatId: String(chat.id || ''),
+      queueLength: String(queuedSends.length),
+    }, { chatId: chat.id, queueLength: queuedSends.length });
+    return;
+  }
+  beginInferenceRequest();
   void requestAssistantReply(chat.id, modelPrompt, true, { thinkForced: Boolean(thinkControl.thinkForced) });
 }
 
 function sendChip(el) {
-  if (pendingInferenceCount > 0) return;
+  // Chips only prefill the input — block them only in the chat that is running.
+  if (pendingInferenceCount > 0 && isCurrentViewInferenceChat()) return;
   const text = resolveQuickStartPrompt(el && el.textContent ? el.textContent : '');
   if (!text || !mainInput) return;
   mainInput.value = text;
@@ -11567,6 +11922,7 @@ function sendChip(el) {
 }
 
 function continueMessage() {
+  // Starts a new operation — stays globally gated (single-operation architecture).
   if (pendingInferenceCount > 0) return;
   maybeStopDictationForSend();
   if (!ensureSignedIn()) return;
@@ -11994,6 +12350,7 @@ function appendLiveDelta(chatId, delta) {
   const thinkingState = buildThinkingState(nextRaw);
   activeStreamRawText = nextRaw;
   activeStreamText = nextDisplay;
+  updateTokenRing();
   if (!activeStreamText.trim() && !thinkingState.text && !thinkingState.inProgress) {
     return;
   }
@@ -12369,10 +12726,11 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
             }
             activeStreamRawText = buildAgentProgressMarker(String(text || '').trim() || 'Inspecting...');
             activeStreamText = '';
+            updateTokenRing();
             scheduleLiveStreamRender();
           };
           setInspectProgress('Inspecting workspace...');
-          startAgentElapsedTimer(); // show the live "Xs" timer for inspect too (consistent with agent)
+          startAgentElapsedTimer(0, chatId); // show the live "Xs" timer for inspect too (consistent with agent)
           let inspected;
           try {
             inspected = await performWorkspaceInspectReply(chatId, promptText, requestToken, setInspectProgress);
@@ -12549,6 +12907,7 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
       const remoteStreamOptions = {
         abortController: requestToken.abortController,
         maxTokens: requestToken.maxTokens,
+        thinkActive: Boolean(thinkModeEnabled || requestToken.thinkForced),
       };
       // No token for 70s = dropped connection: abort, retry once, then fail cleanly.
       const chatStallIdleMs = 70000;
@@ -12655,6 +13014,7 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
           appendToLastAssistant: requestToken.appendToLastAssistant,
           forceNeedsContinue: false,
           thinkingMeta: buildRequestThinkingMeta(requestToken),
+          canvasModeResolved: canvasModeOverride === null ? canvasModeUiEnabled : canvasModeOverride,
         });
         return;
       }
@@ -12692,6 +13052,7 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
           appendToLastAssistant: requestToken.appendToLastAssistant,
           forceNeedsContinue: false,
           thinkingMeta: buildRequestThinkingMeta(requestToken),
+          canvasModeResolved: canvasModeOverride === null ? canvasModeUiEnabled : canvasModeOverride,
         });
         return;
       }

@@ -216,6 +216,23 @@
       return files;
     }
 
+    // Echo applied edits into the observation so the planner doesn't re-read.
+    function summarizeAppliedEditsForObservation(program) {
+      const edits = Array.isArray(program && program.edits) ? program.edits : [];
+      const clip = (value, max) => {
+        const text = String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
+        return text.length > max ? `${text.slice(0, max)}…` : text;
+      };
+      const lines = edits.slice(0, 8).map((edit) => {
+        const op = String((edit && edit.op) || 'replace');
+        const anchor = clip(edit && edit.find, 110);
+        const payload = clip(edit && (edit.replace != null ? edit.replace : edit.text), 220);
+        return anchor ? `- ${op}: "${anchor}" -> "${payload}"` : `- ${op}: "${payload}"`;
+      });
+      if (edits.length > 8) lines.push(`- …and ${edits.length - 8} more edits`);
+      return lines.join('\n');
+    }
+
     function validateGeneratedFile(path, content, taskText, planSpec) {
       const normalized = deps.normalizeWorkspacePath(path || '');
       const text = String(content || '');
@@ -234,6 +251,8 @@
         if (scriptFile && /<script(?![^>]*\bsrc=)[\s>]/i.test(text)) {
           issues.push(`contains inline <script> content even though ${scriptFile} exists`);
         }
+        const htmlStructureIssue = getHtmlStructureIssue(text);
+        if (htmlStructureIssue) issues.push(htmlStructureIssue);
       }
       if (/\.css$/i.test(normalized)) {
         if (/<\/?(?:html|head|body|script|main|section|div)\b|<!doctype html/i.test(text)) {
@@ -252,23 +271,108 @@
         if (/<\/?(?:html|head|body|style)\b|<!doctype html/i.test(strippedForHtmlCheck)) {
           issues.push('contains HTML markup instead of pure JavaScript');
         }
+        let jsSyntaxFailed = false;
         if (!/\b(import|export)\b/.test(text)) {
           try {
             // Syntax-only check for normal script files.
             // eslint-disable-next-line no-new, no-new-func
             new Function(text);
           } catch (err) {
-            issues.push(`has a JavaScript syntax error: ${String(err && err.message ? err.message : err || 'unknown error')}`);
+            jsSyntaxFailed = true;
+            const syntaxIssue = getJsSyntaxIssue(text, err);
+            issues.push(`has a JavaScript syntax error: ${syntaxIssue || String(err && err.message ? err.message : err || 'unknown error')}`);
           }
         }
-        // new Function() only catches parse errors; catch const-reassignment (a runtime error) statically.
-        const constIssue = getJsReassignedConstIssue(text);
-        if (constIssue) issues.push(constIssue);
+        if (!jsSyntaxFailed) {
+          // new Function() only catches parse errors; catch const-reassignment (a runtime error) statically.
+          const constIssue = getJsReassignedConstIssue(text);
+          if (constIssue) issues.push(constIssue);
+        }
       }
-      if (/\.(html|js|ts|jsx|tsx|py)$/i.test(normalized) && !deps.isLikelyCompletePrimarySource(normalized, text, taskText)) {
-        issues.push('still looks incomplete for the requested MVP');
-      }
+      // "Looks incomplete" is a subjective heuristic — advisory only, never a
+      // blocking issue (it false-flagged a finished 20KB app and looped a run).
       return issues;
+    }
+
+    // Tag balance for required-close containers; optional-close tags excluded.
+    function getHtmlStructureIssue(html) {
+      const text = String(html || '');
+      if (!text.trim()) return 'is empty';
+      const cleaned = text
+        .replace(/<!--[\s\S]*?-->/g, ' ')
+        .replace(/<script\b[\s\S]*?<\/script>/gi, ' ')
+        .replace(/<style\b[\s\S]*?<\/style>/gi, ' ');
+      const strictTags = new Set([
+        'div', 'section', 'main', 'header', 'footer', 'article', 'aside', 'nav', 'form',
+        'table', 'thead', 'tbody', 'ul', 'ol', 'select', 'button', 'textarea', 'label',
+        'span', 'a', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'figure', 'figcaption',
+        'dialog', 'details', 'summary', 'fieldset', 'canvas', 'svg', 'video', 'audio',
+        'picture', 'iframe', 'html', 'head', 'body',
+      ]);
+      const counts = {};
+      for (const match of cleaned.matchAll(/<\s*(\/?)\s*([a-z][a-z0-9-]*)\b[^>]*?>/gi)) {
+        const closing = match[1] === '/';
+        const tag = match[2].toLowerCase();
+        if (!strictTags.has(tag)) continue;
+        if (!closing && /\/\s*>$/.test(match[0])) continue;
+        counts[tag] = counts[tag] || { open: 0, close: 0 };
+        if (closing) counts[tag].close += 1;
+        else counts[tag].open += 1;
+      }
+      const unbalanced = Object.entries(counts)
+        .filter(([, c]) => c.open !== c.close)
+        .map(([tag, c]) => `<${tag}> ${c.open} opened vs ${c.close} closed`);
+      if (unbalanced.length) return `has unbalanced HTML tags (${unbalanced.slice(0, 4).join('; ')})`;
+      // Duplicate ids are invalid and break getElementById wiring (the classic
+      // symptom of a model re-adding sections it already added).
+      const idCounts = {};
+      for (const match of cleaned.matchAll(/\bid=["']([^"']+)["']/gi)) {
+        const id = String(match[1] || '').trim();
+        if (id) idCounts[id] = (idCounts[id] || 0) + 1;
+      }
+      const duplicateIds = Object.entries(idCounts).filter(([, n]) => n > 1).map(([id]) => id);
+      if (duplicateIds.length) return `has duplicate HTML ids (${duplicateIds.slice(0, 5).map((id) => `#${id}`).join(', ')}) — the same section exists more than once`;
+      return '';
+    }
+
+    // Structural diagnostic per language; empty string = sound.
+    function getStructuralIssueForPath(path, content) {
+      const normalized = deps.normalizeWorkspacePath(path || '');
+      const text = String(content || '');
+      if (/\.html?$/i.test(normalized)) return getHtmlStructureIssue(text);
+      if (/\.css$/i.test(normalized)) return getCssSyntaxIssue(text);
+      if (/\.(js|mjs|cjs)$/i.test(normalized) && !/\b(import|export)\b/.test(text)) {
+        try {
+          // eslint-disable-next-line no-new, no-new-func
+          new Function(text);
+        } catch (err) {
+          return getJsSyntaxIssue(text, err) || `has a JavaScript syntax error: ${String((err && err.message) || err || 'unknown')}`;
+        }
+        return '';
+      }
+      if (/\.json$/i.test(normalized)) {
+        try {
+          JSON.parse(text);
+        } catch (err) {
+          return `is not valid JSON (${String((err && err.message) || '')})`;
+        }
+      }
+      return '';
+    }
+
+    // Latest known content of a path from this run's tool history (read/write/edit).
+    function getLatestKnownContentForPath(toolEvents, path) {
+      const normalized = deps.normalizeWorkspacePath(path || '');
+      const events = Array.isArray(toolEvents) ? toolEvents : [];
+      for (let i = events.length - 1; i >= 0; i -= 1) {
+        const event = events[i];
+        if (!event || !event.ok) continue;
+        const tool = String(event.tool || '').toLowerCase();
+        if (!['read_file', 'write_file', 'edit_file'].includes(tool)) continue;
+        if (deps.normalizeWorkspacePath(event.path || '') !== normalized) continue;
+        if (typeof event.content === 'string' && event.content) return event.content;
+      }
+      return '';
     }
 
     function getCssSyntaxIssue(css) {
@@ -315,6 +419,114 @@
       if (depth > 0) return 'has unclosed CSS blocks';
       if (/[{:;,]$/.test(text.trim().slice(-1))) return 'appears truncated at the end';
       return '';
+    }
+
+    function lineColAt(text, index) {
+      const src = String(text || '');
+      const pos = Math.max(0, Math.min(src.length, Number(index) || 0));
+      let line = 1;
+      let col = 1;
+      for (let i = 0; i < pos; i += 1) {
+        if (src[i] === '\n') {
+          line += 1;
+          col = 1;
+        } else {
+          col += 1;
+        }
+      }
+      return { line, col };
+    }
+
+    function getJsSyntaxIssue(jsText, parseError = null) {
+      const src = String(jsText || '');
+      const parseMessage = String(parseError && parseError.message ? parseError.message : parseError || '').trim();
+      const stack = [];
+      let quote = '';
+      let inLineComment = false;
+      let inBlockComment = false;
+      let inTemplate = false;
+      let escaped = false;
+      const pairs = { '(': ')', '[': ']', '{': '}' };
+      const closers = { ')': '(', ']': '[', '}': '{' };
+
+      for (let i = 0; i < src.length; i += 1) {
+        const ch = src[i];
+        const next = src[i + 1] || '';
+
+        if (inLineComment) {
+          if (ch === '\n') inLineComment = false;
+          continue;
+        }
+        if (inBlockComment) {
+          if (ch === '*' && next === '/') {
+            inBlockComment = false;
+            i += 1;
+          }
+          continue;
+        }
+        if (quote) {
+          if (escaped) {
+            escaped = false;
+          } else if (ch === '\\') {
+            escaped = true;
+          } else if (ch === quote) {
+            quote = '';
+          }
+          continue;
+        }
+        if (inTemplate) {
+          if (escaped) {
+            escaped = false;
+          } else if (ch === '\\') {
+            escaped = true;
+          } else if (ch === '`') {
+            inTemplate = false;
+          }
+          continue;
+        }
+        if (ch === '/' && next === '/') {
+          inLineComment = true;
+          i += 1;
+          continue;
+        }
+        if (ch === '/' && next === '*') {
+          inBlockComment = true;
+          i += 1;
+          continue;
+        }
+        if (ch === '"' || ch === "'") {
+          quote = ch;
+          continue;
+        }
+        if (ch === '`') {
+          inTemplate = true;
+          continue;
+        }
+        if (pairs[ch]) {
+          stack.push({ ch, index: i });
+          continue;
+        }
+        if (closers[ch]) {
+          const expectedOpen = closers[ch];
+          const top = stack[stack.length - 1];
+          if (!top || top.ch !== expectedOpen) {
+            const loc = lineColAt(src, i);
+            const found = top ? `expected ${pairs[top.ch]} for ${top.ch} opened at line ${lineColAt(src, top.index).line}` : 'nothing is open here';
+            return `${parseMessage || `unexpected ${ch}`} near line ${loc.line}, column ${loc.col} (${found})`;
+          }
+          stack.pop();
+        }
+      }
+
+      if (quote) return `${parseMessage || 'unterminated string'} (unterminated ${quote} string)`;
+      if (inTemplate) return `${parseMessage || 'unterminated template literal'} (unterminated template literal)`;
+      if (inBlockComment) return `${parseMessage || 'unterminated block comment'} (unterminated block comment)`;
+      if (stack.length) {
+        const top = stack[stack.length - 1];
+        const loc = lineColAt(src, top.index);
+        return `${parseMessage || `missing ${pairs[top.ch]}`} near end of file (${top.ch} opened at line ${loc.line}, column ${loc.col})`;
+      }
+      return parseMessage;
     }
 
     // Static detection of the "Assignment to constant variable" regression:
@@ -442,7 +654,7 @@
       };
     }
 
-    function validateWebProjectConsistency(fileContents, planSpec) {
+    function validateWebProjectConsistency(fileContents, planSpec, advisoryOut = null) {
       const issues = [];
       const expectedFiles = Array.isArray(planSpec && planSpec.expectedFiles) ? planSpec.expectedFiles : [];
       const htmlFile = expectedFiles.find((path) => /\.html?$/i.test(String(path || ''))) || '';
@@ -504,12 +716,24 @@
       // "repaired" correct code into worse code, re-failed, and timed out. Removed —
       // the targeted checks below (JS toggles an undefined class; important HTML
       // classes left unstyled) catch the cases that actually matter.
+      // Advisory: root-relative links break when pages are opened from disk
+      // (file:// resolves "/x" to the filesystem root) — the offline target.
+      if (Array.isArray(advisoryOut)) {
+        const rootRelative = Array.from(html.matchAll(/\b(?:href|src)=["'](\/[^"'/][^"']*)["']/gi))
+          .map((match) => String(match[1] || ''))
+          .filter((url) => !/^\/\//.test(url));
+        if (rootRelative.length) {
+          advisoryOut.push(`${htmlFile}: uses root-relative links (${Array.from(new Set(rootRelative)).slice(0, 4).join(', ')}) which break when opened from disk via file:// — use relative paths (e.g. menu.html, ./style.css) instead`);
+        }
+      }
+      // Advisory only (cosmetic, not crash-class): unstyled classes degrade looks
+      // but blocking on them trapped runs in repair loops.
       const importantHtmlClasses = Array.from(htmlClasses).filter((className) => (
         /hero|panel|button|btn|card|section|content|title|subtitle|footer|nav|header|quote|badge|logo|overlay/i.test(className)
       ));
       const unstyledImportantClasses = importantHtmlClasses.filter((className) => !cssClasses.has(className));
-      if (css && unstyledImportantClasses.length > 3) {
-        pushIssue(`${htmlFile}: important classes are not styled in ${cssFile || 'stylesheet'} (${unstyledImportantClasses.slice(0, 6).map((name) => `.${name}`).join(', ')})`);
+      if (css && unstyledImportantClasses.length > 3 && Array.isArray(advisoryOut)) {
+        advisoryOut.push(`${htmlFile}: classes used in the markup have no styles in ${cssFile || 'the stylesheet'} (${unstyledImportantClasses.slice(0, 6).map((name) => `.${name}`).join(', ')}) — style them if those sections look unfinished`);
       }
 
       if (cssClasses.has('buttons-grid') && !htmlClasses.has('buttons-grid') && htmlClasses.has('buttons')) {
@@ -909,13 +1133,23 @@
             && String(e.tool || '').toLowerCase() === 'edit_file'
             && deps.normalizeWorkspacePath(e.path || '') === path
           )).length : 0;
-          if (editFailCount < 2) {
+          // A full rewrite is legitimate recovery once an edit attempt on this file
+          // failed, or when the file's current content is structurally broken.
+          const knownContent = getLatestKnownContentForPath(toolEvents, path);
+          const currentlyBroken = Boolean(knownContent && getStructuralIssueForPath(path, knownContent));
+          if (editFailCount < 1 && !currentlyBroken) {
             return {
               ok: false,
               mutated,
               observation: `write_file blocked for ${path}: this file already exists in the current run. Use edit_file for repairs or follow-up changes after reading it.`,
             };
           }
+        }
+        if (!creatingNewFile) {
+          // Capture the pre-overwrite content: it grounds the revert snapshot,
+          // the per-response diff stats, and the completion CHANGES diffs.
+          const currentRead = await deps.invokeWorkspaceAction('workspaceReadFile', { path });
+          if (currentRead && currentRead.ok) originalContent = String(currentRead.output || '');
         }
         deps.setActiveAgentStreamStatus(chatId, `${creatingNewFile ? 'Writing' : 'Editing'} ${path}...`);
         let content = String(decision.content || '');
@@ -1010,6 +1244,25 @@
               : ' Note: this looks thin for a usable project file; expand it into a real MVP if the request needs more than a stub.';
           }
         }
+        // Never save content that is structurally broken unless it replaces a file
+        // that is already broken (a repair attempt is always allowed through).
+        const newContentStructureIssue = getStructuralIssueForPath(path, content);
+        if (newContentStructureIssue) {
+          const priorKnownContent = creatingNewFile ? '' : getLatestKnownContentForPath(toolEvents, path);
+          const priorBroken = Boolean(priorKnownContent && getStructuralIssueForPath(path, priorKnownContent));
+          if (!priorBroken) {
+            if (typeof deps.recordDebugTrace === 'function') {
+              deps.recordDebugTrace('agent_write_structural_reject', {
+                path, issue: String(newContentStructureIssue).slice(0, 200),
+              }, { path, issue: newContentStructureIssue });
+            }
+            return {
+              ok: false,
+              mutated,
+              observation: `write_file blocked for ${path}: the new content ${newContentStructureIssue}. Nothing was saved. Provide the complete corrected file with all tags/braces paired.`,
+            };
+          }
+        }
         const parentPath = deps.parentWorkspacePath(path);
         if (parentPath && parentPath !== '/' && parentPath !== '.') {
           const mkdirResponse = await deps.invokeWorkspaceAction('workspaceMkdir', { path: parentPath });
@@ -1037,7 +1290,7 @@
         });
         deps.syncFileTabFromWorkspaceWrite(path, content, deps.workspaceBaseName(path));
         mutated = true;
-        observation = `write_file ok: ${path} (${content.length} chars)${primaryQualityNote}`;
+        observation = `write_file ok: ${path} (${content.length} chars)${primaryQualityNote}\nThe saved file matches the generated content exactly — do not re-read ${path} to verify.`;
         return {
           ok: true,
           mutated,
@@ -1117,7 +1370,9 @@
           // non-trivial file, treat it as a revert, keep the current content, and ask
           // for a precise edit instead of silently destroying work.
           const wouldShrinkDrastically = origLen > 400 && rewrittenTrim.length < origLen * 0.6;
-          if (rewrittenTrim && rewritten !== originalContent && !wouldShrinkDrastically) {
+          const rewriteBreaksStructure = !getStructuralIssueForPath(path, originalContent)
+            && Boolean(getStructuralIssueForPath(path, rewritten));
+          if (rewrittenTrim && rewritten !== originalContent && !wouldShrinkDrastically && !rewriteBreaksStructure) {
             const rewriteResponse = await deps.invokeWorkspaceAction('workspaceWriteFile', { path, content: rewritten });
             if (rewriteResponse && rewriteResponse.ok) {
               deps.setActiveAgentStreamStatus(chatId, `Saving edits to ${path}...`);
@@ -1132,7 +1387,7 @@
               });
               deps.syncFileTabFromWorkspaceWrite(path, rewritten, deps.workspaceBaseName(path));
               mutated = true;
-              observation = `edit_file ok: ${path} (full-file rewrite fallback)`;
+              observation = `edit_file ok: ${path} (full-file rewrite fallback, ${rewritten.length} chars)\nThe saved file is exactly the rewrite you just produced — do not re-read ${path} to verify.`;
               return {
                 ok: true,
                 mutated,
@@ -1161,7 +1416,7 @@
           return {
             ok: false,
             mutated,
-            observation: `edit_file blocked for ${path}: invalid edit instructions and rewrite fallback did not succeed.`,
+            observation: `edit_file blocked for ${path}: the instructions could not be parsed into concrete find/replace edits and the rewrite fallback did not produce a safe replacement. Provide a precise JSON edit program (exact anchor text from the file + replacement). If ${path} does not actually need changes for this task, do NOT edit it — take the next planned step or finalize instead.`,
           };
         }
         const applied = deps.applyAgentEditProgram(originalContent, program);
@@ -1170,6 +1425,21 @@
             ok: false,
             mutated,
             observation: `edit_file blocked for ${path}: no edits were applied. Use exact existing text in find/anchor fields.`,
+          };
+        }
+        // Never save an edit that breaks a previously-sound file.
+        const editBeforeIssue = getStructuralIssueForPath(path, originalContent);
+        const editAfterIssue = getStructuralIssueForPath(path, applied.output);
+        if (!editBeforeIssue && editAfterIssue) {
+          if (typeof deps.recordDebugTrace === 'function') {
+            deps.recordDebugTrace('agent_edit_structural_reject', {
+              path, issue: String(editAfterIssue).slice(0, 200),
+            }, { path, issue: editAfterIssue, program });
+          }
+          return {
+            ok: false,
+            mutated,
+            observation: `edit_file rejected for ${path}: applying it would have broken the file — it ${editAfterIssue}. The file was left unchanged. Re-issue a corrected edit that keeps opening and closing tags/braces paired, or use write_file with the complete corrected file if a larger restructure is needed.`,
           };
         }
         if (applied.fuzzyCount > 0 && typeof deps.recordDebugTrace === 'function') {
@@ -1193,7 +1463,12 @@
         });
         deps.syncFileTabFromWorkspaceWrite(path, applied.output, deps.workspaceBaseName(path));
         mutated = true;
-        observation = `edit_file ok: ${path} (${applied.appliedCount} edits)`;
+        const appliedSummary = summarizeAppliedEditsForObservation(program);
+        observation = [
+          `edit_file ok: ${path} (${applied.appliedCount} edits)`,
+          appliedSummary ? `Applied changes:\n${appliedSummary}` : '',
+          `The saved file reflects exactly these changes — do not re-read ${path} to verify.`,
+        ].filter(Boolean).join('\n');
         return {
           ok: true,
           mutated,
@@ -1220,6 +1495,7 @@
         }
         const issues = [];
         const fileContents = {};
+        const completenessAdvisory = [];
         for (const path of targets) {
           const response = await deps.invokeWorkspaceAction('workspaceReadFile', { path });
           if (!response || !response.ok) {
@@ -1230,15 +1506,31 @@
           fileContents[path] = content;
           const fileIssues = validateGeneratedFile(path, content, taskText, planSpec);
           fileIssues.forEach((issue) => issues.push(`${path}: ${issue}`));
+          if (/\.(html|js|ts|jsx|tsx|py)$/i.test(deps.normalizeWorkspacePath(path))
+            && !deps.isLikelyCompletePrimarySource(path, content, taskText)) {
+            completenessAdvisory.push(`${path}: may be thinner than the requested feature set — expand it only if something is actually missing`);
+          }
         }
-        const webConsistencyIssues = validateWebProjectConsistency(fileContents, planSpec);
+        const mechanicalAdvisory = completenessAdvisory;
+        const webConsistencyIssues = validateWebProjectConsistency(fileContents, planSpec, mechanicalAdvisory);
         webConsistencyIssues.forEach((issue) => issues.push(issue));
         if (!issues.length) {
+          // Advisory model-driven cross-file review; never blocks.
+          let advisoryNotes = mechanicalAdvisory.slice();
+          if (typeof deps.reviewAgentProjectCoherence === 'function') {
+            try {
+              advisoryNotes = advisoryNotes.concat(await deps.reviewAgentProjectCoherence(fileContents, taskText) || []);
+            } catch (_) { }
+          }
+          const advisoryBlock = advisoryNotes.length
+            ? `\nAdvisory cross-file review (non-blocking — fix only what is real and quick):\n- ${advisoryNotes.slice(0, 5).join('\n- ')}`
+            : '';
           return {
             ok: true,
             mutated,
-            observation: `validate_files ok: no obvious file-role, syntax, or MVP completeness issues found in ${targets.join(', ')}`,
+            observation: `validate_files ok: no obvious file-role, syntax, or MVP completeness issues found in ${targets.join(', ')}${advisoryBlock}`,
             validationPassed: true,
+            validationAdvisory: advisoryNotes.slice(0, 5),
           };
         }
         return {
@@ -1377,7 +1669,10 @@
       summarizeWorkspaceListForAgent,
       executeDeveloperToolCall,
       describeAgentToolPhase,
+      getJsSyntaxIssue,
       getJsReassignedConstIssue,
+      getHtmlStructureIssue,
+      getStructuralIssueForPath,
     };
   }
 

@@ -64,4 +64,54 @@ function ok(name, cond) {
   ok('final decision is preserved', d && d.action === 'final' && /All done/.test(d.message));
 }
 
+// Path + substantial content with no action/tool is a WRITE intent (a recovery
+// rewrite), not a read — inferring read_file here blocked recovery as a
+// duplicate re-read and redirected the run into editing the wrong file.
+{
+  const html = '<!DOCTYPE html>\n<html lang="en">\n<head><meta charset="UTF-8"><title>Card</title></head>\n<body><div class="layout"></div></body>\n</html>';
+  const d = parseAgentDecision(JSON.stringify({ path: '/index.html', content: html }));
+  ok('path + full file content infers write_file', d && d.action === 'tool' && d.tool === 'write_file' && d.path === '/index.html');
+  ok('inferred write keeps the content', d && d.content.includes('<!DOCTYPE html>'));
+}
+
+// Path + an edit-program payload infers edit_file, not a raw overwrite.
+{
+  const program = JSON.stringify({ edits: [{ op: 'replace', find: 'flex-direction: column', replace: 'flex-direction: row' }] });
+  const d = parseAgentDecision(JSON.stringify({ path: '/style.css', content: program }));
+  ok('path + edit program content infers edit_file', d && d.tool === 'edit_file' && d.path === '/style.css');
+}
+
+// Short content stays a read (likely a stray field, not a file body).
+{
+  const d = parseAgentDecision('{"path": "/script.js", "content": "check this"}');
+  ok('path + trivial content still infers read_file', d && d.tool === 'read_file');
+}
+
+// --- parseAgentEditProgram shape tolerance ---
+const { parseAgentEditProgram } = core;
+
+// Documented object form still parses.
+{
+  const p = parseAgentEditProgram('{"edits":[{"op":"replace","find":"a","replace":"b"}]}');
+  ok('object-form edit program parses', p && p.edits.length === 1 && p.edits[0].op === 'replace');
+}
+
+// Top-level ARRAY form (a common model variant) parses instead of failing.
+{
+  const p = parseAgentEditProgram('[\n  {"find": "<body>", "replace": "<body class=\\"row\\">"},\n  {"find": "gap: 2rem", "replace": "gap: 1rem"}\n]');
+  ok('array-form edit program parses', p && p.edits.length === 2);
+  ok('array-form edits default missing op to replace', p && p.edits.every((e) => e.op === 'replace'));
+}
+
+// find+replace without an op defaults to replace in object form too.
+{
+  const p = parseAgentEditProgram('{"edits":[{"find":"x","replace":"y"}]}');
+  ok('missing op with find+replace defaults to replace', p && p.edits[0].op === 'replace');
+}
+
+// Garbage still returns null.
+{
+  ok('non-JSON edit program returns null', parseAgentEditProgram('please change the layout') === null);
+}
+
 console.log(`\n${passed} passed`);

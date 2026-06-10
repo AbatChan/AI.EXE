@@ -149,24 +149,15 @@ async function testInlineChatNamingOnlyBeforeFirstAssistant() {
 }
 
 function testDeterministicCanvasRouting() {
-  const canvasCases = [
+  // No keyword routing: the model router is primary; the no-model fallback
+  // trusts the user's explicit Canvas toggle regardless of phrasing.
+  const cases = [
     'write a detailed project proposal',
-    'create a landing page',
-    'build a calculator app',
-    'generate a checklist template',
-    'draft an email',
-  ];
-  const chatCases = [
+    'Write a stroy on how AI became famous',
     'thanks',
-    'yes that works',
-    'explain why that happened',
     'how do I run this',
-    'can you summarize this',
-    'what is the difference',
   ];
-
-  canvasCases.forEach((text) => assert.equal(routeMode(text), 'canvas', text));
-  chatCases.forEach((text) => assert.equal(routeMode(text), 'chat', text));
+  cases.forEach((text) => assert.equal(routeMode(text), 'canvas', text));
 }
 
 function testAgentCanvasGuard() {
@@ -177,6 +168,30 @@ function testAgentCanvasGuard() {
   assert.ok(
     aiExeJs.includes('reason: \'Canvas mode is on, so workspace/tool routing is bypassed for this turn.\''),
     'Canvas-only bypass reason should remain explicit for debug traces.',
+  );
+}
+
+// All three send layers must gate per-view so other chats can queue while one runs.
+function testPerViewSendGating() {
+  const keydownSource = extractFunctionSource(aiExeJs, 'handleKey');
+  assert.ok(
+    keydownSource.includes('pendingInferenceCount > 0 && isCurrentViewInferenceChat()'),
+    'composer Enter must be swallowed only in the chat that owns the running op',
+  );
+  assert.ok(
+    !/if \(pendingInferenceCount > 0\) \{\s*\n\s*if \(e\.key === 'Enter'/.test(keydownSource),
+    'the old global Enter swallow must not return',
+  );
+  const sendButtonSource = extractFunctionSource(aiExeJs, 'handleSendButtonClick');
+  assert.ok(
+    sendButtonSource.includes('pendingInferenceCount > 0 && isCurrentViewInferenceChat()'),
+    'send button cancels only when viewing the running chat',
+  );
+  const sendSource = extractFunctionSource(aiExeJs, 'sendMessage');
+  assert.ok(sendSource.includes('queuedSends.push'), 'sends from other chats must queue');
+  assert.ok(
+    extractFunctionSource(aiExeJs, 'endInferenceRequest').includes('dispatchNextQueuedSend'),
+    'queued sends must dispatch when the engine goes idle',
   );
 }
 
@@ -204,6 +219,7 @@ async function testContextBudgetStress() {
   await testInlineChatNamingOnlyBeforeFirstAssistant();
   testDeterministicCanvasRouting();
   testAgentCanvasGuard();
+  testPerViewSendGating();
   await testContextBudgetStress();
   console.log('Mode priority stress tests passed.');
 })().catch((err) => {
