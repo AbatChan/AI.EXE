@@ -101,6 +101,8 @@
       // Advisory final-gate: nudge the model at most once when it tries to
       // finish with planned items still unmet, then trust its judgment.
       let finalNudges = 0;
+      // One evidence-based finish audit per run (diffs vs done criteria); advisory.
+      let criteriaNudgeUsed = false;
       const startedAt = Date.now();
       const deadlineAt = startedAt + deps.agentTotalTimeoutMs;
       let planSpec = null;
@@ -134,6 +136,115 @@
         if (tool === 'move') return 'Moving the file to its final location.';
         if (tool === 'delete') return path ? `Removing ${path}.` : 'Removing the file.';
         return '';
+      };
+
+      // One evidence-based audit (diffs vs done criteria) before accepting a finish
+      // on edit runs; catches no-op fixes.
+      const getUnmetCriteriaNudge = async () => {
+        if (criteriaNudgeUsed || typeof deps.verifyAgentDoneCriteria !== 'function') return null;
+        const editedExisting = toolEvents.some((event) => event && event.ok
+          && ['write_file', 'edit_file'].includes(String(event.tool || '').toLowerCase())
+          && typeof event.originalContent === 'string'
+          && event.originalContent.trim());
+        if (!editedExisting) return null;
+        criteriaNudgeUsed = true;
+        const check = await deps.verifyAgentDoneCriteria(taskText, toolEvents, planSpec);
+        if (!check || check.ok || !Array.isArray(check.unmet) || !check.unmet.length) return null;
+        return check.unmet;
+      };
+
+      const pushCriteriaNudgeObservation = (unmet) => {
+        const lines = unmet.map((item) => `- "${item.criterion}"${item.why ? ` — ${item.why}` : ''}`);
+        toolEvents.push({
+          tool: 'criteria_check',
+          ok: false,
+          observation: `Before finishing: reviewing your actual diffs against the done criteria suggests these are NOT satisfied yet:\n${lines.join('\n')}\nRe-inspect the relevant code — the change you made may target an element that cannot produce the required outcome — and make the missing change. If you are certain a criterion is already satisfied, finish again and it will be accepted.`,
+        });
+        recordDebugTrace('agent_criteria_nudge', {
+          chatId: String(chatId || ''),
+          count: String(unmet.length),
+        }, { chatId: String(chatId || ''), unmet, toolEvents });
+        setAgentProgress('Reviewing...');
+      };
+
+      // LCS line-diff counts (mirrors the renderer's activity stats) so the
+      // edit card can show per-file +added/-removed for the whole run.
+      const countRunLineDiffStats = (beforeText, afterText) => {
+        const beforeLines = String(beforeText || '') ? String(beforeText || '').split('\n') : [];
+        const afterLines = String(afterText || '') ? String(afterText || '').split('\n') : [];
+        if (!beforeLines.length) return { added: afterLines.length, removed: 0 };
+        if (!afterLines.length) return { added: 0, removed: beforeLines.length };
+        const width = afterLines.length + 1;
+        let prev = new Uint16Array(width);
+        let curr = new Uint16Array(width);
+        for (let i = 1; i <= beforeLines.length; i += 1) {
+          for (let j = 1; j <= afterLines.length; j += 1) {
+            curr[j] = beforeLines[i - 1] === afterLines[j - 1]
+              ? prev[j - 1] + 1
+              : Math.max(prev[j], curr[j - 1]);
+          }
+          const swap = prev;
+          prev = curr;
+          curr = swap;
+        }
+        const common = prev[afterLines.length];
+        return { added: afterLines.length - common, removed: beforeLines.length - common };
+      };
+
+      // Per-response revert: snapshot each touched file's pre-run state (first
+      // touch wins; the latest content is the post-run state for diff stats).
+      // Created files revert by deletion. Oversized files are skipped.
+      const buildRunRevertSnapshot = () => {
+        const seen = new Map();
+        for (const event of toolEvents) {
+          if (!event || !event.ok) continue;
+          if (!['write_file', 'edit_file'].includes(String(event.tool || '').toLowerCase())) continue;
+          const path = deps.normalizeWorkspacePath(event.path || '');
+          if (!path) continue;
+          const existing = seen.get(path);
+          if (existing) {
+            if (typeof event.content === 'string' && event.content) existing.post = event.content;
+            continue;
+          }
+          if (typeof event.originalContent !== 'string') continue;
+          const createdNew = event.createdNewFile === true;
+          seen.set(path, {
+            path,
+            existedBefore: !createdNew,
+            content: createdNew ? '' : event.originalContent,
+            post: typeof event.content === 'string' ? event.content : '',
+          });
+        }
+        let totalChars = 0;
+        const files = [];
+        for (const file of seen.values()) {
+          if (file.content.length > 200000) continue;
+          totalChars += file.content.length;
+          if (totalChars > 800000) break;
+          const stats = countRunLineDiffStats(file.content, file.post);
+          files.push({
+            path: file.path,
+            existedBefore: file.existedBefore,
+            content: file.content,
+            added: stats.added,
+            removed: stats.removed,
+          });
+        }
+        return files.length ? { files } : null;
+      };
+      const agentMetaWithRevert = (meta) => {
+        const revert = buildRunRevertSnapshot();
+        return revert ? { ...meta, revert } : meta;
+      };
+
+      // When a guard stops the run after real work landed, the final message must
+      // report that work (grounded in the diffs), not just the blocker.
+      const buildStoppedWithWorkText = async (blockerNote) => {
+        const hasMutations = toolEvents.some((event) => event && event.ok && isMutationTool(event.tool));
+        if (!hasMutations) return blockerNote;
+        const workspaceLabel = deps.getWorkspaceRootName() || deps.deriveProjectNameFromTask(taskText) || 'project';
+        const base = String(await deps.generateAgentCompletionText(taskText, toolEvents, workspaceLabel, planSpec) || '').trim();
+        return base ? `${base}\n\n${blockerNote}` : blockerNote;
       };
 
       let lastNarrationDetail = '';
@@ -227,6 +338,10 @@
         if (signature.tool === 'list_dir' && lastEvent.ok && !hasWorkspaceMutationSince(lastIndex)) {
           return `list_dir blocked for ${signature.path || '/'}: you already listed this folder and nothing has changed since then. Use that result and take the next concrete step (write or edit a file) instead of re-listing.`;
         }
+        if (signature.tool === 'search_files' && lastEvent.ok && !hasWorkspaceMutationSince(lastIndex)
+          && String(lastEvent.searchQuery || '') === String(decision && decision.content ? decision.content : '')) {
+          return `search_files blocked: you already ran this exact search and nothing changed since — its result above stands (no matches MEANS the text is not in any file; stop looking for it). Act on what you know: make the edit or finalize.`;
+        }
         if (
           signature.tool === 'edit_file'
           && !lastEvent.ok
@@ -249,57 +364,33 @@
             ));
             if (hasRefreshedRead) return '';
           }
+          // A retry with genuinely different payload is a new attempt, not a
+          // duplicate — blocking it forced wrong-file redirects during recovery.
+          if (['write_file', 'edit_file'].includes(signature.tool)) {
+            const newContent = String(decision && decision.content ? decision.content : '').trim();
+            const lastContent = String(lastEvent.content || '').trim();
+            if (newContent && newContent !== lastContent) return '';
+          }
           return `${signature.tool} blocked for ${signature.path || signature.dstPath || signature.srcPath || 'this target'}: the same tool/target already failed and nothing changed since then. Follow the latest observation and choose a different corrective step.`;
         }
         return '';
       };
+      // Redirects may be non-mutating, or same-file mutation→mutation only; never
+      // escalate a blocked read into an edit (synthesized edits invent changes).
+      const isSafeDuplicateRedirect = (fromDecision, fallbackDecision) => {
+        const fallbackTool = String(fallbackDecision && fallbackDecision.tool ? fallbackDecision.tool : '').toLowerCase();
+        if (!isMutationTool(fallbackTool)) return true;
+        const fromTool = String(fromDecision && fromDecision.tool ? fromDecision.tool : '').toLowerCase();
+        if (!isMutationTool(fromTool)) return false;
+        const fromPath = normalizeDecisionPath(fromDecision && fromDecision.path);
+        const fallbackPath = normalizeDecisionPath(fallbackDecision && fallbackDecision.path);
+        return Boolean(fallbackPath) && fallbackPath === fromPath;
+      };
       const hasSuccessfulNewProject = () => toolEvents.some((event) => (
         event && event.ok && String(event.tool || '').toLowerCase() === 'new_project'
       ));
-      const isCoordinatedFrontendEdit = () => (
-        String(planSpec && planSpec.taskKind || '').toLowerCase() === 'edit'
-        && /\b(design|style|layout|responsive|mobile|dark\s*mode|light\s*mode|theme|toggle|calculator|modern|polish|ui|frontend)\b/i.test(taskText)
-      );
-      const getKnownRootFilePaths = () => {
-        const paths = [];
-        const workspaceContext = typeof deps.getWorkspaceContext === 'function' ? deps.getWorkspaceContext() : null;
-        const rootEntries = Array.isArray(workspaceContext && workspaceContext.rootEntries) ? workspaceContext.rootEntries : [];
-        rootEntries.forEach((entry) => {
-          if (!entry || String(entry.kind || '').toLowerCase() === 'folder') return;
-          const path = deps.normalizeWorkspacePath((entry.path || (entry.name ? `/${entry.name}` : '')));
-          if (path) paths.push(path);
-        });
-        toolEvents.forEach((event) => {
-          if (!event || !event.ok || String(event.tool || '').toLowerCase() !== 'list_dir') return;
-          String(event.observation || '').split(/\n/).forEach((line) => {
-            const match = line.match(/-\s+\[file\]\s+([^\s(]+)/i);
-            if (match && match[1]) {
-              const base = deps.normalizeWorkspacePath(event.path || '/') || '/';
-              const name = match[1].replace(/^\/+/, '');
-              paths.push(deps.normalizeWorkspacePath(base === '/' ? `/${name}` : `${base}/${name}`));
-            }
-          });
-        });
-        return Array.from(new Set(paths.filter(Boolean)));
-      };
-      const getCoordinatedFrontendFiles = () => {
-        const plannedFiles = []
-          .concat(Array.isArray(planSpec && planSpec.filesToInspect) ? planSpec.filesToInspect : [])
-          .concat(Array.isArray(planSpec && planSpec.affectedFiles) ? planSpec.affectedFiles : [])
-          .concat(Array.isArray(planSpec && planSpec.expectedFiles) ? planSpec.expectedFiles : [])
-          .map((path) => deps.normalizeWorkspacePath(path || ''))
-          .filter(Boolean);
-        const knownRootFiles = getKnownRootFilePaths();
-        const sourceCandidates = knownRootFiles.filter((path) => /\.(?:html?|css|scss|sass|less|js|mjs|cjs|ts|jsx|tsx)$/i.test(path));
-        const coordinated = isCoordinatedFrontendEdit()
-          ? [
-            sourceCandidates.find((path) => /\.html?$/i.test(path)) || '',
-            sourceCandidates.find((path) => /\.(?:css|scss|sass|less)$/i.test(path)) || '',
-            sourceCandidates.find((path) => /\.(?:js|mjs|cjs|ts|jsx|tsx)$/i.test(path)) || '',
-          ].filter(Boolean)
-          : [];
-        return Array.from(new Set(plannedFiles.concat(coordinated))).filter(Boolean);
-      };
+      // (Removed: keyword-based "coordinated frontend edit" helpers — only the
+      // deleted read-before-edit hijack used them.)
       const repairDecisionBeforeExecution = (decision, step) => {
         if (!decision || decision.action !== 'tool') return decision;
         // Coerce raw edit_file payloads only while creating planned project files.
@@ -308,82 +399,12 @@
           const looksLikeEditProgram = rawContent.startsWith('[') || rawContent.startsWith('{');
           const looksLikeRawCode = rawContent.length > 40 && !looksLikeEditProgram;
           const isProjectCreation = String(planSpec && planSpec.taskKind || '').toLowerCase() === 'project';
-          const isEditTask = String(planSpec && planSpec.taskKind || '').toLowerCase() === 'edit';
           const expectedFiles = Array.isArray(planSpec && planSpec.expectedFiles) ? planSpec.expectedFiles : [];
-          const plannedInspectFiles = getCoordinatedFrontendFiles();
-          const plannedAffectedFiles = plannedInspectFiles.length
-            ? plannedInspectFiles
-            : (Array.isArray(planSpec && planSpec.affectedFiles)
-              ? planSpec.affectedFiles.map((path) => deps.normalizeWorkspacePath(path || '')).filter(Boolean)
-              : []);
           const targetPath = deps.normalizeWorkspacePath(decision.path || '');
           const isExpectedFile = expectedFiles.map((path) => deps.normalizeWorkspacePath(path || '')).includes(targetPath);
-          const successfulReads = new Set(toolEvents
-            .filter((event) => event && event.ok && String(event.tool || '').toLowerCase() === 'read_file')
-            .map((event) => deps.normalizeWorkspacePath(event.path || ''))
-            .filter(Boolean));
-          const successfulWrites = new Set(toolEvents
-            .filter((event) => event && event.ok && ['write_file', 'edit_file'].includes(String(event.tool || '').toLowerCase()))
-            .map((event) => deps.normalizeWorkspacePath(event.path || ''))
-            .filter(Boolean));
-          if (isEditTask && plannedInspectFiles.length > 1) {
-            const unreadPlannedFile = plannedInspectFiles.find((path) => !successfulReads.has(path));
-            if (unreadPlannedFile) {
-              recordDebugTrace('agent_edit_deferred_for_planned_read', {
-                chatId: String(chatId || ''),
-                step: String(step),
-                attemptedPath: deps.debugPreview(targetPath, 180),
-                readPath: deps.debugPreview(unreadPlannedFile, 180),
-              }, {
-                chatId: String(chatId || ''),
-                step,
-                originalDecision: decision,
-                planSpec,
-                toolEvents,
-              });
-              return {
-                action: 'tool',
-                tool: 'read_file',
-                message: `Read ${unreadPlannedFile} before editing the coordinated feature.`,
-                path: unreadPlannedFile,
-                content: '',
-                srcPath: '',
-                dstPath: '',
-                raw: '[repair-read-planned-file-before-edit]',
-              };
-            }
-          }
-          if (isEditTask && plannedAffectedFiles.length > 1 && targetPath && successfulWrites.has(targetPath)) {
-            const untouchedAffectedFile = plannedAffectedFiles.find((path) => path !== targetPath && !successfulWrites.has(path));
-            if (untouchedAffectedFile) {
-              recordDebugTrace('agent_repeat_edit_redirected_to_planned_file', {
-                chatId: String(chatId || ''),
-                step: String(step),
-                attemptedPath: deps.debugPreview(targetPath, 180),
-                nextPath: deps.debugPreview(untouchedAffectedFile, 180),
-              }, {
-                chatId: String(chatId || ''),
-                step,
-                originalDecision: decision,
-                planSpec,
-                toolEvents,
-              });
-              return {
-                action: 'tool',
-                tool: successfulReads.has(untouchedAffectedFile) ? 'edit_file' : 'read_file',
-                message: successfulReads.has(untouchedAffectedFile)
-                  ? `Update ${untouchedAffectedFile} as the next planned file for this feature.`
-                  : `Read ${untouchedAffectedFile} before editing the next planned file.`,
-                path: untouchedAffectedFile,
-                content: '',
-                srcPath: '',
-                dstPath: '',
-                raw: successfulReads.has(untouchedAffectedFile)
-                  ? '[repair-edit-next-planned-file]'
-                  : '[repair-read-next-planned-file]',
-              };
-            }
-          }
+          // (Removed: two hijack doors lived here — "read all planned files before
+          // any edit" and "repeat edit -> next planned file". Both discarded the
+          // model's edit; the executor already requires the edit TARGET read.)
           const hasReadTarget = toolEvents.some((event) => (
             event
             && event.ok
@@ -483,6 +504,16 @@
       if (approvedNewProject && planSpec && String(planSpec.taskKind || '').toLowerCase() !== 'project'
         && typeof deps.buildFallbackAgentPlanSpec === 'function') {
         planSpec = deps.buildFallbackAgentPlanSpec(taskText, { chatId, forceProjectScope: true });
+      }
+      // The chat's manual context rides in the contract so every prompt sees it.
+      const chatManualContext = typeof deps.getChatManualContext === 'function'
+        ? String(deps.getChatManualContext(chatId) || '').trim()
+        : '';
+      if (chatManualContext && planSpec) {
+        planSpec.projectContract = [
+          String(planSpec.projectContract || '').trim(),
+          `USER CUSTOM INSTRUCTIONS (set in the app UI — follow for all files and decisions):\n${chatManualContext}`,
+        ].filter(Boolean).join('\n\n');
       }
       deps.applyAgentProjectChatName(chatId, planSpec);
       const workspaceStateComparison = typeof deps.getWorkspaceStateComparison === 'function'
@@ -677,7 +708,7 @@
             }
             deps.commitAssistantMessage(chatId, failure, failure, {
               agentActivities,
-              agentMeta: { startedAt, completedAt: Date.now(), collapsed: false },
+              agentMeta: agentMetaWithRevert({ startedAt, completedAt: Date.now(), collapsed: false }),
               forceNeedsContinue: true,
             });
             return true;
@@ -785,7 +816,7 @@
           }
           deps.commitAssistantMessage(chatId, failure, failure, {
             agentActivities,
-            agentMeta: { startedAt, completedAt: Date.now(), collapsed: false },
+            agentMeta: agentMetaWithRevert({ startedAt, completedAt: Date.now(), collapsed: false }),
             forceNeedsContinue: true,
           });
           return true;
@@ -831,6 +862,7 @@
           toolEvents.push({
             tool: decision.tool,
             ok: false,
+            _guardBlock: true,
             path: normalizeDecisionPath(decision.path || ''),
             srcPath: normalizeDecisionPath(decision.srcPath || ''),
             dstPath: normalizeDecisionPath(decision.dstPath || ''),
@@ -857,7 +889,13 @@
             const finalCheck = deps.validateAgentFinalDecision(taskText, toolEvents, planSpec);
             const missing = Array.isArray(finalCheck && finalCheck.missing) ? finalCheck.missing : [];
             const onlyValidationMissing = missing.length > 0 && missing.every((item) => /validate/i.test(String(item || '')));
-            if (((finalCheck && finalCheck.ok) || onlyValidationMissing) && !isWeakEditPlan()) {
+            if (((finalCheck && finalCheck.ok) || onlyValidationMissing) && !isWeakEditPlan()
+              && agentHasWorkspaceMutations()) {
+              const unmetCriteria = await getUnmetCriteriaNudge();
+              if (unmetCriteria) {
+                pushCriteriaNudgeObservation(unmetCriteria);
+                continue;
+              }
               setAgentProgress('Finalizing...');
               const workspaceLabel = deps.getWorkspaceRootName() || deps.deriveProjectNameFromTask(taskText) || 'project';
               const finalText = await deps.generateAgentCompletionText(taskText, toolEvents, workspaceLabel, planSpec);
@@ -867,7 +905,7 @@
               deps.consumeLiveAssistantText();
               deps.commitAssistantMessage(chatId, finalText, finalText, {
                 agentActivities,
-                agentMeta: { startedAt, completedAt: Date.now(), collapsed: true },
+                agentMeta: agentMetaWithRevert({ startedAt, completedAt: Date.now(), collapsed: true }),
                 forceNeedsContinue: false,
               });
               recordDebugTrace('agent_done', {
@@ -897,7 +935,7 @@
                 && fallbackSignature.path === duplicateSignature.path
                 && fallbackSignature.srcPath === duplicateSignature.srcPath
                 && fallbackSignature.dstPath === duplicateSignature.dstPath;
-              if (!sameTarget) {
+              if (!sameTarget && isSafeDuplicateRedirect(decision, fallbackDecision)) {
                 recordDebugTrace('agent_duplicate_decision_repaired', {
                   chatId: String(chatId || ''),
                   step: String(step),
@@ -928,14 +966,15 @@
                 && /same tool\/target already failed|already read and no workspace changes/i.test(String(event.observation || ''))
               )).length;
               if (duplicateBlockedCount >= 2) {
-                const blockedText = duplicateTool === 'edit_file'
-                  ? `I stopped because editing ${duplicatePath || 'the target file'} kept hitting the same blocker. I did not switch to unrelated files just to keep the loop running.`
-                  : `I stopped because ${duplicatePath || 'that file'} was already read and no workspace changes happened after it. I did not keep rereading or switch to unrelated files.`;
+                const blockerNote = duplicateTool === 'edit_file'
+                  ? `Note: I stopped before fully wrapping up because editing ${duplicatePath || 'the target file'} kept hitting the same blocker. If anything still looks off there, press Continue or tell me what to change.`
+                  : `Note: I stopped because ${duplicatePath || 'that file'} was already read and no workspace changes happened after it. Press Continue if something is still missing.`;
+                const blockedText = await buildStoppedWithWorkText(blockerNote);
                 setAgentProgress('Stopped.');
                 deps.consumeLiveAssistantText();
                 deps.commitAssistantMessage(chatId, blockedText, blockedText, {
                   agentActivities,
-                  agentMeta: { startedAt, completedAt: Date.now(), collapsed: false },
+                  agentMeta: agentMetaWithRevert({ startedAt, completedAt: Date.now(), collapsed: false }),
                   forceNeedsContinue: true,
                 });
                 recordDebugTrace('agent_done', {
@@ -964,7 +1003,7 @@
               && fallbackSignature.path === duplicateSignature.path
               && fallbackSignature.srcPath === duplicateSignature.srcPath
               && fallbackSignature.dstPath === duplicateSignature.dstPath;
-            if (!sameTarget) {
+            if (!sameTarget && isSafeDuplicateRedirect(decision, fallbackDecision)) {
               recordDebugTrace('agent_duplicate_decision_repaired', {
                 chatId: String(chatId || ''),
                 step: String(step),
@@ -1017,6 +1056,11 @@
             setAgentProgress('Reviewing...');
             continue;
           }
+          const unmetCriteria = await getUnmetCriteriaNudge();
+          if (unmetCriteria) {
+            pushCriteriaNudgeObservation(unmetCriteria);
+            continue;
+          }
           // Honor the model's final decision: requirements met, or it reaffirmed
           // finishing after the single advisory nudge.
           setAgentProgress('Finalizing...');
@@ -1027,7 +1071,7 @@
           deps.consumeLiveAssistantText();
           deps.commitAssistantMessage(chatId, finalText, finalText, {
             agentActivities,
-            agentMeta: { startedAt, completedAt: Date.now(), collapsed: true },
+            agentMeta: agentMetaWithRevert({ startedAt, completedAt: Date.now(), collapsed: true }),
             forceNeedsContinue: false,
           });
           recordDebugTrace('agent_done', {
@@ -1053,6 +1097,55 @@
           });
         }
 
+        // Polish-loop breakers: after a clean write, reading it back or rewriting
+        // it whole is churn unless something actually failed since.
+        const lastWriteWithoutFailureSince = (path) => {
+          let sawCleanWrite = false;
+          for (let i = toolEvents.length - 1; i >= 0; i -= 1) {
+            const event = toolEvents[i];
+            if (!event || event._guardBlock) continue;
+            if (deps.normalizeWorkspacePath(event.path || '') !== path) continue;
+            if (!event.ok) return false;
+            const eventTool = String(event.tool || '').toLowerCase();
+            if (eventTool === 'write_file') { sawCleanWrite = true; break; }
+            if (eventTool === 'edit_file') return false;
+            // successful reads/validates after the write change nothing; keep looking
+          }
+          return sawCleanWrite;
+        };
+        if (decision.action === 'tool' && String(decision.tool || '').toLowerCase() === 'read_file') {
+          const readPath = deps.normalizeWorkspacePath(decision.path || '');
+          if (readPath && lastWriteWithoutFailureSince(readPath)) {
+            recordDebugTrace('agent_read_after_own_write_blocked', {
+              chatId: String(chatId || ''), step: String(step), path: readPath,
+            }, { chatId: String(chatId || ''), step, path: readPath });
+            toolEvents.push({
+              tool: 'read_file',
+              ok: false,
+              _guardBlock: true,
+              path: readPath,
+              observation: `read_file blocked for ${readPath}: you just wrote this file's complete content yourself — the saved file IS that content, nothing changed it since. Do not read it back. If something specific is wrong, change it with ONE targeted edit_file; otherwise run validate_files once and finalize.`,
+            });
+            continue;
+          }
+        }
+        if (decision.action === 'tool' && String(decision.tool || '').toLowerCase() === 'write_file') {
+          const writePath = deps.normalizeWorkspacePath(decision.path || '');
+          if (writePath && lastWriteWithoutFailureSince(writePath)) {
+            recordDebugTrace('agent_repeat_rewrite_blocked', {
+              chatId: String(chatId || ''), step: String(step), path: writePath,
+            }, { chatId: String(chatId || ''), step, path: writePath });
+            toolEvents.push({
+              tool: 'write_file',
+              ok: false,
+              _guardBlock: true,
+              path: writePath,
+              observation: `write_file blocked for ${writePath}: you already generated this file's complete content this run and nothing failed since. Do NOT polish by rewriting the whole file — each rewrite regenerates everything and loops. If one specific rule or section is wrong, change it with ONE targeted edit_file; otherwise run validate_files once and finalize.`,
+            });
+            continue;
+          }
+        }
+
         // Read-loop guard (see evaluateRepeatedRead).
         if (decision.action === 'tool' && String(decision.tool || '').toLowerCase() === 'read_file') {
           const readPath = deps.normalizeWorkspacePath(decision.path || '');
@@ -1065,6 +1158,7 @@
             toolEvents.push({
               tool: 'read_file',
               ok: false,
+              _guardBlock: true,
               path: readPath,
               observation: `You have already read the relevant parts of ${readPath} (${blockReason}) — stop re-reading; you have enough context. To find a specific selector/class/id/function, use ONE search_files query on ${readPath}. Otherwise MAKE THE EDIT now (edit_file) or finalize. Do NOT call read_file on ${readPath} again.`,
             });
@@ -1072,12 +1166,15 @@
           }
         }
 
-        // Inspection-budget guard: too many reads/searches with no edit -> steer to act.
+        // Inspection-budget guard: too many reads/searches with no edit -> steer to
+        // act. Searches get a higher cap — the guard's own steer recommends "ONE
+        // search_files query", so it must not block that query at the read cap.
         if (decision.action === 'tool'
           && (String(decision.tool || '').toLowerCase() === 'read_file'
             || String(decision.tool || '').toLowerCase() === 'search_files')) {
           const inspections = countInspectionsSinceMutation(toolEvents);
-          if (inspections >= 8) {
+          const inspectionCap = String(decision.tool || '').toLowerCase() === 'search_files' ? 12 : 8;
+          if (inspections >= inspectionCap) {
             recordDebugTrace('agent_inspection_budget_blocked', {
               chatId: String(chatId || ''), step: String(step), tool: String(decision.tool || ''), inspections: String(inspections),
             }, { chatId: String(chatId || ''), step, tool: String(decision.tool || ''), inspections });
@@ -1089,6 +1186,7 @@
             toolEvents.push({
               tool: String(decision.tool || ''),
               ok: false,
+              _guardBlock: true,
               path: deps.normalizeWorkspacePath(decision.path || ''),
               observation: `You have inspected the workspace ${inspections} times without making a single change — you already have enough context. STOP inspecting: no more read_file or search_files. Make the change now with edit_file using the lines you have already located, or finalize if the task is done. Anchors do NOT need to be byte-exact — close matches (whitespace/indent differences) are accepted, so edit from what you have.${checklistSteer}`,
             });
@@ -1107,6 +1205,7 @@
             toolEvents.push({
               tool: String(decision.tool || ''),
               ok: false,
+              _guardBlock: true,
               path: editPath,
               observation: `Stop editing ${editPath}: your edits have cycled it back to a state it was already in this run — you are going in circles, removing the same code you just added. It is correct as-is. Do NOT edit ${editPath} again. Finalize now (or move to a different file if one genuinely still needs changes).`,
             });
@@ -1313,7 +1412,7 @@
               : deps.sanitizeAssistantText(toolResult.userFacingMessage || toolResult.observation || 'I need confirmation before continuing.');
             deps.commitAssistantMessage(chatId, userFacingMessage, userFacingMessage, {
               agentActivities,
-              agentMeta: { startedAt, completedAt: Date.now(), collapsed: true },
+              agentMeta: agentMetaWithRevert({ startedAt, completedAt: Date.now(), collapsed: true }),
               forceNeedsContinue: false,
             });
             recordDebugTrace('agent_confirmation_requested', {
@@ -1363,10 +1462,18 @@
             : (String(decision.tool || '').toLowerCase() === 'read_file'
               ? String(toolResult && typeof toolResult.readContent === 'string' ? toolResult.readContent : '')
               : ''),
+          // Pre-change content — lets the change-summary/diff builders ground the
+          // completion message and the finish audit in what actually changed.
+          originalContent: ['write_file', 'edit_file'].includes(String(decision.tool || '').toLowerCase())
+            && toolResult && typeof toolResult.originalContent === 'string'
+            ? toolResult.originalContent
+            : undefined,
+          createdNewFile: Boolean(toolResult && toolResult.createdNewFile),
           // Read range — for the range-aware read-loop guard.
           startLine: Number(decision.start_line) || 0,
           endLine: Number(decision.end_line) || 0,
           offset: Number(decision.offset) || 0,
+          searchQuery: String(decision.tool || '').toLowerCase() === 'search_files' ? String(decision.content || '') : '',
           observation: clippedObservation,
         });
         if (toolEvents.length > 48) {
@@ -1490,7 +1597,7 @@
           }
           deps.commitAssistantMessage(chatId, stoppedText, stoppedText, {
             agentActivities,
-            agentMeta: { startedAt, completedAt: Date.now(), collapsed: true },
+            agentMeta: agentMetaWithRevert({ startedAt, completedAt: Date.now(), collapsed: true }),
             forceNeedsContinue: true,
           });
           recordDebugTrace('agent_stopped_after_tool_timeout', {
@@ -1526,7 +1633,7 @@
                 .map((event) => deps.normalizeWorkspacePath(event.path || ''))
                 .filter(Boolean))];
               const keptSummary = keptList.length ? ` I kept the files that are already done: ${keptList.slice(0, 6).join(', ')}.` : '';
-              const stoppedText = `I tried ${streakPath} ${failureStreak.count} times and it kept failing the same way (${shortReason}). I'm stopping here instead of looping and using up the run.${keptSummary} Tell me how you want to handle ${streakPath} and I'll pick it back up.`;
+              const stoppedText = await buildStoppedWithWorkText(`Note: I tried ${streakPath} ${failureStreak.count} times and it kept failing the same way (${shortReason}), so I stopped instead of looping.${keptSummary} Tell me how you want to handle ${streakPath} and I'll pick it back up.`);
               appendAgentActivity({
                 kind: 'error',
                 title: 'Stopped after retries',
@@ -1542,7 +1649,7 @@
               }
               deps.commitAssistantMessage(chatId, stoppedText, stoppedText, {
                 agentActivities,
-                agentMeta: { startedAt, completedAt: Date.now(), collapsed: true },
+                agentMeta: agentMetaWithRevert({ startedAt, completedAt: Date.now(), collapsed: true }),
                 forceNeedsContinue: true,
               });
               recordDebugTrace('agent_stopped_after_repeated_failures', {
@@ -1566,6 +1673,7 @@
               kind: 'validate',
               title: 'Retrying',
               detail: `${streakPath} didn't pass: ${shortReason}. Fixing it and trying again (attempt ${failureStreak.count + 1} of ${sameFailureLimit}).`,
+              hasIssues: true,
               status: 'running',
               openPath: streakPath.startsWith('/') ? streakPath : '',
               openKind: 'file',
@@ -1599,7 +1707,7 @@
             deps.consumeLiveAssistantText();
             deps.commitAssistantMessage(chatId, finalText, finalText, {
               agentActivities,
-              agentMeta: { startedAt, completedAt: Date.now(), collapsed: true },
+              agentMeta: agentMetaWithRevert({ startedAt, completedAt: Date.now(), collapsed: true }),
               // Was false — so "continue" fell through to chat (which just
               // re-summarized). True puts the chat in resume state so a bare
               // "continue" re-enters the agent and wires up the gaps.
@@ -1644,7 +1752,7 @@
             }
             deps.commitAssistantMessage(chatId, stoppedText, stoppedText, {
               agentActivities,
-              agentMeta: { startedAt, completedAt: Date.now(), collapsed: true },
+              agentMeta: agentMetaWithRevert({ startedAt, completedAt: Date.now(), collapsed: true }),
               forceNeedsContinue: true,
             });
             recordDebugTrace('agent_stopped_after_blocked_file_generation', {
@@ -1682,7 +1790,17 @@
               lastCorrectionDetail = correctionDetail;
             }
           }
-          if (finalCheck.ok && !isWeakEditPlan()) {
+          // Never auto-finalize a build/edit task that changed nothing — an
+          // inspect-only plan once "completed" after one read and the completion
+          // model invented a file it never created. The model may still decide
+          // its own final (which states honestly that nothing was changed).
+          const isAnalysisRun = String(planSpec && planSpec.taskKind || '').toLowerCase() === 'analysis';
+          if (finalCheck.ok && !isWeakEditPlan() && (agentHasWorkspaceMutations() || isAnalysisRun)) {
+            const unmetCriteria = await getUnmetCriteriaNudge();
+            if (unmetCriteria) {
+              pushCriteriaNudgeObservation(unmetCriteria);
+              continue;
+            }
             setAgentProgress('Finalizing...');
             const workspaceLabel = deps.getWorkspaceRootName() || deps.deriveProjectNameFromTask(taskText) || 'project';
             const finalText = await deps.generateAgentCompletionText(taskText, toolEvents, workspaceLabel, planSpec);
@@ -1692,7 +1810,7 @@
             deps.consumeLiveAssistantText();
             deps.commitAssistantMessage(chatId, finalText, finalText, {
               agentActivities,
-              agentMeta: { startedAt, completedAt: Date.now(), collapsed: true },
+              agentMeta: agentMetaWithRevert({ startedAt, completedAt: Date.now(), collapsed: true }),
               forceNeedsContinue: false,
             });
             recordDebugTrace('agent_done', {
@@ -1759,7 +1877,7 @@
       }
       deps.commitAssistantMessage(chatId, fallback, fallback, {
         agentActivities,
-        agentMeta: { startedAt, completedAt: Date.now(), collapsed: true },
+        agentMeta: agentMetaWithRevert({ startedAt, completedAt: Date.now(), collapsed: true }),
         forceNeedsContinue: !(cl && cl.allDone),
       });
       recordDebugTrace('agent_done', {
@@ -1799,7 +1917,7 @@
             const stoppedText = 'The agent stopped before finishing. The files generated so far are saved in the workspace — say "continue" and I will pick up from the current state.';
             deps.commitAssistantMessage(chatId, stoppedText, stoppedText, {
               agentActivities,
-              agentMeta: { startedAt, completedAt: Date.now(), collapsed: true },
+              agentMeta: agentMetaWithRevert({ startedAt, completedAt: Date.now(), collapsed: true }),
               forceNeedsContinue: true,
             });
             recordDebugTrace('agent_finalized_orphaned_stream', {

@@ -175,7 +175,28 @@
       const completedAt = Number(meta.completedAt) || 0;
       const collapsed = meta.collapsed !== false;
       if (!startedAt && !completedAt) return null;
-      return { startedAt, completedAt, collapsed };
+      const normalized = { startedAt, completedAt, collapsed };
+      // Per-response revert snapshot: pre-run file states (+ post-run states once
+      // a revert captured them) so the message can restore either direction.
+      const normalizeSnapshotFiles = (list) => (Array.isArray(list) ? list : [])
+        .map((file) => (file && file.path ? {
+          path: String(file.path),
+          existedBefore: file.existedBefore === true,
+          content: String(file.content || ''),
+          added: Math.max(0, Number(file.added) || 0),
+          removed: Math.max(0, Number(file.removed) || 0),
+        } : null))
+        .filter(Boolean);
+      if (meta.revert && typeof meta.revert === 'object') {
+        const files = normalizeSnapshotFiles(meta.revert.files);
+        if (files.length) {
+          normalized.revert = { files };
+          const restored = normalizeSnapshotFiles(meta.revert.restored);
+          if (restored.length) normalized.revert.restored = restored;
+        }
+      }
+      if (meta.reverted === true) normalized.reverted = true;
+      return normalized;
     }
 
     function cloneAgentActivities(list) {
@@ -502,12 +523,18 @@
         });
       }
       if (tool === 'validate_files') {
+        const advisoryCount = Array.isArray(toolResult && toolResult.validationAdvisory)
+          ? toolResult.validationAdvisory.length
+          : 0;
         return buildInlineAgentActivityBase({
           kind: 'validate',
           title: 'Checked files',
           detail: toolResult && toolResult.validationPassed === false
             ? 'Found issues that need repair.'
-            : 'No obvious issues found.',
+            : (advisoryCount
+              ? `No blocking issues; ${advisoryCount} advisory note${advisoryCount === 1 ? '' : 's'}.`
+              : 'No obvious issues found.'),
+          hasIssues: Boolean(toolResult && toolResult.validationPassed === false),
           meta: '',
           status: 'done',
         });
@@ -740,6 +767,8 @@
       const item = document.createElement(clickable ? 'button' : 'div');
       item.className = `msg-agent-activity-row${activity && activity.status === 'error' ? ' error' : ''}${clickable ? ' clickable' : ''}`;
       if (item instanceof HTMLButtonElement) item.type = 'button';
+      const activityRowPath = normalizeWorkspacePath(activity && activity.openPath ? activity.openPath : '');
+      if (activityRowPath && activityRowPath !== '/') item.dataset.activityPath = activityRowPath;
       let inlineRow = null;
       let titleEl = null;
       let pathEl = null;
@@ -1304,7 +1333,9 @@
       const errorItem = items.find((a) => a && a.status === 'error');
       const groupStatus = runningItem ? 'running' : (errorItem ? 'error' : 'done');
       const count = items.length;
-      const validateHasIssues = phase === 'validate' && items.some((a) => /issue|error|fail|problem|warn/i.test(String(a.detail || '')));
+      // Structured flag set by the validate activity builder — the old detail-text
+      // regex matched the word "issues" inside "no obvious issues found".
+      const validateHasIssues = phase === 'validate' && items.some((a) => a && (a.hasIssues === true || a.status === 'error'));
       const labelsByPhase = {
         setup: { running: 'Preparing workspace', done: 'Created workspace' },
         create: { running: 'Generating files', done: `Generated ${count} file${count !== 1 ? 's' : ''}` },
@@ -1429,6 +1460,182 @@
       return wrapper;
     }
 
+    // Expand the "work" panel (main collapsible) and scroll to it; with a path,
+    // also open that file's edit row and its diff drawer.
+    function revealAgentWorkPanel(bubble, path = '') {
+      const panel = bubble ? bubble.querySelector('.msg-agent-panel') : null;
+      if (!panel) return;
+      setAgentPanelExpanded(panel, true, true);
+      window.setTimeout(() => {
+        let target = panel;
+        if (path) {
+          const rows = panel.querySelectorAll('.msg-agent-activity-row[data-activity-path]');
+          for (const row of rows) {
+            if (row.dataset.activityPath !== path) continue;
+            target = row;
+            if (row.classList.contains('diff-toggle')) break;
+          }
+        }
+        if (target !== panel) {
+          const subgroup = target.closest('.msg-agent-subgroup');
+          if (subgroup && subgroup.dataset.expanded !== 'true') {
+            const toggle = subgroup.querySelector('.msg-agent-subgroup-toggle');
+            if (toggle) toggle.click();
+          }
+          if (target.classList.contains('diff-toggle') && target.getAttribute('aria-expanded') !== 'true') {
+            target.click();
+          }
+        }
+        window.setTimeout(() => {
+          try {
+            target.scrollIntoView({ behavior: 'smooth', block: target === panel ? 'start' : 'center' });
+          } catch (_) { }
+        }, 140);
+      }, 60);
+    }
+
+    // Per-response edit summary card, rendered at the bottom of the message
+    // (after the final message, before the action icons). The aggregate +A/-R
+    // swaps to "Review changes ↗" on hover; rows reveal that file's edit inside
+    // the work panel.
+    function buildAgentEditCard(chatId, messageTs, meta, editedFiles, bubble) {
+      const reverted = meta.reverted === true;
+      const totalAdded = editedFiles.reduce((sum, file) => sum + file.added, 0);
+      const totalRemoved = editedFiles.reduce((sum, file) => sum + file.removed, 0);
+      const rememberPanelExpanded = () => {
+        if (typeof d.updateAssistantAgentMeta === 'function') {
+          void d.updateAssistantAgentMeta(chatId, messageTs, (current) => ({
+            ...(current || {}),
+            collapsed: false,
+          }), { rerender: false });
+        }
+      };
+
+      const card = document.createElement('div');
+      card.className = `msg-agent-editcard${reverted ? ' reverted' : ''}`;
+
+      const header = document.createElement('div');
+      header.className = 'msg-agent-editcard-header';
+
+      const icon = document.createElement('span');
+      icon.className = 'msg-agent-editcard-icon';
+      icon.innerHTML = `
+        <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <rect x="3" y="3" width="14" height="14" rx="4"></rect>
+          <path d="M10 6.8v3.4M8.3 8.5h3.4"></path>
+          <path d="M8.3 12.8h3.4"></path>
+        </svg>
+      `;
+      header.appendChild(icon);
+
+      const titles = document.createElement('div');
+      titles.className = 'msg-agent-editcard-titles';
+      const createdCount = meta.revert.files.length - editedFiles.length;
+      const title = document.createElement('div');
+      title.className = 'msg-agent-editcard-title';
+      title.textContent = `Edited ${editedFiles.length} file${editedFiles.length === 1 ? '' : 's'}${createdCount > 0 ? ` · ${createdCount} new file${createdCount === 1 ? '' : 's'}` : ''}${reverted ? ' · reverted' : ''}`;
+      titles.appendChild(title);
+
+      const statsSwap = document.createElement('button');
+      statsSwap.type = 'button';
+      statsSwap.className = 'msg-agent-editcard-statswap';
+      statsSwap.innerHTML = `
+        <span class="msg-agent-editcard-stats"><span class="plus">+${totalAdded}</span> <span class="minus">-${totalRemoved}</span></span>
+        <span class="msg-agent-editcard-review-link">Review changes
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M5 11 11 5"></path>
+            <path d="M6.5 5H11v4.5"></path>
+          </svg>
+        </span>
+      `;
+      statsSwap.addEventListener('click', () => {
+        revealAgentWorkPanel(bubble);
+        rememberPanelExpanded();
+      });
+      titles.appendChild(statsSwap);
+      header.appendChild(titles);
+
+      const actions = document.createElement('div');
+      actions.className = 'msg-agent-editcard-actions';
+      const undoBtn = document.createElement('button');
+      undoBtn.type = 'button';
+      undoBtn.className = 'msg-agent-editcard-undo ui-tooltip-anchor';
+      undoBtn.dataset.tooltip = reverted
+        ? 'Re-apply the changes from this response'
+        : `Restore the edited files to their state just before this response${createdCount > 0 ? ` and remove the ${createdCount} new file${createdCount === 1 ? '' : 's'} it created (moved to Trash)` : ''}`;
+      undoBtn.innerHTML = `
+        <span>${reverted ? 'Redo' : 'Undo'}</span>
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M12.5 6.5h-6a3 3 0 0 0 0 6h4"></path>
+          <path d="M10 3.5l3 3-3 3"></path>
+        </svg>
+      `;
+      undoBtn.addEventListener('click', async () => {
+        if (undoBtn.disabled) return;
+        undoBtn.disabled = true;
+        try {
+          await d.revertAgentMessageEdits(chatId, messageTs);
+        } finally {
+          undoBtn.disabled = false;
+        }
+      });
+      actions.appendChild(undoBtn);
+      header.appendChild(actions);
+      card.appendChild(header);
+
+      const fileList = document.createElement('div');
+      fileList.className = 'msg-agent-editcard-files';
+      const visibleCount = 3;
+      editedFiles.forEach((file, index) => {
+        const row = document.createElement('button');
+        row.type = 'button';
+        row.className = 'msg-agent-editcard-row';
+        if (index >= visibleCount) row.hidden = true;
+        const pathEl = document.createElement('span');
+        pathEl.className = 'msg-agent-editcard-row-path';
+        pathEl.textContent = file.path.replace(/^\//, '');
+        row.appendChild(pathEl);
+        const rowStats = document.createElement('span');
+        rowStats.className = 'msg-agent-editcard-stats';
+        rowStats.innerHTML = `<span class="plus">+${file.added}</span> <span class="minus">-${file.removed}</span>`;
+        row.appendChild(rowStats);
+        row.addEventListener('click', () => {
+          revealAgentWorkPanel(bubble, file.path);
+          rememberPanelExpanded();
+        });
+        fileList.appendChild(row);
+      });
+      card.appendChild(fileList);
+
+      if (editedFiles.length > visibleCount) {
+        const moreBtn = document.createElement('button');
+        moreBtn.type = 'button';
+        moreBtn.className = 'msg-agent-editcard-more';
+        const hiddenCount = editedFiles.length - visibleCount;
+        const setMoreLabel = (expanded) => {
+          moreBtn.innerHTML = `
+            <span>${expanded ? 'Show fewer files' : `Show ${hiddenCount} more file${hiddenCount === 1 ? '' : 's'}`}</span>
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="transform: rotate(${expanded ? 180 : 0}deg)">
+              <path d="M4.5 6.5 8 10l3.5-3.5"></path>
+            </svg>
+          `;
+        };
+        setMoreLabel(false);
+        moreBtn.addEventListener('click', () => {
+          const expanded = moreBtn.dataset.expanded === 'true';
+          const next = !expanded;
+          moreBtn.dataset.expanded = next ? 'true' : 'false';
+          Array.from(fileList.children).forEach((row, index) => {
+            if (index >= visibleCount) row.hidden = !next;
+          });
+          setMoreLabel(next);
+        });
+        card.appendChild(moreBtn);
+      }
+
+      return card;
+    }
+
     function hasCanvasTokenStarted(text) {
       const source = String(text || '');
       return /<AIcanvas\b/i.test(source)
@@ -1517,6 +1724,22 @@
       content.innerHTML = d.renderMarkdownHtml ? d.renderMarkdownHtml(contentText) : contentText;
       bubble.appendChild(content);
       if (typeof d.attachCodeCopyButtons === 'function') d.attachCodeCopyButtons(content);
+      // Edit summary card at the bottom of the finished response (before the
+      // message action icons). Edited files only — a response that only created
+      // files gets no card.
+      if (normalizedAgentMeta && normalizedAgentMeta.completedAt && normalizedAgentMeta.revert
+        && typeof d.revertAgentMessageEdits === 'function') {
+        const editedSnapshotFiles = normalizedAgentMeta.revert.files.filter((file) => file.existedBefore);
+        if (editedSnapshotFiles.length) {
+          bubble.appendChild(buildAgentEditCard(
+            options.chatId || '',
+            Number(options.messageTs) || 0,
+            normalizedAgentMeta,
+            editedSnapshotFiles,
+            bubble,
+          ));
+        }
+      }
     }
 
     function populateUserBubble(bubble, text) {

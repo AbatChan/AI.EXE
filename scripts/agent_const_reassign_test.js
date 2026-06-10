@@ -11,7 +11,7 @@ require(path.join(__dirname, '..', 'ui', 'agent-executor.js'));
 // createAgentExecutor only reads deps lazily inside tool calls, so a minimal
 // stub is enough to obtain the pure helper.
 const exec = global.AIExeAgentExecutor.createAgentExecutor({});
-const { getJsReassignedConstIssue } = exec;
+const { getJsReassignedConstIssue, getJsSyntaxIssue } = exec;
 
 let passed = 0;
 const bug = (name, code) => { assert.ok(getJsReassignedConstIssue(code), name); console.log(`PASS: ${name}`); passed += 1; };
@@ -35,5 +35,19 @@ ok('a const re-declared in another scope (shadowing) is skipped',
   'const a = 1;\nfunction g(){ const a = 2; return a; }');
 ok('=== and => near the name do not trip it',
   'const ok = true;\nconst h = () => ok === true ? 1 : 2;');
+
+{
+  const issue = getJsSyntaxIssue('function ok() {\n  return true;\n}\n}', new SyntaxError("Unexpected token '}'"));
+  assert.ok(/line 4/.test(issue) && /nothing is open/i.test(issue), 'reports unmatched closing brace line');
+  console.log('PASS: reports unmatched closing brace line');
+  passed += 1;
+}
+
+{
+  const issue = getJsSyntaxIssue('function ok() {\n  if (true) {\n    return 1;\n', new SyntaxError('Unexpected end of input'));
+  assert.ok(/opened at line 2/.test(issue), 'reports latest unclosed block line');
+  console.log('PASS: reports latest unclosed block line');
+  passed += 1;
+}
 
 console.log(`\n${passed} passed`);

@@ -78,6 +78,24 @@ const CSS = [
   ok('absent anchor is rejected', r.appliedCount === 0 && r.output === CSS && !r.output.includes('WRECKED'));
 }
 
+// Safety: if two non-exact anchors are equally plausible, refuse instead of
+// guessing. A failed edit is recoverable; a wrong splice silently corrupts code.
+{
+  const repeated = [
+    'function one() {',
+    '  selectedField = null;',
+    '}',
+    '',
+    'function two() {',
+    '  selectedField = null;',
+    '}',
+  ].join('\n');
+  const r = applyAgentEditProgram(repeated, {
+    edits: [{ op: 'replace', find: '  selectedFields = null;', replace: '  selectedField = { id: 1 };' }],
+  });
+  ok('ambiguous fuzzy anchor is rejected', r.appliedCount === 0 && r.output === repeated);
+}
+
 // insert_after resolves its anchor fuzzily too.
 {
   const r = applyAgentEditProgram(CSS, {
