@@ -66,10 +66,22 @@
     if (priorReads.some((e) => summarizeReadRange(e) === currentSig)) return 'exact-repeat';
     if (priorReads.length >= hardCap) return 'hard-cap';
     const last = priorReads[priorReads.length - 1];
-    // "already-seen" only blocks BROAD/full re-reads; a targeted line-range read
-    // (focusing on a section to edit) is allowed, bounded by exact-repeat + hard cap.
     const sigParts = String(currentSig).split(':');
     const currentIsTargeted = (Number(sigParts[0]) || 0) > 0 || (Number(sigParts[2]) || 0) > 0;
+    // A ranged read fully covered by a recent untruncated read adds nothing
+    // (the 1-50 then 1-30 then 1-15 pattern).
+    const reqStart = Number(sigParts[0]) || 0;
+    const reqEnd = Number(sigParts[1]) || 0;
+    if (reqStart > 0) {
+      const covered = priorReads.slice(-3).some((event) => {
+        if (readEventWasTruncated(event)) return false;
+        const priorStart = Number(event.startLine) || 0;
+        const priorEnd = Number(event.endLine) || 0;
+        if (priorStart === 0 && (Number(event.offset) || 0) === 0) return true;
+        return priorStart > 0 && priorStart <= reqStart && (priorEnd === 0 || (reqEnd > 0 && priorEnd >= reqEnd));
+      });
+      if (covered) return 'subset-of-recent-read';
+    }
     if (priorReads.length >= 2 && !readEventWasTruncated(last) && !currentIsTargeted) return 'already-seen';
     // Otherwise the file is still partially unseen (last read truncated) — allow
     // the model to page forward to the part it has not read yet.
@@ -341,6 +353,9 @@
         if (signature.tool === 'search_files' && lastEvent.ok && !hasWorkspaceMutationSince(lastIndex)
           && String(lastEvent.searchQuery || '') === String(decision && decision.content ? decision.content : '')) {
           return `search_files blocked: you already ran this exact search and nothing changed since — its result above stands (no matches MEANS the text is not in any file; stop looking for it). Act on what you know: make the edit or finalize.`;
+        }
+        if (['check_code', 'run_app'].includes(signature.tool) && lastEvent.ok && !hasWorkspaceMutationSince(lastIndex)) {
+          return `${signature.tool} blocked: nothing changed since the last run — its results above still hold. Fix the reported errors (or finalize if everything was clean).`;
         }
         if (
           signature.tool === 'edit_file'
@@ -1104,6 +1119,14 @@
           for (let i = toolEvents.length - 1; i >= 0; i -= 1) {
             const event = toolEvents[i];
             if (!event || event._guardBlock) continue;
+            const sinceTool = String(event.tool || '').toLowerCase();
+            // Validation/run failures carry no matching path but ARE failures
+            // since the write — without this the guard deadlocks every repair.
+            if (sinceTool === 'validate_files' && event.validationPassed === false) {
+              const issues = Array.isArray(event.validationIssues) ? event.validationIssues : [];
+              if (!issues.length || issues.some((issue) => String(issue || '').includes(path))) return false;
+            }
+            if (sinceTool === 'run_app' && !event.ok) return false;
             if (deps.normalizeWorkspacePath(event.path || '') !== path) continue;
             if (!event.ok) return false;
             const eventTool = String(event.tool || '').toLowerCase();
@@ -1151,6 +1174,34 @@
           const readPath = deps.normalizeWorkspacePath(decision.path || '');
           const currentSig = `${Number(decision.start_line) || 0}:${Number(decision.end_line) || 0}:${Number(decision.offset) || 0}`;
           const blockReason = readPath ? evaluateRepeatedRead(toolEvents, readPath, currentSig) : null;
+          if (blockReason === 'subset-of-recent-read') {
+            // Serve from cache instead of dead-ending: the model wants these
+            // lines in front of it again — give them to it for free.
+            const reqStart = Number(decision.start_line) || 1;
+            const reqEnd = Number(decision.end_line) || 0;
+            const cached = [...toolEvents].reverse().find((event) => (
+              event && event.ok && String(event.tool || '').toLowerCase() === 'read_file'
+              && deps.normalizeWorkspacePath(event.path || '') === readPath
+              && typeof event.content === 'string' && event.content
+            ));
+            if (cached) {
+              const allLines = String(cached.content).split('\n');
+              const slice = allLines.slice(Math.max(0, reqStart - 1), reqEnd > 0 ? reqEnd : allLines.length).join('\n');
+              toolEvents.push({
+                tool: 'read_file',
+                ok: true,
+                _guardBlock: true,
+                path: readPath,
+                startLine: reqStart,
+                endLine: reqEnd,
+                observation: `read_file ${readPath} (lines ${reqStart}–${reqEnd || allLines.length} of ${allLines.length}, served from this run's cache — the file has not changed):\n${slice.slice(0, deps.agentMaxToolOutputChars - 400)}`,
+              });
+              recordDebugTrace('agent_read_served_from_cache', {
+                chatId: String(chatId || ''), step: String(step), path: readPath,
+              }, { chatId: String(chatId || ''), step, path: readPath });
+              continue;
+            }
+          }
           if (blockReason) {
             recordDebugTrace('agent_read_loop_blocked', {
               chatId: String(chatId || ''), step: String(step), path: readPath, reason: blockReason,
@@ -1852,6 +1903,22 @@
       const remainingClause = cl && cl.remaining && cl.remaining.length
         ? ` Still to do: ${cl.remaining.join('; ')}.`
         : '';
+      // A validation failure with no repair landed after it must be disclosed —
+      // never end on a clean success message over a known-failed check.
+      let unresolvedValidationClause = '';
+      for (let i = toolEvents.length - 1; i >= 0; i -= 1) {
+        const event = toolEvents[i];
+        if (!event) continue;
+        const evTool = String(event.tool || '').toLowerCase();
+        if (event.ok && ['write_file', 'edit_file'].includes(evTool)) break;
+        if (evTool === 'validate_files') {
+          if (event.validationPassed === false) {
+            const firstIssue = Array.isArray(event.validationIssues) ? String(event.validationIssues[0] || '') : '';
+            unresolvedValidationClause = ` Note: the last check still flagged something I couldn't repair${firstIssue ? ` (${firstIssue})` : ''}. Press Continue and I'll address it.`;
+          }
+          break;
+        }
+      }
       let fallback = '';
       if (cl && cl.allDone) {
         // Work is done — let the model write the wrap-up naturally rather than a template.
@@ -1869,6 +1936,7 @@
           fallback = 'I could not finish in time. Press Continue to keep going, or tell me the exact change you want.';
         }
       }
+      if (unresolvedValidationClause) fallback += unresolvedValidationClause;
       deps.setThinkingStatus('');
       setAgentProgress('Stopped.');
       deps.consumeLiveAssistantText();
@@ -1878,7 +1946,7 @@
       deps.commitAssistantMessage(chatId, fallback, fallback, {
         agentActivities,
         agentMeta: agentMetaWithRevert({ startedAt, completedAt: Date.now(), collapsed: true }),
-        forceNeedsContinue: !(cl && cl.allDone),
+        forceNeedsContinue: !(cl && cl.allDone) || Boolean(unresolvedValidationClause),
       });
       recordDebugTrace('agent_done', {
         chatId: String(chatId || ''),

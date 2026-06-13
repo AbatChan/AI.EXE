@@ -1,5 +1,7 @@
 # Build outputs
 /build/
+/build-mac-preview/
+/build-*/
 /dist/
 *.obj
 *.o

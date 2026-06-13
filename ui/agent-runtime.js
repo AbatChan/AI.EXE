@@ -90,9 +90,19 @@
     // Returns { output, truncated }. `truncated` prefers the provider's real signal
     // (OpenAI finish_reason==='length' / Anthropic stop_reason==='max_tokens'); the
     // native path has no such flag, so completeness there is judged structurally.
+    // Per-delta heartbeat: a single long remote generation used to look idle to
+    // the tool watchdog (heartbeats only fired between calls) and got killed
+    // mid-flight. Streaming beats per token; true stalls still time out.
+    const beatToolProgress = () => {
+      if (typeof deps.markAgentToolProgress === 'function') deps.markAgentToolProgress();
+    };
+
     async function runRawAgentFileInference(prompt) {
       const budget = Math.max(1, Number(getAgentFileOutputBudget()) || agentFileContentMaxTokens);
-      const remote = await deps.requestSelectedRemoteTextCompletion(prompt, budget);
+      const remote = await deps.requestSelectedRemoteTextCompletion(prompt, budget, '', {
+        preferStreaming: true,
+        onDelta: beatToolProgress,
+      });
       if (remote && remote.ok && String(remote.output || '').trim()) {
         return { output: String(remote.output || ''), truncated: Boolean(remote.truncated) };
       }
@@ -171,7 +181,10 @@
 
     async function generateAgentEditFileProgram(taskText, toolEvents, path, currentContent, priorAttempt = '', planSpec = null) {
       const prompt = await deps.buildAgentEditFileContentPrompt(taskText, toolEvents, path, currentContent, priorAttempt, planSpec);
-      const remote = await deps.requestSelectedRemoteTextCompletion(prompt, agentDecisionMaxTokens * 3);
+      const remote = await deps.requestSelectedRemoteTextCompletion(prompt, agentDecisionMaxTokens * 3, '', {
+        preferStreaming: true,
+        onDelta: beatToolProgress,
+      });
       if (remote && remote.ok) {
         const cleaned = deps.sanitizeAgentGeneratedEditProgram(remote.output || '');
         if (cleaned) return cleaned;
