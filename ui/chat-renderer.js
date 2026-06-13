@@ -522,6 +522,32 @@
           status: 'done',
         });
       }
+      if (tool === 'run_app') {
+        const runErrors = Number(toolResult && toolResult.runErrorCount) || 0;
+        return buildInlineAgentActivityBase({
+          kind: 'validate',
+          title: 'Ran the app',
+          detail: runErrors
+            ? `${runErrors} runtime error${runErrors === 1 ? '' : 's'} at startup.`
+            : 'Started cleanly — no runtime errors.',
+          hasIssues: runErrors > 0,
+          meta: '',
+          status: 'done',
+        });
+      }
+      if (tool === 'check_code') {
+        const errorCount = Number(toolResult && toolResult.checkErrorCount) || 0;
+        return buildInlineAgentActivityBase({
+          kind: 'validate',
+          title: 'Checked syntax',
+          detail: errorCount
+            ? `${errorCount} file${errorCount === 1 ? '' : 's'} with parse errors.`
+            : 'All files parse cleanly.',
+          hasIssues: errorCount > 0,
+          meta: '',
+          status: 'done',
+        });
+      }
       if (tool === 'validate_files') {
         const advisoryCount = Array.isArray(toolResult && toolResult.validationAdvisory)
           ? toolResult.validationAdvisory.length

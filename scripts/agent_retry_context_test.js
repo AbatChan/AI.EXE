@@ -262,11 +262,22 @@ ok('paging forward while the last read was truncated is ALLOWED (the fix)',
 ok('a BROAD (full) re-read of a fully-seen file is blocked as already-seen',
   evaluateRepeatedRead([rd(1, 200, 0, false), rd(201, 400, 0, false)], '/script.js', '0:0:0') === 'already-seen');
 
-ok('a TARGETED line-range read of a fully-seen file is ALLOWED (focusing to edit)',
-  evaluateRepeatedRead([rd(0, 0, 0, false), rd(0, 0, 0, false)], '/script.js', '469:600:0') === null);
+// Changed contract (v2.5.5): a ranged read fully covered by a recent untruncated
+// read is pure waste — the expanded in-prompt content serves "focusing to edit".
+ok('a TARGETED subset of a fully-seen file is blocked as subset-of-recent-read',
+  evaluateRepeatedRead([rd(0, 0, 0, false), rd(0, 0, 0, false)], '/script.js', '469:600:0') === 'subset-of-recent-read');
 
-ok('a single prior full read does not block the next (distinct) read',
-  evaluateRepeatedRead([rd(0, 0, 0, false)], '/script.js', '240:350:0') === null);
+ok('the overlapping 1-50 then 1-30 pattern is blocked',
+  evaluateRepeatedRead([rd(1, 50, 0, false)], '/script.js', '1:30:0') === 'subset-of-recent-read');
+
+ok('a ranged read BEYOND the prior range is still allowed',
+  evaluateRepeatedRead([rd(1, 50, 0, false)], '/script.js', '40:120:0') === null);
+
+ok('a subset of a TRUNCATED read is still allowed (content was incomplete)',
+  evaluateRepeatedRead([rd(0, 0, 0, true)], '/script.js', '10:20:0') === null);
+
+ok('a single prior full read blocks covered ranges too',
+  evaluateRepeatedRead([rd(0, 0, 0, false)], '/script.js', '240:350:0') === 'subset-of-recent-read');
 
 ok('runaway paging hits the hard cap',
   evaluateRepeatedRead(

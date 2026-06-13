@@ -298,6 +298,17 @@
     function getHtmlStructureIssue(html) {
       const text = String(html || '');
       if (!text.trim()) return 'is empty';
+      // Content after the closing </html> tag is unambiguously invalid — the
+      // classic symptom of the model dumping raw CSS/JS into the HTML file
+      // instead of the stylesheet/script (browsers render or drop it as junk).
+      const closeHtmlIdx = text.toLowerCase().lastIndexOf('</html>');
+      if (closeHtmlIdx >= 0) {
+        const trailing = text.slice(closeHtmlIdx + '</html>'.length).replace(/<!--[\s\S]*?-->/g, ' ').trim();
+        if (trailing) {
+          const preview = trailing.replace(/\s+/g, ' ').slice(0, 60);
+          return `has content after the closing </html> tag ("${preview}${trailing.length > 60 ? '…' : ''}") — likely CSS or JS dumped into the HTML file by mistake`;
+        }
+      }
       const cleaned = text
         .replace(/<!--[\s\S]*?-->/g, ' ')
         .replace(/<script\b[\s\S]*?<\/script>/gi, ' ')
@@ -657,7 +668,8 @@
     function validateWebProjectConsistency(fileContents, planSpec, advisoryOut = null) {
       const issues = [];
       const expectedFiles = Array.isArray(planSpec && planSpec.expectedFiles) ? planSpec.expectedFiles : [];
-      const htmlFile = expectedFiles.find((path) => /\.html?$/i.test(String(path || ''))) || '';
+      const htmlFiles = expectedFiles.filter((path) => /\.html?$/i.test(String(path || '')));
+      const htmlFile = htmlFiles[0] || '';
       const cssFile = expectedFiles.find((path) => /\.(css|scss|sass|less)$/i.test(String(path || ''))) || '';
       const scriptFile = expectedFiles.find((path) => /\.(js|mjs|cjs|ts|jsx|tsx)$/i.test(String(path || ''))) || '';
       if (!htmlFile || (!cssFile && !scriptFile)) return issues;
@@ -679,9 +691,19 @@
         }
       }
 
-      const htmlIds = new Set(extractHtmlIds(html));
-      const htmlDataActions = new Set(extractHtmlDataActions(html));
-      const htmlClasses = new Set(extractHtmlClasses(html));
+      // Shared JS legitimately references ids/classes that exist on only one
+      // page of a multi-page project — check against the union of ALL pages.
+      const htmlIds = new Set();
+      const htmlDataActions = new Set();
+      const htmlClasses = new Set();
+      for (const page of htmlFiles) {
+        const pageHtml = String(fileContents[page] || '');
+        if (!pageHtml) continue;
+        extractHtmlIds(pageHtml).forEach((id) => htmlIds.add(id));
+        extractHtmlDataActions(pageHtml).forEach((action) => htmlDataActions.add(action));
+        extractHtmlClasses(pageHtml).forEach((className) => htmlClasses.add(className));
+      }
+      const htmlLabel = htmlFiles.length > 1 ? htmlFiles.join(', ') : htmlFile;
       const cssClasses = new Set(extractCssClassSelectors(css));
       const cssIds = new Set(extractCssIdSelectors(css));
       const jsExpectations = extractJsHtmlExpectations(js);
@@ -692,17 +714,17 @@
 
       jsExpectations.ids.forEach((id) => {
         if (!htmlIds.has(id) && !jsExpectations.createdIds.includes(id)) {
-          pushIssue(`${scriptFile || 'script file'}: references #${id}, but ${htmlFile} does not define that id`);
+          pushIssue(`${scriptFile || 'script file'}: references #${id}, but ${htmlLabel} does not define that id`);
         }
       });
       jsExpectations.dataActions.forEach((action) => {
         if (!htmlDataActions.has(action)) {
-          pushIssue(`${scriptFile || 'script file'}: expects data-action="${action}", but ${htmlFile} does not provide it`);
+          pushIssue(`${scriptFile || 'script file'}: expects data-action="${action}", but ${htmlLabel} does not provide it`);
         }
       });
       jsExpectations.queriedClasses.forEach((className) => {
         if (!htmlClasses.has(className) && !cssClasses.has(className) && !jsExpectations.createdClasses.includes(className)) {
-          pushIssue(`${scriptFile || 'script file'}: queries .${className}, but ${htmlFile} does not define that class`);
+          pushIssue(`${scriptFile || 'script file'}: queries .${className}, but ${htmlLabel} does not define that class`);
         }
       });
       // Removed (advisory, not crash-class — drove repair loops): "JS toggles .X" and
@@ -1290,7 +1312,7 @@
         });
         deps.syncFileTabFromWorkspaceWrite(path, content, deps.workspaceBaseName(path));
         mutated = true;
-        observation = `write_file ok: ${path} (${content.length} chars)${primaryQualityNote}\nThe saved file matches the generated content exactly — do not re-read ${path} to verify.`;
+        observation = `write_file ok: ${path} (${content.length} chars)${primaryQualityNote}\nThe saved file matches the generated content exactly — do not re-read ${path} to verify.${newContentStructureIssue ? `\nWARNING: the saved content still fails to parse — it ${newContentStructureIssue}. Fix this before finishing.` : ''}`;
         return {
           ok: true,
           mutated,
@@ -1468,6 +1490,9 @@
           `edit_file ok: ${path} (${applied.appliedCount} edits)`,
           appliedSummary ? `Applied changes:\n${appliedSummary}` : '',
           `The saved file reflects exactly these changes — do not re-read ${path} to verify.`,
+          editBeforeIssue && editAfterIssue
+            ? `WARNING: ${path} STILL fails to parse — it ${editAfterIssue}. It was broken before this edit and remains broken; fix the remaining error or regenerate the COMPLETE file with write_file.`
+            : '',
         ].filter(Boolean).join('\n');
         return {
           ok: true,
@@ -1477,6 +1502,82 @@
           writtenContent: applied.output,
           originalContent,
           createdNewFile: false,
+        };
+      }
+
+      // Smoke-run the app in a hidden sandboxed preview and return real runtime
+      // console errors from startup.
+      if (tool === 'run_app') {
+        if (typeof deps.runWorkspaceAppSmokeTest !== 'function') {
+          return { ok: false, mutated, observation: 'run_app is not available in this build.' };
+        }
+        const requestedHtml = deps.normalizeWorkspacePath(decision.path || '');
+        const htmlTarget = /\.html?$/i.test(requestedHtml) ? requestedHtml : '/index.html';
+        deps.setActiveAgentStreamStatus(chatId, `Running ${htmlTarget} in the offline preview...`);
+        const result = await deps.runWorkspaceAppSmokeTest(htmlTarget);
+        if (!result || !result.ok) {
+          return { ok: false, mutated, observation: `run_app failed: ${(result && result.message) || 'could not load the page'}.` };
+        }
+        const errors = Array.isArray(result.errors) ? result.errors.filter(Boolean) : [];
+        return {
+          ok: true,
+          mutated,
+          runErrorCount: errors.length,
+          observation: errors.length
+            ? `run_app ${htmlTarget}: ${errors.length} runtime error${errors.length === 1 ? '' : 's'} during startup:\n- ${errors.join('\n- ')}\nFix these (the file:line references point into the inlined sources), then run_app again to verify.`
+            : `run_app ${htmlTarget}: started cleanly — no runtime errors, unhandled rejections, or console.error during the startup smoke run.`,
+        };
+      }
+
+      // Parse code files and report exact syntax errors with line/column — the
+      // agent's "console". Non-mutating; doesn't count as inspection budget.
+      if (tool === 'check_code') {
+        const codeFileRe = /\.(?:js|mjs|cjs|html?|css|json)$/i;
+        const requested = deps.normalizeWorkspacePath(decision.path || '');
+        let targets = [];
+        if (requested && requested !== '/' && codeFileRe.test(requested)) {
+          targets = [requested];
+        } else {
+          const seen = new Set();
+          planExpectedFiles.forEach((p) => {
+            const normalized = deps.normalizeWorkspacePath(p || '');
+            if (normalized && codeFileRe.test(normalized)) seen.add(normalized);
+          });
+          (Array.isArray(toolEvents) ? toolEvents : []).forEach((event) => {
+            const normalized = deps.normalizeWorkspacePath((event && event.path) || '');
+            if (normalized && codeFileRe.test(normalized)) seen.add(normalized);
+          });
+          listedExistingFiles.forEach((p) => {
+            const normalized = deps.normalizeWorkspacePath(p || '');
+            if (normalized && codeFileRe.test(normalized)) seen.add(normalized);
+          });
+          targets = Array.from(seen);
+        }
+        if (!targets.length) {
+          return { ok: false, mutated, observation: 'check_code found no known code files yet — run list_dir first or pass a specific file path.' };
+        }
+        const lines = [];
+        let errorCount = 0;
+        for (const targetPath of targets.slice(0, 12)) {
+          const response = await deps.invokeWorkspaceAction('workspaceReadFile', { path: targetPath });
+          if (!response || !response.ok) {
+            lines.push(`- ${targetPath}: could not be read`);
+            errorCount += 1;
+            continue;
+          }
+          const issue = getStructuralIssueForPath(targetPath, String(response.output || ''));
+          if (issue) {
+            lines.push(`- ${targetPath}: ${issue}`);
+            errorCount += 1;
+          } else {
+            lines.push(`- ${targetPath}: OK (parses cleanly)`);
+          }
+        }
+        return {
+          ok: true,
+          mutated,
+          checkErrorCount: errorCount,
+          observation: `check_code results (${errorCount ? `${errorCount} file${errorCount === 1 ? '' : 's'} with errors` : 'all clean'}):\n${lines.join('\n')}`,
         };
       }
 
@@ -1656,6 +1757,8 @@
         if (name === 'write_file') return withTarget('Writing file');
         if (name === 'edit_file') return withTarget('Editing file');
         if (name === 'validate_files') return 'Checking written files';
+        if (name === 'check_code') return 'Checking syntax';
+        if (name === 'run_app') return 'Running the app';
         if (name === 'mkdir') return withTarget('Creating folder');
         if (name === 'move') return withTarget('Moving');
         if (name === 'delete') return withTarget('Deleting');
@@ -1673,6 +1776,7 @@
       getJsReassignedConstIssue,
       getHtmlStructureIssue,
       getStructuralIssueForPath,
+      validateWebProjectConsistency,
     };
   }
 
