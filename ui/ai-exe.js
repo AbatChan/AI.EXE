@@ -1255,6 +1255,18 @@ const agentTotalTimeoutMs = 600000;
 let lastAgentToolProgressAt = 0;
 function markAgentToolProgress() { lastAgentToolProgressAt = Date.now(); }
 function getLastAgentToolProgressAt() { return lastAgentToolProgressAt; }
+// Live file-write streaming: hold the partial content of the file being generated
+// so the work panel can render it filling in. Committed by write_file separately.
+function updateAgentStreamingFile(path, content) {
+  if (!activeAgentStreamState) return;
+  activeAgentStreamState.streamingFile = { path: String(path || ''), content: String(content || '') };
+  scheduleLiveStreamRender();
+}
+function clearAgentStreamingFile() {
+  if (!activeAgentStreamState || !activeAgentStreamState.streamingFile) return;
+  activeAgentStreamState.streamingFile = null;
+  scheduleLiveStreamRender();
+}
 const agentDecisionMaxTokens = 768;
 const agentFileContentMaxTokens = 5000;
 // Local GGUF context window (matches the native --ctx-size launch arg in
@@ -9188,6 +9200,8 @@ const agentRuntime = window.AIExeAgentRuntime && typeof window.AIExeAgentRuntime
     sanitizeAgentGeneratedEditProgram,
     requestSelectedRemoteTextCompletion,
     markAgentToolProgress,
+    updateAgentStreamingFile,
+    clearAgentStreamingFile,
     nativeBridge,
     normalizeWorkspacePath,
     deriveProjectNameFromTask,
@@ -12368,6 +12382,7 @@ function renderLiveStreamNow() {
         statusText: (activeAgentStreamState && activeAgentStreamState.statusText != null)
           ? activeAgentStreamState.statusText
           : agentProgressText,
+        streamingFile: (activeAgentStreamState && activeAgentStreamState.streamingFile) || null,
       }
     ));
     scrollChatToBottom();

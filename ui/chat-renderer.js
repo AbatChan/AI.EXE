@@ -55,6 +55,30 @@
 
     const agentProgressPrefix = '__AGENT_PROGRESS__:';
 
+    // Count-up tween for diff stats (+A / -R), animated once per logical row.
+    const animatedDiffKeys = new Set();
+    function setAnimatedCount(el, target, prefix, key) {
+      const end = Math.max(0, Number(target) || 0);
+      if (!el) return;
+      if (!key || animatedDiffKeys.has(key) || end <= 0 || typeof requestAnimationFrame !== 'function') {
+        el.textContent = `${prefix}${end}`;
+        return;
+      }
+      animatedDiffKeys.add(key);
+      if (animatedDiffKeys.size > 600) animatedDiffKeys.clear();
+      const startTs = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+      const dur = Math.min(700, 220 + end * 9);
+      const tick = (now) => {
+        const t = Math.min(1, ((now || Date.now()) - startTs) / dur);
+        const eased = 1 - Math.pow(1 - t, 3);
+        el.textContent = `${prefix}${Math.round(end * eased)}`;
+        if (t < 1) requestAnimationFrame(tick);
+        else el.textContent = `${prefix}${end}`;
+      };
+      el.textContent = `${prefix}0`;
+      requestAnimationFrame(tick);
+    }
+
     function buildAgentProgressMarker(text) {
       return `${agentProgressPrefix}${String(text || '').trim()}`;
     }
@@ -833,16 +857,17 @@
         }
 
         const diff = activity && activity.diff && typeof activity.diff === 'object' ? activity.diff : null;
+        const diffKeyBase = `${activity && activity.openPath ? activity.openPath : (activity && activity.detail) || ''}:${activity && activity.ts ? activity.ts : 0}`;
         if (diff && Number(diff.added) > 0) {
           plusEl = document.createElement('span');
           plusEl.className = 'msg-agent-activity-inline-plus';
-          plusEl.textContent = `+${Number(diff.added)}`;
+          setAnimatedCount(plusEl, Number(diff.added), '+', `${diffKeyBase}:+${Number(diff.added)}`);
           inlineRow.appendChild(plusEl);
         }
         if (diff && Number(diff.removed) > 0) {
           minusEl = document.createElement('span');
           minusEl.className = 'msg-agent-activity-inline-minus';
-          minusEl.textContent = `-${Number(diff.removed)}`;
+          setAnimatedCount(minusEl, Number(diff.removed), '-', `${diffKeyBase}:-${Number(diff.removed)}`);
           inlineRow.appendChild(minusEl);
         }
 
@@ -1482,8 +1507,38 @@
           wrapper.appendChild(list);
         }
       }
+      const streamingFile = options.streamingFile && typeof options.streamingFile === 'object' ? options.streamingFile : null;
+      if (streamingFile && !completed && String(streamingFile.content || '').trim()) {
+        wrapper.appendChild(buildAgentStreamingFileView(streamingFile));
+      }
       if (statusText && !completed) wrapper.appendChild(buildAgentProgressLoader(statusText));
       return wrapper;
+    }
+
+    // Live view of a file being generated — fills in as tokens stream, with a
+    // line counter (+N) that grows in real time. Shows the tail like a terminal.
+    function buildAgentStreamingFileView(streamingFile) {
+      const path = String(streamingFile.path || '').replace(/^\//, '') || 'file';
+      const content = String(streamingFile.content || '');
+      const lineCount = content ? content.split('\n').length : 0;
+      const box = document.createElement('div');
+      box.className = 'msg-agent-stream-file';
+      const head = document.createElement('div');
+      head.className = 'msg-agent-stream-file-head';
+      const name = document.createElement('span');
+      name.className = 'msg-agent-stream-file-name';
+      name.textContent = path;
+      const plus = document.createElement('span');
+      plus.className = 'msg-agent-activity-inline-plus';
+      plus.textContent = `+${lineCount}`;
+      head.appendChild(name);
+      head.appendChild(plus);
+      const pre = document.createElement('pre');
+      pre.className = 'msg-agent-stream-file-body';
+      pre.textContent = content.split('\n').slice(-24).join('\n');
+      box.appendChild(head);
+      box.appendChild(pre);
+      return box;
     }
 
     // Expand the "work" panel (main collapsible) and scroll to it; with a path,

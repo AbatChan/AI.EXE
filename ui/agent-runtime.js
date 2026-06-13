@@ -97,11 +97,15 @@
       if (typeof deps.markAgentToolProgress === 'function') deps.markAgentToolProgress();
     };
 
-    async function runRawAgentFileInference(prompt) {
+    async function runRawAgentFileInference(prompt, onPartial = null) {
       const budget = Math.max(1, Number(getAgentFileOutputBudget()) || agentFileContentMaxTokens);
+      let streamed = '';
       const remote = await deps.requestSelectedRemoteTextCompletion(prompt, budget, '', {
         preferStreaming: true,
-        onDelta: beatToolProgress,
+        onDelta: (delta) => {
+          beatToolProgress();
+          if (typeof onPartial === 'function' && delta) { streamed += String(delta); onPartial(streamed); }
+        },
       });
       if (remote && remote.ok && String(remote.output || '').trim()) {
         return { output: String(remote.output || ''), truncated: Boolean(remote.truncated) };
@@ -126,11 +130,17 @@
       // Heartbeat so the loop's idle-timeout knows this slow multi-pass generation
       // is actually progressing (not hung) and lets it finish a large file.
       const beat = () => { if (typeof deps.markAgentToolProgress === 'function') deps.markAgentToolProgress(); };
+      // Live-stream the partial content into the work panel so the file is seen
+      // filling in as it generates; the real file is committed by write_file later.
+      const emitPartial = (text) => {
+        if (typeof deps.updateAgentStreamingFile === 'function') deps.updateAgentStreamingFile(path, String(text || ''));
+      };
       beat();
-      const first = await runRawAgentFileInference(prompt);
+      const first = await runRawAgentFileInference(prompt, emitPartial);
       beat();
       let raw = first.output;
       if (!raw) {
+        if (typeof deps.clearAgentStreamingFile === 'function') deps.clearAgentStreamingFile(path);
         recordAgentFileGenTrace(path, promptChars, 0, 0, first.truncated, 'empty_output');
         return '';
       }
@@ -139,7 +149,8 @@
       while (guard < 3 && (wasTruncated || looksTruncatedFileContent(raw, path))) {
         guard += 1;
         const continuationPrompt = `${prompt}\n\nPARTIAL_OUTPUT_ALREADY_SAVED (do NOT repeat any of this):\n${raw.slice(-1600)}\n\nContinue the file from exactly where it stopped. Output ONLY the remaining content — no repetition, no commentary, no code fences.`;
-        const next = await runRawAgentFileInference(continuationPrompt);
+        const carried = raw;
+        const next = await runRawAgentFileInference(continuationPrompt, (partial) => emitPartial(stitchFileContinuation(carried, partial)));
         beat();
         if (!next.output || !next.output.trim()) break;
         const before = raw.length;
@@ -147,6 +158,7 @@
         wasTruncated = next.truncated;
         if (raw.length <= before) break;
       }
+      if (typeof deps.clearAgentStreamingFile === 'function') deps.clearAgentStreamingFile(path);
       const finalContent = deps.sanitizeAgentGeneratedFileContent(raw, path);
       recordAgentFileGenTrace(path, promptChars, String(finalContent || '').length, guard, wasTruncated,
         guard >= 3 ? 'continuation_exhausted' : 'ok');
