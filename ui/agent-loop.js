@@ -1849,6 +1849,25 @@
           // its own final (which states honestly that nothing was changed).
           const isAnalysisRun = String(planSpec && planSpec.taskKind || '').toLowerCase() === 'analysis';
           if (finalCheck.ok && !isWeakEditPlan() && (agentHasWorkspaceMutations() || isAnalysisRun)) {
+            // Don't finish a browser-runnable project until a CLEAN run_app has run
+            // since the last write — static validation can't see a crash-on-load.
+            // Not-yet-run -> deriveFallbackAgentDecision sequences run_app next step;
+            // ran-with-errors -> the model repairs from the run_app observation.
+            const browserRunnableProject = !isAnalysisRun && toolEvents.some((e) => e && e.ok
+              && ['write_file', 'edit_file'].includes(String(e.tool || '').toLowerCase())
+              && /\.(html?|js|mjs|cjs)$/i.test(deps.normalizeWorkspacePath(e.path || '')));
+            if (browserRunnableProject) {
+              let lastWriteIdx = -1;
+              let lastCleanRunIdx = -1;
+              for (let i = 0; i < toolEvents.length; i += 1) {
+                const ev = toolEvents[i];
+                if (!ev) continue;
+                const t = String(ev.tool || '').toLowerCase();
+                if (ev.ok && ['write_file', 'edit_file'].includes(t)) lastWriteIdx = i;
+                if (t === 'run_app' && ev.ok && Number(ev.runErrorCount) === 0) lastCleanRunIdx = i;
+              }
+              if (lastCleanRunIdx <= lastWriteIdx) continue;
+            }
             const unmetCriteria = await getUnmetCriteriaNudge();
             if (unmetCriteria) {
               pushCriteriaNudgeObservation(unmetCriteria);
