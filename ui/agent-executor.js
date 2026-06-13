@@ -298,9 +298,7 @@
     function getHtmlStructureIssue(html) {
       const text = String(html || '');
       if (!text.trim()) return 'is empty';
-      // Content after the closing </html> tag is unambiguously invalid — the
-      // classic symptom of the model dumping raw CSS/JS into the HTML file
-      // instead of the stylesheet/script (browsers render or drop it as junk).
+      // Content after </html> is invalid — usually raw CSS/JS dumped into the HTML.
       const closeHtmlIdx = text.toLowerCase().lastIndexOf('</html>');
       if (closeHtmlIdx >= 0) {
         const trailing = text.slice(closeHtmlIdx + '</html>'.length).replace(/<!--[\s\S]*?-->/g, ' ').trim();
@@ -691,8 +689,7 @@
         }
       }
 
-      // Shared JS legitimately references ids/classes that exist on only one
-      // page of a multi-page project — check against the union of ALL pages.
+      // Multi-page: check JS refs against the union of all pages' ids/classes.
       const htmlIds = new Set();
       const htmlDataActions = new Set();
       const htmlClasses = new Set();
