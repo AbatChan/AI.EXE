@@ -630,6 +630,26 @@
               raw: '[fallback-project-validate-files]',
             };
           }
+          // One-time runtime smoke run after validation: static validation can't see
+          // a crash-on-load. A failure hands back to the model for repair.
+          const projectIsRunnable = nonReadmeExpectedFiles.some((p) => /\.(html?|js|mjs|cjs)$/i.test(p));
+          if (projectIsRunnable && projectLatestValidation.validationPassed !== false) {
+            const ranAppSinceWrite = toolEvents.some((event, i) => (
+              event && String(event.tool || '').toLowerCase() === 'run_app' && i > latestWriteIndex
+            ));
+            if (!ranAppSinceWrite) {
+              return {
+                action: 'tool',
+                tool: 'run_app',
+                message: 'Run the app to catch load and runtime errors before finishing.',
+                path: '/',
+                content: '',
+                srcPath: '',
+                dstPath: '',
+                raw: '[fallback-project-run-app]',
+              };
+            }
+          }
         }
       }
       if (taskKind === 'analysis') return null;
@@ -1111,12 +1131,8 @@
         appliedCount += 1;
         if (anchor && anchor.mode && anchor.mode !== 'exact') fuzzyCount += 1;
       };
-      // When an anchor matched fuzzily, the model's `find` differs from the real
-      // source text. A keep-and-extend replacement (replace starts/ends with find)
-      // would then write the model's anchor text — including any hallucinated typo
-      // like "outbox-shadow" for "box-shadow" — into the file, silently corrupting
-      // valid code that the CSS/JS parser won't even flag. Re-base the kept portion
-      // on the actual matched text so the typo can't land.
+      // On a fuzzy match, a keep-and-extend replacement would write the model's
+      // (possibly typo'd) anchor text. Re-base the kept part on the real matched text.
       const healReplacement = (anchor, find, replaceText) => {
         const text = String(replaceText || '');
         if (!anchor || anchor.mode === 'exact') return text;

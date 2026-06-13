@@ -6603,9 +6603,7 @@ async function requestWorkspaceInspectAnswer(chatId, latestUserMessage, inspectC
   const recentMessages = getChatDebugSnapshot(chatId, 10)
     .map((msg) => `${msg.role}: ${String(msg.text || '').slice(0, 1000)}`)
     .join('\n\n');
-  // How many real file bodies are actually in the context. With zero (e.g. a
-  // multi-project root that only listed sub-folders), the model must NOT describe
-  // what any project/file does — that is confabulation from folder names.
+  // With zero real file bodies in context, the model must not describe any file.
   const readFileCount = (String(inspectContextText || '').match(/^FILE:\s+/gim) || []).length;
   const noFilesReadRule = readFileCount === 0
     ? 'CRITICAL: NO file contents were read this turn — only a directory/folder listing is below. You therefore have ZERO knowledge of what any project or file actually does. Do NOT describe any project\'s purpose, features, structure, behavior, file names, or issues. Do NOT guess from folder names. State plainly that you only have the folder listing and have not read any files, then offer to inspect a specific named project, or note that reviewing every sub-project at once is better handled in Agent mode. Even if the user insists or says it is "right there", you still cannot describe unread files.'
@@ -6819,9 +6817,7 @@ async function performWorkspaceInspectReply(chatId, promptText, requestToken, on
     return { ok: false, message: (listResponse && listResponse.message) || 'Failed to inspect workspace.' };
   }
   const listInfo = summarizeWorkspaceListPayload(listResponse.output || '');
-  // Activity rows for the collapsible work panel — so inspect shows exactly which
-  // files it read (the same reusable element agent mode uses). Makes "read nothing"
-  // visible instead of letting a confabulated answer pass for real inspection.
+  // Work-panel rows so inspect shows which files it actually read.
   const activities = [{
     kind: 'list', title: 'Inspected', detail: listPath || '/',
     openPath: listPath || '', openKind: 'folder', status: 'done', ts: Date.now(),
@@ -12169,10 +12165,7 @@ function sanitizeAssistantText(text) {
   clean = clean.replace(/<[^A-Za-z0-9\s]{0,4}\s*DSML[\s\S]*$/i, '');
   clean = clean.replace(/<\s*(?:\/\s*)?(?:tool_calls?|function_calls?|antml:invoke|antml:parameter|invoke\s+name=)\b[\s\S]*$/i, '');
   clean = clean.replace(/<[^A-Za-z0-9\s]{1,3}\s*tool[▁_\s-]*calls?[▁_\s-]*(?:begin|end)[\s\S]*$/i, '');
-  // Some models (DeepSeek seen in chat mode) hallucinate an XML file-write directive
-  // — <rewrite_file>/<write_file>/<edit_file><content><![CDATA[ …entire file… ]]> —
-  // as plain chat text. Chat can't write files, so it's dead output that dumps the
-  // whole file into the bubble. Cut from the first such opener to the end of the text.
+  // Strip hallucinated <*_file> rewrite directives chat models emit as raw text.
   clean = clean.replace(/<\s*(?:rewrite|write|edit|create|update|new|replace)_file\b[\s\S]*$/i, '');
   clean = clean
     .replace(/^\s*assistant\s*$/gim, '')

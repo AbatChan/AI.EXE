@@ -1126,7 +1126,7 @@
               const issues = Array.isArray(event.validationIssues) ? event.validationIssues : [];
               if (!issues.length || issues.some((issue) => String(issue || '').includes(path))) return false;
             }
-            if (sinceTool === 'run_app' && !event.ok) return false;
+            if (sinceTool === 'run_app' && (!event.ok || Number(event.runErrorCount) > 0)) return false;
             if (deps.normalizeWorkspacePath(event.path || '') !== path) continue;
             if (!event.ok) return false;
             const eventTool = String(event.tool || '').toLowerCase();
@@ -1520,6 +1520,8 @@
             ? toolResult.originalContent
             : undefined,
           createdNewFile: Boolean(toolResult && toolResult.createdNewFile),
+          // run_app reports startup crashes as ok:true + runErrorCount>0 (not !ok).
+          runErrorCount: Number(toolResult && toolResult.runErrorCount) || 0,
           // Read range — for the range-aware read-loop guard.
           startLine: Number(decision.start_line) || 0,
           endLine: Number(decision.end_line) || 0,
@@ -1911,6 +1913,16 @@
         if (!event) continue;
         const evTool = String(event.tool || '').toLowerCase();
         if (event.ok && ['write_file', 'edit_file'].includes(evTool)) break;
+        if (evTool === 'run_app') {
+          if (!event.ok || Number(event.runErrorCount) > 0) {
+            const errLine = String(event.observation || '')
+              .split('\n')
+              .map((l) => l.trim())
+              .find((l) => /^-\s/.test(l) || /error|uncaught|cannot read|is not (defined|a function)/i.test(l)) || '';
+            unresolvedValidationClause = ` Note: the app still throws an error when it runs that I couldn't fix${errLine ? ` (${errLine.replace(/^-\s*/, '').slice(0, 160)})` : ''}. Press Continue and I'll keep working on it.`;
+          }
+          break;
+        }
         if (evTool === 'validate_files') {
           if (event.validationPassed === false) {
             const firstIssue = Array.isArray(event.validationIssues) ? String(event.validationIssues[0] || '') : '';
