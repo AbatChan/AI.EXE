@@ -1259,6 +1259,13 @@ function getLastAgentToolProgressAt() { return lastAgentToolProgressAt; }
 // so the work panel can render it filling in. Committed by write_file separately.
 function updateAgentStreamingFile(path, content) {
   if (!activeAgentStreamState) return;
+  const prev = activeAgentStreamState.streamingFile;
+  if (!prev || prev.path !== String(path || '')) {
+    recordDebugTrace('agent_stream_file_begin', {
+      chatId: String(activeAgentStreamState.chatId || ''),
+      path: String(path || ''),
+    });
+  }
   activeAgentStreamState.streamingFile = { path: String(path || ''), content: String(content || '') };
   scheduleLiveStreamRender();
 }
