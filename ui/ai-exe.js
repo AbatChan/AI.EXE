@@ -6603,10 +6603,18 @@ async function requestWorkspaceInspectAnswer(chatId, latestUserMessage, inspectC
   const recentMessages = getChatDebugSnapshot(chatId, 10)
     .map((msg) => `${msg.role}: ${String(msg.text || '').slice(0, 1000)}`)
     .join('\n\n');
+  // How many real file bodies are actually in the context. With zero (e.g. a
+  // multi-project root that only listed sub-folders), the model must NOT describe
+  // what any project/file does — that is confabulation from folder names.
+  const readFileCount = (String(inspectContextText || '').match(/^FILE:\s+/gim) || []).length;
+  const noFilesReadRule = readFileCount === 0
+    ? 'CRITICAL: NO file contents were read this turn — only a directory/folder listing is below. You therefore have ZERO knowledge of what any project or file actually does. Do NOT describe any project\'s purpose, features, structure, behavior, file names, or issues. Do NOT guess from folder names. State plainly that you only have the folder listing and have not read any files, then offer to inspect a specific named project, or note that reviewing every sub-project at once is better handled in Agent mode. Even if the user insists or says it is "right there", you still cannot describe unread files.'
+    : `Only ${readFileCount} file(s) were actually read (the FILE: blocks below). Describe ONLY those files. Do NOT describe, summarize, or list issues for any project or file whose contents are not in a FILE: block — say it was not read if asked.`;
   const prompt = [
     'Return exactly one JSON object. No prose outside JSON.',
     'Schema: {"answer":"final user-facing answer"}',
     'Answer the user using only the inspected workspace context below.',
+    noFilesReadRule,
     'Do not invent repository URLs, clone steps, or generic setup advice unless the inspected files explicitly show that information.',
     'Base run/setup/install instructions STRICTLY on the file contents and the DETECTED_DEPENDENCIES block. Never assume the standard library. Never claim a module/library is used unless it appears in the file imports. If DETECTED_DEPENDENCIES lists a third-party package, tell the user to install it.',
     'If the inspected files are insufficient, say what is missing briefly.',
@@ -6811,6 +6819,13 @@ async function performWorkspaceInspectReply(chatId, promptText, requestToken, on
     return { ok: false, message: (listResponse && listResponse.message) || 'Failed to inspect workspace.' };
   }
   const listInfo = summarizeWorkspaceListPayload(listResponse.output || '');
+  // Activity rows for the collapsible work panel — so inspect shows exactly which
+  // files it read (the same reusable element agent mode uses). Makes "read nothing"
+  // visible instead of letting a confabulated answer pass for real inspection.
+  const activities = [{
+    kind: 'list', title: 'Inspected', detail: listPath || '/',
+    openPath: listPath || '', openKind: 'folder', status: 'done', ts: Date.now(),
+  }];
   reportProgress('Choosing relevant files...');
   const plan = await requestWorkspaceInspectPlan(chatId, promptText, listInfo.summary);
   const selectedPaths = normalizeInspectPlanPaths(plan && plan.paths, listInfo.entries, workspaceContext);
@@ -6818,7 +6833,12 @@ async function performWorkspaceInspectReply(chatId, promptText, requestToken, on
   for (const path of selectedPaths) {
     reportProgress(`Reading ${path}...`);
     const readResponse = await invokeWorkspaceBridgeAction('workspaceReadFile', { path });
-    if (!readResponse || !readResponse.ok) continue;
+    const readOk = Boolean(readResponse && readResponse.ok);
+    activities.push({
+      kind: 'read', title: readOk ? 'Read' : 'Read failed', detail: path,
+      openPath: path, openKind: 'file', status: readOk ? 'done' : 'error', ts: Date.now(),
+    });
+    if (!readOk) continue;
     inspectedFiles.push({
       path,
       content: clipDebugText(String(readResponse.output || ''), 18000),
@@ -6855,6 +6875,7 @@ async function performWorkspaceInspectReply(chatId, promptText, requestToken, on
     selectedPaths,
     inspectContextText,
     answerMode: answer.mode || '',
+    activities,
   };
 }
 
@@ -12810,6 +12831,7 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
             scheduleLiveStreamRender();
           };
           setInspectProgress('Inspecting workspace...');
+          const inspectStartedAt = Date.now();
           startAgentElapsedTimer(0, chatId); // show the live "Xs" timer for inspect too (consistent with agent)
           let inspected;
           try {
@@ -12846,16 +12868,24 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
               appendErrorMessageToChat(chatId, 'I inspected the workspace, but the answer came back empty.');
               return;
             }
+            const inspectActivities = Array.isArray(inspected.activities) ? inspected.activities : [];
+            const inspectAgentMeta = inspectActivities.length
+              ? { startedAt: inspectStartedAt, completedAt: Date.now(), collapsed: true }
+              : null;
             if (requestToken.appendToLastAssistant) {
               commitAssistantMessage(chatId, finalText, rawCandidate, {
                 appendToLastAssistant: true,
                 forceNeedsContinue: false,
                 thinkingMeta: buildRequestThinkingMeta(requestToken),
+                agentActivities: inspectActivities,
+                agentMeta: inspectAgentMeta,
               });
             } else {
               consumeLiveAssistantText();
               await typewriterAssistantMessage(chatId, rawCandidate, {
                 thinkingMeta: buildRequestThinkingMeta(requestToken),
+                agentActivities: inspectActivities,
+                agentMeta: inspectAgentMeta,
               });
             }
             return;
