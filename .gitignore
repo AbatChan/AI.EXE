@@ -3,6 +3,10 @@
 /build-mac-preview/
 /build-*/
 /dist/
+
+# Local-only regression tests (kept on disk, not pushed)
+/scripts/agent_fuzzy_heal_test.js
+/scripts/agent_multipage_validate_test.js
 *.obj
 *.o
 *.exe
