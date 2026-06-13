@@ -1462,16 +1462,14 @@
         ? String(parsed.primary_stack).toLowerCase()
         : (/python|pygame|\.py\b/.test(lower) ? 'python' : ((WEB_TASK_HINT_REGEX.test(lower) || /\bcalculator\b/.test(lower)) ? 'web' : 'generic'));
       const parsedProjectName = normalizeWorkspaceName(parsed && parsed.project_name ? parsed.project_name : '');
-      const fallbackProjectName = deriveProjectNameFromTask(taskText);
-      const sanitizedParsedProjectName = parsedProjectNameLooksUsable(parsedProjectName, taskText)
+      // Trust the model's project name when it is usable. It knows the subject
+      // (e.g. "tetris") far better than any keyword rule; deriveProjectNameFromTask
+      // is only a last resort for when the model gave nothing usable. (A prior
+      // keyword "intent" check used to OVERRIDE the model's name with the regex
+      // fallback — it replaced a correct "tetris" with "full-game". Removed.)
+      const projectName = parsedProjectNameLooksUsable(parsedProjectName, taskText)
         ? sanitizeProjectSlug(parsedProjectName)
-        : '';
-      const fallbackHasIntent = /\b(surprise|landing|dashboard|tracker|calculator|game|site|page|desktop|os|interface|ui)\b/i.test(String(fallbackProjectName || ''));
-      const parsedMissingIntent = fallbackHasIntent
-        && !String(sanitizedParsedProjectName || '').split('-').some((part) => String(fallbackProjectName || '').split('-').includes(part) && /surprise|landing|dashboard|tracker|calculator|game|site|page|desktop|os|interface|ui/i.test(part));
-      const projectName = sanitizedParsedProjectName && !parsedMissingIntent
-        ? sanitizedParsedProjectName
-        : fallbackProjectName;
+        : deriveProjectNameFromTask(taskText);
       let expectedFiles = parseAgentExpectedFiles(parsed && parsed.expected_files ? parsed.expected_files : '');
       expectedFiles = expectedFiles.filter((path) => !/\.(?:png|jpe?g|gif|webp|bmp|ico|tiff?)$/i.test(String(path || '')));
       let affectedFiles = parseAgentPlanPathList(parsed && parsed.affected_files ? parsed.affected_files : '');
