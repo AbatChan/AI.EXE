@@ -5848,6 +5848,7 @@ async function streamOpenAiCompatibleChatCompletion(provider, prompt, handlers =
     }
     let output = '';
     let reasoningOpen = false;
+    let streamFinishReason = '';
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
@@ -5870,6 +5871,9 @@ async function streamOpenAiCompatibleChatCompletion(provider, prompt, handlers =
           } catch (_) {
             continue;
           }
+          const finishReason = parsed && Array.isArray(parsed.choices) && parsed.choices[0]
+            && parsed.choices[0].finish_reason ? String(parsed.choices[0].finish_reason) : '';
+          if (finishReason) streamFinishReason = finishReason;
           const deltaObj = parsed && Array.isArray(parsed.choices) && parsed.choices[0]
             ? parsed.choices[0].delta
             : null;
@@ -5914,6 +5918,7 @@ async function streamOpenAiCompatibleChatCompletion(provider, prompt, handlers =
     return {
       ok: true,
       output,
+      truncated: streamFinishReason === 'length',
       status: {
         lastInferenceRoute: `${provider}:${model}`,
         lastPersistentError: '',
@@ -6178,11 +6183,11 @@ async function requestAnthropicTextCompletion(prompt, maxTokens) {
   }
 }
 
-async function requestSelectedRemoteTextCompletion(prompt, maxTokens, systemPrompt = '') {
+async function requestSelectedRemoteTextCompletion(prompt, maxTokens, systemPrompt = '', extra = {}) {
   noteAgentInferenceStart(String(prompt || '').length + String(systemPrompt || '').length);
   let result = null;
   try {
-    result = await requestRemoteTextCompletionForCapability('agent.writeFile', prompt, maxTokens, { systemPrompt });
+    result = await requestRemoteTextCompletionForCapability('agent.writeFile', prompt, maxTokens, { systemPrompt, ...extra });
   } finally {
     noteAgentInferenceEnd(result && result.ok ? String(result.output || '').length : 0);
   }
@@ -6207,7 +6212,9 @@ async function requestRemoteTextCompletionForCapability(capability, prompt, maxT
     maxTokens: Number(maxTokens) || 0,
   });
   if (options && options.preferStreaming) {
-    const result = await streamRemoteChatCompletion(provider, prompt, {}, {
+    const result = await streamRemoteChatCompletion(provider, prompt, {
+      onDelta: typeof options.onDelta === 'function' ? options.onDelta : undefined,
+    }, {
       maxTokens: Math.max(1, Number(maxTokens) || 64),
     });
     return result ? { ...result, workerId: worker.id, provider, model: getProviderModel(provider) } : result;
@@ -6417,6 +6424,7 @@ async function requestPreflightRouteModelDecision(chatId, latestUserMessage, con
     '- Asking PURELY to understand, explain, review, or learn how to run the OPEN workspace, with NO change wanted => route="inspect".',
     '- Asking to create, build, generate, implement, scaffold a deliverable, or to modify/fix/refactor real files => route="agent".',
     '- A pasted error message, stack trace, console/runtime error, OR a report that the open app is broken / not working / crashing / blank / "nothing happens" => route="agent", intent="debug_existing_workspace". The user wants it FIXED (and explained as you go), NOT merely diagnosed. Treat this by MEANING, not keywords — however they phrase it, a broken app or an error they pasted is a request to fix it. Use route="inspect" for an error ONLY if they explicitly ask just to understand it without changing anything.',
+    '- A report that the open project or a file has something WRONG with its contents — wrong, stray, leftover, duplicated, misplaced, or unwanted content, something that "got added/injected/left in" by mistake, or a request to remove / delete / clean up / undo / take out part of a file => route="agent" (modify or debug). The user is pointing at something in the FILES to correct, not asking for conversation. Decide by meaning even when it is phrased as a calm observation ("I think you put X in the file").',
     '- Agent being ON means file-producing or file-changing requests SHOULD go to route="agent". It does NOT mean every message goes to agent.',
     '- Workspace being open means workspace questions can use route="inspect". It does NOT mean every message is about the workspace.',
     '- If the user wants something fixed, improved, restyled, redesigned, polished, or made to look/work better in the open project, that is route="agent" (modify) EVEN IF they also say "check", "look at", or describe the symptoms first. "check and fix it" = agent, not inspect. Use route="inspect" only when the user asks purely to understand/explain/diagnose with no change requested.',
@@ -7256,6 +7264,72 @@ async function revertAgentMessageEdits(chatId, messageTs) {
   }, { chatId, messageTs, mode: reverting ? 'revert' : 'restore', files: touched });
   await refreshWorkspaceTree(true);
   return true;
+}
+
+// Offline smoke run: load the generated app in a hidden sandboxed iframe with
+// linked CSS/JS inlined and an injected error hook; return real runtime errors
+// (window.onerror / unhandled rejections / console.error) from startup.
+async function runWorkspaceAppSmokeTest(htmlPath) {
+  const normalized = normalizeWorkspacePath(htmlPath || '/index.html');
+  const htmlRes = await invokeWorkspaceAction('workspaceReadFile', { path: normalized });
+  if (!htmlRes || !htmlRes.ok) return { ok: false, message: `could not read ${normalized}` };
+  let html = String(htmlRes.output || '');
+  const baseDir = parentWorkspacePath(normalized) || '/';
+  const resolveRef = (ref) => {
+    let r = String(ref || '').trim();
+    if (!r || /^(?:https?:|data:|\/\/|#)/i.test(r)) return '';
+    if (r.startsWith('/')) return normalizeWorkspacePath(r);
+    let dir = baseDir;
+    while (r.startsWith('../')) { r = r.slice(3); dir = parentWorkspacePath(dir) || '/'; }
+    if (r.startsWith('./')) r = r.slice(2);
+    return normalizeWorkspacePath(`${dir === '/' ? '' : dir}/${r}`);
+  };
+  const inlineAsset = async (ref) => {
+    const path = resolveRef(ref);
+    if (!path) return null;
+    const res = await invokeWorkspaceAction('workspaceReadFile', { path });
+    return res && res.ok ? String(res.output || '').replace(/<\/script/gi, '<\\/script') : null;
+  };
+  for (const match of [...html.matchAll(/<link\b[^>]*rel=["']stylesheet["'][^>]*href=["']([^"']+)["'][^>]*\/?>/gi)]) {
+    const css = await inlineAsset(match[1]);
+    if (css != null) html = html.replace(match[0], `<style>\n${css}\n</style>`);
+  }
+  for (const match of [...html.matchAll(/<script\b[^>]*src=["']([^"']+)["'][^>]*>\s*<\/script>/gi)]) {
+    const js = await inlineAsset(match[1]);
+    if (js != null) html = html.replace(match[0], `<script>\n${js}\n</script>`);
+  }
+  const hook = `<script>(function(){var send=function(t){try{parent.postMessage({__aiexeSmoke:true,text:String(t).slice(0,400)},'*');}catch(e){}};
+window.onerror=function(m,s,l,c){send(m+' ('+(s||'inline')+':'+(l||0)+':'+(c||0)+')');};
+window.addEventListener('unhandledrejection',function(e){send('Unhandled promise rejection: '+((e.reason&&e.reason.message)||e.reason));});
+var ce=console.error;console.error=function(){send(Array.prototype.slice.call(arguments).map(String).join(' '));try{ce.apply(console,arguments);}catch(e){}};
+try{window.localStorage&&window.localStorage.length;}catch(e){var mem={};try{Object.defineProperty(window,'localStorage',{configurable:true,value:{getItem:function(k){return k in mem?mem[k]:null;},setItem:function(k,v){mem[k]=String(v);},removeItem:function(k){delete mem[k];},clear:function(){mem={};},key:function(i){return Object.keys(mem)[i]||null;},get length(){return Object.keys(mem).length;}}});}catch(e2){}}
+window.addEventListener('load',function(){setTimeout(function(){try{parent.postMessage({__aiexeSmokeDone:true},'*');}catch(e){}},400);});
+})();</script>`;
+  html = /<head[^>]*>/i.test(html) ? html.replace(/<head[^>]*>/i, (m) => `${m}\n${hook}`) : `${hook}\n${html}`;
+  return new Promise((resolve) => {
+    const errors = [];
+    const iframe = document.createElement('iframe');
+    iframe.setAttribute('sandbox', 'allow-scripts');
+    iframe.style.cssText = 'position:fixed;left:-9999px;top:-9999px;width:800px;height:600px;visibility:hidden;';
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      window.removeEventListener('message', onMessage);
+      try { iframe.remove(); } catch (_) { }
+      resolve({ ok: true, errors: errors.slice(0, 12), htmlPath: normalized });
+    };
+    const onMessage = (event) => {
+      const data = event && event.data;
+      if (!data || typeof data !== 'object') return;
+      if (data.__aiexeSmoke && typeof data.text === 'string') errors.push(data.text);
+      if (data.__aiexeSmokeDone) window.setTimeout(finish, 150);
+    };
+    window.addEventListener('message', onMessage);
+    document.body.appendChild(iframe);
+    iframe.srcdoc = html;
+    window.setTimeout(finish, 3000);
+  });
 }
 
 function buildContinuationPrompt(chatId) {
@@ -9162,6 +9236,7 @@ const agentExecutor = window.AIExeAgentExecutor && typeof window.AIExeAgentExecu
     syncMovedFileTab,
     removeWorkspaceTab,
     reviewAgentProjectCoherence,
+    runWorkspaceAppSmokeTest,
   })
   : null;
 const {
@@ -12073,6 +12148,11 @@ function sanitizeAssistantText(text) {
   clean = clean.replace(/<[^A-Za-z0-9\s]{0,4}\s*DSML[\s\S]*$/i, '');
   clean = clean.replace(/<\s*(?:\/\s*)?(?:tool_calls?|function_calls?|antml:invoke|antml:parameter|invoke\s+name=)\b[\s\S]*$/i, '');
   clean = clean.replace(/<[^A-Za-z0-9\s]{1,3}\s*tool[▁_\s-]*calls?[▁_\s-]*(?:begin|end)[\s\S]*$/i, '');
+  // Some models (DeepSeek seen in chat mode) hallucinate an XML file-write directive
+  // — <rewrite_file>/<write_file>/<edit_file><content><![CDATA[ …entire file… ]]> —
+  // as plain chat text. Chat can't write files, so it's dead output that dumps the
+  // whole file into the bubble. Cut from the first such opener to the end of the text.
+  clean = clean.replace(/<\s*(?:rewrite|write|edit|create|update|new|replace)_file\b[\s\S]*$/i, '');
   clean = clean
     .replace(/^\s*assistant\s*$/gim, '')
     .replace(/^\s*user\s*$/gim, '')

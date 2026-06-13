@@ -411,7 +411,7 @@
         return null;
       }
       const normalizedAction = String(action || '').trim().toLowerCase();
-      const validTools = ['none', 'new_project', 'list_dir', 'search_files', 'read_file', 'write_file', 'edit_file', 'validate_files', 'mkdir', 'move', 'delete'];
+      const validTools = ['none', 'new_project', 'list_dir', 'search_files', 'read_file', 'write_file', 'edit_file', 'validate_files', 'check_code', 'run_app', 'mkdir', 'move', 'delete'];
       let resolvedAction = normalizedAction;
       let resolvedTool = String(tool || '').toLowerCase();
       // Auto-repair: model put tool name in action field (e.g. "action": "read_file")
@@ -520,6 +520,15 @@
             && ['write_file', 'edit_file'].includes(String(event.tool || '').toLowerCase())
           ));
           if (!mutationAfterValidation) {
+            // Repair attempts that keep failing or getting guard-blocked must not
+            // be re-proposed forever — hand the step back to the model instead.
+            const failedRepairAttempts = toolEvents.slice(latestValidationIndex + 1).filter((event) => (
+              event
+              && !event.ok
+              && ['write_file', 'edit_file'].includes(String(event.tool || '').toLowerCase())
+              && normalizeWorkspacePath(event.path || '') === targetPath
+            )).length;
+            if (failedRepairAttempts >= 2) return null;
             // If edit_file already failed for this path, read again and give the next step more grounded context.
             const editAlreadyFailed = readAfterValidation && toolEvents.slice(latestValidationIndex + 1).some((event) => (
               event
@@ -1102,6 +1111,21 @@
         appliedCount += 1;
         if (anchor && anchor.mode && anchor.mode !== 'exact') fuzzyCount += 1;
       };
+      // When an anchor matched fuzzily, the model's `find` differs from the real
+      // source text. A keep-and-extend replacement (replace starts/ends with find)
+      // would then write the model's anchor text — including any hallucinated typo
+      // like "outbox-shadow" for "box-shadow" — into the file, silently corrupting
+      // valid code that the CSS/JS parser won't even flag. Re-base the kept portion
+      // on the actual matched text so the typo can't land.
+      const healReplacement = (anchor, find, replaceText) => {
+        const text = String(replaceText || '');
+        if (!anchor || anchor.mode === 'exact') return text;
+        const matched = output.slice(anchor.start, anchor.end);
+        if (matched === find || !find) return text;
+        if (text.startsWith(find)) return matched + text.slice(find.length);
+        if (text.endsWith(find)) return text.slice(0, text.length - find.length) + matched;
+        return text;
+      };
       for (const edit of edits) {
         if (!edit || !edit.op) continue;
         if (edit.op === 'prepend') {
@@ -1126,14 +1150,14 @@
           }
           const anchor = findEditAnchor(output, find);
           if (!anchor) continue;
-          output = `${output.slice(0, anchor.start)}${String(edit.replace || '')}${output.slice(anchor.end)}`;
+          output = `${output.slice(0, anchor.start)}${healReplacement(anchor, find, edit.replace)}${output.slice(anchor.end)}`;
           noteAnchor(anchor);
           continue;
         }
         if (edit.op === 'replace') {
           const anchor = findEditAnchor(output, find);
           if (!anchor) continue;
-          output = `${output.slice(0, anchor.start)}${String(edit.replace || '')}${output.slice(anchor.end)}`;
+          output = `${output.slice(0, anchor.start)}${healReplacement(anchor, find, edit.replace)}${output.slice(anchor.end)}`;
           noteAnchor(anchor);
           continue;
         }

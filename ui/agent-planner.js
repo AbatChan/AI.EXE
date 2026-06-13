@@ -289,6 +289,20 @@
         });
       }
 
+      // Code mutations always require one passing validate before finishing —
+      // a "fixed" file that still fails to parse must block, not ship.
+      const codeMutated = hasSuccessfulAgentTool(toolEvents, (event) => (
+        ['write_file', 'edit_file'].includes(String(event.tool || '').toLowerCase())
+        && /\.(?:js|mjs|cjs|html?|css)$/i.test(normalizeWorkspacePath(event.path || ''))
+      ));
+      if (codeMutated && !requirements.some((item) => /^validate/.test(String(item.id || '')))) {
+        requirements.push({
+          id: 'validate_code_mutations',
+          label: 'validate the changed code files',
+          met: hasSuccessfulAgentTool(toolEvents, (event) => String(event.tool || '').toLowerCase() === 'validate_files' && event.validationPassed === true),
+        });
+      }
+
       if (!requirements.length) {
         const hasMutation = hasSuccessfulAgentTool(toolEvents, (event) => {
           const tool = String(event.tool || '').toLowerCase();
@@ -968,7 +982,10 @@
       const relevantOlder = selectRelevantOlderEvents(olderEvents, taskText, planSpec, 3);
       const diagnosticsLog = buildAgentDiagnosticsLog(allEvents);
       const expandedReadCap = Math.max(0, Number(getAgentExpandedReadChars()) || 0);
-      const expandedReadEvent = !diagnosticsLog && expandedReadCap > agentMaxToolOutputChars
+      // Expanded content is MOST needed when diagnostics exist (fixing a broken
+      // file requires its content); the old !diagnosticsLog gate starved exactly
+      // that case and drove overlapping 1-20/1-30/1-50 re-reads.
+      const expandedReadEvent = expandedReadCap > agentMaxToolOutputChars
         ? [...allEvents].reverse().find((event) => {
           const tool = String(event && event.tool ? event.tool : '').toLowerCase();
           const path = normalizeWorkspacePath(event && event.path ? event.path : '');
