@@ -6602,7 +6602,27 @@ async function requestPreflightRouteDecision(chatId, latestUserMessage, options 
   });
   const decision = normalizePreflightRouteDecision(evaluated && evaluated.decision ? evaluated.decision : advisoryDecision);
   const sameChatWorkspaceFollowup = Boolean(chatHasPriorAgentWorkspaceWork(chatId) && workspace.workspaceRootName);
-  if (sameChatWorkspaceFollowup && decision.route === 'confirm' && !decision.shouldCreateProject) {
+  const buildIntent = String((modelDecision && modelDecision.intent) || decision.intent || '').toLowerCase();
+  // A genuinely NEW deliverable requested in a chat that already owns a project is
+  // ambiguous (build it fresh vs add to the current one). Ask — don't silently force
+  // the existing workspace to be rewritten into a different app, and don't suppress
+  // the confirm as a "follow-up". (modify_existing_workspace IS a follow-up; this isn't.)
+  if (agentEnabled && sameChatWorkspaceFollowup && decision.route === 'agent'
+    && buildIntent === 'create_or_build_deliverable') {
+    decision.route = 'confirm';
+    decision.shouldAskUser = true;
+    decision.shouldCreateProject = true;
+    decision.shouldModifyFiles = false;
+    decision.reason = 'A new build was requested while this chat already owns a project — confirm new vs current.';
+    decision.userMessage = `I already have "${workspace.workspaceRootName}" open. Do you want me to keep using that project, or create a new one for this request?`;
+    if (evaluated && evaluated.debug) {
+      evaluated.debug.finalRoute = 'confirm';
+      evaluated.debug.overridden = true;
+      evaluated.debug.overrideReason = decision.reason;
+    }
+  }
+  if (sameChatWorkspaceFollowup && decision.route === 'confirm' && !decision.shouldCreateProject
+    && buildIntent !== 'create_or_build_deliverable') {
     decision.route = agentEnabled ? 'agent' : 'chat';
     decision.shouldAskUser = false;
     decision.shouldCreateProject = false;

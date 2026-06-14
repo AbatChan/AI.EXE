@@ -867,7 +867,8 @@
         // Silently continue in the current workspace instead of asking.
         const chatOwnsOpenWorkspace = typeof deps.chatHasPriorAgentWorkspaceWork === 'function'
           && deps.chatHasPriorAgentWorkspaceWork(chatId);
-        if (hasOpenWorkspace && canonicalWorkspaceRootName && openWorkspaceEntryCount > 0 && !explicitSeparateWorkspaceIntent && chatOwnsOpenWorkspace) {
+        const approvedNewProjectRun = Boolean(runOptions.approvedNewProject || runOptions.skipNewProjectConfirmation);
+        if (hasOpenWorkspace && canonicalWorkspaceRootName && openWorkspaceEntryCount > 0 && !explicitSeparateWorkspaceIntent && chatOwnsOpenWorkspace && !approvedNewProjectRun) {
           return {
             ok: false,
             mutated,
