@@ -231,8 +231,13 @@
       // clientHeight 0), so scroll the CM view. Returns false if CM isn't ready yet
       // so the caller can retry once the editor finishes mounting.
       const cm = getFileViewerCodeMirror();
-      if (cm && typeof cm.scrollToLine === 'function') {
-        cm.scrollToLine(lineNumber);
+      if (cm && typeof cm.highlightRange === 'function') {
+        const start = Math.max(0, Number(lineNumber) || 0);
+        if (start <= 0) {
+          if (typeof cm.clearHighlight === 'function') cm.clearHighlight();
+        } else {
+          cm.highlightRange(start, Number(options.endLine) || start, options.kind || 'read');
+        }
         return true;
       }
       const editor = d.getFileViewerEditor ? d.getFileViewerEditor() : null;
