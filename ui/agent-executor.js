@@ -392,6 +392,7 @@
       let depth = 0;
       let quote = '';
       let inComment = false;
+      let lastSig = ''; // last significant (non-ws) char outside strings/comments
       for (let i = 0; i < text.length; i += 1) {
         const ch = text[i];
         const next = text[i + 1] || '';
@@ -419,9 +420,15 @@
           quote = ch;
           continue;
         }
-        if (ch === '{') depth += 1;
+        if (ch === '{') {
+          // `*, {` / `a, {` — a trailing comma with no selector after it is invalid
+          // and silently kills the whole rule (browsers drop it). Catch it.
+          if (lastSig === ',') return "has an empty selector (a trailing comma right before '{')";
+          depth += 1;
+        }
         if (ch === '}') depth -= 1;
         if (depth < 0) return 'has an unmatched closing brace';
+        if (!/\s/.test(ch)) lastSig = ch;
       }
       if (inComment) return 'has an unterminated CSS comment';
       if (quote) return 'has an unterminated CSS string';

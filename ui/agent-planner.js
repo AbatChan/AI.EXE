@@ -655,7 +655,17 @@
       }).join('\n\n');
       const normalizedPath = normalizeWorkspacePath(path || '');
       const projectState = buildAgentProjectStateContext(toolEvents, planSpec, normalizedPath);
-      const editHints = buildAgentFileGenerationHints(taskText, normalizedPath);
+      const baseEditHints = buildAgentFileGenerationHints(taskText, normalizedPath);
+      // When an HTML page links an external stylesheet, styling belongs in that .css
+      // file. A weak model otherwise injects a fresh inline <style> block, inline
+      // style="..." attributes, or !important overrides into the HTML — fighting the
+      // stylesheet and creating conflicting sources of truth. Only steer this when an
+      // external sheet exists (single-file HTML legitimately uses inline styles).
+      const linksExternalStylesheet = /\.html?$/i.test(normalizedPath)
+        && /<link[^>]+rel=["']stylesheet["']/i.test(String(currentContent || ''));
+      const editHints = linksExternalStylesheet
+        ? [...baseEditHints, 'This page links an external stylesheet. Make styling/layout changes by editing the linked CSS file — do NOT add a new inline <style> block, inline style="..." attributes, or !important overrides in this HTML; they fight the stylesheet and create conflicting styles.']
+        : baseEditHints;
       const template = await loadPromptTemplate('developer_agent_edit_file');
       if (template) {
         return renderPromptTemplate(template, {
@@ -683,6 +693,9 @@
         '- Prefer the smallest targeted edits that satisfy the request.',
         '- Reuse exact text from the file for find/anchor fields.',
         '- Do not rewrite the whole file unless the request truly requires it.',
+        linksExternalStylesheet
+          ? '- This page links an external stylesheet: make styling/layout changes in the linked CSS file, NOT by adding an inline <style> block, inline style="..." attributes, or !important overrides here.'
+          : '',
         `File path: ${normalizedPath}`,
         planSpec && planSpec.projectContract ? `PROJECT_CONTRACT:\n${String(planSpec.projectContract)}` : '',
         projectState ? `PROJECT_STATE:\n${projectState}` : '',
