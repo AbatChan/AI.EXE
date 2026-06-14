@@ -785,6 +785,7 @@ const settingsProviderSelect = document.getElementById('settingsProviderSelect')
 const settingsRemoteFieldsWrap = document.getElementById('settingsRemoteFieldsWrap');
 const settingsApiKeyLabel = document.getElementById('settingsApiKeyLabel');
 const settingsApiKeyInput = document.getElementById('settingsApiKeyInput');
+const settingsApiKeyToggle = document.getElementById('settingsApiKeyToggle');
 const settingsApiEndpointWrap = document.getElementById('settingsApiEndpointWrap');
 const settingsApiEndpointLabel = document.getElementById('settingsApiEndpointLabel');
 const settingsApiEndpointInput = document.getElementById('settingsApiEndpointInput');
@@ -5062,6 +5063,13 @@ function populateRemoteProviderFields(provider) {
   if (settingsApiKeyInput) {
     settingsApiKeyInput.placeholder = def.keyPlaceholder || 'sk-...';
     settingsApiKeyInput.value = getProviderApiKey(provider);
+    // Re-mask when the field is repopulated so a revealed key never lingers.
+    settingsApiKeyInput.type = 'password';
+    if (settingsApiKeyToggle) {
+      settingsApiKeyToggle.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>';
+      settingsApiKeyToggle.setAttribute('aria-pressed', 'false');
+      settingsApiKeyToggle.setAttribute('aria-label', 'Show API key');
+    }
   }
   if (settingsApiEndpointWrap) {
     settingsApiEndpointWrap.style.display = def.endpointField ? 'block' : 'none';
@@ -10620,6 +10628,22 @@ if (settingsApiModelInput) {
 }
 if (settingsApiKeyInput) {
   settingsApiKeyInput.addEventListener('input', () => scheduleSettingsAutosave());
+}
+if (settingsApiKeyToggle && settingsApiKeyInput) {
+  const eyeIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>';
+  const eyeOffIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9.9 5.1A9.6 9.6 0 0 1 12 5c6.4 0 10 7 10 7a17.7 17.7 0 0 1-3.1 4M6.4 6.5A17.7 17.7 0 0 0 2 12s3.6 7 10 7a9.6 9.6 0 0 0 4-.86"/><path d="M9.6 9.6a3 3 0 0 0 4.2 4.2"/><path d="M3 3l18 18"/></svg>';
+  const renderSecretToggle = () => {
+    const shown = settingsApiKeyInput.type === 'text';
+    settingsApiKeyToggle.innerHTML = shown ? eyeOffIcon : eyeIcon;
+    settingsApiKeyToggle.setAttribute('aria-pressed', shown ? 'true' : 'false');
+    settingsApiKeyToggle.setAttribute('aria-label', shown ? 'Hide API key' : 'Show API key');
+  };
+  settingsApiKeyToggle.addEventListener('click', () => {
+    settingsApiKeyInput.type = settingsApiKeyInput.type === 'password' ? 'text' : 'password';
+    renderSecretToggle();
+    settingsApiKeyInput.focus();
+  });
+  renderSecretToggle();
 }
 if (settingsApiEndpointInput) {
   settingsApiEndpointInput.addEventListener('input', () => scheduleSettingsAutosave());
