@@ -768,18 +768,13 @@
         if (typeof d.openFileTab === 'function') {
           await d.openFileTab(path, typeof d.workspaceBaseName === 'function' ? d.workspaceBaseName(path) : 'file');
         }
-        // Scroll to and highlight the exact line range that was read/edited.
+        // Scroll to + highlight the read/edited range; a plain open (no range)
+        // clears any previous highlight so the file shows clean.
         const startLine = Math.max(0, Number(activity && activity.openStartLine) || 0);
-        if (pushDebugTrace) {
-          pushDebugTrace('activity_open_target', {
-            kind: String(activity && activity.kind || ''),
-            openPath: String(path || ''),
-            openStartLine: String(activity && activity.openStartLine || 0),
-            willReveal: String(startLine > 0 && typeof d.revealWorkspaceFileLine === 'function'),
-          });
-        }
-        if (startLine > 0 && typeof d.revealWorkspaceFileLine === 'function') {
-          d.revealWorkspaceFileLine(startLine);
+        const endLine = Math.max(startLine, Number(activity && activity.openEndLine) || 0);
+        const hlKind = String(activity && activity.kind || '').toLowerCase() === 'read' ? 'read' : 'edit';
+        if (typeof d.revealWorkspaceFileLine === 'function') {
+          d.revealWorkspaceFileLine(startLine, endLine, hlKind);
         }
       } else {
         if (typeof d.getWorkspaceNodeState === 'function') d.getWorkspaceNodeState(path).expanded = true;
