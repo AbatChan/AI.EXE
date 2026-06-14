@@ -1546,11 +1546,14 @@
       const name = document.createElement('span');
       name.className = 'msg-agent-stream-file-name';
       name.textContent = path;
-      const plus = document.createElement('span');
-      plus.className = 'msg-agent-activity-inline-plus';
-      plus.textContent = `+${lineCount}`;
+      // Neutral live line count — NOT a green "+N", because while generating an
+      // edit/rewrite this is the size of the content, not the real diff. The
+      // accurate +A/-B animates on the committed row once the change is known.
+      const meter = document.createElement('span');
+      meter.className = 'msg-agent-activity-inline-meta';
+      meter.textContent = `${lineCount} line${lineCount === 1 ? '' : 's'}`;
       head.appendChild(name);
-      head.appendChild(plus);
+      head.appendChild(meter);
       const pre = document.createElement('pre');
       pre.className = 'msg-agent-stream-file-body';
       pre.textContent = content.split('\n').slice(-24).join('\n');
