@@ -4154,11 +4154,21 @@ function extractSmartChatTitle(rawText) {
   return title;
 }
 
+function deriveChatTitleFromFirstUserMessage(chat) {
+  const thread = chat ? getChatActiveThread(chat) : null;
+  const msgs = thread && Array.isArray(thread.messages) ? thread.messages : [];
+  const firstUser = msgs.find((m) => m && m.role === 'user' && String(m.text || '').trim());
+  return firstUser ? sanitizeUserRequestTitle(String(firstUser.text || '')) : '';
+}
+
 function settleSmartChatTitleFallback(chatId, reason = 'fallback', assistantText = '') {
   const key = String(chatId || '');
   const chat = findChatById(key);
   if (!chat || chat.customName || !chat.isNaming) return false;
-  chat.name = 'New Chat';
+  // When the smart (remote) namer fails, don't leave the chat as "New Chat" —
+  // derive a real title from the first user message deterministically.
+  const derived = deriveChatTitleFromFirstUserMessage(chat);
+  chat.name = derived ? makeUniqueChatName(derived, key, derived) : 'New Chat';
   chat.isNaming = false;
   chat.autoNamed = false;
   saveChats();
@@ -4175,6 +4185,22 @@ function scheduleSmartChatRename(chatId) {
   const key = String(chatId || '');
   if (!key || smartTitleRenamePending.has(key)) return;
   const chat = findChatById(key);
+  // Self-heal a chat left stuck on "New Chat" by an earlier failed naming attempt
+  // (e.g. the remote namer erred / was out of credits): name it deterministically
+  // from the first user message — no remote call.
+  if (chat && !chat.customName && chat.smartTitleAttempted
+    && String(chat.name || '').trim().toLowerCase() === 'new chat') {
+    const derived = deriveChatTitleFromFirstUserMessage(chat);
+    if (derived) {
+      chat.name = makeUniqueChatName(derived, key, derived);
+      chat.isNaming = false;
+      chat.autoNamed = false;
+      saveChats();
+      renderHistory();
+      pushDebugTrace('smart_chat_title_healed', { chatId: key, title: chat.name });
+    }
+    return;
+  }
   const needsGeneratedTitle = Boolean(chat && (chat.isNaming || chat.autoNamed));
   if (!chat || chat.customName || !needsGeneratedTitle || chat.smartTitleAttempted) {
     pushDebugTrace('smart_chat_title_skipped', {
@@ -4289,6 +4315,7 @@ function scheduleSmartChatRename(chatId) {
           chatId: key,
           error: String(err && err.message ? err.message : err || 'unknown error'),
         });
+        settleSmartChatTitleFallback(key, 'exception', String(firstAssistant.text || ''));
       } finally {
         smartTitleRenamePending.delete(key);
       }
@@ -8589,9 +8616,14 @@ const chatRenderer = window.AIExeChatRenderer && typeof window.AIExeChatRenderer
     openFileTab,
     workspaceBaseName,
     revealWorkspaceFileLine: (lineNumber) => {
-      if (fileViewerApi && typeof fileViewerApi.selectFileViewerLine === 'function') {
-        fileViewerApi.selectFileViewerLine(lineNumber, { reveal: true });
-      }
+      if (!fileViewerApi || typeof fileViewerApi.selectFileViewerLine !== 'function') return;
+      // Defer to the next frame so the just-opened editor is populated + laid out
+      // before we measure line height and scroll to the target line.
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          try { fileViewerApi.selectFileViewerLine(lineNumber, { reveal: true }); } catch (_) {}
+        });
+      });
     },
     getWorkspaceNodeState,
     renderArtifacts: (...args) => renderArtifacts(...args),
