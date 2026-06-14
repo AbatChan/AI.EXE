@@ -7400,9 +7400,16 @@ async function runWorkspaceAppSmokeTest(htmlPath) {
     const css = await inlineAsset(match[1]);
     if (css != null) html = html.replace(match[0], `<style>\n${css}\n</style>`);
   }
+  // ES modules don't load when the page is opened from file:// (offline) and become
+  // syntax errors once inlined — detect them so we can report a fixable cause instead
+  // of a wall of opaque "Script error" entries.
+  let usesEsModules = /<script\b[^>]*type=["']module["']/i.test(html);
   for (const match of [...html.matchAll(/<script\b[^>]*src=["']([^"']+)["'][^>]*>\s*<\/script>/gi)]) {
     const js = await inlineAsset(match[1]);
-    if (js != null) html = html.replace(match[0], `<script>\n${js}\n</script>`);
+    if (js != null) {
+      if (/^[ \t]*import\s+[^(]/m.test(js) || /^[ \t]*export\b/m.test(js)) usesEsModules = true;
+      html = html.replace(match[0], `<script>\n${js}\n</script>`);
+    }
   }
   const hook = `<script>(function(){var send=function(t){try{parent.postMessage({__aiexeSmoke:true,text:String(t).slice(0,400)},'*');}catch(e){}};
 window.onerror=function(m,s,l,c){send(m+' ('+(s||'inline')+':'+(l||0)+':'+(c||0)+')');};
@@ -7423,7 +7430,12 @@ window.addEventListener('load',function(){setTimeout(function(){try{parent.postM
       settled = true;
       window.removeEventListener('message', onMessage);
       try { iframe.remove(); } catch (_) { }
-      resolve({ ok: true, errors: errors.slice(0, 12), htmlPath: normalized });
+      // A module-based page can't even load offline, so surface that single fixable
+      // cause instead of the cascade of opaque "Script error" entries it produces.
+      const reportedErrors = usesEsModules
+        ? ['Uses ES module import/export, which does NOT load when the page is opened from file:// (offline) — this breaks the whole app. Convert the scripts to classic <script src="..."> files with no import/export (expose shared values on window), then run again.']
+        : errors.slice(0, 12);
+      resolve({ ok: true, errors: reportedErrors, htmlPath: normalized });
     };
     const onMessage = (event) => {
       const data = event && event.data;
