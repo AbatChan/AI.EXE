@@ -867,7 +867,10 @@
               <div id="settingsRemoteFieldsWrap" class="settings-remote-grid" style="display:none;">
                 <div class="settings-field settings-field-span">
                   <div class="chat-modal-label" id="settingsApiKeyLabel">API Key</div>
-                  <input class="chat-modal-input" id="settingsApiKeyInput" type="password" placeholder="sk-...">
+                  <div class="settings-secret-wrap">
+                    <input class="chat-modal-input settings-secret-input" id="settingsApiKeyInput" type="password" placeholder="sk-...">
+                    <button type="button" class="settings-secret-toggle" id="settingsApiKeyToggle" aria-label="Show API key" aria-pressed="false"></button>
+                  </div>
                 </div>
 
                 <div class="settings-field settings-field-span" id="settingsApiEndpointWrap" style="display:none;">

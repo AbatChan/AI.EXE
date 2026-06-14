@@ -1380,6 +1380,45 @@ body.resizing-panels .panel-resizer {
   box-shadow: 0 0 0 3px rgba(0, 229, 255, 0.08);
 }
 
+.settings-secret-wrap {
+  position: relative;
+  width: 100%;
+}
+
+.settings-secret-input {
+  padding-right: 38px;
+}
+
+.settings-secret-toggle {
+  position: absolute;
+  top: 50%;
+  right: 4px;
+  transform: translateY(-50%);
+  width: 30px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted, rgba(150, 164, 185, 0.85));
+  cursor: pointer;
+  transition: color 0.15s ease, background 0.15s ease;
+}
+
+.settings-secret-toggle:hover {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.settings-secret-toggle svg {
+  width: 18px;
+  height: 18px;
+  display: block;
+}
+
 .chat-modal-actions {
   display: flex;
   justify-content: space-between;
