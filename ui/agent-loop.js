@@ -113,6 +113,24 @@
       // Advisory final-gate: nudge the model at most once when it tries to
       // finish with planned items still unmet, then trust its judgment.
       let finalNudges = 0;
+      let runAppFinishNudges = 0;
+      // The latest run_app since the last write, IF it still reports errors — used to
+      // refuse a clean finish over an unrepaired runtime failure (ok:true+runErrorCount
+      // >0 is a failure; ok:false = page wouldn't load).
+      const unresolvedRunAppError = () => {
+        let lastWrite = -1;
+        let lastRun = null;
+        let lastRunIdx = -1;
+        for (let i = 0; i < toolEvents.length; i += 1) {
+          const ev = toolEvents[i];
+          if (!ev) continue;
+          const t = String(ev.tool || '').toLowerCase();
+          if (ev.ok && ['write_file', 'edit_file'].includes(t)) lastWrite = i;
+          if (t === 'run_app') { lastRun = ev; lastRunIdx = i; }
+        }
+        if (lastRunIdx > lastWrite && lastRun && (!lastRun.ok || Number(lastRun.runErrorCount) > 0)) return lastRun;
+        return null;
+      };
       // One evidence-based finish audit per run (diffs vs done criteria); advisory.
       let criteriaNudgeUsed = false;
       const startedAt = Date.now();
@@ -1064,6 +1082,24 @@
         }
 
         if (decision.action !== 'tool' || decision.tool === 'none') {
+          // Don't accept a finish (incl. a no-op tool:none) over an unrepaired run_app
+          // failure — push the errors back and force a real repair attempt. (This is
+          // exactly where the agent used to bail with a dangling "Inspecting…" note.)
+          const runErr = unresolvedRunAppError();
+          if (runErr && runAppFinishNudges < 2) {
+            runAppFinishNudges += 1;
+            const obs = String(runErr.observation || '').slice(0, 600);
+            toolEvents.push({
+              tool: 'final_check',
+              ok: false,
+              observation: `Don't finish yet — run_app reported runtime error(s) at startup that are not fixed:\n${obs}\nRead the failing file(s) and apply a real fix, then run_app again to verify. If these are opaque "Script error" entries from ES module import/export (which do NOT load from file:// offline), convert the scripts to classic <script src> files with no import/export (expose what's needed on window).`,
+            });
+            recordDebugTrace('agent_run_app_finish_blocked', {
+              chatId: String(chatId || ''), step: String(step), attempt: String(runAppFinishNudges),
+            }, { chatId: String(chatId || ''), step, runErr });
+            setAgentProgress('Reviewing...');
+            continue;
+          }
           const finalCheck = deps.validateAgentFinalDecision(taskText, toolEvents, planSpec);
           // Advisory gate (not a veto): on the first finish attempt with planned
           // items still unmet, surface them as a tool observation and let the
@@ -1097,7 +1133,13 @@
           // Honor the model's final decision: requirements met, or it reaffirmed
           // finishing after the single advisory nudge.
           setAgentProgress('Finalizing...');
-          const finalText = deps.sanitizeAssistantText(decision.message || 'Done.') || 'Done.';
+          let finalText = deps.sanitizeAssistantText(decision.message || 'Done.') || 'Done.';
+          // If run_app still reports errors after the repair attempts, never end on a
+          // clean message — disclose it and force Continue.
+          const stillBrokenRun = unresolvedRunAppError();
+          if (stillBrokenRun) {
+            finalText += ' Note: the app still reports a runtime error on startup that I could not fully fix — press Continue and I will keep working on it.';
+          }
           if (agentHasWorkspaceMutations()) {
             await deps.refreshWorkspaceTree(true);
           }
@@ -1105,7 +1147,7 @@
           deps.commitAssistantMessage(chatId, finalText, finalText, {
             agentActivities,
             agentMeta: agentMetaWithRevert({ startedAt, completedAt: Date.now(), collapsed: true }),
-            forceNeedsContinue: false,
+            forceNeedsContinue: Boolean(stillBrokenRun),
           });
           recordDebugTrace('agent_done', {
             chatId: String(chatId || ''),
