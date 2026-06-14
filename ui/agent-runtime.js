@@ -193,10 +193,17 @@
 
     async function generateAgentEditFileProgram(taskText, toolEvents, path, currentContent, priorAttempt = '', planSpec = null) {
       const prompt = await deps.buildAgentEditFileContentPrompt(taskText, toolEvents, path, currentContent, priorAttempt, planSpec);
+      // Live feedback while the harness GENERATES edit content (only happens when the
+      // model didn't provide an inline find/replace program in its decision).
+      let streamed = '';
       const remote = await deps.requestSelectedRemoteTextCompletion(prompt, agentDecisionMaxTokens * 3, '', {
         preferStreaming: true,
-        onDelta: beatToolProgress,
+        onDelta: (delta) => {
+          beatToolProgress();
+          if (delta && typeof deps.updateAgentStreamingFile === 'function') { streamed += String(delta); deps.updateAgentStreamingFile(path, streamed); }
+        },
       });
+      if (typeof deps.clearAgentStreamingFile === 'function') deps.clearAgentStreamingFile(path);
       if (remote && remote.ok) {
         const cleaned = deps.sanitizeAgentGeneratedEditProgram(remote.output || '');
         if (cleaned) return cleaned;

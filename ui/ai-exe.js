@@ -8616,12 +8616,30 @@ const chatRenderer = window.AIExeChatRenderer && typeof window.AIExeChatRenderer
     openFileTab,
     workspaceBaseName,
     revealWorkspaceFileLine: (lineNumber) => {
-      if (!fileViewerApi || typeof fileViewerApi.selectFileViewerLine !== 'function') return;
+      const hasApi = Boolean(fileViewerApi && typeof fileViewerApi.selectFileViewerLine === 'function');
+      recordDebugTrace('reveal_file_line_called', {
+        line: String(lineNumber),
+        hasApi: String(hasApi),
+        editorPresent: String(Boolean(fileViewerEditor)),
+        valueLen: String(fileViewerEditor ? String(fileViewerEditor.value || '').length : 0),
+        clientHeight: String(fileViewerEditor ? fileViewerEditor.clientHeight : 0),
+      });
+      if (!hasApi) return;
       // Defer to the next frame so the just-opened editor is populated + laid out
       // before we measure line height and scroll to the target line.
       requestAnimationFrame(() => {
         requestAnimationFrame(() => {
-          try { fileViewerApi.selectFileViewerLine(lineNumber, { reveal: true }); } catch (_) {}
+          try {
+            fileViewerApi.selectFileViewerLine(lineNumber, { reveal: true });
+            recordDebugTrace('reveal_file_line_applied', {
+              line: String(lineNumber),
+              valueLen: String(fileViewerEditor ? String(fileViewerEditor.value || '').length : 0),
+              scrollTop: String(fileViewerEditor ? Math.round(fileViewerEditor.scrollTop) : 0),
+              clientHeight: String(fileViewerEditor ? fileViewerEditor.clientHeight : 0),
+            });
+          } catch (err) {
+            recordDebugTrace('reveal_file_line_error', { line: String(lineNumber), error: String(err && err.message ? err.message : err) });
+          }
         });
       });
     },
