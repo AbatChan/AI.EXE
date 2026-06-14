@@ -1200,11 +1200,15 @@ const inferenceProviderModelPresets = {
   ],
   venice: [
     'venice-uncensored',
-    'zai-org-glm-4.7',
-    'llama-3.3-70b',
+    'qwen3-coder-480b-a35b-instruct',
+    'qwen3-235b-a22b-instruct-2507',
+    'qwen3-235b-a22b-thinking-2507',
+    'deepseek-ai-DeepSeek-R1',
+    'hermes-3-llama-3.1-405b',
+    'qwen3-next-80b',
+    'google-gemma-3-27b-it',
+    'zai-org-glm-5',
     'mistral-31-24b',
-    'qwen3-4b',
-    'qwen3-vl-235b-a22b',
   ],
 };
 let debugTraceEntries = [];
@@ -1291,7 +1295,7 @@ const agentFileOutputCeilings = {
   huggingface: 16000,
   customopenai: 8000,
   deepseek: 16000,
-  venice: 16000,
+  venice: 32000,
 };
 const agentPlannerEndpoint = devPlannerEnabled ? 'http://127.0.0.1:8765/plan' : '';
 const agentPlannerRequestTimeoutMs = 7000;
