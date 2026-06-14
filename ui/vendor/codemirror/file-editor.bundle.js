@@ -30781,7 +30781,7 @@ var AIExeCodeMirrorBundle = (function (exports) {
     LineComment = 1,
     BlockComment = 2,
     String$1 = 3,
-    Number = 4,
+    Number$1 = 4,
     Bool = 5,
     Null = 6,
     ParenL = 7,
@@ -31089,18 +31089,18 @@ var AIExeCodeMirrorBundle = (function (exports) {
                   input.advance();
               if (quoted && input.next == 39 /* Ch.SingleQuote */)
                   input.advance();
-              input.acceptToken(Number);
+              input.acceptToken(Number$1);
           }
           else if (next == 46 /* Ch.Dot */ && input.next >= 48 /* Ch._0 */ && input.next <= 57 /* Ch._9 */) {
               readNumber(input, true);
-              input.acceptToken(Number);
+              input.acceptToken(Number$1);
           }
           else if (next == 46 /* Ch.Dot */) {
               input.acceptToken(Dot);
           }
           else if (next >= 48 /* Ch._0 */ && next <= 57 /* Ch._9 */) {
               readNumber(input, false);
-              input.acceptToken(Number);
+              input.acceptToken(Number$1);
           }
           else if (inString(next, d.operatorChars)) {
               while (inString(input.next, d.operatorChars))
@@ -31660,6 +31660,16 @@ var AIExeCodeMirrorBundle = (function (exports) {
         view.dispatch({
           effects: languageCompartment.reconfigure(languageExtension(lang))
         });
+      },
+      scrollToLine(lineNumber) {
+        const total = view.state.doc.lines;
+        const ln = Math.max(1, Math.min(total, Math.floor(Number(lineNumber) || 1)));
+        const line = view.state.doc.line(ln);
+        view.dispatch({
+          selection: {anchor: line.from, head: line.to},
+          effects: EditorView.scrollIntoView(line.from, {y: "center"}),
+        });
+        view.focus();
       },
     };
   }

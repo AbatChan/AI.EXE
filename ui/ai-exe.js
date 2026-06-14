@@ -8616,32 +8616,22 @@ const chatRenderer = window.AIExeChatRenderer && typeof window.AIExeChatRenderer
     openFileTab,
     workspaceBaseName,
     revealWorkspaceFileLine: (lineNumber) => {
-      const hasApi = Boolean(fileViewerApi && typeof fileViewerApi.selectFileViewerLine === 'function');
-      recordDebugTrace('reveal_file_line_called', {
-        line: String(lineNumber),
-        hasApi: String(hasApi),
-        editorPresent: String(Boolean(fileViewerEditor)),
-        valueLen: String(fileViewerEditor ? String(fileViewerEditor.value || '').length : 0),
-        clientHeight: String(fileViewerEditor ? fileViewerEditor.clientHeight : 0),
-      });
-      if (!hasApi) return;
-      // Defer to the next frame so the just-opened editor is populated + laid out
-      // before we measure line height and scroll to the target line.
-      requestAnimationFrame(() => {
-        requestAnimationFrame(() => {
-          try {
-            fileViewerApi.selectFileViewerLine(lineNumber, { reveal: true });
-            recordDebugTrace('reveal_file_line_applied', {
-              line: String(lineNumber),
-              valueLen: String(fileViewerEditor ? String(fileViewerEditor.value || '').length : 0),
-              scrollTop: String(fileViewerEditor ? Math.round(fileViewerEditor.scrollTop) : 0),
-              clientHeight: String(fileViewerEditor ? fileViewerEditor.clientHeight : 0),
-            });
-          } catch (err) {
-            recordDebugTrace('reveal_file_line_error', { line: String(lineNumber), error: String(err && err.message ? err.message : err) });
-          }
-        });
-      });
+      if (!fileViewerApi || typeof fileViewerApi.selectFileViewerLine !== 'function') return;
+      // The CodeMirror editor mounts asynchronously after a file opens; retry on a
+      // short backoff until selectFileViewerLine reports it scrolled (CM ready).
+      const delays = [0, 60, 150, 300, 600, 1000];
+      let attempt = 0;
+      const tryReveal = () => {
+        let ok = false;
+        try { ok = fileViewerApi.selectFileViewerLine(lineNumber, { reveal: true }) === true; } catch (_) {}
+        if (ok || attempt >= delays.length - 1) {
+          recordDebugTrace('reveal_file_line_applied', { line: String(lineNumber), ok: String(ok), attempt: String(attempt) });
+          return;
+        }
+        attempt += 1;
+        window.setTimeout(tryReveal, delays[attempt]);
+      };
+      window.setTimeout(tryReveal, delays[0]);
     },
     getWorkspaceNodeState,
     renderArtifacts: (...args) => renderArtifacts(...args),
