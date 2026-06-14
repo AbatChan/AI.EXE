@@ -8588,6 +8588,11 @@ const chatRenderer = window.AIExeChatRenderer && typeof window.AIExeChatRenderer
     setWorkspaceSelection,
     openFileTab,
     workspaceBaseName,
+    revealWorkspaceFileLine: (lineNumber) => {
+      if (fileViewerApi && typeof fileViewerApi.selectFileViewerLine === 'function') {
+        fileViewerApi.selectFileViewerLine(lineNumber, { reveal: true });
+      }
+    },
     getWorkspaceNodeState,
     renderArtifacts: (...args) => renderArtifacts(...args),
     updateAssistantAgentMeta,
