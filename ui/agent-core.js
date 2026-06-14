@@ -1281,11 +1281,20 @@
     }
 
     function parseAgentPlanTextList(raw, maxItems = 8) {
-      return String(raw || '')
+      let items = String(raw || '')
         .split('|')
         .map((item) => String(item || '').trim())
-        .filter(Boolean)
-        .slice(0, maxItems);
+        .filter(Boolean);
+      // The model sometimes joins DISTINCT criteria with a comma instead of '|'
+      // ("...per submission,Create a sample-data.json...") so two requirements collapse
+      // into one item ("Plan 1/1"). Recover them only when a single piped item contains
+      // a comma immediately before a capital letter (a clause join — in-clause commas
+      // have a space after, e.g. "Basic, Pro"), and each piece is substantial.
+      if (items.length === 1 && /,(?=[A-Z])/.test(items[0])) {
+        const split = items[0].split(/,(?=[A-Z])/).map((s) => s.trim()).filter((s) => s.length >= 8);
+        if (split.length >= 2) items = split;
+      }
+      return items.slice(0, maxItems);
     }
 
     function buildFallbackExpectedFiles(taskKind, primaryStack, projectName = '') {
