@@ -5557,9 +5557,13 @@ function completeInferenceRequest(token) {
   renderHistory();
 }
 
-function commitInterruptedAgentRun(chatId, reason = 'Agent was interrupted before finishing.') {
-  if (!activeAgentStreamState || String(activeAgentStreamState.chatId || '') !== String(chatId || '')) return false;
-  const interruptedActivities = cloneAgentActivities(activeAgentStreamState.activities || []);
+function commitInterruptedAgentRun(chatId, reason = 'Agent was interrupted before finishing.', snapshot = null) {
+  // Use the passed snapshot when provided — the global activeAgentStreamState may
+  // already be nulled (consumeLiveAssistantText resets it during cancel), which
+  // used to make this bail and wipe the whole run from the chat.
+  const state = snapshot || activeAgentStreamState;
+  if (!state || String(state.chatId || '') !== String(chatId || '')) return false;
+  const interruptedActivities = cloneAgentActivities(state.activities || []);
   if (!interruptedActivities.length) return false;
   mergeAgentActivityIntoList(interruptedActivities, {
     kind: 'error',
@@ -5567,7 +5571,7 @@ function commitInterruptedAgentRun(chatId, reason = 'Agent was interrupted befor
     detail: reason,
     status: 'error',
   });
-  const startedAt = (activeAgentStreamState && activeAgentStreamState.startedAt) || Date.now();
+  const startedAt = (state && state.startedAt) || Date.now();
   commitAssistantMessage(String(chatId || ''), reason, reason, {
     agentActivities: interruptedActivities,
     agentMeta: { startedAt, completedAt: Date.now(), collapsed: true },
@@ -5646,13 +5650,14 @@ function cancelActiveInference() {
       chatId: String(activeAgentStreamState.chatId || ''),
       statusText: String(activeAgentStreamState.statusText || ''),
       activities: cloneAgentActivities(activeAgentStreamState.activities || []),
+      startedAt: Number(activeAgentStreamState.startedAt) || Date.now(),
     }
     : null;
   const partialRaw = consumeLiveAssistantText();
   cancelLiveStreamRender();
   let partialText = sanitizeAssistantText(partialRaw);
   if (activeAgentState && Array.isArray(activeAgentState.activities) && activeAgentState.activities.length > 0) {
-    commitInterruptedAgentRun(String(token.chatId || ''), 'Agent was interrupted before finishing.');
+    commitInterruptedAgentRun(String(token.chatId || ''), 'Agent was interrupted before finishing.', activeAgentState);
     pushDebugTrace('request_cancelled_agent_committed', {
       chatId: String(token.chatId || ''),
       activityCount: String(activeAgentState.activities.length),
