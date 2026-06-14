@@ -770,6 +770,14 @@
         }
         // Scroll to and highlight the exact line range that was read/edited.
         const startLine = Math.max(0, Number(activity && activity.openStartLine) || 0);
+        if (pushDebugTrace) {
+          pushDebugTrace('activity_open_target', {
+            kind: String(activity && activity.kind || ''),
+            openPath: String(path || ''),
+            openStartLine: String(activity && activity.openStartLine || 0),
+            willReveal: String(startLine > 0 && typeof d.revealWorkspaceFileLine === 'function'),
+          });
+        }
         if (startLine > 0 && typeof d.revealWorkspaceFileLine === 'function') {
           d.revealWorkspaceFileLine(startLine);
         }
