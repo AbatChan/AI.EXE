@@ -177,6 +177,7 @@
         hints.push('Do not output JavaScript as the main body of this file.');
         hints.push('If the project has separate style.css or script.js files, prefer linking them instead of embedding large inline <style> or <script> blocks.');
         hints.push('Pages are opened directly from disk (file://). Inter-page and asset links must be RELATIVE (menu.html, ./style.css, ../style.css from a subfolder) — root-relative paths like /menu.html resolve to the filesystem root and break.');
+        hints.push('OFFLINE: load JS as classic scripts — <script src="js/app.js"></script> in dependency order. Do NOT use <script type="module"> or import/export anywhere; ES modules do not load from file:// and silently break the whole page. Share code via globals on window.');
         hints.push('Keep markup semantic and compact. Use reusable classes and stable IDs that CSS and JS can share. IDs must be unique — never leave two copies of a section.');
         hints.push('If a change replaces an existing structure (e.g. moving inline sections into separate pages), remove the superseded markup and links in the same pass — never leave two competing implementations.');
         hints.push('Guideline: for UI control icons, prefer clean inline SVG over emoji (emoji render inconsistently and look less polished). Not a hard rule — any consistent icon approach is fine.');
@@ -194,6 +195,7 @@
       if (/\.(js|ts|jsx|tsx)$/i.test(normalized)) {
         hints.push('Return only JavaScript or TypeScript source for this file.');
         hints.push('Do not output HTML, <script> tags, or CSS rules.');
+        hints.push('OFFLINE: the page opens directly from disk (file://), where ES modules do NOT load. Do NOT use import/export or <script type="module">. Use plain classic scripts loaded via <script src="..."> in dependency order, and share code by exposing it on window (e.g. window.AppStore = ...). import/export will silently break the whole app offline.');
         hints.push('Keep script focused on core behavior and DOM interactions. Avoid large decorative systems unless required.');
         hints.push('Keep one source of truth per setting: a script default must match the corresponding HTML control\'s min/max/value and the unit the code applies (0–1 vs 0–100, px vs unitless), and must not conflict with a CSS variable default. Drive effects through ONE mechanism (either CSS variables or inline styles), and give interactive effects visible non-zero defaults so the result shows before any control is touched.');
       }
