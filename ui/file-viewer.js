@@ -227,8 +227,16 @@
     }
 
     function selectFileViewerLine(lineNumber, options = {}) {
+      // The visible editor is CodeMirror (the textarea is the hidden input layer,
+      // clientHeight 0), so scroll the CM view. Returns false if CM isn't ready yet
+      // so the caller can retry once the editor finishes mounting.
+      const cm = getFileViewerCodeMirror();
+      if (cm && typeof cm.scrollToLine === 'function') {
+        cm.scrollToLine(lineNumber);
+        return true;
+      }
       const editor = d.getFileViewerEditor ? d.getFileViewerEditor() : null;
-      if (!editor) return;
+      if (!editor) return false;
       const focusEditor = options.focusEditor !== false;
       const revealSelection = options.reveal !== false;
       const { start, end } = findLineBounds(editor.value, lineNumber);
@@ -237,6 +245,7 @@
       if (typeof editor.setSelectionRange === 'function') editor.setSelectionRange(start, end);
       if (revealSelection) revealFileViewerSelection(start); else updateFileViewerCurrentLine();
       if (focusEditor) editor.focus();
+      return editor.clientHeight > 0;
     }
 
     function resetFileViewerSearchState() {
