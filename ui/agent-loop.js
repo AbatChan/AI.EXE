@@ -244,6 +244,14 @@
           totalChars += file.content.length;
           if (totalChars > 800000) break;
           const stats = countRunLineDiffStats(file.content, file.post);
+          recordDebugTrace('agent_file_diff', {
+            path: String(file.path || ''),
+            existedBefore: String(file.existedBefore),
+            beforeLines: String(file.content ? file.content.split('\n').length : 0),
+            afterLines: String(file.post ? file.post.split('\n').length : 0),
+            added: String(stats.added),
+            removed: String(stats.removed),
+          });
           files.push({
             path: file.path,
             existedBefore: file.existedBefore,
