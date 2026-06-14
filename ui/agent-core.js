@@ -1127,9 +1127,15 @@
       const edits = Array.isArray(program && program.edits) ? program.edits : [];
       let appliedCount = 0;
       let fuzzyCount = 0;
-      const noteAnchor = (anchor) => {
+      const anchors = []; // per-applied-edit match mode, for diagnostics
+      const noteAnchor = (anchor, op) => {
         appliedCount += 1;
         if (anchor && anchor.mode && anchor.mode !== 'exact') fuzzyCount += 1;
+        anchors.push({
+          op: String(op || ''),
+          mode: anchor && anchor.mode ? String(anchor.mode) : 'direct',
+          score: anchor && typeof anchor.score === 'number' ? Math.round(anchor.score * 100) / 100 : null,
+        });
       };
       // On a fuzzy match, a keep-and-extend replacement would write the model's
       // (possibly typo'd) anchor text. Re-base the kept part on the real matched text.
@@ -1147,11 +1153,13 @@
         if (edit.op === 'prepend') {
           output = String(edit.text || '') + output;
           appliedCount += 1;
+          anchors.push({ op: 'prepend', mode: 'direct', score: null });
           continue;
         }
         if (edit.op === 'append') {
           output += String(edit.text || '');
           appliedCount += 1;
+          anchors.push({ op: 'append', mode: 'direct', score: null });
           continue;
         }
         const find = String(edit.find || '');
@@ -1167,31 +1175,31 @@
           const anchor = findEditAnchor(output, find);
           if (!anchor) continue;
           output = `${output.slice(0, anchor.start)}${healReplacement(anchor, find, edit.replace)}${output.slice(anchor.end)}`;
-          noteAnchor(anchor);
+          noteAnchor(anchor, edit.op);
           continue;
         }
         if (edit.op === 'replace') {
           const anchor = findEditAnchor(output, find);
           if (!anchor) continue;
           output = `${output.slice(0, anchor.start)}${healReplacement(anchor, find, edit.replace)}${output.slice(anchor.end)}`;
-          noteAnchor(anchor);
+          noteAnchor(anchor, edit.op);
           continue;
         }
         if (edit.op === 'insert_before') {
           const anchor = findEditAnchor(output, find);
           if (!anchor) continue;
           output = `${output.slice(0, anchor.start)}${String(edit.text || '')}${output.slice(anchor.start)}`;
-          noteAnchor(anchor);
+          noteAnchor(anchor, edit.op);
           continue;
         }
         if (edit.op === 'insert_after') {
           const anchor = findEditAnchor(output, find);
           if (!anchor) continue;
           output = `${output.slice(0, anchor.end)}${String(edit.text || '')}${output.slice(anchor.end)}`;
-          noteAnchor(anchor);
+          noteAnchor(anchor, edit.op);
         }
       }
-      return { output, appliedCount, fuzzyCount };
+      return { output, appliedCount, fuzzyCount, anchors };
     }
 
     // Mechanically mark a doneCriteria item done when a successful edit's target or

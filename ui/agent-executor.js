@@ -1309,6 +1309,16 @@
         });
         deps.syncFileTabFromWorkspaceWrite(path, content, deps.workspaceBaseName(path));
         mutated = true;
+        if (typeof deps.recordDebugTrace === 'function') {
+          deps.recordDebugTrace('agent_write_apply', {
+            path,
+            createdNew: String(creatingNewFile),
+            contentSource: shouldAutoGenerate || !String(decision.content || '').trim() ? 'generated' : 'inline-decision',
+            chars: String(content.length),
+            originalLen: String(originalContent.length),
+            structuralIssue: String(newContentStructureIssue || 'none'),
+          }, { path });
+        }
         observation = `write_file ok: ${path} (${content.length} chars)${primaryQualityNote}\nThe saved file matches the generated content exactly — do not re-read ${path} to verify.${newContentStructureIssue ? `\nWARNING: the saved content still fails to parse — it ${newContentStructureIssue}. Fix this before finishing.` : ''}`;
         return {
           ok: true,
@@ -1374,9 +1384,19 @@
         const originalContent = String(readResponse.output || '');
         deps.setActiveAgentStreamStatus(chatId, `Editing file ${path}...`);
         let program = deps.parseAgentEditProgram(decision.content || '');
+        let editProgramSource = program ? 'inline-decision' : '';
         if (!program) {
           const generated = await deps.generateAgentEditFileProgram(taskText, toolEvents, path, originalContent, decision.content || '', planSpec);
           program = deps.parseAgentEditProgram(generated);
+          if (program) editProgramSource = 'generated';
+        }
+        if (typeof deps.recordDebugTrace === 'function') {
+          deps.recordDebugTrace('agent_edit_mode', {
+            path,
+            originalLen: String(originalContent.length),
+            mode: program ? `edit-program (${editProgramSource})` : 'rewrite-fallback',
+            editCount: String(program && Array.isArray(program.edits) ? program.edits.length : 0),
+          }, { path, program });
         }
         if (!program) {
           const rewritten = await deps.generateAgentRewriteExistingFileContent(taskText, toolEvents, path, originalContent, decision.content || '', planSpec);
@@ -1439,6 +1459,18 @@
           };
         }
         const applied = deps.applyAgentEditProgram(originalContent, program);
+        if (typeof deps.recordDebugTrace === 'function') {
+          deps.recordDebugTrace('agent_edit_apply', {
+            path,
+            editCount: String(Array.isArray(program.edits) ? program.edits.length : 0),
+            appliedCount: String(applied ? applied.appliedCount : 0),
+            fuzzyCount: String(applied ? applied.fuzzyCount : 0),
+            anchorModes: (applied && Array.isArray(applied.anchors) ? applied.anchors.map((a) => `${a.op}:${a.mode}${a.score != null ? `(${a.score})` : ''}`).join(', ') : ''),
+            changed: String(Boolean(applied && String(applied.output || '') !== originalContent)),
+            beforeLen: String(originalContent.length),
+            afterLen: String(applied ? String(applied.output || '').length : 0),
+          }, { path, anchors: applied && applied.anchors });
+        }
         if (!applied || applied.appliedCount <= 0 || String(applied.output || '') === originalContent) {
           return {
             ok: false,

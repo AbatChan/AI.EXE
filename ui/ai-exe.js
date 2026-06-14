@@ -1276,6 +1276,12 @@ function updateAgentStreamingFile(path, content) {
 }
 function clearAgentStreamingFile() {
   if (!activeAgentStreamState || !activeAgentStreamState.streamingFile) return;
+  const sf = activeAgentStreamState.streamingFile;
+  recordDebugTrace('agent_stream_file_done', {
+    path: String(sf.path || ''),
+    streamedChars: String(String(sf.content || '').length),
+    streamedLines: String(String(sf.content || '').split('\n').length),
+  });
   activeAgentStreamState.streamingFile = null;
   scheduleLiveStreamRender();
 }
