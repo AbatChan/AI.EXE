@@ -180,6 +180,16 @@ export function createFileEditor(host, options = {}) {
         effects: languageCompartment.reconfigure(languageExtension(lang))
       });
     },
+    scrollToLine(lineNumber) {
+      const total = view.state.doc.lines;
+      const ln = Math.max(1, Math.min(total, Math.floor(Number(lineNumber) || 1)));
+      const line = view.state.doc.line(ln);
+      view.dispatch({
+        selection: {anchor: line.from, head: line.to},
+        effects: EditorView.scrollIntoView(line.from, {y: "center"}),
+      });
+      view.focus();
+    },
   };
 }
 
