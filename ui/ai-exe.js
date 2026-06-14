@@ -8615,17 +8615,22 @@ const chatRenderer = window.AIExeChatRenderer && typeof window.AIExeChatRenderer
     setWorkspaceSelection,
     openFileTab,
     workspaceBaseName,
-    revealWorkspaceFileLine: (lineNumber) => {
+    revealWorkspaceFileLine: (startLine, endLine, kind) => {
       if (!fileViewerApi || typeof fileViewerApi.selectFileViewerLine !== 'function') return;
       // The CodeMirror editor mounts asynchronously after a file opens; retry on a
-      // short backoff until selectFileViewerLine reports it scrolled (CM ready).
+      // short backoff until selectFileViewerLine reports it applied (CM ready).
+      // startLine<=0 clears any highlight (a plain open should show nothing).
       const delays = [0, 60, 150, 300, 600, 1000];
       let attempt = 0;
       const tryReveal = () => {
         let ok = false;
-        try { ok = fileViewerApi.selectFileViewerLine(lineNumber, { reveal: true }) === true; } catch (_) {}
+        try {
+          ok = fileViewerApi.selectFileViewerLine(startLine, {
+            endLine: endLine || startLine, kind: kind || 'read', reveal: true,
+          }) === true;
+        } catch (_) {}
         if (ok || attempt >= delays.length - 1) {
-          recordDebugTrace('reveal_file_line_applied', { line: String(lineNumber), ok: String(ok), attempt: String(attempt) });
+          recordDebugTrace('reveal_file_line_applied', { line: String(startLine), endLine: String(endLine || ''), kind: String(kind || ''), ok: String(ok), attempt: String(attempt) });
           return;
         }
         attempt += 1;

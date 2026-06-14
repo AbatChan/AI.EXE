@@ -1,5 +1,5 @@
-import {EditorState, Compartment} from "@codemirror/state";
-import {EditorView, keymap, lineNumbers, highlightActiveLineGutter, drawSelection, highlightActiveLine} from "@codemirror/view";
+import {EditorState, Compartment, StateField, StateEffect, RangeSetBuilder} from "@codemirror/state";
+import {EditorView, keymap, lineNumbers, highlightActiveLineGutter, drawSelection, highlightActiveLine, Decoration} from "@codemirror/view";
 import {defaultKeymap, history, historyKeymap, indentWithTab} from "@codemirror/commands";
 import {searchKeymap, highlightSelectionMatches} from "@codemirror/search";
 import {defaultHighlightStyle, syntaxHighlighting} from "@codemirror/language";
@@ -114,9 +114,44 @@ function createTheme() {
     },
     ".cm-searchMatch.cm-searchMatch-selected": {
       backgroundColor: "rgba(255, 214, 10, 0.45)"
+    },
+    // Range highlight for "go to the read/edited region" from the agent work panel.
+    ".cm-range-hl-read": {
+      backgroundColor: "rgba(82, 174, 255, 0.16)",
+      boxShadow: "inset 3px 0 0 rgba(82, 174, 255, 0.85)"
+    },
+    ".cm-range-hl-edit": {
+      backgroundColor: "rgba(52, 211, 153, 0.16)",
+      boxShadow: "inset 3px 0 0 rgba(52, 211, 153, 0.9)"
     }
   }, {dark: true});
 }
+
+// Effect + field that paint a contiguous line range (read = blue, edit = green).
+const setRangeHighlight = StateEffect.define();
+const rangeHighlightField = StateField.define({
+  create() { return Decoration.none; },
+  update(deco, tr) {
+    for (const e of tr.effects) {
+      if (!e.is(setRangeHighlight)) continue;
+      if (!e.value) return Decoration.none;
+      const doc = tr.state.doc;
+      const total = doc.lines;
+      const start = Math.max(1, Math.min(total, Math.floor(Number(e.value.startLine) || 1)));
+      const end = Math.max(start, Math.min(total, Math.floor(Number(e.value.endLine) || start)));
+      const cls = `cm-range-hl-${e.value.kind === "edit" ? "edit" : "read"}`;
+      const lineDeco = Decoration.line({class: cls});
+      const builder = new RangeSetBuilder();
+      for (let ln = start; ln <= end; ln += 1) {
+        const line = doc.line(ln);
+        builder.add(line.from, line.from, lineDeco);
+      }
+      return builder.finish();
+    }
+    return deco.map(tr.changes);
+  },
+  provide: (f) => EditorView.decorations.from(f),
+});
 
 export function createFileEditor(host, options = {}) {
   const languageCompartment = new Compartment();
@@ -145,6 +180,7 @@ export function createFileEditor(host, options = {}) {
         highlightSelectionMatches(),
         syntaxHighlighting(defaultHighlightStyle, {fallback: true}),
         languageCompartment.of(languageExtension(options.language)),
+        rangeHighlightField,
         theme,
         EditorView.updateListener.of((update) => {
           if (!update.docChanged || suppress) return;
@@ -171,7 +207,8 @@ export function createFileEditor(host, options = {}) {
       if (next === view.state.doc.toString()) return;
       suppress = true;
       view.dispatch({
-        changes: {from: 0, to: view.state.doc.length, insert: next}
+        changes: {from: 0, to: view.state.doc.length, insert: next},
+        effects: setRangeHighlight.of(null), // new content -> drop any stale highlight
       });
       suppress = false;
     },
@@ -180,15 +217,22 @@ export function createFileEditor(host, options = {}) {
         effects: languageCompartment.reconfigure(languageExtension(lang))
       });
     },
-    scrollToLine(lineNumber) {
+    highlightRange(startLine, endLine, kind) {
       const total = view.state.doc.lines;
-      const ln = Math.max(1, Math.min(total, Math.floor(Number(lineNumber) || 1)));
-      const line = view.state.doc.line(ln);
+      const start = Math.max(1, Math.min(total, Math.floor(Number(startLine) || 1)));
+      const end = Math.max(start, Math.min(total, Math.floor(Number(endLine) || start)));
+      const line = view.state.doc.line(start);
       view.dispatch({
-        selection: {anchor: line.from, head: line.to},
-        effects: EditorView.scrollIntoView(line.from, {y: "center"}),
+        selection: {anchor: line.from},
+        effects: [
+          setRangeHighlight.of({startLine: start, endLine: end, kind}),
+          EditorView.scrollIntoView(line.from, {y: "center"}),
+        ],
       });
       view.focus();
+    },
+    clearHighlight() {
+      view.dispatch({effects: setRangeHighlight.of(null)});
     },
   };
 }
