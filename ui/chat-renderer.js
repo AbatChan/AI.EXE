@@ -184,6 +184,8 @@
             diffPreview: diffPreview && diffPreview.length ? diffPreview : null,
             openPath: openPath && openPath !== '/' ? openPath : '',
             openKind: String(item.openKind || '').trim().toLowerCase() === 'folder' ? 'folder' : 'file',
+            openStartLine: Math.max(0, Number(item.openStartLine) || 0),
+            openEndLine: Math.max(0, Number(item.openEndLine) || 0),
             status: status === 'error' ? 'error' : (status === 'pending' ? 'pending' : 'done'),
             items: checklistItems && checklistItems.length ? checklistItems : null,
             ts: Number(item.ts) || nowTs(),
@@ -512,6 +514,8 @@
           detail: formatAgentActivityPathLabel(targetInfo || 'workspace file'),
           openPath: targetInfo,
           openKind: 'file',
+          openStartLine: startLine,
+          openEndLine: endLine,
           meta: rangeLabel || 'Open file',
           status: 'done',
         });
@@ -763,6 +767,11 @@
       if (kind === 'file') {
         if (typeof d.openFileTab === 'function') {
           await d.openFileTab(path, typeof d.workspaceBaseName === 'function' ? d.workspaceBaseName(path) : 'file');
+        }
+        // Scroll to and highlight the exact line range that was read/edited.
+        const startLine = Math.max(0, Number(activity && activity.openStartLine) || 0);
+        if (startLine > 0 && typeof d.revealWorkspaceFileLine === 'function') {
+          d.revealWorkspaceFileLine(startLine);
         }
       } else {
         if (typeof d.getWorkspaceNodeState === 'function') d.getWorkspaceNodeState(path).expanded = true;
@@ -1393,9 +1402,18 @@
         explore: {
           running: 'Inspecting files',
           done: (() => {
-            const reads = items.filter((a) => a && a.kind === 'read').length;
+            const readItems = items.filter((a) => a && a.kind === 'read');
+            const reads = readItems.length;
             const searches = items.filter((a) => a && (a.kind === 'search' || a.kind === 'search_files')).length;
-            if (reads && !searches && reads === count) return `Read ${count} file${count !== 1 ? 's' : ''}`;
+            if (reads && !searches && reads === count) {
+              const uniquePaths = new Set(readItems.map((a) => String(a && a.openPath ? a.openPath : '')));
+              if (uniquePaths.size === 1) {
+                const name = (readItems[0].openPath || '').split('/').filter(Boolean).pop() || 'file';
+                // Same file read in chunks — name it, don't claim multiple files.
+                return reads === 1 ? `Read ${name}` : `Read ${name} · ${reads} sections`;
+              }
+              return `Read ${reads} files`;
+            }
             if (searches && !reads) return `Searched ${searches} pattern${searches !== 1 ? 's' : ''}`;
             return `Inspected ${count} item${count !== 1 ? 's' : ''}`;
           })()
