@@ -135,13 +135,23 @@
         }
       };
 
+      const fileRoleLabel = (path) => {
+        const p = String(path || '').toLowerCase();
+        if (/\.html?$/.test(p)) return 'page';
+        if (/\.(css|scss|sass|less)$/.test(p)) return 'styles';
+        if (/\.(js|mjs|cjs|ts|jsx|tsx)$/.test(p)) return 'script';
+        if (/\.json$/.test(p)) return 'data';
+        if (/\.md$/.test(p)) return 'docs';
+        return 'file';
+      };
+      const baseName = (path) => String(path || '').split('/').filter(Boolean).pop() || 'file';
       const synthesizeToolNarration = (decision) => {
         const tool = String(decision && decision.tool || '').toLowerCase();
         const path = String(decision && decision.path || '').trim();
-        if (tool === 'read_file') return path ? `Reading ${path} before deciding the next change.` : 'Reading the file before deciding the next change.';
+        if (tool === 'read_file') return path ? `Reading ${baseName(path)} before deciding the next change.` : 'Reading the file before deciding the next change.';
         if (tool === 'search_files') return 'Searching for relevant code patterns before choosing files to edit.';
-        if (tool === 'edit_file') return path ? `Applying the targeted edit in ${path}.` : 'Applying the targeted file edit.';
-        if (tool === 'write_file') return path ? `Writing ${path}.` : 'Writing the file.';
+        if (tool === 'edit_file') return path ? `Editing the ${fileRoleLabel(path)} ${baseName(path)}.` : 'Applying the targeted file edit.';
+        if (tool === 'write_file') return path ? `Writing the ${fileRoleLabel(path)} ${baseName(path)}.` : 'Writing the file.';
         if (tool === 'validate_files') return 'Checking the changed files before finishing.';
         if (tool === 'list_dir') return 'Checking the workspace structure.';
         if (tool === 'mkdir') return path ? `Creating directory ${path}.` : 'Creating the directory.';
