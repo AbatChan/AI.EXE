@@ -994,17 +994,27 @@
         }
       }
       const edits = Array.isArray(parsed && parsed.edits) ? parsed.edits : [];
+      // Weak models emit the right intent under the wrong key names ("anchor" for
+      // "find", "replacement" for "replace", a bare array, etc.). Tolerate the common
+      // synonyms instead of rejecting the whole program — reliability lives here.
+      const pick = (edit, keys) => {
+        for (const k of keys) {
+          if (edit && edit[k] != null && String(edit[k]) !== '') return String(edit[k]);
+        }
+        return '';
+      };
       const normalizedEdits = edits.map((edit) => {
         let op = String(edit && edit.op ? edit.op : '').toLowerCase();
-        // Default the op when the shape is unambiguous (find+replace / bare text).
-        if (!op && edit && edit.find != null && edit.replace != null) op = 'replace';
-        if (!op && edit && edit.find == null && edit.replace == null && edit.text != null) op = 'append';
-        return {
-          op,
-          find: String(edit && edit.find ? edit.find : ''),
-          replace: String(edit && edit.replace ? edit.replace : ''),
-          text: String(edit && edit.text ? edit.text : ''),
-        };
+        if (op === 'find_replace' || op === 'substitute' || op === 'change' || op === 'edit') op = 'replace';
+        if (op === 'insert' || op === 'add') op = 'insert_after';
+        const find = pick(edit, ['find', 'anchor', 'search', 'old', 'from', 'target', 'match']);
+        const replace = pick(edit, ['replace', 'replacement', 'new', 'to', 'with', 'newText']);
+        const text = pick(edit, ['text', 'content', 'value', 'insert', 'add', 'snippet']);
+        // Default the op when the shape is unambiguous.
+        if (!op && find && replace) op = 'replace';
+        if (!op && !find && !replace && text) op = 'append';
+        if (!op && find && !replace && text) op = 'insert_after';
+        return { op, find, replace, text };
       }).filter((edit) => ['replace', 'replace_all', 'insert_before', 'insert_after', 'prepend', 'append'].includes(edit.op));
       if (!normalizedEdits.length) return null;
       return { edits: normalizedEdits };
