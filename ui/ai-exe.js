@@ -5520,6 +5520,7 @@ function saveSettingsFromUi(options = {}) {
   appSettings.keepModelOnUpdate = Boolean(settingsKeepModelChk && settingsKeepModelChk.checked);
   appSettings.debugTraceEnabled = Boolean(settingsDebugTraceChk && settingsDebugTraceChk.checked);
   saveAppSettings();
+  updateModelSetupBanner(); // a freshly-added API key should hide the setup banner
   if (options.toast) {
     setSettingsNote(
       appSettings.inferenceProvider === 'local'
@@ -7637,6 +7638,37 @@ function updateContinueButtonVisibility() {
   syncComposerLayoutState();
 }
 
+// True when a remote provider is configured with an API key (so the app can run
+// online even without a local model). Used to gate the model-setup banner.
+function hasUsableRemoteProvider() {
+  try {
+    const candidates = ['venice', 'deepseek', getSelectedInferenceProvider()];
+    return candidates.some((p) => p && p !== 'local'
+      && String(getProviderApiKey(p) || '').trim().length > 0);
+  } catch (_) { return false; }
+}
+
+// Banner "Add API Key" action — open Settings on the Models & Inference section.
+function openApiKeySettings() {
+  Promise.resolve(openSettingsModal())
+    .then(() => openSettingsSection('models'))
+    .catch(() => {});
+}
+
+// Setup banner shows only when neither a local model nor a remote key is available.
+// Re-callable so adding an API key in Settings hides it immediately.
+let lastModelLoaded = false;
+function updateModelSetupBanner() {
+  const showBanner = !lastModelLoaded && !hasUsableRemoteProvider();
+  const bannerEl = document.getElementById('modelSetupBanner');
+  if (bannerEl) bannerEl.style.display = showBanner ? 'block' : 'none';
+  const tmplBanner = document.querySelector('#emptyState .model-setup-banner');
+  if (tmplBanner) {
+    tmplBanner.style.display = showBanner ? 'block' : 'none';
+    emptyStateTemplate = (document.getElementById('emptyState') || { outerHTML: '' }).outerHTML;
+  }
+}
+
 function applyRuntimeStatus(status) {
   if (!status || typeof status !== 'object') return;
   const modelPathText = status.modelPath || '(unavailable)';
@@ -7652,18 +7684,8 @@ function applyRuntimeStatus(status) {
   if (settingsModelHash) settingsModelHash.textContent = modelHashText;
   if (settingsBackendStatus) settingsBackendStatus.textContent = `${backendLine}\n${modelLine}`;
 
-  // Show/hide model setup banner
-  const showBanner = !status.modelLoaded;
-  const bannerEl = document.getElementById('modelSetupBanner');
-  if (bannerEl) {
-    bannerEl.style.display = showBanner ? 'block' : 'none';
-  }
-  // Also update the cached template so re-renders keep the right state
-  const tmplBanner = document.querySelector('#emptyState .model-setup-banner');
-  if (tmplBanner) {
-    tmplBanner.style.display = showBanner ? 'block' : 'none';
-    emptyStateTemplate = (document.getElementById('emptyState') || { outerHTML: '' }).outerHTML;
-  }
+  lastModelLoaded = Boolean(status.modelLoaded);
+  updateModelSetupBanner();
 
   // Track workspace root folder name (like VSCode shows real folder name in explorer)
   if (typeof status.rootPath === 'string') {

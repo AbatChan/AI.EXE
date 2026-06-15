@@ -453,9 +453,24 @@ std::string NormalizeWorkspaceRelativePath(const std::string &raw,
 std::mutex s_workspace_root_mu;
 std::optional<std::filesystem::path> s_workspace_root_override;
 
+std::filesystem::path DefaultWorkspaceRoot(const WebRuntimeBridge &runtime) {
+  // Generated projects go to the user's Downloads (easy to find), not buried in
+  // the app folder next to AI.EXE.exe. Falls back to the app data dir if needed.
+  wchar_t buf[MAX_PATH] = {};
+  const DWORD len = GetEnvironmentVariableW(L"USERPROFILE", buf, MAX_PATH);
+  if (len > 0 && len < MAX_PATH) {
+    std::error_code ec;
+    const auto downloads = std::filesystem::path(buf) / L"Downloads";
+    if (std::filesystem::exists(downloads, ec)) {
+      return downloads / L"AI.EXE Projects";
+    }
+  }
+  return runtime.Config().sandbox_root / "workspace";
+}
+
 std::filesystem::path WorkspaceRoot(const WebRuntimeBridge &runtime) {
   std::error_code ec;
-  const auto default_root = runtime.Config().sandbox_root / "workspace";
+  const auto default_root = DefaultWorkspaceRoot(runtime);
   std::filesystem::create_directories(default_root, ec);
 
   std::filesystem::path root = default_root;
