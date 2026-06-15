@@ -4985,11 +4985,24 @@ function humanizeAssistantErrorText(text) {
   return value;
 }
 
-// DeepSeek V4 defaults to thinking mode (slow, stalls big generations). Disable it
-// via the documented toggle (api-docs.deepseek.com/guides/thinking_mode).
-function applyDeepseekThinkingOff(provider, req) {
-  if (String(provider || '').toLowerCase() === 'deepseek' && req && typeof req === 'object') {
+// Control the model's native reasoning by the UI "Think" toggle, per provider.
+// thinkActive=true  -> leave reasoning on (it streams into the Thoughts UI).
+// thinkActive=false -> turn it OFF at the API level (no wasted tokens, no leaked
+//   <thinking>, no empty-output when a model puts its whole reply in think tags).
+// Each provider exposes a different switch; unknown providers are left as-is.
+function applyThinkingMode(provider, req, thinkActive) {
+  if (!req || typeof req !== 'object' || thinkActive) return req;
+  const p = String(provider || '').toLowerCase();
+  if (p === 'deepseek') {
+    // api-docs.deepseek.com/guides/thinking_mode
     req.thinking = { type: 'disabled' };
+  } else if (p === 'venice') {
+    // docs.venice.ai — disable_thinking turns reasoning off on supported models AND
+    // strips <think> blocks; strip_thinking_response covers legacy <think> output.
+    req.venice_parameters = Object.assign({}, req.venice_parameters, {
+      disable_thinking: true,
+      strip_thinking_response: true,
+    });
   }
   return req;
 }
@@ -5922,7 +5935,7 @@ async function streamOpenAiCompatibleChatCompletion(provider, prompt, handlers =
     req.max_tokens = maxTokens;
   }
   // Think mode keeps the model's native reasoning on; otherwise off for speed.
-  if (!options.thinkActive) applyDeepseekThinkingOff(provider, req);
+  applyThinkingMode(provider, req, Boolean(options.thinkActive));
   if (typeof handlers.onStart === 'function') {
     handlers.onStart(`${provider}_${Date.now()}`);
   }
@@ -6223,14 +6236,14 @@ async function requestOpenAiCompatibleTextCompletion(provider, prompt, maxTokens
         Authorization: getOpenAiCompatibleAuthHeader(provider, apiKey, endpointUrl),
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify(applyDeepseekThinkingOff(provider, {
+      body: JSON.stringify(applyThinkingMode(provider, {
         model,
         messages: systemPrompt
           ? [{ role: 'system', content: String(systemPrompt) }, { role: 'user', content: String(prompt || '') }]
           : [{ role: 'user', content: String(prompt || '') }],
         max_tokens: Math.max(1, Number(maxTokens) || agentFileContentMaxTokens),
         ...(systemPrompt && def && def.supportsToolCalling ? { tools: [agentStepFunctionSchema] } : {}),
-      })),
+      }, false)),
     });
     if (!response.ok) {
       const status = response.status;
@@ -12452,6 +12465,13 @@ function sanitizeAssistantText(text) {
     .trim();
   if (hadThinkingTrace) {
     clean = normalizeStandaloneFinalAnswer(clean);
+  }
+  // Safety net: a reasoning model that ignored disable_thinking can put its WHOLE
+  // reply inside <thinking> — stripping then leaves nothing. Rather than fail with
+  // "empty output", surface the thinking text itself as the answer.
+  if (!clean && hadThinkingTrace) {
+    const m = normalizedSource.match(/<(thinking|think)>([\s\S]*?)<\/\1>/i);
+    if (m && m[2] && m[2].trim()) clean = m[2].trim();
   }
   return clean;
 }
