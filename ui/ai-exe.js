@@ -7686,13 +7686,10 @@ function applyRuntimeStatus(status) {
 
   lastModelLoaded = Boolean(status.modelLoaded);
   updateModelSetupBanner();
-
-  // Track workspace root folder name (like VSCode shows real folder name in explorer)
-  if (typeof status.rootPath === 'string') {
-    const rp = status.rootPath.replace(/[/\\]+$/, '');
-    workspaceRootPath = rp;
-    workspaceRootName = rp ? rp.split(/[/\\]/).pop() || '' : '';
-  }
+  // NOTE: do NOT derive the workspace root from the runtime status here. Its
+  // rootPath is the app/runtime directory (cfg_.root), not the open project — and
+  // copying it on every poll re-opened a project the user had just closed. The
+  // workspace root is owned solely by applyWorkspaceStatusSnapshot.
 }
 
 async function fetchRuntimeStatus(action = 'status') {
@@ -9078,6 +9075,8 @@ function applyWorkspaceStatusSnapshot(statusSnapshot, options = {}) {
   const priorCurrentKind = workspaceCurrentKind === 'file' ? 'file' : 'folder';
   const priorSelectedPaths = Array.from(workspaceSelectedPaths || []);
   workspaceRootName = hasRoot ? canonicalRootName : '';
+  // Absolute path of the OPEN workspace (for drag-to-browser file:// URLs); empty when closed.
+  workspaceRootPath = hasRoot ? rootPath.replace(/[/\\]+$/, '') : '';
   workspaceCurrentPath = preserveSelection ? priorCurrentPath : (hasRoot ? nextPath : '/');
   workspaceCurrentKind = preserveSelection
     ? priorCurrentKind
