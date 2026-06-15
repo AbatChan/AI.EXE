@@ -76,6 +76,42 @@ std::filesystem::path WindowStateIniPath() {
   return dir / "window_state.ini";
 }
 
+// WebView2 stores localStorage (chats, API keys, settings) in this folder. Keep it
+// in %LOCALAPPDATA% — OUTSIDE the app folder — so it survives the app folder being
+// replaced by an update. (Default would put it next to the exe, where an update
+// wipes it.) One-time migration copies any pre-existing app-folder store over.
+std::filesystem::path WebView2UserDataDir() {
+  wchar_t buf[MAX_PATH] = {};
+  const DWORD len = GetEnvironmentVariableW(L"LOCALAPPDATA", buf, MAX_PATH);
+  const std::filesystem::path base =
+      (len > 0 && len < MAX_PATH) ? std::filesystem::path(buf) : ExecutableDir();
+  const auto dir = base / "AI_EXE" / "WebView2";
+  std::error_code ec;
+  std::filesystem::create_directories(dir, ec);
+
+  bool new_empty = true;
+  for (auto it = std::filesystem::directory_iterator(dir, ec);
+       it != std::filesystem::directory_iterator(); ++it) {
+    new_empty = false;
+    break;
+  }
+  if (new_empty) {
+    const auto exe_dir = ExecutableDir();
+    for (auto it = std::filesystem::directory_iterator(exe_dir, ec);
+         it != std::filesystem::directory_iterator(); ++it) {
+      if (it->is_directory(ec) && it->path().extension() == L".WebView2") {
+        std::error_code copy_ec;
+        std::filesystem::copy(it->path(), dir,
+                              std::filesystem::copy_options::recursive |
+                                  std::filesystem::copy_options::overwrite_existing,
+                              copy_ec);
+        break;
+      }
+    }
+  }
+  return dir;
+}
+
 bool LoadWindowPlacementFromIni(RECT *out_rect) {
   if (!out_rect)
     return false;
@@ -1487,8 +1523,10 @@ private:
 
     using Microsoft::WRL::Callback;
 
+    // Persisted outside the app folder so chats/keys/settings survive updates.
+    static std::wstring user_data_dir = WebView2UserDataDir().wstring();
     const HRESULT hr = create_env(
-        nullptr, nullptr, nullptr,
+        nullptr, user_data_dir.c_str(), nullptr,
         Callback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>(
             [this](HRESULT result, ICoreWebView2Environment *env) -> HRESULT {
               if (FAILED(result) || !env) {
