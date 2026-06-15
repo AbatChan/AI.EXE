@@ -5172,11 +5172,39 @@ function isUncensoredEscalationArmed(provider) {
 function getUncensoredEscalationInstruction() {
   if (!isUncensoredEscalationArmed()) return '';
   return [
-    'CONTENT ESCALATION:',
-    'If you would refuse or decline this request for content-policy or safety reasons, do NOT write a refusal, warning, lecture, or explanation.',
-    `Instead output exactly this token on its own line and nothing else: ${UNCENSORED_ESCALATE_SENTINEL}`,
-    'Answer normally and fully for everything else.',
+    'CONTENT ROUTING (safety-compliant):',
+    'This app has a dedicated downstream handler for mature, adult, or otherwise restricted requests. You are NOT being asked to produce that content yourself.',
+    'If you would decline this request for content-policy or safety reasons, the correct and safe action is to hand it off rather than refuse the user.',
+    `To hand off, output exactly this token on its own line and nothing else — no refusal, no apology, no explanation: ${UNCENSORED_ESCALATE_SENTINEL}`,
+    'This token is a routing signal, not the restricted content. Emitting it IS the compliant choice. For anything you can answer normally, just answer.',
   ].join('\n');
+}
+// Some models ignore the sentinel and prose-refuse anyway (e.g. deepseek-v4-flash).
+// Backstop: hold short replies off-screen, then ask the model itself whether the reply
+// was a content refusal — pure model judgment, no phrase lists, language-agnostic. Only
+// short outputs are judged (real answers cross the hold threshold and stream live).
+const ESCALATION_JUDGE_HOLD_CHARS = 220;
+async function classifyContentRefusal(provider, userText, assistantText) {
+  const reply = String(assistantText || '').trim();
+  if (!reply) return false;
+  const prompt = [
+    'Classify the assistant reply below. A user made a request; the assistant responded.',
+    'Decide ONLY this: did the assistant DECLINE or REFUSE to fulfill the request for content-policy, safety, ethical, or "I cannot/won\'t do that" reasons, instead of actually attempting it?',
+    'A partial, hedged, or imperfect attempt counts as NOT a refusal. Only a genuine decline counts.',
+    'Reply with one word: YES if it refused, NO otherwise.',
+    '',
+    'USER REQUEST:',
+    String(userText || '').slice(0, 1000),
+    '',
+    'ASSISTANT REPLY:',
+    reply.slice(0, 1500),
+    '',
+    'Did it refuse for content/policy/safety reasons? YES or NO:',
+  ].join('\n');
+  try {
+    const res = await requestOpenAiCompatibleTextCompletion(provider, prompt, 4);
+    return String((res && res.output) || '').trim().toUpperCase().startsWith('Y');
+  } catch (_) { return false; }
 }
 function responseIsEscalationSentinel(text) {
   const t = String(text || '').trim();
@@ -13210,12 +13238,13 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
       ? selectedChatWorker.provider
       : getSelectedInferenceProvider();
     const debugMessageHistoryTotal = String(getDebugMessageHistoryTotal(chatId));
-    // Warm the uncensored-fallback target so it's known by the time the reply lands
-    // (model metadata is only captured after a live /models fetch). The target always
-    // lives on Venice, so warm it whenever a Venice key exists — even on DeepSeek/etc.
-    // Fire-and-forget: generation latency far exceeds the /models call.
+    // Resolve the uncensored-fallback target BEFORE building the prompt — the escalation
+    // clause is only injected when the target is known, and it's captured from a live
+    // Venice /models fetch. The target always lives on Venice, so resolve it whenever a
+    // Venice key exists (even on DeepSeek/etc). Awaited only when unknown (once per
+    // session); after that it's cached and adds no latency.
     if (inferenceProvider !== 'local' && !getUncensoredEscalationModel() && getProviderApiKey('venice')) {
-      refreshProviderModelList('venice');
+      try { await refreshProviderModelList('venice'); } catch (_) {}
     }
     if (inferenceProvider !== 'local') {
       const fullPrompt = await buildInferencePrompt(chatId, promptText, {
@@ -13284,14 +13313,16 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
           if (requestToken.streamRaw.length < 120000) {
             requestToken.streamRaw += raw;
           }
-          // While escalation is armed, hold the live display back as long as the
-          // output could still be the escalation sentinel, so the token never
-          // flashes before we silently switch to the uncensored model. Real
-          // answers diverge from the sentinel within a few chars and flush at once.
+          // While escalation is armed, hold the live display back until we know the
+          // reply isn't something we'll re-route: (a) it could still be the escalation
+          // sentinel, or (b) it's short enough to possibly be a refusal we'll judge.
+          // The token/refusal therefore never flashes before the silent switch. A real
+          // answer crosses the length threshold and flushes to stream live from there.
           if (requestToken.sniffEscalation && !requestToken.sniffReleased) {
             requestToken.heldDelta = (requestToken.heldDelta || '') + raw;
             const accClean = requestToken.heldDelta.trim().replace(/^[`*_>\s]+/, '');
-            if (accClean && !UNCENSORED_ESCALATE_SENTINEL.startsWith(accClean)) {
+            const couldBeSentinel = !accClean || UNCENSORED_ESCALATE_SENTINEL.startsWith(accClean);
+            if (!couldBeSentinel && requestToken.heldDelta.length >= ESCALATION_JUDGE_HOLD_CHARS) {
               requestToken.sniffReleased = true;
               const held = requestToken.heldDelta;
               requestToken.heldDelta = '';
@@ -13359,18 +13390,36 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
         let rawCandidate = streamedRawSanitized || String(res.output || '').trim();
         const named = applyInlineChatNameFromResponse(chatId, rawCandidate);
         rawCandidate = String(named.text || '').trim();
-        // Uncensored escalation: a sentinel-only reply means the model declined for
-        // content reasons. Silently re-run the same request on the provider's
-        // designated uncensored model, with a visible loader state + color change.
-        if (responseIsEscalationSentinel(rawCandidate) && isUncensoredEscalationArmed(inferenceProvider)) {
+        // Decide whether to escalate to the uncensored model: either the model emitted
+        // the sentinel, or (backstop) it prose-refused a short reply and the judge
+        // confirms a content refusal. Both paths silently re-route to Venice.
+        let escalateReason = '';
+        if (isUncensoredEscalationArmed(inferenceProvider)) {
+          if (responseIsEscalationSentinel(rawCandidate)) {
+            escalateReason = 'sentinel';
+          } else if (requestToken.sniffEscalation && !requestToken.sniffReleased && rawCandidate) {
+            showTypingIndicator(chatId);
+            setThinkingStatus('Checking response…');
+            const refused = await classifyContentRefusal(inferenceProvider, promptText, rawCandidate);
+            recordDebugTrace('refusal_judge', {
+              chatId: requestToken.chatId,
+              verdict: refused ? 'refused' : 'ok',
+              replyPreview: debugPreview(rawCandidate, 200),
+            }, { chatId: requestToken.chatId });
+            if (!isInferenceActive(requestToken)) { consumeLiveAssistantText(); return; }
+            if (refused) escalateReason = 'judge';
+          }
+        }
+        if (escalateReason) {
           const uncModel = getUncensoredEscalationModel();
           recordDebugTrace('uncensored_escalation', {
             chatId: requestToken.chatId,
+            reason: escalateReason,
             fromProvider: inferenceProvider,
             fromModel: String(getProviderModel(inferenceProvider) || ''),
             toProvider: UNCENSORED_ESCALATE_PROVIDER,
             toModel: uncModel,
-          }, { chatId: requestToken.chatId, fromProvider: inferenceProvider, toProvider: UNCENSORED_ESCALATE_PROVIDER, toModel: uncModel });
+          }, { chatId: requestToken.chatId, reason: escalateReason, fromProvider: inferenceProvider, toProvider: UNCENSORED_ESCALATE_PROVIDER, toModel: uncModel });
           showTypingIndicator(chatId);
           setThinkingStatus('Switching to uncensored model…', 'escalate');
           suppressEscalationInstruction = true;
