@@ -24,8 +24,8 @@ option(AI_EXE_UI_REMEMBER_LAYOUT "Remember panel layout in local storage" ON)
 option(AI_EXE_ENABLE_REMOTE_PROVIDERS "Enable hosted/API inference providers in the UI" ON)
 option(AI_EXE_ENABLE_DEV_PLANNER "Enable localhost development planner endpoint in the UI" OFF)
 set(AI_EXE_WEBVIEW2_DIR "" CACHE PATH "Microsoft.Web.WebView2 NuGet package root (provides WebView2.h + WebView2Loader.dll for the Windows GUI). Without it the GUI builds in a non-rendering fallback mode.")
-set(AI_EXE_APP_VERSION "3.0.4" CACHE STRING "AI.EXE app and UI version" FORCE)
-set(AI_EXE_BUILD_TAG "update-target" CACHE STRING "Human-readable AI.EXE build tag" FORCE)
+set(AI_EXE_APP_VERSION "3.0.5" CACHE STRING "AI.EXE app and UI version" FORCE)
+set(AI_EXE_BUILD_TAG "icon-shortcut-update-ui" CACHE STRING "Human-readable AI.EXE build tag" FORCE)
 set(AI_EXE_BUILD_LABEL "v${AI_EXE_APP_VERSION} (${AI_EXE_BUILD_TAG} 2026-06-15)")
 
 if(AI_EXE_UI_ANIMATIONS_DEFAULT)
@@ -94,6 +94,7 @@ if(WIN32)
 endif()
 
 if(WIN32)
+  enable_language(RC)  # compile src/app.rc (the .exe icon)
   set(WIN_UI_HTML "${CMAKE_SOURCE_DIR}/ui/ai-exe.html")
   set(WIN_UI_CSS "${CMAKE_SOURCE_DIR}/ui/ai-exe.css")
   set(WIN_UI_JS "${CMAKE_SOURCE_DIR}/ui/ai-exe.js")
@@ -120,6 +121,7 @@ if(WIN32)
     src/web_runtime_bridge.cpp
     src/inference_engine.cpp
     src/process_runner.cpp
+    src/app.rc
   )
 
   target_include_directories(ai_exe_gui PRIVATE src "${CMAKE_BINARY_DIR}/generated")
