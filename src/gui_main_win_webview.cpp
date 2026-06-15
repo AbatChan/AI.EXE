@@ -11,6 +11,7 @@
 #include <windows.h>
 #include <commctrl.h>
 #include <commdlg.h>
+#include <dwmapi.h>
 #include <shellapi.h>
 #include <shlobj.h>
 #include <shlwapi.h>
@@ -1059,7 +1060,7 @@ bool LaunchUpdater(const std::string &url, const std::string &version,
      << L"$ver='" << ver_label << L"'\r\n"
      << L"Add-Type -AssemblyName System.Windows.Forms,System.Drawing\r\n"
      << L"[Windows.Forms.Application]::EnableVisualStyles()\r\n"
-     << L"$acc=[Drawing.Color]::FromArgb(192,132,252)\r\n"
+     << L"$acc=[Drawing.Color]::FromArgb(0,229,255)\r\n"
      << L"$bg=[Drawing.Color]::FromArgb(20,22,29)\r\n"
      << L"$f=New-Object Windows.Forms.Form\r\n"
      << L"$f.FormBorderStyle='None'; $f.Size=New-Object Drawing.Size(460,168)\r\n"
@@ -1202,6 +1203,11 @@ public:
     if (!hwnd_) {
       return false;
     }
+
+    // Dark title bar to match the app's dark UI (Win10 1903+/Win11).
+    // 20 = DWMWA_USE_IMMERSIVE_DARK_MODE.
+    BOOL dark = TRUE;
+    DwmSetWindowAttribute(hwnd_, 20, &dark, sizeof(dark));
 
     ShowWindow(hwnd_, SW_SHOW);
     UpdateWindow(hwnd_);
