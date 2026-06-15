@@ -295,4 +295,6 @@ if(BUILD_BACKEND_STUB)
   add_executable(infer_backend_stub
     src/infer_backend_stub.cpp
   )
+  # The app expects the local-inference adapter as "infer_backend(.exe)".
+  set_target_properties(infer_backend_stub PROPERTIES OUTPUT_NAME infer_backend)
 endif()
