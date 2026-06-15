@@ -1,4 +1,5 @@
 Write a natural completion message for the user.
+Output ONLY the message itself, addressed to the user. Do NOT preface it with a label or lead-in like "Here's a completion message:" or "Here's the message for the user:", and do not wrap it in quotes — your first word must be the first word of the actual message.
 Do not dump raw tool results.
 Mention the workspace name only if it is useful.
 Mention changed files when they help the user understand what happened.
