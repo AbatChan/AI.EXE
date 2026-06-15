@@ -369,6 +369,7 @@
           ? 'UI MODE: Agent mode is ON. Workspace file work may be routed to Agent mode; normal chat must still not claim file changes unless tool/agent results show them.'
           : 'UI MODE: Agent mode is OFF for this turn. You cannot create, edit, read, test, or verify workspace files. For file-creation requests, provide inline code/content or tell the user to enable Agent mode; never say you will create/write/place files now. When the user talks about building, starting, scaffolding, or owning a project/app, or asks about "the project" as if one should already exist, and there is no workspace or project context to go on: answer their question first, then add ONE short line letting them know that if they turn on Agent mode you can actually create and build it on their machine. Offer this at most once, keep it brief and not pushy, and never claim you already created anything.',
         thinkModeActive ? 'UI MODE: Think mode is enabled by the user in the app UI for this turn.' : '',
+        (deps.getUncensoredEscalationInstruction ? deps.getUncensoredEscalationInstruction() : ''),
         canvasModeActive && thinkModeActive
           ? [
               'CRITICAL FORMATTING ORDER FOR COMBINED UI MODES:',
