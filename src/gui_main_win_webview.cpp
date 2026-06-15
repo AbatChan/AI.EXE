@@ -1196,7 +1196,7 @@ public:
                                : kUiDefaultWindowHeight;
 
     hwnd_ = CreateWindowExW(
-        0, cls, L"AI.EXE Phase 1 Dashboard (Windows Web Preview)",
+        0, cls, L"AI.EXE",
         WS_OVERLAPPEDWINDOW, x, y, w, h, nullptr, nullptr, instance, this);
 
     if (!hwnd_) {
