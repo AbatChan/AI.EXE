@@ -1025,7 +1025,8 @@ CreateWebView2EnvironmentWithOptionsFn LoadCreateEnvironmentFn() {
 // downloads the new build, extracts it over the app folder, and relaunches. The app
 // quits right after launching it. User data lives in %LOCALAPPDATA% and projects in
 // Downloads, so replacing the app folder is safe.
-bool LaunchUpdater(const std::string &url, std::string *err) {
+bool LaunchUpdater(const std::string &url, const std::string &version,
+                   std::string *err) {
   wchar_t exe_buf[MAX_PATH] = {};
   if (GetModuleFileNameW(nullptr, exe_buf, MAX_PATH) == 0) {
     if (err) *err = "Could not resolve the app path.";
@@ -1049,27 +1050,35 @@ bool LaunchUpdater(const std::string &url, std::string *err) {
   // Shows a small dark "Updating AI.EXE…" window with per-phase status during the
   // gap while the app is closed (otherwise the user stares at nothing). The phase
   // label updates as it waits → downloads → installs → restarts.
+  std::wstring ver_label = psq(Utf8ToWide(version));
   std::wstringstream ss;
   ss << L"$ErrorActionPreference='SilentlyContinue'\r\n"
      << L"$u='" << psq(Utf8ToWide(url)) << L"'\r\n"
      << L"$app='" << psq(app_dir.wstring()) << L"'\r\n"
      << L"$exe='" << psq(exe_path.wstring()) << L"'\r\n"
+     << L"$ver='" << ver_label << L"'\r\n"
      << L"Add-Type -AssemblyName System.Windows.Forms,System.Drawing\r\n"
+     << L"[Windows.Forms.Application]::EnableVisualStyles()\r\n"
+     << L"$acc=[Drawing.Color]::FromArgb(192,132,252)\r\n"
+     << L"$bg=[Drawing.Color]::FromArgb(20,22,29)\r\n"
      << L"$f=New-Object Windows.Forms.Form\r\n"
-     << L"$f.Text='AI.EXE Update'; $f.Size=New-Object Drawing.Size(380,132)\r\n"
-     << L"$f.StartPosition='CenterScreen'; $f.FormBorderStyle='FixedDialog'\r\n"
-     << L"$f.ControlBox=$false; $f.TopMost=$true\r\n"
-     << L"$f.BackColor=[Drawing.Color]::FromArgb(20,22,29)\r\n"
-     << L"$lbl=New-Object Windows.Forms.Label; $lbl.ForeColor=[Drawing.Color]::White\r\n"
-     << L"$lbl.Font=New-Object Drawing.Font('Segoe UI',10); $lbl.AutoSize=$false; $lbl.TextAlign='MiddleLeft'\r\n"
-     << L"$lbl.SetBounds(22,20,336,24)\r\n"
-     << L"$pb=New-Object Windows.Forms.ProgressBar; $pb.Style='Marquee'; $pb.MarqueeAnimationSpeed=30\r\n"
-     << L"$pb.SetBounds(22,54,336,18)\r\n"
-     << L"$f.Controls.AddRange(@($lbl,$pb))\r\n"
-     << L"function St($t){ $lbl.Text=$t; $f.Refresh(); [Windows.Forms.Application]::DoEvents() }\r\n"
-     << L"$f.Show(); St('Starting update…')\r\n"
+     << L"$f.FormBorderStyle='None'; $f.Size=New-Object Drawing.Size(460,168)\r\n"
+     << L"$f.StartPosition='CenterScreen'; $f.TopMost=$true; $f.BackColor=$bg\r\n"
+     << L"$f.Add_Paint({ param($s,$e) $p=New-Object Drawing.Pen($acc,2); $e.Graphics.DrawRectangle($p,1,1,$s.Width-3,$s.Height-3); $p.Dispose() })\r\n"
+     << L"$mark=New-Object Windows.Forms.Label; $mark.Text='AI'; $mark.ForeColor=$acc\r\n"
+     << L"$mark.Font=New-Object Drawing.Font('Segoe UI',20,[Drawing.FontStyle]::Bold); $mark.AutoSize=$false; $mark.TextAlign='MiddleCenter'; $mark.SetBounds(28,26,52,44)\r\n"
+     << L"$h=New-Object Windows.Forms.Label; $h.Text='Updating AI.EXE'; $h.ForeColor=[Drawing.Color]::White\r\n"
+     << L"$h.Font=New-Object Drawing.Font('Segoe UI Semibold',15,[Drawing.FontStyle]::Bold); $h.AutoSize=$false; $h.SetBounds(92,28,340,28)\r\n"
+     << L"$lbl=New-Object Windows.Forms.Label; $lbl.ForeColor=[Drawing.Color]::FromArgb(160,166,178)\r\n"
+     << L"$lbl.Font=New-Object Drawing.Font('Segoe UI',10); $lbl.AutoSize=$false; $lbl.SetBounds(92,58,340,22)\r\n"
+     << L"$pb=New-Object Windows.Forms.ProgressBar; $pb.Style='Marquee'; $pb.MarqueeAnimationSpeed=28\r\n"
+     << L"$pb.SetBounds(28,108,404,10)\r\n"
+     << L"$f.Controls.AddRange(@($mark,$h,$lbl,$pb))\r\n"
+     << L"$suffix= if($ver){\" to v$ver\"}else{''}\r\n"
+     << L"function St($t){ $lbl.Text=$t; $lbl.Refresh(); [Windows.Forms.Application]::DoEvents() }\r\n"
+     << L"$f.Show(); $f.Refresh(); St('Preparing update'+$suffix+'…')\r\n"
      << L"try { Wait-Process -Id " << pid << L" -Timeout 120 } catch {}\r\n"
-     << L"Start-Sleep -Milliseconds 400; St('Downloading the new version…')\r\n"
+     << L"Start-Sleep -Milliseconds 300; St('Downloading the new version…')\r\n"
      << L"$t=Join-Path $env:TEMP ('aiexe_up_'+[guid]::NewGuid().ToString('N'))\r\n"
      << L"New-Item -ItemType Directory -Force $t | Out-Null\r\n"
      << L"$zip=Join-Path $t 'u.zip'\r\n"
@@ -1147,6 +1156,14 @@ void CreateDesktopShortcutIfMissing() {
     }
     link->Release();
   }
+}
+
+// Delayed app-close after launching the updater (see applyUpdate). Fires on the
+// UI thread via the message pump, so the window stays responsive until it closes.
+constexpr UINT_PTR kUpdateCloseTimerId = 0xA1;
+void CALLBACK UpdateCloseTimerProc(HWND hwnd, UINT, UINT_PTR id, DWORD) {
+  KillTimer(hwnd, id);
+  PostMessageW(hwnd, WM_CLOSE, 0, 0);
 }
 
 class AppWindow {
@@ -1583,13 +1600,16 @@ private:
       if (url.empty()) {
         ok = false;
         message = "No update URL provided.";
-      } else if (!LaunchUpdater(url, &op_err)) {
+      } else if (!LaunchUpdater(url, ExtractJsonStringField(request_json, "version"),
+                                &op_err)) {
         ok = false;
         message = op_err.empty() ? "Could not start the updater." : op_err;
       } else {
         message = "Updating — the app will close and reopen on the new version.";
-        // Quit so the updater can replace the app files, then it relaunches us.
-        PostMessageW(hwnd_, WM_CLOSE, 0, 0);
+        // Keep the window visible ~1.5s so the updater's progress window appears
+        // before we vanish (PowerShell + WinForms cold start), then close so the
+        // files can be swapped. Timer fires on the UI thread without blocking it.
+        SetTimer(hwnd_, kUpdateCloseTimerId, 1500, UpdateCloseTimerProc);
       }
     } else {
       ok = false;
