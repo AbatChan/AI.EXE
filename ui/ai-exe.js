@@ -1235,6 +1235,70 @@ try {
   }
   window.addEventListener('load', applyBuildVer); // re-apply if the topbar re-renders
 } catch (_) {}
+
+// In-app update check: compare our version to the latest public GitHub Release and
+// surface an "Update" badge. Clicking it runs the native auto-updater (download +
+// swap + relaunch) on the desktop app, or opens the release page as a fallback.
+(function setupUpdateCheck() {
+  const REPO = 'AbatChan/AI.EXE';
+  const cmpVer = (a, b) => {
+    const pa = String(a).split('.').map((n) => parseInt(n, 10) || 0);
+    const pb = String(b).split('.').map((n) => parseInt(n, 10) || 0);
+    for (let i = 0; i < Math.max(pa.length, pb.length); i += 1) {
+      const d = (pa[i] || 0) - (pb[i] || 0);
+      if (d) return d > 0 ? 1 : -1;
+    }
+    return 0;
+  };
+  let updateInfo = null;
+  async function checkForUpdate() {
+    try {
+      const res = await fetch(`https://api.github.com/repos/${REPO}/releases/latest`, {
+        headers: { Accept: 'application/vnd.github+json' },
+      });
+      if (!res || !res.ok) return;
+      const data = await res.json();
+      const latest = String(data.tag_name || '').replace(/^v/i, '').trim();
+      if (!latest || cmpVer(latest, AI_EXE_VERSION) <= 0) return;
+      const asset = Array.isArray(data.assets)
+        ? data.assets.find((a) => /\.zip$/i.test(a && a.name || ''))
+        : null;
+      updateInfo = {
+        version: latest,
+        url: asset ? asset.browser_download_url : '',
+        page: data.html_url || '',
+      };
+      const badge = document.getElementById('updateBadge');
+      const text = document.getElementById('updateBadgeText');
+      if (badge) {
+        if (text) text.textContent = `Update to v${latest}`;
+        badge.style.display = '';
+        badge.title = `Version ${latest} is available — click to update`;
+      }
+    } catch (_) {}
+  }
+  function onBadgeClick() {
+    if (!updateInfo) return;
+    const badge = document.getElementById('updateBadge');
+    const text = document.getElementById('updateBadgeText');
+    const nativeOk = typeof nativeBridge !== 'undefined'
+      && nativeBridge && nativeBridge.available && nativeBridge.available();
+    if (nativeOk && updateInfo.url) {
+      if (text) text.textContent = 'Updating…';
+      if (badge) badge.disabled = true;
+      // Native handler downloads the new build, swaps files, and relaunches.
+      nativeBridge.invoke('applyUpdate', { url: updateInfo.url, version: updateInfo.version });
+    } else if (updateInfo.page) {
+      window.open(updateInfo.page, '_blank');
+    }
+  }
+  window.addEventListener('load', () => {
+    const badge = document.getElementById('updateBadge');
+    if (badge) badge.addEventListener('click', onBadgeClick);
+    setTimeout(checkForUpdate, 2500);
+    setInterval(checkForUpdate, 30 * 60 * 1000);
+  });
+})();
 // Step budget. 16 was too tight for multi-item tasks (e.g. a 3-item checklist):
 // inspection + a couple of failed edit-anchor retries exhausted it before the
 // agent finished every item. The mechanical guards (inspection-budget, read-loop,

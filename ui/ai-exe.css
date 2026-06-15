@@ -545,6 +545,30 @@ body.resizing-panels .panel-resizer {
   padding: 0 46px 9px 10px;
 }
 
+.update-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 6px;
+  padding: 3px 9px;
+  border: 1px solid var(--accent, #c084fc);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent, #c084fc) 16%, transparent);
+  color: var(--accent, #c084fc);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  cursor: pointer;
+  transition: background 0.15s ease, opacity 0.15s ease;
+  animation: update-badge-pulse 1.8s ease-in-out infinite;
+}
+.update-badge:hover { background: color-mix(in srgb, var(--accent, #c084fc) 28%, transparent); }
+.update-badge:disabled { cursor: default; opacity: 0.7; animation: none; }
+
+@keyframes update-badge-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent, #c084fc) 40%, transparent); }
+  50% { box-shadow: 0 0 0 4px transparent; }
+}
+
 .sidebar-brand {
   display: flex;
   align-items: center;
