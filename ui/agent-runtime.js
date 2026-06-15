@@ -418,6 +418,20 @@
       return `${fileSummary}${verification}`;
     }
 
+    // Safety net: drop a leading meta lead-in the model sometimes echoes from the
+    // prompt framing, e.g. "Here's a natural completion message for the user:" or
+    // "Completion message:". Targeted by the literal "completion message" /
+    // "message for the user" phrase + colon, so real intros like "Here's your app:"
+    // are never touched. The prompt also explicitly forbids the preamble.
+    function stripCompletionPreamble(text) {
+      let out = String(text || '').trim();
+      const meta = /^\s*"?\s*(?:sure[,!.]?\s*)?(?:here'?s|here is|below is|this is|okay|ok)?[^:\n]{0,60}?\b(?:completion message|message for the user)\b[^:\n]{0,30}?:\s*"?\s*/i;
+      const m = out.match(meta);
+      if (m && out.slice(m[0].length).trim()) out = out.slice(m[0].length).trim();
+      if (/^"[\s\S]+"$/.test(out)) out = out.slice(1, -1).trim();
+      return out;
+    }
+
     function isLikelyIncompleteCompletion(text) {
       const value = String(text || '').trim();
       if (!value) return true;
@@ -450,6 +464,7 @@
         .join('\n\n');
       let prompt = [
         'Write a natural completion message for the user.',
+        'Output ONLY the message itself. Do NOT preface it with a label or lead-in like "Here\'s a completion message:" and do not wrap it in quotes — start with the first word of the actual message.',
         'Return a complete answer. Do not end mid-sentence or mid-list.',
         'Do not dump raw tool results.',
         'Mention the workspace name only if it is useful.',
@@ -482,12 +497,12 @@
       }
       const remote = await deps.requestSelectedRemoteTextCompletion(prompt, 420);
       if (remote && remote.ok) {
-        const text = deps.sanitizeAssistantText(remote.output || '');
+        const text = stripCompletionPreamble(deps.sanitizeAssistantText(remote.output || ''));
         if (text && !isLikelyIncompleteCompletion(text)) return text;
       }
       const external = await requestExternalAgentPlanner(prompt, 420, 12000);
       if (external && external.ok) {
-        const text = deps.sanitizeAssistantText(external.output || '');
+        const text = stripCompletionPreamble(deps.sanitizeAssistantText(external.output || ''));
         if (text && !isLikelyIncompleteCompletion(text)) return text;
       }
       return deterministicCompletion;
