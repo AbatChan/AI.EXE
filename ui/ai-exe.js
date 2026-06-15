@@ -5014,18 +5014,27 @@ function shouldUseNativeCustomOpenAiRelay(provider) {
     && document.documentElement.classList.contains('platform-mac');
 }
 
+// Provider picker is trimmed to Local + DeepSeek + Venice (Venice proxies the
+// other companies' models anyway). The other provider defs/code are kept, just
+// hidden — flip a name out of this set to re-enable it.
+const HIDDEN_INFERENCE_PROVIDERS = new Set(['huggingface', 'customopenai', 'openai', 'anthropic', 'gemini']);
 function syncInferenceProviderOptions() {
   if (!settingsProviderSelect) return;
   Array.from(settingsProviderSelect.options || []).forEach((option) => {
     const value = String(option && option.value ? option.value : '').trim().toLowerCase();
-    if (value && value !== 'local') {
-      option.hidden = !remoteProvidersEnabled;
-      option.disabled = !remoteProvidersEnabled;
-    }
+    if (!value || value === 'local') return;
+    const hidden = HIDDEN_INFERENCE_PROVIDERS.has(value) || !remoteProvidersEnabled;
+    option.hidden = hidden;
+    option.disabled = hidden;
   });
+  const current = String(appSettings.inferenceProvider || '').trim().toLowerCase();
   if (!remoteProvidersEnabled) {
     settingsProviderSelect.value = 'local';
     appSettings.inferenceProvider = 'local';
+  } else if (HIDDEN_INFERENCE_PROVIDERS.has(current)) {
+    // A previously-selected, now-hidden provider falls back to Venice.
+    appSettings.inferenceProvider = 'venice';
+    settingsProviderSelect.value = 'venice';
   }
 }
 
