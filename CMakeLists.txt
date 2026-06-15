@@ -23,8 +23,9 @@ option(AI_EXE_UI_ANIMATIONS_DEFAULT "Enable UI animations by default" ON)
 option(AI_EXE_UI_REMEMBER_LAYOUT "Remember panel layout in local storage" ON)
 option(AI_EXE_ENABLE_REMOTE_PROVIDERS "Enable hosted/API inference providers in the UI" ON)
 option(AI_EXE_ENABLE_DEV_PLANNER "Enable localhost development planner endpoint in the UI" OFF)
-set(AI_EXE_APP_VERSION "2.9.5" CACHE STRING "AI.EXE app and UI version" FORCE)
-set(AI_EXE_BUILD_TAG "escalation-refusal-judge" CACHE STRING "Human-readable AI.EXE build tag" FORCE)
+set(AI_EXE_WEBVIEW2_DIR "" CACHE PATH "Microsoft.Web.WebView2 NuGet package root (provides WebView2.h + WebView2Loader.dll for the Windows GUI). Without it the GUI builds in a non-rendering fallback mode.")
+set(AI_EXE_APP_VERSION "2.9.6" CACHE STRING "AI.EXE app and UI version" FORCE)
+set(AI_EXE_BUILD_TAG "windows-gui-ship" CACHE STRING "Human-readable AI.EXE build tag" FORCE)
 set(AI_EXE_BUILD_LABEL "v${AI_EXE_APP_VERSION} (${AI_EXE_BUILD_TAG} 2026-06-15)")
 
 if(AI_EXE_UI_ANIMATIONS_DEFAULT)
@@ -122,6 +123,11 @@ if(WIN32)
   )
 
   target_include_directories(ai_exe_gui PRIVATE src "${CMAKE_BINARY_DIR}/generated")
+  if(AI_EXE_WEBVIEW2_DIR)
+    # Puts WebView2.h on the include path so __has_include(<WebView2.h>) is true
+    # and the GUI compiles with real WebView2 rendering (not the fallback window).
+    target_include_directories(ai_exe_gui PRIVATE "${AI_EXE_WEBVIEW2_DIR}/build/native/include")
+  endif()
   target_compile_definitions(ai_exe_gui PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
   target_link_libraries(ai_exe_gui PRIVATE shlwapi ole32 advapi32 bcrypt)
 
