@@ -12489,6 +12489,15 @@ function sanitizeAssistantText(text) {
     .replace(/^\s*(?:AI|ASSISTANT)\s*:\s*/gim, '')
     .replace(/^\s*Intro sentence\s*:?\s*/gim, '')
     .replace(/^\s*Outro sentence\s*:?\s*/gim, '');
+  // Drop a leading meta lead-in a model echoes from a prompt's framing, e.g.
+  // "Here's a natural completion message for the user:", "Completion message:",
+  // "Here's the final message:", "Here's a progress note:". Targeted by the exact
+  // artifact phrase + a colon, so genuine intros ("Here's your app:") are untouched.
+  {
+    const metaEcho = /^\s*"?\s*(?:sure[,!.]?\s*)?(?:here'?s|here is|below is|this is|okay|ok)?[^:\n]{0,60}?\b(?:completion message|message for the user|progress note|final message)\b[^:\n]{0,30}?:\s*"?\s*/i;
+    const m = clean.match(metaEcho);
+    if (m && clean.slice(m[0].length).trim()) clean = clean.slice(m[0].length).trim();
+  }
   clean = clean
     .split('\n')
     .filter((line) => {

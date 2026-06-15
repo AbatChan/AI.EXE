@@ -298,7 +298,8 @@
       let lastNarrationDetail = '';
       let deterministicBatchNarrated = false;
       const appendAgentNarration = (text) => {
-        const detail = String(text || '').trim();
+        const cleaned = deps.sanitizeAssistantText ? deps.sanitizeAssistantText(text) : text;
+        const detail = String(cleaned || '').trim();
         if (!detail || detail.length < 8) return;
         if (detail === lastNarrationDetail) return;
         appendAgentActivity({
