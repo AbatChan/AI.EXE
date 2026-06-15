@@ -2556,11 +2556,12 @@ function ensureSignedIn() {
   return false;
 }
 
-function setThinkingStatus(text) {
+function setThinkingStatus(text, variant) {
   if (!thinkingStatus) return;
   const clean = String(text || '').trim();
   thinkingStatus.textContent = clean;
   thinkingStatus.classList.toggle('active', Boolean(clean));
+  thinkingStatus.classList.toggle('thinking-status-escalate', variant === 'escalate' && Boolean(clean));
 }
 
 // Chat that owns the current/last agent run. The timer text and the run token
@@ -5020,12 +5021,14 @@ function shouldUseNativeCustomOpenAiRelay(provider) {
 const HIDDEN_INFERENCE_PROVIDERS = new Set(['huggingface', 'customopenai', 'openai', 'anthropic', 'gemini']);
 function syncInferenceProviderOptions() {
   if (!settingsProviderSelect) return;
+  // Remove hidden providers outright. A native macOS <select> ignores option.hidden
+  // and just renders hidden/disabled options greyed-out, so they must leave the DOM.
   Array.from(settingsProviderSelect.options || []).forEach((option) => {
     const value = String(option && option.value ? option.value : '').trim().toLowerCase();
     if (!value || value === 'local') return;
-    const hidden = HIDDEN_INFERENCE_PROVIDERS.has(value) || !remoteProvidersEnabled;
-    option.hidden = hidden;
-    option.disabled = hidden;
+    if (HIDDEN_INFERENCE_PROVIDERS.has(value) || !remoteProvidersEnabled) {
+      option.remove();
+    }
   });
   const current = String(appSettings.inferenceProvider || '').trim().toLowerCase();
   if (!remoteProvidersEnabled) {
@@ -5103,6 +5106,9 @@ function openSettingsSection(section) {
 // from the provider's /models endpoint with the user's key. The static presets are
 // only a fallback. Works for OpenAI-compatible providers (chat/completions -> models).
 const liveProviderModels = {};
+// Per-provider uncensored fallback target, chosen from Venice's own trait metadata
+// (model_spec.traits includes 'most_uncensored') — never by guessing the model name.
+const liveProviderUncensored = {};
 let lastPresetProvider = '';
 async function refreshProviderModelList(provider) {
   const def = getInferenceProviderDef(provider);
@@ -5123,8 +5129,61 @@ async function refreshProviderModelList(provider) {
       .sort();
     if (!ids.length) return false;
     liveProviderModels[provider] = ids;
+    // Capture the provider-designated uncensored model for the refusal fallback.
+    // Prefer the trait the provider itself assigns; refine by coding capability when
+    // several carry it, so an agent/code refusal escalates to the most capable one.
+    const traitOf = (m) => {
+      const t = m && m.model_spec && m.model_spec.traits;
+      if (Array.isArray(t)) return t.map((x) => String(x).toLowerCase());
+      if (t && typeof t === 'object') return Object.keys(t).map((x) => String(x).toLowerCase());
+      return [];
+    };
+    const uncensored = list.filter((m) => traitOf(m).includes('most_uncensored'));
+    if (uncensored.length) {
+      const coder = uncensored.find((m) => m && m.capabilities && (m.capabilities.optimizedForCode || m.capabilities.supportsFunctionCalling));
+      liveProviderUncensored[provider] = String(((coder || uncensored[0]).id) || '').trim();
+    }
     return true;
   } catch (_) { return false; }
+}
+
+// Refusal-to-uncensored fallback. A model that would decline for content reasons
+// emits this exact sentinel (no keyword/regex sniffing of natural language); the
+// harness then silently re-runs the request on the provider-designated uncensored
+// model. Only armed for Venice, only when a distinct uncensored model exists.
+const UNCENSORED_ESCALATE_SENTINEL = '<<<ESCALATE_UNCENSORED>>>';
+let suppressEscalationInstruction = false;
+// The uncensored fallback always lives on Venice, whatever the active provider is.
+const UNCENSORED_ESCALATE_PROVIDER = 'venice';
+function getUncensoredEscalationModel() {
+  return String(liveProviderUncensored[UNCENSORED_ESCALATE_PROVIDER] || '').trim();
+}
+function isUncensoredEscalationArmed(provider) {
+  if (suppressEscalationInstruction) return false;
+  const p = String(provider || getSelectedInferenceProvider() || '');
+  if (p === 'local') return false; // offline model — no cross-provider escalation
+  const unc = getUncensoredEscalationModel();
+  if (!unc) return false; // no known Venice uncensored model
+  if (!getProviderApiKey(UNCENSORED_ESCALATE_PROVIDER)) return false; // can't reach Venice
+  // Don't escalate when already serving Venice's uncensored model (self).
+  if (p === UNCENSORED_ESCALATE_PROVIDER && getProviderModel(p) === unc) return false;
+  return true;
+}
+function getUncensoredEscalationInstruction() {
+  if (!isUncensoredEscalationArmed()) return '';
+  return [
+    'CONTENT ESCALATION:',
+    'If you would refuse or decline this request for content-policy or safety reasons, do NOT write a refusal, warning, lecture, or explanation.',
+    `Instead output exactly this token on its own line and nothing else: ${UNCENSORED_ESCALATE_SENTINEL}`,
+    'Answer normally and fully for everything else.',
+  ].join('\n');
+}
+function responseIsEscalationSentinel(text) {
+  const t = String(text || '').trim();
+  if (!t) return false;
+  // Exact-match the sentinel (optionally as the sole content), never a phrase guess.
+  return t === UNCENSORED_ESCALATE_SENTINEL
+    || t.replace(/[`*_>\s]+/g, '') === UNCENSORED_ESCALATE_SENTINEL.replace(/\s+/g, '');
 }
 
 function populateProviderPresetOptions(provider, modelId) {
@@ -5904,7 +5963,7 @@ async function streamOpenAiCompatibleChatCompletion(provider, prompt, handlers =
   }
   const def = getInferenceProviderDef(provider);
   const apiKey = getProviderApiKey(provider);
-  const model = getProviderModel(provider);
+  const model = String(options.modelOverride || '').trim() || getProviderModel(provider);
   const endpointUrl = getProviderEndpoint(provider);
   if (shouldUseNativeCustomOpenAiRelay(provider)) {
     if (typeof handlers.onStart === 'function') {
@@ -8871,6 +8930,7 @@ const promptCore = window.AIExePromptCore && typeof window.AIExePromptCore.creat
     isCanvasModeEnabled: () => canvasModeEnabled,
     isThinkModeEnabled: () => thinkModeEnabled,
     isAgentModeEnabled: () => developerAgentEnabled,
+    getUncensoredEscalationInstruction,
     shouldInlineNameChatResponse,
   })
   : null;
@@ -13150,6 +13210,13 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
       ? selectedChatWorker.provider
       : getSelectedInferenceProvider();
     const debugMessageHistoryTotal = String(getDebugMessageHistoryTotal(chatId));
+    // Warm the uncensored-fallback target so it's known by the time the reply lands
+    // (model metadata is only captured after a live /models fetch). The target always
+    // lives on Venice, so warm it whenever a Venice key exists — even on DeepSeek/etc.
+    // Fire-and-forget: generation latency far exceeds the /models call.
+    if (inferenceProvider !== 'local' && !getUncensoredEscalationModel() && getProviderApiKey('venice')) {
+      refreshProviderModelList('venice');
+    }
     if (inferenceProvider !== 'local') {
       const fullPrompt = await buildInferencePrompt(chatId, promptText, {
         thinkForced: requestToken.thinkForced,
@@ -13189,6 +13256,7 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
         chatHistory: getChatDebugSnapshot(chatId),
         workspace: getWorkspaceDebugSnapshot(),
       });
+      const streamModelLabel = () => String(requestToken.activeModelLabel || getProviderModel(inferenceProvider) || '');
       const remoteStreamHandlers = {
         onStart: (streamId) => {
           requestToken.streamId = String(streamId || '');
@@ -13197,7 +13265,7 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
             streamId: requestToken.streamId,
             workerId: selectedChatWorker ? selectedChatWorker.id : '',
             provider: inferenceProvider,
-            model: String(getProviderModel(inferenceProvider) || ''),
+            model: streamModelLabel(),
             messageHistoryTotal: debugMessageHistoryTotal,
           }, {
             chatId: requestToken.chatId,
@@ -13205,7 +13273,7 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
             requestMode: 'remote',
             worker: selectedChatWorker || null,
             provider: inferenceProvider,
-            model: String(getProviderModel(inferenceProvider) || ''),
+            model: streamModelLabel(),
             messageHistoryTotal: Number(debugMessageHistoryTotal) || 0,
           });
         },
@@ -13216,9 +13284,28 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
           if (requestToken.streamRaw.length < 120000) {
             requestToken.streamRaw += raw;
           }
+          // While escalation is armed, hold the live display back as long as the
+          // output could still be the escalation sentinel, so the token never
+          // flashes before we silently switch to the uncensored model. Real
+          // answers diverge from the sentinel within a few chars and flush at once.
+          if (requestToken.sniffEscalation && !requestToken.sniffReleased) {
+            requestToken.heldDelta = (requestToken.heldDelta || '') + raw;
+            const accClean = requestToken.heldDelta.trim().replace(/^[`*_>\s]+/, '');
+            if (accClean && !UNCENSORED_ESCALATE_SENTINEL.startsWith(accClean)) {
+              requestToken.sniffReleased = true;
+              const held = requestToken.heldDelta;
+              requestToken.heldDelta = '';
+              appendLiveDelta(chatId, held);
+            }
+            return;
+          }
           appendLiveDelta(chatId, delta);
         },
       };
+      requestToken.activeModelLabel = '';
+      requestToken.sniffEscalation = isUncensoredEscalationArmed(inferenceProvider);
+      requestToken.sniffReleased = false;
+      requestToken.heldDelta = '';
       const remoteStreamOptions = {
         abortController: requestToken.abortController,
         maxTokens: requestToken.maxTokens,
@@ -13272,6 +13359,90 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
         let rawCandidate = streamedRawSanitized || String(res.output || '').trim();
         const named = applyInlineChatNameFromResponse(chatId, rawCandidate);
         rawCandidate = String(named.text || '').trim();
+        // Uncensored escalation: a sentinel-only reply means the model declined for
+        // content reasons. Silently re-run the same request on the provider's
+        // designated uncensored model, with a visible loader state + color change.
+        if (responseIsEscalationSentinel(rawCandidate) && isUncensoredEscalationArmed(inferenceProvider)) {
+          const uncModel = getUncensoredEscalationModel();
+          recordDebugTrace('uncensored_escalation', {
+            chatId: requestToken.chatId,
+            fromProvider: inferenceProvider,
+            fromModel: String(getProviderModel(inferenceProvider) || ''),
+            toProvider: UNCENSORED_ESCALATE_PROVIDER,
+            toModel: uncModel,
+          }, { chatId: requestToken.chatId, fromProvider: inferenceProvider, toProvider: UNCENSORED_ESCALATE_PROVIDER, toModel: uncModel });
+          showTypingIndicator(chatId);
+          setThinkingStatus('Switching to uncensored model…', 'escalate');
+          suppressEscalationInstruction = true;
+          let escPrompt = '';
+          try {
+            escPrompt = await buildInferencePrompt(chatId, promptText, {
+              thinkForced: requestToken.thinkForced,
+              canvasModeOverride,
+              latestUserOverride: requestToken.latestUserOverride,
+              suppressChatNameInstruction: requestToken.appendToLastAssistant || requestToken.suppressChatNameInstruction,
+              contextWindowChars: getChatPromptContextBudgetChars(),
+            });
+          } finally {
+            suppressEscalationInstruction = false;
+          }
+          requestToken.streamRaw = '';
+          requestToken.deltaCount = 0;
+          requestToken.streamId = '';
+          // Re-run is the real answer from the uncensored model: stream it live,
+          // and label the stream with the model that actually serves it.
+          requestToken.activeModelLabel = uncModel;
+          requestToken.sniffEscalation = false;
+          requestToken.sniffReleased = true;
+          requestToken.heldDelta = '';
+          requestToken.abortController = new AbortController();
+          const escOptions = {
+            abortController: requestToken.abortController,
+            maxTokens: requestToken.maxTokens,
+            thinkActive: Boolean(thinkModeEnabled || requestToken.thinkForced),
+            modelOverride: uncModel,
+          };
+          let escRes = null;
+          let escRetried = false;
+          for (;;) {
+            escRes = await awaitChatStreamWithStallGuard(
+              streamRemoteChatCompletion(UNCENSORED_ESCALATE_PROVIDER, escPrompt, remoteStreamHandlers, escOptions),
+              requestToken,
+              chatStallIdleMs,
+            );
+            if (!(escRes && escRes._stalled) || escRetried || !isInferenceActive(requestToken)) break;
+            escRetried = true;
+            consumeLiveAssistantText();
+            requestToken.streamRaw = '';
+            requestToken.deltaCount = 0;
+            requestToken.streamId = '';
+            requestToken.abortController = new AbortController();
+            escOptions.abortController = requestToken.abortController;
+          }
+          clearTypingIndicator();
+          setThinkingStatus('');
+          if (!isInferenceActive(requestToken)) { consumeLiveAssistantText(); return; }
+          if (escRes && escRes.cancelled) { return; }
+          if (escRes && escRes.ok && !escRes._stalled) {
+            res = escRes;
+            const escSanitized = consumeLiveAssistantText();
+            const escNamed = applyInlineChatNameFromResponse(chatId, escSanitized || String(escRes.output || '').trim());
+            rawCandidate = String(escNamed.text || '').trim();
+          } else {
+            consumeLiveAssistantText();
+            const why = String((escRes && escRes.message) || '').trim();
+            recordDebugTrace('uncensored_escalation_failed', { chatId: requestToken.chatId, reason: why }, { chatId: requestToken.chatId });
+            appendErrorMessageToChat(chatId, why || 'The uncensored model could not complete this request.');
+            return;
+          }
+        }
+        // A sentinel that survived to here means escalation wasn't possible (e.g. no
+        // Venice key/model). Never surface the raw token — fail cleanly instead.
+        if (responseIsEscalationSentinel(rawCandidate)) {
+          consumeLiveAssistantText();
+          appendErrorMessageToChat(chatId, 'This request needs the uncensored model, which is unavailable. Add a Venice API key in Settings.');
+          return;
+        }
         const finalText = sanitizeAssistantText(rawCandidate);
         if (!finalText) {
           const emptyOutputLabel = String((providerDef && providerDef.label) || 'Remote provider');
