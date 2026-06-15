@@ -232,13 +232,14 @@
                 <circle cx="12" cy="12" r="4" />
               </svg>
             </div>
-            <div class="msb-title">Model Setup Required</div>
+            <div class="msb-title">Set up a model to start</div>
             <div class="msb-text">
-              No AI model found. Run <strong>setup_model.bat</strong> (Windows) to download automatically (~8.5 GB,
-              resumes if interrupted).
+              Add a Venice or DeepSeek <strong>API key</strong> to use AI.EXE online (no GPU needed) — or, for offline
+              use, run <strong>setup_model.bat</strong> (Windows) to download a local model.
             </div>
             <div class="msb-actions">
-              <button class="msb-btn msb-btn-primary" id="modelImportBtn" type="button">Import Model</button>
+              <button class="msb-btn msb-btn-primary" type="button" onclick="openApiKeySettings()">Add API Key</button>
+              <button class="msb-btn msb-btn-secondary" id="modelImportBtn" type="button">Import Model</button>
               <button class="msb-btn msb-btn-secondary" id="modelRetryBtn" type="button">Check Again</button>
             </div>
           </div>
