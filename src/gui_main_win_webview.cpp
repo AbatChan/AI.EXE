@@ -528,6 +528,21 @@ void ClearWorkspaceRootOverride() {
   s_workspace_root_override.reset();
 }
 
+// The OPEN workspace root: the override if one is set, otherwise EMPTY (no project
+// open). Status reports this so closing a project actually stays closed instead of
+// falling back to the always-present default and re-opening on the next poll.
+std::filesystem::path WorkspaceRootOrEmpty() {
+  std::lock_guard<std::mutex> lock(s_workspace_root_mu);
+  if (s_workspace_root_override.has_value()) {
+    std::error_code check_ec;
+    if (std::filesystem::exists(*s_workspace_root_override, check_ec) &&
+        std::filesystem::is_directory(*s_workspace_root_override, check_ec)) {
+      return *s_workspace_root_override;
+    }
+  }
+  return std::filesystem::path();
+}
+
 std::optional<std::filesystem::path>
 ResolveWorkspacePath(const WebRuntimeBridge &runtime,
                      const std::string &raw_path, std::string *err) {
@@ -1337,8 +1352,11 @@ private:
         if (downloads_path)
           CoTaskMemFree(downloads_path);
       } else {
-        std::filesystem::path dl_dir(downloads_path);
+        std::filesystem::path dl_dir =
+            std::filesystem::path(downloads_path) / "AI.EXE Projects";
         CoTaskMemFree(downloads_path);
+        std::error_code mk_ec;
+        std::filesystem::create_directories(dl_dir, mk_ec);
         // Build a unique folder name with date.
         auto now = std::chrono::system_clock::now();
         auto tt = std::chrono::system_clock::to_time_t(now);
@@ -1402,7 +1420,10 @@ private:
       message = runtime_init_error_;
     }
 
-    const WebRuntimeStatus status = runtime_.GetStatus();
+    WebRuntimeStatus status = runtime_.GetStatus();
+    // Report the OPEN workspace (override or empty), not the fixed app dir, so a
+    // closed project stays closed instead of being re-opened by the next poll.
+    status.root_path = WorkspaceRootOrEmpty().string();
     return BuildResponse(id, action, ok, message, output, status);
   }
 
