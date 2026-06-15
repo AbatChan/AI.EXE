@@ -1,0 +1,3 @@
+// Windows application icon. The lowest-ID ICON resource becomes the .exe's
+// icon in Explorer/taskbar; the app also loads ID 1 for its window icon.
+1 ICON "app.ico"

@@ -1046,21 +1046,41 @@ bool LaunchUpdater(const std::string &url, std::string *err) {
     for (wchar_t c : s) { if (c == L'\'') out += L"''"; else out += c; }
     return out;
   };
+  // Shows a small dark "Updating AI.EXE…" window with per-phase status during the
+  // gap while the app is closed (otherwise the user stares at nothing). The phase
+  // label updates as it waits → downloads → installs → restarts.
   std::wstringstream ss;
   ss << L"$ErrorActionPreference='SilentlyContinue'\r\n"
-     << L"try { Wait-Process -Id " << pid << L" -Timeout 120 } catch {}\r\n"
-     << L"Start-Sleep -Seconds 1\r\n"
      << L"$u='" << psq(Utf8ToWide(url)) << L"'\r\n"
      << L"$app='" << psq(app_dir.wstring()) << L"'\r\n"
      << L"$exe='" << psq(exe_path.wstring()) << L"'\r\n"
+     << L"Add-Type -AssemblyName System.Windows.Forms,System.Drawing\r\n"
+     << L"$f=New-Object Windows.Forms.Form\r\n"
+     << L"$f.Text='AI.EXE Update'; $f.Size=New-Object Drawing.Size(380,132)\r\n"
+     << L"$f.StartPosition='CenterScreen'; $f.FormBorderStyle='FixedDialog'\r\n"
+     << L"$f.ControlBox=$false; $f.TopMost=$true\r\n"
+     << L"$f.BackColor=[Drawing.Color]::FromArgb(20,22,29)\r\n"
+     << L"$lbl=New-Object Windows.Forms.Label; $lbl.ForeColor=[Drawing.Color]::White\r\n"
+     << L"$lbl.Font=New-Object Drawing.Font('Segoe UI',10); $lbl.AutoSize=$false; $lbl.TextAlign='MiddleLeft'\r\n"
+     << L"$lbl.SetBounds(22,20,336,24)\r\n"
+     << L"$pb=New-Object Windows.Forms.ProgressBar; $pb.Style='Marquee'; $pb.MarqueeAnimationSpeed=30\r\n"
+     << L"$pb.SetBounds(22,54,336,18)\r\n"
+     << L"$f.Controls.AddRange(@($lbl,$pb))\r\n"
+     << L"function St($t){ $lbl.Text=$t; $f.Refresh(); [Windows.Forms.Application]::DoEvents() }\r\n"
+     << L"$f.Show(); St('Starting update…')\r\n"
+     << L"try { Wait-Process -Id " << pid << L" -Timeout 120 } catch {}\r\n"
+     << L"Start-Sleep -Milliseconds 400; St('Downloading the new version…')\r\n"
      << L"$t=Join-Path $env:TEMP ('aiexe_up_'+[guid]::NewGuid().ToString('N'))\r\n"
      << L"New-Item -ItemType Directory -Force $t | Out-Null\r\n"
      << L"$zip=Join-Path $t 'u.zip'\r\n"
      << L"curl.exe -L -o $zip $u\r\n"
+     << L"St('Installing…')\r\n"
      << L"$x=Join-Path $t 'x'\r\n"
      << L"Expand-Archive -Path $zip -DestinationPath $x -Force\r\n"
      << L"Copy-Item -Path (Join-Path $x '*') -Destination $app -Recurse -Force\r\n"
+     << L"St('Restarting AI.EXE…'); Start-Sleep -Milliseconds 500\r\n"
      << L"Start-Process -FilePath $exe -WorkingDirectory $app\r\n"
+     << L"Start-Sleep -Seconds 1; $f.Close()\r\n"
      << L"Remove-Item -Recurse -Force $t -ErrorAction SilentlyContinue\r\n";
 
   std::ofstream of(script_path, std::ios::binary);
@@ -1088,6 +1108,47 @@ bool LaunchUpdater(const std::string &url, std::string *err) {
   return true;
 }
 
+// Create a Desktop shortcut to the app on first run (skipped if one already
+// exists). Assumes COM is initialized by the caller (wWinMain does).
+void CreateDesktopShortcutIfMissing() {
+  wchar_t exe_buf[MAX_PATH] = {};
+  if (GetModuleFileNameW(nullptr, exe_buf, MAX_PATH) == 0) return;
+  const std::filesystem::path exe_path(exe_buf);
+  const std::filesystem::path app_dir = exe_path.parent_path();
+
+  wchar_t *desktop = nullptr;
+  if (FAILED(SHGetKnownFolderPath(FOLDERID_Desktop, 0, nullptr, &desktop)) ||
+      !desktop) {
+    if (desktop) CoTaskMemFree(desktop);
+    return;
+  }
+  const std::filesystem::path lnk =
+      std::filesystem::path(desktop) / L"AI.EXE.lnk";
+  CoTaskMemFree(desktop);
+
+  std::error_code ec;
+  if (std::filesystem::exists(lnk, ec)) return; // user keeps control after first run
+
+  IShellLinkW *link = nullptr;
+  if (SUCCEEDED(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER,
+                                 IID_IShellLinkW,
+                                 reinterpret_cast<void **>(&link))) &&
+      link) {
+    link->SetPath(exe_path.wstring().c_str());
+    link->SetWorkingDirectory(app_dir.wstring().c_str());
+    link->SetIconLocation(exe_path.wstring().c_str(), 0);
+    link->SetDescription(L"AI.EXE");
+    IPersistFile *pf = nullptr;
+    if (SUCCEEDED(link->QueryInterface(IID_IPersistFile,
+                                       reinterpret_cast<void **>(&pf))) &&
+        pf) {
+      pf->Save(lnk.wstring().c_str(), TRUE);
+      pf->Release();
+    }
+    link->Release();
+  }
+}
+
 class AppWindow {
 public:
   bool Create(HINSTANCE instance) {
@@ -1100,6 +1161,9 @@ public:
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
     wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
     wc.lpszClassName = cls;
+    // App icon (resource ID 1 from app.rc) for the titlebar/taskbar.
+    wc.hIcon = LoadIconW(instance, MAKEINTRESOURCEW(1));
+    wc.hIconSm = wc.hIcon;
 
     if (!RegisterClassExW(&wc)) {
       return false;
@@ -1750,6 +1814,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   const HRESULT com_hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
   const bool com_initialized =
       SUCCEEDED(com_hr) || com_hr == RPC_E_CHANGED_MODE;
+
+  CreateDesktopShortcutIfMissing();
 
   AppWindow app;
   if (!app.Create(instance)) {
