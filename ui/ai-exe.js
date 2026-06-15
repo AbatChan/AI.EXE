@@ -1055,7 +1055,7 @@ let appSettings = {
   deepseekApiKey: '',
   deepseekModel: 'deepseek-v4-flash',
   veniceApiKey: '',
-  veniceModel: 'venice-uncensored',
+  veniceModel: 'venice-uncensored-1-2',
   modelUrl: '',
   keepModelOnUpdate: true,
   debugTraceEnabled: false,
@@ -1149,8 +1149,8 @@ const inferenceProviderDefs = {
     modelField: 'veniceModel',
     keyLabel: 'Venice API Key',
     keyPlaceholder: 'via_...',
-    modelPlaceholder: 'venice-uncensored',
-    defaultModel: 'venice-uncensored',
+    modelPlaceholder: 'venice-uncensored-1-2',
+    defaultModel: 'venice-uncensored-1-2',
     helpText: 'Uses Venice\'s OpenAI-compatible API. Key stays in local app settings on this machine.',
     endpointUrl: 'https://api.venice.ai/api/v1/chat/completions',
     protocol: 'openai',
@@ -1198,17 +1198,19 @@ const inferenceProviderModelPresets = {
     'deepseek-chat',
     'deepseek-reasoner',
   ],
+  // Fallback only — the live list is fetched from the user's Venice key at runtime
+  // (refreshProviderModelList). These are verified-valid IDs as of 2026-06.
   venice: [
-    'venice-uncensored',
-    'qwen3-coder-480b-a35b-instruct',
+    'venice-uncensored-1-2',
+    'qwen3-coder-480b-a35b-instruct-turbo',
+    'deepseek-v4-pro',
+    'deepseek-v4-flash',
     'qwen3-235b-a22b-instruct-2507',
-    'qwen3-235b-a22b-thinking-2507',
-    'deepseek-ai-DeepSeek-R1',
-    'hermes-3-llama-3.1-405b',
-    'qwen3-next-80b',
-    'google-gemma-3-27b-it',
+    'claude-opus-4-8',
     'zai-org-glm-5',
-    'mistral-31-24b',
+    'gemma-4-uncensored',
+    'qwen3-next-80b',
+    'hermes-3-llama-3.1-405b',
   ],
 };
 let debugTraceEntries = [];
@@ -4673,7 +4675,7 @@ function loadAppSettings() {
     deepseekApiKey: '',
     deepseekModel: 'deepseek-chat',
     veniceApiKey: '',
-    veniceModel: 'venice-uncensored',
+    veniceModel: 'venice-uncensored-1-2',
     workMode: 'coding',
     modelUrl: '',
     keepModelOnUpdate: true,
@@ -5075,9 +5077,41 @@ function openSettingsSection(section) {
   if (settingsViewSubtitle) settingsViewSubtitle.textContent = meta.subtitle;
 }
 
+// Model IDs differ per provider/account and go stale fast, so fetch the real list
+// from the provider's /models endpoint with the user's key. The static presets are
+// only a fallback. Works for OpenAI-compatible providers (chat/completions -> models).
+const liveProviderModels = {};
+let lastPresetProvider = '';
+async function refreshProviderModelList(provider) {
+  const def = getInferenceProviderDef(provider);
+  const key = getProviderApiKey(provider);
+  if (!def || !key) return false;
+  const chatUrl = getProviderEndpoint(provider) || String(def.endpointUrl || '');
+  const modelsUrl = chatUrl.replace(/\/chat\/completions\/?(\?.*)?$/i, '/models');
+  if (!modelsUrl || modelsUrl === chatUrl) return false; // non-OpenAI shape (e.g. anthropic /messages)
+  try {
+    const res = await fetch(modelsUrl, { headers: { Authorization: `Bearer ${key}` } });
+    if (!res || !res.ok) return false;
+    const data = await res.json();
+    const list = Array.isArray(data && data.data) ? data.data : [];
+    const ids = list
+      .filter((m) => !m || m.type == null || String(m.type).toLowerCase() === 'text')
+      .map((m) => String(m && m.id ? m.id : '').trim())
+      .filter(Boolean)
+      .sort();
+    if (!ids.length) return false;
+    liveProviderModels[provider] = ids;
+    return true;
+  } catch (_) { return false; }
+}
+
 function populateProviderPresetOptions(provider, modelId) {
   if (!settingsApiModelPreset) return;
-  const presets = Array.isArray(inferenceProviderModelPresets[provider]) ? inferenceProviderModelPresets[provider] : [];
+  lastPresetProvider = provider;
+  const live = Array.isArray(liveProviderModels[provider]) ? liveProviderModels[provider] : null;
+  const presets = (live && live.length)
+    ? live
+    : (Array.isArray(inferenceProviderModelPresets[provider]) ? inferenceProviderModelPresets[provider] : []);
   settingsApiModelPreset.innerHTML = '';
   presets.forEach((preset) => {
     const opt = document.createElement('option');
@@ -5090,6 +5124,12 @@ function populateProviderPresetOptions(provider, modelId) {
   customOpt.textContent = 'Custom model ID';
   settingsApiModelPreset.appendChild(customOpt);
   settingsApiModelPreset.value = getProviderPresetValue(provider, modelId);
+  // No live list yet but we have a key — fetch the real models and repopulate.
+  if (!live && getProviderApiKey(provider)) {
+    refreshProviderModelList(provider).then((ok) => {
+      if (ok && lastPresetProvider === provider) populateProviderPresetOptions(provider, getProviderModel(provider));
+    });
+  }
 }
 
 function populateRemoteProviderFields(provider) {
