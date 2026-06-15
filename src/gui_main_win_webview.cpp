@@ -1021,6 +1021,73 @@ CreateWebView2EnvironmentWithOptionsFn LoadCreateEnvironmentFn() {
 }
 #endif
 
+// Auto-updater: write a PowerShell script that waits for THIS process to exit, then
+// downloads the new build, extracts it over the app folder, and relaunches. The app
+// quits right after launching it. User data lives in %LOCALAPPDATA% and projects in
+// Downloads, so replacing the app folder is safe.
+bool LaunchUpdater(const std::string &url, std::string *err) {
+  wchar_t exe_buf[MAX_PATH] = {};
+  if (GetModuleFileNameW(nullptr, exe_buf, MAX_PATH) == 0) {
+    if (err) *err = "Could not resolve the app path.";
+    return false;
+  }
+  const std::filesystem::path exe_path(exe_buf);
+  const std::filesystem::path app_dir = exe_path.parent_path();
+  const DWORD pid = GetCurrentProcessId();
+
+  wchar_t tmp_buf[MAX_PATH] = {};
+  const DWORD tlen = GetTempPathW(MAX_PATH, tmp_buf);
+  const std::filesystem::path tmp_dir =
+      (tlen > 0 && tlen < MAX_PATH) ? std::filesystem::path(tmp_buf) : app_dir;
+  const auto script_path = tmp_dir / L"ai_exe_update.ps1";
+
+  auto psq = [](const std::wstring &s) {
+    std::wstring out;
+    for (wchar_t c : s) { if (c == L'\'') out += L"''"; else out += c; }
+    return out;
+  };
+  std::wstringstream ss;
+  ss << L"$ErrorActionPreference='SilentlyContinue'\r\n"
+     << L"try { Wait-Process -Id " << pid << L" -Timeout 120 } catch {}\r\n"
+     << L"Start-Sleep -Seconds 1\r\n"
+     << L"$u='" << psq(Utf8ToWide(url)) << L"'\r\n"
+     << L"$app='" << psq(app_dir.wstring()) << L"'\r\n"
+     << L"$exe='" << psq(exe_path.wstring()) << L"'\r\n"
+     << L"$t=Join-Path $env:TEMP ('aiexe_up_'+[guid]::NewGuid().ToString('N'))\r\n"
+     << L"New-Item -ItemType Directory -Force $t | Out-Null\r\n"
+     << L"$zip=Join-Path $t 'u.zip'\r\n"
+     << L"curl.exe -L -o $zip $u\r\n"
+     << L"$x=Join-Path $t 'x'\r\n"
+     << L"Expand-Archive -Path $zip -DestinationPath $x -Force\r\n"
+     << L"Copy-Item -Path (Join-Path $x '*') -Destination $app -Recurse -Force\r\n"
+     << L"Start-Process -FilePath $exe -WorkingDirectory $app\r\n"
+     << L"Remove-Item -Recurse -Force $t -ErrorAction SilentlyContinue\r\n";
+
+  std::ofstream of(script_path, std::ios::binary);
+  if (!of) {
+    if (err) *err = "Could not write the updater script.";
+    return false;
+  }
+  const std::string utf8 = WideToUtf8(ss.str());
+  const unsigned char bom[3] = {0xEF, 0xBB, 0xBF};
+  of.write(reinterpret_cast<const char *>(bom), 3);
+  of.write(utf8.data(), static_cast<std::streamsize>(utf8.size()));
+  of.close();
+
+  std::wstring args =
+      L"-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"";
+  args += script_path.wstring();
+  args += L"\"";
+  const HINSTANCE r =
+      ShellExecuteW(nullptr, L"open", L"powershell.exe", args.c_str(),
+                    app_dir.wstring().c_str(), SW_HIDE);
+  if (reinterpret_cast<INT_PTR>(r) <= 32) {
+    if (err) *err = "Could not launch the updater.";
+    return false;
+  }
+  return true;
+}
+
 class AppWindow {
 public:
   bool Create(HINSTANCE instance) {
@@ -1447,6 +1514,19 @@ private:
     } else if (action == "workspaceCloseRoot") {
       ClearWorkspaceRootOverride();
       message = "Project closed.";
+    } else if (action == "applyUpdate") {
+      const std::string url = ExtractJsonStringField(request_json, "url");
+      if (url.empty()) {
+        ok = false;
+        message = "No update URL provided.";
+      } else if (!LaunchUpdater(url, &op_err)) {
+        ok = false;
+        message = op_err.empty() ? "Could not start the updater." : op_err;
+      } else {
+        message = "Updating — the app will close and reopen on the new version.";
+        // Quit so the updater can replace the app files, then it relaunches us.
+        PostMessageW(hwnd_, WM_CLOSE, 0, 0);
+      }
     } else {
       ok = false;
       message = "Unsupported action.";

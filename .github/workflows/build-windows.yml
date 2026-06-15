@@ -11,6 +11,8 @@ jobs:
   build-windows:
     name: Windows x64 (GUI, remote providers)
     runs-on: windows-latest
+    permissions:
+      contents: write  # publish the build as a public GitHub Release
 
     steps:
       - name: Checkout AI.EXE
@@ -71,3 +73,22 @@ jobs:
           path: release/AI.EXE/
           compression-level: 9
           retention-days: 30
+
+      # Publish the build as a public GitHub Release so the in-app updater (and the
+      # client) can download the latest version over the internet without a login.
+      # One release per version tag; re-pushes of the same version refresh the asset.
+      - name: Publish GitHub Release
+        if: github.ref == 'refs/heads/main'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ver = (Select-String -Path CMakeLists.txt -Pattern 'AI_EXE_APP_VERSION "([0-9.]+)"').Matches[0].Groups[1].Value
+          $tag = "v$ver"
+          Compress-Archive -Path release/AI.EXE/* -DestinationPath "AI.EXE-Windows.zip" -Force
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag "AI.EXE-Windows.zip" --clobber
+          } else {
+            gh release create $tag "AI.EXE-Windows.zip" --title "AI.EXE $tag" --notes "Automated build of AI.EXE $tag."
+          }
