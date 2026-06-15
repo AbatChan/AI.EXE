@@ -27,14 +27,21 @@ jobs:
           nuget install Microsoft.Web.WebView2 -OutputDirectory packages -ExcludeVersion
           "WEBVIEW2_DIR=$PWD/packages/Microsoft.Web.WebView2" >> $env:GITHUB_ENV
 
+      # Activate the MSVC toolchain (cl.exe/link.exe on PATH) so the build doesn't
+      # depend on CMake's flaky "Visual Studio" generator auto-detection.
+      - name: Setup MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
       - name: Build AI.EXE GUI
         shell: cmd
         run: |
-          cmake -B build -G "Visual Studio 17 2022" -A x64 ^
+          cmake -B build -G Ninja ^
             -DCMAKE_BUILD_TYPE=Release ^
             -DBUILD_BACKEND_STUB=OFF ^
             -DAI_EXE_WEBVIEW2_DIR="%WEBVIEW2_DIR%"
-          cmake --build build --config Release --target ai_exe_gui -- /m
+          cmake --build build --target ai_exe_gui
 
       - name: Assemble release
         shell: pwsh
@@ -42,12 +49,12 @@ jobs:
           $out = "release/AI.EXE"
           New-Item -ItemType Directory -Force "$out" | Out-Null
 
-          # Main app, renamed to AI.EXE.exe
-          Copy-Item "build/Release/ai_exe_gui.exe" "$out/AI.EXE.exe"
+          # Main app, renamed to AI.EXE.exe (Ninja single-config: exe is in build/)
+          Copy-Item "build/ai_exe_gui.exe" "$out/AI.EXE.exe"
 
           # UI files (HTML/CSS/JS + prompts + CodeMirror vendor) copied by CMake post-build
-          if (Test-Path "build/Release/ui") {
-            Copy-Item -Recurse "build/Release/ui" "$out/ui"
+          if (Test-Path "build/ui") {
+            Copy-Item -Recurse "build/ui" "$out/ui"
           }
 
           # WebView2 loader next to the exe so it renders without a separate SDK install.
