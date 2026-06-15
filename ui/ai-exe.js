@@ -1251,18 +1251,34 @@ try {
     return 0;
   };
   let updateInfo = null;
+  const ulog = (event, fields) => {
+    try { if (typeof recordDebugTrace === 'function') recordDebugTrace(event, fields || {}, fields || {}); } catch (_) {}
+    try { console.log(`[update] ${event}`, fields || {}); } catch (_) {}
+  };
   async function checkForUpdate() {
+    ulog('update_check_start', { current: AI_EXE_VERSION, repo: REPO });
     try {
       const res = await fetch(`https://api.github.com/repos/${REPO}/releases/latest`, {
         headers: { Accept: 'application/vnd.github+json' },
       });
-      if (!res || !res.ok) return;
+      if (!res || !res.ok) {
+        ulog('update_check_http_fail', { status: String(res && res.status), ok: String(res && res.ok) });
+        return;
+      }
       const data = await res.json();
       const latest = String(data.tag_name || '').replace(/^v/i, '').trim();
-      if (!latest || cmpVer(latest, AI_EXE_VERSION) <= 0) return;
+      const newer = latest ? cmpVer(latest, AI_EXE_VERSION) : 0;
       const asset = Array.isArray(data.assets)
         ? data.assets.find((a) => /\.zip$/i.test(a && a.name || ''))
         : null;
+      ulog('update_check_result', {
+        current: AI_EXE_VERSION,
+        latest: latest || '(none)',
+        isNewer: String(newer > 0),
+        hasAsset: String(Boolean(asset)),
+        badgeEl: String(Boolean(document.getElementById('updateBadge'))),
+      });
+      if (!latest || newer <= 0) return;
       updateInfo = {
         version: latest,
         url: asset ? asset.browser_download_url : '',
@@ -1274,8 +1290,11 @@ try {
         if (text) text.textContent = `Update to v${latest}`;
         badge.style.display = '';
         badge.title = `Version ${latest} is available — click to update`;
+        ulog('update_badge_shown', { latest });
       }
-    } catch (_) {}
+    } catch (err) {
+      ulog('update_check_error', { error: String(err && err.message ? err.message : err) });
+    }
   }
   function onBadgeClick() {
     if (!updateInfo) return;
@@ -1292,12 +1311,16 @@ try {
       window.open(updateInfo.page, '_blank');
     }
   }
-  window.addEventListener('load', () => {
+  const startUpdateChecks = () => {
     const badge = document.getElementById('updateBadge');
     if (badge) badge.addEventListener('click', onBadgeClick);
     setTimeout(checkForUpdate, 2500);
     setInterval(checkForUpdate, 30 * 60 * 1000);
-  });
+  };
+  // Run even if 'load' already fired before this script executed (otherwise the
+  // listener never fires and the check never runs).
+  if (document.readyState === 'complete') startUpdateChecks();
+  else window.addEventListener('load', startUpdateChecks);
 })();
 // Step budget. 16 was too tight for multi-item tasks (e.g. a 3-item checklist):
 // inspection + a couple of failed edit-anchor retries exhausted it before the
