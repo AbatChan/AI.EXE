@@ -1380,6 +1380,15 @@ body.resizing-panels .panel-resizer {
   box-shadow: 0 0 0 3px rgba(0, 229, 255, 0.08);
 }
 
+/* The model preset dropdown can hold the provider's full live list (Venice ~89).
+   Cap its height so a long list scrolls inside the dropdown instead of the page. */
+#settingsApiModelPreset {
+  max-height: 240px;
+}
+#settingsApiModelPreset option {
+  max-height: 240px;
+}
+
 .settings-secret-wrap {
   position: relative;
   width: 100%;
