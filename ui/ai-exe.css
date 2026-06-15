@@ -6061,6 +6061,17 @@ html.platform-mac .settings-sidebar {
   opacity: 1;
 }
 
+/* Refusal-to-uncensored fallback in progress: distinct color so the swap is visible. */
+.thinking-status.thinking-status-escalate {
+  color: var(--accent, #c084fc);
+  animation: thinking-status-escalate-pulse 1.1s ease-in-out infinite;
+}
+
+@keyframes thinking-status-escalate-pulse {
+  0%, 100% { opacity: 0.55; }
+  50% { opacity: 1; }
+}
+
 .char-count {
   font-family: var(--font-mono);
   font-size: 10px;
