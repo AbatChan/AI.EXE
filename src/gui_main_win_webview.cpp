@@ -1,12 +1,19 @@
 #ifdef _WIN32
 
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
+// windows.h must come first — the shell/common-dialog headers below depend on
+// its base types (CALLBACK, HWND, …); including them first breaks prsht.h.
+#include <windows.h>
+#include <commctrl.h>
 #include <commdlg.h>
 #include <shellapi.h>
 #include <shlobj.h>
 #include <shlwapi.h>
-#include <windows.h>
 
 #include <algorithm>
 #include <cctype>
