@@ -1991,7 +1991,15 @@
         const event = toolEvents[i];
         if (!event) continue;
         const evTool = String(event.tool || '').toLowerCase();
-        if (event.ok && ['write_file', 'edit_file'].includes(evTool)) break;
+        if (event.ok && ['write_file', 'edit_file'].includes(evTool)) {
+          // The run ended on a write with no validate/run_app after it. For a
+          // browser-runnable file that means the final state was never verified —
+          // say so instead of implying it works.
+          if (/\.(html?|js|mjs|cjs)$/i.test(String(event.path || ''))) {
+            unresolvedValidationClause = ' Note: I made the change but ran out of steps before verifying it runs — press Continue and I\'ll run it and fix anything that breaks.';
+          }
+          break;
+        }
         if (evTool === 'run_app') {
           if (!event.ok || Number(event.runErrorCount) > 0) {
             const errLine = String(event.observation || '')
