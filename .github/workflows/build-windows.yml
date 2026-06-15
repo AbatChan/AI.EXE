@@ -1,4 +1,4 @@
-name: Build AI.EXE (Windows + CUDA)
+name: Build AI.EXE (Windows)
 
 on:
   push:
@@ -9,100 +9,58 @@ on:
 
 jobs:
   build-windows:
-    name: Windows x64 + CUDA
+    name: Windows x64 (GUI, remote providers)
     runs-on: windows-latest
 
     steps:
       - name: Checkout AI.EXE
         uses: actions/checkout@v4
 
-      # ── Install CUDA Toolkit (for llama.cpp CUDA build)
-      - name: Install CUDA Toolkit
-        uses: Jimver/cuda-toolkit@v0.2.17
-        id: cuda-toolkit
-        with:
-          cuda: '12.4.0'
-          method: 'network'
-          sub-packages: '["nvcc", "cudart", "cublas", "cublas_dev", "thrust", "visual_studio_integration"]'
+      - name: Setup NuGet
+        uses: NuGet/setup-nuget@v2
 
-      # ── Build llama.cpp with CUDA
-      - name: Clone llama.cpp
+      # WebView2 SDK provides WebView2.h (so the GUI renders, not the fallback)
+      # and WebView2Loader.dll (shipped next to the exe).
+      - name: Install WebView2 SDK
+        shell: pwsh
         run: |
-          git clone --depth 1 https://github.com/ggerganov/llama.cpp.git llama_cpp_src
+          nuget install Microsoft.Web.WebView2 -OutputDirectory packages -ExcludeVersion
+          "WEBVIEW2_DIR=$PWD/packages/Microsoft.Web.WebView2" >> $env:GITHUB_ENV
 
-      - name: Build llama.cpp (CUDA + static)
-        shell: cmd
-        run: |
-          cd llama_cpp_src
-          cmake -B build -G "Visual Studio 17 2022" -A x64 ^
-            -DGGML_CUDA=ON ^
-            -DGGML_STATIC=ON ^
-            -DCMAKE_BUILD_TYPE=Release ^
-            -DCMAKE_MSVC_RUNTIME_LIBRARY="MultiThreaded" ^
-            -DLLAMA_BUILD_TESTS=OFF ^
-            -DLLAMA_BUILD_EXAMPLES=OFF ^
-            -DLLAMA_BUILD_SERVER=OFF ^
-            -DLLAMA_CURL=OFF
-          cmake --build build --config Release --target llama-cli -- /m
-
-      # ── Build AI.EXE Windows GUI
-      - name: Build AI.EXE
+      - name: Build AI.EXE GUI
         shell: cmd
         run: |
           cmake -B build -G "Visual Studio 17 2022" -A x64 ^
             -DCMAKE_BUILD_TYPE=Release ^
-            -DBUILD_BACKEND_STUB=OFF
+            -DBUILD_BACKEND_STUB=OFF ^
+            -DAI_EXE_WEBVIEW2_DIR="%WEBVIEW2_DIR%"
           cmake --build build --config Release --target ai_exe_gui -- /m
 
-      # ── Assemble release folder
       - name: Assemble release
         shell: pwsh
         run: |
           $out = "release/AI.EXE"
-          New-Item -ItemType Directory -Force "$out/data/runtime" | Out-Null
-          New-Item -ItemType Directory -Force "$out/data/model"   | Out-Null
+          New-Item -ItemType Directory -Force "$out" | Out-Null
 
-          # Main app
+          # Main app, renamed to AI.EXE.exe
           Copy-Item "build/Release/ai_exe_gui.exe" "$out/AI.EXE.exe"
 
-          # UI files (copied by CMake post-build)
+          # UI files (HTML/CSS/JS + prompts + CodeMirror vendor) copied by CMake post-build
           if (Test-Path "build/Release/ui") {
             Copy-Item -Recurse "build/Release/ui" "$out/ui"
           }
 
-          # llama-cli CUDA binary + required DLLs
-          Copy-Item "llama_cpp_src/build/bin/Release/llama-cli.exe" "$out/data/runtime/llama-cli.exe"
-
-          # Copy CUDA runtime DLLs that llama-cli needs
-          $cudaPath = "$env:CUDA_PATH/bin"
-          if (Test-Path "$cudaPath/cudart64_12.dll")  { Copy-Item "$cudaPath/cudart64_12.dll"  "$out/data/runtime/" }
-          if (Test-Path "$cudaPath/cublas64_12.dll")   { Copy-Item "$cudaPath/cublas64_12.dll"  "$out/data/runtime/" }
-          if (Test-Path "$cudaPath/cublasLt64_12.dll") { Copy-Item "$cudaPath/cublasLt64_12.dll" "$out/data/runtime/" }
-
-          # Copy any ggml DLLs
-          Get-ChildItem "llama_cpp_src/build/bin/Release/" -Filter "ggml*.dll" | ForEach-Object {
-            Copy-Item $_.FullName "$out/data/runtime/"
-          }
-          Get-ChildItem "llama_cpp_src/build/bin/Release/" -Filter "llama*.dll" | ForEach-Object {
-            Copy-Item $_.FullName "$out/data/runtime/"
-          }
-
-          # Setup script & prompts
-          Copy-Item "setup_model.bat" "$out/"
-
-          if (Test-Path "ui/prompts") {
-            New-Item -ItemType Directory -Force "$out/ui/prompts" | Out-Null
-            Copy-Item "ui/prompts/*" "$out/ui/prompts/" -Force
-          }
+          # WebView2 loader next to the exe so it renders without a separate SDK install.
+          # The end user still needs the (near-ubiquitous) Evergreen WebView2 Runtime.
+          Copy-Item "$env:WEBVIEW2_DIR/build/native/x64/WebView2Loader.dll" "$out/WebView2Loader.dll"
 
           Write-Host "Release assembled at: $out"
           Get-ChildItem -Recurse "$out" | Format-Table FullName, Length
 
-      # ── Upload as artifact
       - name: Upload Release
         uses: actions/upload-artifact@v4
         with:
-          name: AI.EXE-Windows-CUDA
+          name: AI.EXE-Windows
           path: release/AI.EXE/
           compression-level: 9
           retention-days: 30
