@@ -1143,8 +1143,13 @@
         // print-ready HTML instead (the user gets a real PDF via the browser's
         // Save-as-PDF). The generation prompt produces HTML for these requests.
         let docRedirectNote = '';
-        const docBin = path.match(/\.(?:pdf|docx?|rtf|odt|xlsx?|pptx?)$/i);
-        if (docBin) {
+        const sheetBin = path.match(/\.(?:xlsx?|ods)$/i);
+        const docBin = path.match(/\.(?:pdf|docx?|rtf|odt|pptx?)$/i);
+        if (sheetBin) {
+          const ext = sheetBin[0].slice(1).toUpperCase();
+          path = `${path.slice(0, -sheetBin[0].length)}.csv`;
+          docRedirectNote = `\nNote: ${ext} is a binary spreadsheet format that can't be authored as text, so it was saved as ${path} — a CSV that opens directly in Excel/Google Sheets. Write comma-separated rows with a header row.`;
+        } else if (docBin) {
           const ext = docBin[0].slice(1).toUpperCase();
           path = `${path.slice(0, -docBin[0].length)}.html`;
           docRedirectNote = `\nNote: ${ext} is a binary format that can't be authored as text, so it was saved as ${path} — a print-ready HTML document. The user opens it and uses the "Save as PDF" button (or Ctrl+P → Save as PDF) to get a ${ext}.`;
