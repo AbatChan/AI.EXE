@@ -167,6 +167,9 @@
         hints.push('Build the complete, working feature the request describes. Match the quality and depth you would produce answering this in a normal chat — do not ship a reduced stub or "first pass".');
         hints.push('Prefer self-contained code with as few external runtime requirements as possible unless the user explicitly requested a stack.');
       }
+      if (/\b(pdf|printable|brochure|whitepaper|white paper|flyer|invoice|resume|cv|certificate|one[- ]?pager)\b/.test(lower)) {
+        hints.push('DOCUMENT/PDF request: a real PDF is binary and CANNOT be authored as text — do NOT output LaTeX or a .pdf file. Produce a single SELF-CONTAINED, print-ready HTML document. Put all CSS in one inline <style> block, use clean document styling (readable body text, generous margins, page-friendly headings, @page margins), and add a fixed "Save as PDF" button at the top that calls window.print(). Hide that button in the print output with @media print { .no-print { display: none } }. The user opens the file and clicks Save as PDF (or Ctrl+P) to get a perfect PDF.');
+      }
       if (/offline/.test(lower)) {
         hints.push('Use local storage or local files for persistence instead of any network service.');
       }
