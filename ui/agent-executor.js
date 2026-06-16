@@ -1107,7 +1107,7 @@
       }
 
       if (tool === 'write_file') {
-        const path = deps.normalizeWorkspacePath(decision.path || '');
+        let path = deps.normalizeWorkspacePath(decision.path || '');
         if (!path || path === '/') {
           return { ok: false, mutated, observation: 'write_file requires a valid file path.' };
         }
@@ -1138,6 +1138,16 @@
             mutated,
             observation: `write_file blocked for ${path}: this tool can only write text-editable files. Do not create binary image assets here; use CSS, inline SVG, or text placeholders instead.`,
           };
+        }
+        // PDF/Office docs are binary formats the text writer can't author. Save a
+        // print-ready HTML instead (the user gets a real PDF via the browser's
+        // Save-as-PDF). The generation prompt produces HTML for these requests.
+        let docRedirectNote = '';
+        const docBin = path.match(/\.(?:pdf|docx?|rtf|odt|xlsx?|pptx?)$/i);
+        if (docBin) {
+          const ext = docBin[0].slice(1).toUpperCase();
+          path = `${path.slice(0, -docBin[0].length)}.html`;
+          docRedirectNote = `\nNote: ${ext} is a binary format that can't be authored as text, so it was saved as ${path} — a print-ready HTML document. The user opens it and uses the "Save as PDF" button (or Ctrl+P → Save as PDF) to get a ${ext}.`;
         }
         const creatingNewFile = deps.isLikelyNewAgentFileTarget(toolEvents, path) && !listedExistingFiles.has(path);
         let originalContent = '';
@@ -1327,7 +1337,7 @@
             structuralIssue: String(newContentStructureIssue || 'none'),
           }, { path });
         }
-        observation = `write_file ok: ${path} (${content.length} chars)${primaryQualityNote}\nThe saved file matches the generated content exactly — do not re-read ${path} to verify.${newContentStructureIssue ? `\nWARNING: the saved content still fails to parse — it ${newContentStructureIssue}. Fix this before finishing.` : ''}`;
+        observation = `write_file ok: ${path} (${content.length} chars)${primaryQualityNote}${docRedirectNote}\nThe saved file matches the generated content exactly — do not re-read ${path} to verify.${newContentStructureIssue ? `\nWARNING: the saved content still fails to parse — it ${newContentStructureIssue}. Fix this before finishing.` : ''}`;
         return {
           ok: true,
           mutated,
