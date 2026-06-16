@@ -170,6 +170,9 @@
       if (/\b(pdf|printable|brochure|whitepaper|white paper|flyer|invoice|resume|cv|certificate|one[- ]?pager)\b/.test(lower)) {
         hints.push('DOCUMENT/PDF request: a real PDF is binary and CANNOT be authored as text — do NOT output LaTeX or a .pdf file. Produce a single SELF-CONTAINED, print-ready HTML document. Put all CSS in one inline <style> block, use clean document styling (readable body text, generous margins, page-friendly headings, @page margins), and add a fixed "Save as PDF" button at the top that calls window.print(). Hide that button in the print output with @media print { .no-print { display: none } }. The user opens the file and clicks Save as PDF (or Ctrl+P) to get a perfect PDF.');
       }
+      if (/\b(spreadsheet|excel|xlsx?|\.ods|google sheets?)\b/.test(lower) || /\.csv$/i.test(normalized)) {
+        hints.push('SPREADSHEET request: a real .xlsx is binary and CANNOT be authored as text — produce a .csv instead (it opens directly in Excel/Google Sheets). Output valid CSV: a header row then data rows, comma-separated, quote any field containing a comma/quote/newline. No markdown, no explanation — just the CSV.');
+      }
       if (/offline/.test(lower)) {
         hints.push('Use local storage or local files for persistence instead of any network service.');
       }
@@ -1504,7 +1507,14 @@
         : deriveProjectNameFromTask(taskText);
       let expectedFiles = parseAgentExpectedFiles(parsed && parsed.expected_files ? parsed.expected_files : '');
       expectedFiles = expectedFiles.filter((path) => !/\.(?:png|jpe?g|gif|webp|bmp|ico|tiff?)$/i.test(String(path || '')));
-      let affectedFiles = parseAgentPlanPathList(parsed && parsed.affected_files ? parsed.affected_files : '');
+      // Binary document/sheet formats can't be authored as text — plan the text-native
+      // equivalent so the plan, write target, and validation all agree (.pdf/.docx/.pptx
+      // → .html; .xlsx/.ods → .csv). Mirrors the executor's write-time redirect.
+      const mapBinaryDocPath = (p) => String(p || '')
+        .replace(/\.(?:pdf|docx?|rtf|odt|pptx?)$/i, '.html')
+        .replace(/\.(?:xlsx?|ods)$/i, '.csv');
+      expectedFiles = expectedFiles.map(mapBinaryDocPath);
+      let affectedFiles = parseAgentPlanPathList(parsed && parsed.affected_files ? parsed.affected_files : '').map(mapBinaryDocPath);
       let filesToInspect = parseAgentPlanPathList(parsed && parsed.files_to_inspect ? parsed.files_to_inspect : '');
       const doneCriteria = parseAgentPlanTextList(parsed && parsed.done_criteria ? parsed.done_criteria : '', 5); // cap 5
       const validationSteps = parseAgentPlanTextList(parsed && parsed.validation ? parsed.validation : '', 6);
