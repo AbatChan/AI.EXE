@@ -611,9 +611,7 @@
         return `ToolResult ${index + 1}: ${String(event && event.tool ? event.tool : 'unknown')}\n${observation}`;
       }).join('\n\n');
       const normalizedPath = normalizeWorkspacePath(path || '');
-      // A web project is "self-contained" when the plan ships a single HTML file with
-      // no separate stylesheet/script — that HTML must inline its CSS and JS so it runs
-      // when double-clicked (file://). Steers the HTML hints to embed rather than link.
+      // Single planned HTML, no separate css/js → inline everything.
       const planFiles = Array.isArray(planSpec && planSpec.expectedFiles) ? planSpec.expectedFiles.map((p) => String(p || '')) : [];
       const selfContained = /\.html?$/i.test(normalizedPath)
         && planFiles.some((p) => /\.html?$/i.test(p))
@@ -779,8 +777,11 @@
     async function buildAgentPlanSpec(chatId, taskText, planOptions = {}) {
       const forceProjectScope = Boolean(planOptions && planOptions.forceProjectScope);
       const prompt = await buildAgentPlanPrompt(chatId, taskText);
+      // Plan = one-shot JSON; needs room for a reasoning model's hidden tokens too,
+      // else it truncates mid-criterion ("...and col"). 768 (decision budget) was far short.
+      const planMaxTokens = Math.max(4096, Number(agentDecisionMaxTokens) || 0);
       const res = await Promise.race([
-        requestAgentPlannerInference(prompt, agentDecisionMaxTokens, agentPlanGrammar),
+        requestAgentPlannerInference(prompt, planMaxTokens, agentPlanGrammar),
         new Promise((resolve) => setTimeout(() => resolve({
           ok: false,
           timedOut: true,

@@ -670,10 +670,7 @@
       };
     }
 
-    // import name -> pip package, for common third-party libs whose absence from
-    // requirements.txt would make the app crash at startup (ModuleNotFoundError)
-    // once Run installs deps into the venv. Only well-known externals are listed,
-    // so stdlib imports never false-positive.
+    // import name -> pip package (well-known externals only, no stdlib false-positives).
     const PY_THIRD_PARTY = {
       // pygame-ce (community edition) is a drop-in for `import pygame` that keeps
       // up with current Python; the original pygame breaks on 3.13+/3.14.
@@ -688,9 +685,7 @@
       pyglet: 'pyglet', arcade: 'arcade', pytest: 'pytest', websockets: 'websockets',
     };
 
-    // A .py that imports a known third-party package must declare it in
-    // requirements.txt — otherwise the Run button's venv won't have it and the
-    // app dies with ModuleNotFoundError. Returns the missing packages.
+    // Third-party imports not in requirements.txt (the venv won't have them).
     function getPythonMissingDependencies(fileContents, requirementsText) {
       const reqLower = String(requirementsText || '').toLowerCase();
       const missing = new Set();
@@ -1235,10 +1230,41 @@
         deps.setActiveAgentStreamStatus(chatId, `${creatingNewFile ? 'Writing' : 'Editing'} ${path}...`);
         let content = String(decision.content || '');
         const shouldAutoGenerate = deps.isAgentGeneratedContentTarget(path, taskText);
-        if (shouldAutoGenerate) {
+        const initialInlineContent = content;
+        const inlineStructureIssue = String(content).trim() ? getStructuralIssueForPath(path, content) : '';
+        // Trust non-trivial, structurally-valid content the model already supplied.
+        // A retry decision may include a complete corrected file; discarding it and
+        // auto-generating again is what caused the visible write/rewrite loop.
+        const modelSuppliedComplete = shouldAutoGenerate
+          && content.trim().length >= 80
+          && !inlineStructureIssue;
+        let structuralRepairAttempted = false;
+        const repairStructuralIssueOnce = async (stageLabel) => {
+          const issue = getStructuralIssueForPath(path, content);
+          if (!issue || !shouldAutoGenerate) return '';
+          structuralRepairAttempted = true;
+          const prior = [
+            `Previous ${stageLabel || 'generation'} for ${path} failed structural validation: ${issue}.`,
+            'Return the COMPLETE corrected file content only. Fix the exact syntax/structure problem; do not restart with a reduced stub.',
+            '',
+            'BROKEN_CONTENT:',
+            String(content || '').slice(0, 18000),
+          ].join('\n');
+          if (typeof deps.recordDebugTrace === 'function') {
+            deps.recordDebugTrace('agent_write_structural_repair_attempt', {
+              path, issue: String(issue).slice(0, 200), stage: String(stageLabel || ''),
+              len: String(String(content || '').length),
+            }, { path, issue, stage: stageLabel, len: String(content || '').length });
+          }
+          const generated = await deps.generateAgentWriteFileContent(taskText, toolEvents, path, prior, planSpec);
+          if (generated) content = generated;
+          return getStructuralIssueForPath(path, content);
+        };
+        if (shouldAutoGenerate && !modelSuppliedComplete) {
           const generated = await deps.generateAgentWriteFileContent(taskText, toolEvents, path, content, planSpec);
           if (generated) content = generated;
-        } else if (!String(content).trim()) {
+          await repairStructuralIssueOnce('initial generated content');
+        } else if (!shouldAutoGenerate && !String(content).trim()) {
           const generated = await deps.generateAgentWriteFileContent(taskText, toolEvents, path, '', planSpec);
           if (generated) content = generated;
         }
@@ -1278,7 +1304,7 @@
           const sanitized = sanitizeReadmeContent(content);
           if (sanitized) content = sanitized;
         }
-        if (projectStyleTask && cssTarget) {
+        if (projectStyleTask && cssTarget && !modelSuppliedComplete && !structuralRepairAttempted && !getStructuralIssueForPath(path, content)) {
           let cssIssues = validateGeneratedFile(path, content, taskText, planSpec);
           if (cssIssues.length) {
             const generated = await deps.generateAgentWriteFileContent(
@@ -1289,6 +1315,7 @@
               planSpec
             );
             if (generated) content = generated;
+            await repairStructuralIssueOnce('CSS validation repair');
             cssIssues = validateGeneratedFile(path, content, taskText, planSpec);
           }
           // Advisory, not a veto: write the stylesheet and flag any remaining
@@ -1297,7 +1324,7 @@
             primaryQualityNote = ` Note: the generated CSS may still have issues (${cssIssues.join('; ')}); refine it with an edit pass if the page looks off.`;
           }
         }
-        if (projectStyleTask && primaryTarget) {
+        if (projectStyleTask && primaryTarget && !modelSuppliedComplete && !structuralRepairAttempted && !getStructuralIssueForPath(path, content)) {
           const shouldUsePythonGameGate = gameLikeTask && pythonTarget;
           const isValidPrimaryContent = shouldUsePythonGameGate
             ? deps.isLikelyCompletePythonGameSource(content)
@@ -1305,13 +1332,15 @@
           if (!isValidPrimaryContent) {
             const generated = await deps.generateAgentWriteFileContent(taskText, toolEvents, path, content, planSpec);
             if (generated) content = generated;
+            await repairStructuralIssueOnce('primary completeness repair');
           }
           const afterFirstRepair = shouldUsePythonGameGate
             ? deps.isLikelyCompletePythonGameSource(content)
             : deps.isLikelyCompletePrimarySource(path, content, taskText);
-          if (!afterFirstRepair) {
+          if (!afterFirstRepair && !getStructuralIssueForPath(path, content)) {
             const strengthened = await deps.generateAgentWriteFileContent(taskText, toolEvents, path, content, planSpec);
             if (strengthened) content = strengthened;
+            await repairStructuralIssueOnce('primary strengthening repair');
           }
           const validAfterExpansion = shouldUsePythonGameGate
             ? deps.isLikelyCompletePythonGameSource(content)
@@ -1333,9 +1362,12 @@
           const priorBroken = Boolean(priorKnownContent && getStructuralIssueForPath(path, priorKnownContent));
           if (!priorBroken) {
             if (typeof deps.recordDebugTrace === 'function') {
+              const c = String(content || '');
               deps.recordDebugTrace('agent_write_structural_reject', {
                 path, issue: String(newContentStructureIssue).slice(0, 200),
-              }, { path, issue: newContentStructureIssue });
+                len: String(c.length), fromInline: String(modelSuppliedComplete && content === initialInlineContent),
+                tail: deps.debugPreview(c.slice(-160), 160),
+              }, { path, issue: newContentStructureIssue, len: c.length, tail: c.slice(-300) });
             }
             return {
               ok: false,
@@ -1620,9 +1652,7 @@
         };
       }
 
-      // Run an allowlisted project command (python/pip/node/npm) in the project
-      // dir and report its real output + exit — the agent's run→see-error→fix
-      // loop. Allowlist only; no raw shell. Backed by the sandboxed ProcessRunner.
+      // Allowlisted run (python/pip/node/npm) → real output+exit for run→fix.
       if (tool === 'run_command') {
         const rawCommand = String(decision.command || decision.content || '').trim();
         if (!rawCommand) {

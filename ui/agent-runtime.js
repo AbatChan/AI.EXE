@@ -65,6 +65,8 @@
       }
       const tail = text.replace(/\s+$/, '');
       const lastChar = tail.slice(-1);
+      // Dangling backslash = cut mid-\n string; continue rather than regenerate.
+      if (/\\$/.test(tail)) return true;
       if (tail.length > 400 && /[A-Za-z0-9_,:(\[{]/.test(lastChar) && !/[}\])>;]$/.test(tail)) return true;
       return false;
     }
@@ -146,7 +148,8 @@
       }
       let wasTruncated = first.truncated;
       let guard = 0;
-      while (guard < 3 && (wasTruncated || looksTruncatedFileContent(raw, path))) {
+      // Append until whole instead of regenerating from scratch on truncation.
+      while (guard < 6 && (wasTruncated || looksTruncatedFileContent(raw, path))) {
         guard += 1;
         const continuationPrompt = `${prompt}\n\nPARTIAL_OUTPUT_ALREADY_SAVED (do NOT repeat any of this):\n${raw.slice(-1600)}\n\nContinue the file from exactly where it stopped. Output ONLY the remaining content — no repetition, no commentary, no code fences.`;
         const carried = raw;
@@ -161,7 +164,7 @@
       if (typeof deps.clearAgentStreamingFile === 'function') deps.clearAgentStreamingFile(path);
       const finalContent = deps.sanitizeAgentGeneratedFileContent(raw, path);
       recordAgentFileGenTrace(path, promptChars, String(finalContent || '').length, guard, wasTruncated,
-        guard >= 3 ? 'continuation_exhausted' : 'ok');
+        guard >= 6 ? 'continuation_exhausted' : 'ok');
       return finalContent;
     }
 
