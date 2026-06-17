@@ -442,7 +442,7 @@
         return null;
       }
       const normalizedAction = String(action || '').trim().toLowerCase();
-      const validTools = ['none', 'new_project', 'list_dir', 'search_files', 'read_file', 'write_file', 'edit_file', 'validate_files', 'check_code', 'run_app', 'run_command', 'mkdir', 'move', 'delete'];
+      const validTools = ['none', 'new_project', 'generate_project', 'list_dir', 'search_files', 'read_file', 'write_file', 'edit_file', 'validate_files', 'check_code', 'run_app', 'run_command', 'mkdir', 'move', 'delete'];
       let resolvedAction = normalizedAction;
       let resolvedTool = String(tool || '').toLowerCase();
       // Auto-repair: model put tool name in action field (e.g. "action": "read_file")
@@ -597,6 +597,26 @@
         // and style every class/ID the HTML and JS actually use, rather than being
         // written blind before the JS exists. README always last so it references
         // real, finished files.
+        // Fresh multi-file project: generate ALL files in one pass (like chat) — far
+        // more reliable than slow, stall-prone per-file generation. Only when nothing
+        // is written yet and no generate_project was already attempted.
+        const codeFilesToCreate = expectedFiles
+          .map((path) => normalizeWorkspacePath(path || ''))
+          .filter((path) => path && path !== '/src' && path !== '/README.md' && !writtenPaths.includes(path));
+        const onePassAlreadyTried = Array.isArray(toolEvents)
+          && toolEvents.some((e) => e && String(e.tool || '').toLowerCase() === 'generate_project');
+        if (codeFilesToCreate.length >= 2 && writtenPaths.length === 0 && !onePassAlreadyTried) {
+          return {
+            action: 'tool',
+            tool: 'generate_project',
+            message: 'Generate all project files in one pass',
+            path: '/',
+            content: '',
+            srcPath: '',
+            dstPath: '',
+            raw: '[fallback-project-generate-onepass]',
+          };
+        }
         // Keep the plan's order; only push README last (stable sort).
         const nextPath = expectedFiles
           .map((path) => normalizeWorkspacePath(path || ''))
