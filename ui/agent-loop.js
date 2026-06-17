@@ -698,7 +698,9 @@
           // We do NOT retry timeouts (the model was simply too slow — retrying
           // burns another full timeout) or user cancellations.
           let res = null;
-          const maxInferenceRetries = 2;
+          // Cap; rate-limits (429) use the full budget with exponential backoff,
+          // other transient blips bail after a couple of quick retries.
+          const maxInferenceRetries = 4;
           for (let attempt = 0; attempt <= maxInferenceRetries; attempt += 1) {
             // Capture + swallow so an inference abandoned by the timeout (and later
             // aborted) cannot surface as an unhandledRejection.
@@ -720,13 +722,27 @@
             if (!deps.isInferenceActive(requestToken)) return true;
             if (res && res.ok) break;
             const retriable = Boolean(res && !res.ok && !res.timedOut);
-            if (!retriable || attempt === maxInferenceRetries) break;
+            if (!retriable) break;
+            // A 429 means the provider is throttling, not broken — it clears on its
+            // own. Each retry is itself a request, and Venice blocks for 30s after
+            // 20 failed requests in 30s, so we retry FEW times with LONG waits:
+            // honor the provider's retry-after header when present, else 10s/20s/40s.
+            const isRateLimit = Boolean(res && (res.httpStatus === 429
+              || /rate.?limit|too many requests/i.test(String(res.message || ''))));
+            const attemptCap = isRateLimit ? 3 : 2;
+            if (attempt >= attemptCap) break;
+            const headerMs = Number(res && res.retryAfterMs) || 0;
+            const delayMs = isRateLimit
+              ? (headerMs > 0 ? headerMs + 500 : Math.min(10000 * Math.pow(2, attempt), 45000))
+              : 1200 * (attempt + 1);
             recordDebugTrace('agent_infer_retry', {
               chatId: String(chatId || ''), step: String(step), attempt: String(attempt + 1),
               reason: deps.debugPreview((res && res.message) || 'inference failed', 160),
-            }, { chatId: String(chatId || ''), step, attempt: attempt + 1, reason: String((res && res.message) || 'inference failed') });
-            setAgentProgress(`Reconnecting (retry ${attempt + 1}/${maxInferenceRetries})...`);
-            await new Promise((resolve) => setTimeout(resolve, 1200 * (attempt + 1)));
+            }, { chatId: String(chatId || ''), step, attempt: attempt + 1, rateLimited: isRateLimit, delayMs, reason: String((res && res.message) || 'inference failed') });
+            setAgentProgress(isRateLimit
+              ? `Provider is rate-limiting — waiting ${Math.round(delayMs / 1000)}s (retry ${attempt + 1})...`
+              : `Reconnecting (retry ${attempt + 1})...`);
+            await new Promise((resolve) => setTimeout(resolve, delayMs));
             if (!deps.isInferenceActive(requestToken)) return true;
           }
 

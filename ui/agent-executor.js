@@ -670,6 +670,42 @@
       };
     }
 
+    // import name -> pip package, for common third-party libs whose absence from
+    // requirements.txt would make the app crash at startup (ModuleNotFoundError)
+    // once Run installs deps into the venv. Only well-known externals are listed,
+    // so stdlib imports never false-positive.
+    const PY_THIRD_PARTY = {
+      // pygame-ce (community edition) is a drop-in for `import pygame` that keeps
+      // up with current Python; the original pygame breaks on 3.13+/3.14.
+      pygame: 'pygame-ce', numpy: 'numpy', pandas: 'pandas', requests: 'requests',
+      flask: 'flask', django: 'django', fastapi: 'fastapi', uvicorn: 'uvicorn',
+      PIL: 'Pillow', cv2: 'opencv-python', matplotlib: 'matplotlib', scipy: 'scipy',
+      sklearn: 'scikit-learn', torch: 'torch', tensorflow: 'tensorflow',
+      bs4: 'beautifulsoup4', yaml: 'pyyaml', pydantic: 'pydantic',
+      sqlalchemy: 'SQLAlchemy', aiohttp: 'aiohttp', rich: 'rich', click: 'click',
+      tqdm: 'tqdm', dotenv: 'python-dotenv', openai: 'openai', anthropic: 'anthropic',
+      selenium: 'selenium', plotly: 'plotly', seaborn: 'seaborn', kivy: 'kivy',
+      pyglet: 'pyglet', arcade: 'arcade', pytest: 'pytest', websockets: 'websockets',
+    };
+
+    // A .py that imports a known third-party package must declare it in
+    // requirements.txt — otherwise the Run button's venv won't have it and the
+    // app dies with ModuleNotFoundError. Returns the missing packages.
+    function getPythonMissingDependencies(fileContents, requirementsText) {
+      const reqLower = String(requirementsText || '').toLowerCase();
+      const missing = new Set();
+      Object.keys(fileContents || {}).forEach((path) => {
+        if (!/\.py$/i.test(String(path || ''))) return;
+        const src = String(fileContents[path] || '');
+        for (const m of src.matchAll(/^\s*(?:import|from)\s+([a-zA-Z0-9_]+)/gm)) {
+          const mod = m[1];
+          const pkg = PY_THIRD_PARTY[mod];
+          if (pkg && !reqLower.includes(pkg.toLowerCase())) missing.add(pkg);
+        }
+      });
+      return Array.from(missing);
+    }
+
     function validateWebProjectConsistency(fileContents, planSpec, advisoryOut = null) {
       const issues = [];
       const expectedFiles = Array.isArray(planSpec && planSpec.expectedFiles) ? planSpec.expectedFiles : [];
@@ -816,6 +852,9 @@
         if (!projectTask) return true;
         if (!planExpectedFiles.length) return true;
         if (normalized === '/README.md') return Boolean(planSpec && planSpec.needsReadme);
+        // requirements.txt is a standard Python deliverable — the Run button
+        // installs it into a venv — so never block it as "outside the plan".
+        if (/(^|\/)requirements\.txt$/i.test(normalized)) return true;
         return planExpectedFiles.includes(normalized);
       };
       const listedExistingFiles = new Set();
@@ -1581,6 +1620,45 @@
         };
       }
 
+      // Run an allowlisted project command (python/pip/node/npm) in the project
+      // dir and report its real output + exit — the agent's run→see-error→fix
+      // loop. Allowlist only; no raw shell. Backed by the sandboxed ProcessRunner.
+      if (tool === 'run_command') {
+        const rawCommand = String(decision.command || decision.content || '').trim();
+        if (!rawCommand) {
+          return { ok: false, mutated, observation: 'run_command needs a command, e.g. {"action":"tool","tool":"run_command","command":"python main.py"}.' };
+        }
+        const parts = rawCommand.split(/\s+/).filter(Boolean);
+        const head = parts[0].toLowerCase();
+        const ALLOWED = { python: 'python', python3: 'python', pip: 'pip', pip3: 'pip', node: 'node', npm: 'npm' };
+        const program = ALLOWED[head];
+        if (!program) {
+          return { ok: false, mutated, observation: `run_command only allows: python, pip, node, npm (got "${head}"). Use one of those to run or test the project — no other shell commands.` };
+        }
+        if (typeof deps.invokeWorkspaceAction !== 'function') {
+          return { ok: false, mutated, observation: 'run_command is not available in this build.' };
+        }
+        const args = parts.slice(1);
+        deps.setActiveAgentStreamStatus(chatId, `Running \`${rawCommand}\`...`);
+        const res = await deps.invokeWorkspaceAction('runCommand', { program, argsLine: args.join('\n') });
+        if (!res || !res.ok) {
+          return { ok: false, mutated, observation: `run_command \`${rawCommand}\` could not run: ${(res && res.message) || 'unknown error'}.` };
+        }
+        const status = String(res.message || '');
+        const rawOut = String(res.output || '').trim();
+        const tail = rawOut.length > 4000 ? `…(truncated)\n${rawOut.slice(-4000)}` : rawOut;
+        const timedOut = status === 'timed_out';
+        const exitMatch = status.match(/exit_code=(-?\d+)/);
+        const exitCode = exitMatch ? Number(exitMatch[1]) : (timedOut ? null : 0);
+        if (timedOut) {
+          return { ok: true, mutated, runErrorCount: 0, observation: `run_command \`${rawCommand}\`: still running at the timeout with no crash — the program started cleanly (a GUI/game loop or server keeps running, which is expected).${tail ? `\nOutput:\n${tail}` : ''}` };
+        }
+        if (exitCode === 0) {
+          return { ok: true, mutated, runErrorCount: 0, observation: `run_command \`${rawCommand}\`: finished cleanly (exit 0).${tail ? `\nOutput:\n${tail}` : ''}` };
+        }
+        return { ok: true, mutated, runErrorCount: 1, observation: `run_command \`${rawCommand}\`: exited with code ${exitCode}. Read the error below, fix its ROOT cause in the code, then run_command again to verify.\nOutput:\n${tail || '(no output)'}` };
+      }
+
       // Parse code files and report exact syntax errors with line/column — the
       // agent's "console". Non-mutating; doesn't count as inspection budget.
       if (tool === 'check_code') {
@@ -1667,6 +1745,20 @@
         const mechanicalAdvisory = completenessAdvisory;
         const webConsistencyIssues = validateWebProjectConsistency(fileContents, planSpec, mechanicalAdvisory);
         webConsistencyIssues.forEach((issue) => issues.push(issue));
+        // Python dependency check: if a .py imports a known third-party package,
+        // requirements.txt must list it (the Run button installs it into a venv).
+        // Catches the "import pygame" → ModuleNotFoundError class before finishing.
+        if (Object.keys(fileContents).some((p) => /\.py$/i.test(p))) {
+          let reqText = fileContents['/requirements.txt'] || '';
+          if (!reqText) {
+            const reqRes = await deps.invokeWorkspaceAction('workspaceReadFile', { path: '/requirements.txt' });
+            if (reqRes && reqRes.ok) reqText = String(reqRes.output || '');
+          }
+          const missingDeps = getPythonMissingDependencies(fileContents, reqText);
+          if (missingDeps.length) {
+            issues.push(`Python project imports third-party package(s) not declared in requirements.txt: ${missingDeps.join(', ')}. Create or extend /requirements.txt (one package per line) so the Run button can install them into the virtual environment — do NOT pip-install from inside the code.`);
+          }
+        }
         if (!issues.length) {
           // Advisory model-driven cross-file review; never blocks.
           let advisoryNotes = mechanicalAdvisory.slice();
