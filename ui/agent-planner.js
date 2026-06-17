@@ -432,6 +432,12 @@
       if (leakedPrompt && fencedBlock && fencedBlock[1]) {
         text = String(fencedBlock[1] || '').trim();
       }
+      // Some models return the file as a JSON-escaped blob — one line of literal
+      // \n / \" instead of real newlines — which parses as invalid ("Invalid
+      // escape"). Detect that shape (many escapes, ~no real newlines) and unescape.
+      if ((text.match(/\\n/g) || []).length >= 3 && (text.match(/\n/g) || []).length <= 2) {
+        text = text.replace(/\\([nrt"'\\])/g, (m, ch) => (ch === 'n' ? '\n' : ch === 'r' ? '' : ch === 't' ? '\t' : ch)).trim();
+      }
       text = text
         .replace(/^.*?\bFILE_CONTENT:\s*/is, '')
         .replace(/^(?:Return only the file contents\..*|File path:\s*.*|Rules:\s*|MVP_REQUIREMENTS:\s*|TASK:\s*|RECENT_TOOL_RESULTS:\s*|PREVIOUS_ATTEMPT_TO_IMPROVE:\s*)$/gim, '')
