@@ -52,7 +52,11 @@
       const text = String(content || '');
       if (!text.trim()) return false;
       const ext = ((String(path || '').match(/\.([a-z0-9]+)$/i) || [])[1] || '').toLowerCase();
-      if (['css', 'scss', 'less', 'js', 'mjs', 'cjs', 'ts', 'jsx', 'tsx', 'json'].includes(ext)) {
+      // Brace counting only for CSS (structural braces). JS/TS strings, templates,
+      // and regex routinely hold unbalanced braces in valid code, so counting them
+      // falsely flags a complete file as truncated and triggers an endless
+      // continuation loop. For code, rely on the provider's truncated signal + tail.
+      if (['css', 'scss', 'less'].includes(ext)) {
         const bal = (o, c) => (text.split(o).length - 1) - (text.split(c).length - 1);
         if (bal('{', '}') > 0 || bal('(', ')') > 0 || bal('[', ']') > 0) return true;
       }
@@ -148,17 +152,26 @@
       }
       let wasTruncated = first.truncated;
       let guard = 0;
+      const passTrace = (pass, info) => {
+        if (typeof deps.recordDebugTrace !== 'function') return;
+        deps.recordDebugTrace('agent_file_gen_pass', {
+          path: String(path || ''), pass: String(pass), ...Object.fromEntries(Object.entries(info).map(([k, v]) => [k, String(v)])),
+        }, { path: String(path || ''), pass, ...info });
+      };
+      passTrace(0, { len: raw.length, truncatedSignal: Boolean(first.truncated), looksTruncated: looksTruncatedFileContent(raw, path), tail: raw.slice(-120) });
       // Append until whole instead of regenerating from scratch on truncation.
       while (guard < 6 && (wasTruncated || looksTruncatedFileContent(raw, path))) {
         guard += 1;
+        const reason = wasTruncated ? 'provider_truncated' : 'looks_truncated';
         const continuationPrompt = `${prompt}\n\nPARTIAL_OUTPUT_ALREADY_SAVED (do NOT repeat any of this):\n${raw.slice(-1600)}\n\nContinue the file from exactly where it stopped. Output ONLY the remaining content — no repetition, no commentary, no code fences.`;
         const carried = raw;
         const next = await runRawAgentFileInference(continuationPrompt, (partial) => emitPartial(stitchFileContinuation(carried, partial)));
         beat();
-        if (!next.output || !next.output.trim()) break;
+        if (!next.output || !next.output.trim()) { passTrace(guard, { reason, added: 0, note: 'empty_continuation' }); break; }
         const before = raw.length;
         raw = stitchFileContinuation(raw, next.output);
         wasTruncated = next.truncated;
+        passTrace(guard, { reason, beforeLen: before, addedLen: raw.length - before, nextChunkLen: next.output.length, nextTruncated: Boolean(next.truncated), tail: raw.slice(-120) });
         if (raw.length <= before) break;
       }
       if (typeof deps.clearAgentStreamingFile === 'function') deps.clearAgentStreamingFile(path);
