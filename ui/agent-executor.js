@@ -1140,6 +1140,50 @@
         return { ok: true, mutated, observation, readPath: path, readContent: body };
       }
 
+      // Single-pass project generation: one model call emits all files (like chat),
+      // then we write them. Avoids the slow, stall-prone per-file pipeline.
+      if (tool === 'generate_project') {
+        if (typeof deps.generateAgentProjectFiles !== 'function') {
+          return { ok: false, mutated, observation: 'generate_project is not available in this build.' };
+        }
+        deps.setActiveAgentStreamStatus(chatId, 'Generating all project files in one pass...');
+        const files = await deps.generateAgentProjectFiles(taskText, planSpec);
+        const written = [];
+        const skipped = [];
+        for (const f of (Array.isArray(files) ? files : [])) {
+          const fpath = deps.normalizeWorkspacePath(f && f.path || '');
+          const fcontent = String(f && f.content || '');
+          if (!fpath || fpath === '/' || !fcontent.trim()) continue;
+          if (!planAllowsPath(fpath)) { skipped.push(`${fpath} (outside plan)`); continue; }
+          const parent = deps.parentWorkspacePath(fpath);
+          if (parent && parent !== '/' && parent !== '.') {
+            await deps.invokeWorkspaceAction('workspaceMkdir', { path: parent });
+          }
+          const resp = await deps.invokeWorkspaceAction('workspaceWriteFile', { path: fpath, content: fcontent });
+          if (resp && resp.ok) {
+            mutated = true;
+            const issue = getStructuralIssueForPath(fpath, fcontent);
+            written.push(`${fpath} (${fcontent.length} chars${issue ? `, WARNING: ${issue}` : ''})`);
+            deps.upsertWorkspaceTreeEntry({
+              kind: 'file', path: fpath, name: deps.workspaceBaseName(fpath),
+              sizeBytes: deps.estimateTextBytes(fcontent), updatedAt: deps.nowTs(), optimisticUntil: deps.nowTs() + 5000,
+            });
+            deps.syncFileTabFromWorkspaceWrite(fpath, fcontent, deps.workspaceBaseName(fpath));
+          } else {
+            skipped.push(`${fpath} (write failed)`);
+          }
+        }
+        if (!written.length) {
+          return { ok: false, mutated, observation: 'generate_project produced no usable files — fall back to creating each file with write_file.' };
+        }
+        deps.setWorkspaceSelection(written.length ? deps.normalizeWorkspacePath((files[0] || {}).path || '/') : '/', 'file');
+        return {
+          ok: true,
+          mutated,
+          observation: `generate_project wrote ${written.length} file(s):\n- ${written.join('\n- ')}${skipped.length ? `\nSkipped: ${skipped.join(', ')}` : ''}\nNow run validate_files; create any remaining planned file with write_file.`,
+        };
+      }
+
       if (tool === 'write_file') {
         let path = deps.normalizeWorkspacePath(decision.path || '');
         if (!path || path === '/') {
@@ -1927,6 +1971,7 @@
       const withTarget = (base) => (target ? `${base} ${target}` : base);
       if (phase === 'start') {
         if (name === 'new_project') return 'Creating project workspace';
+        if (name === 'generate_project') return 'Generating all project files';
         if (name === 'list_dir') return withTarget('Scanning folder');
         if (name === 'search_files') return withTarget('Searching files');
         if (name === 'read_file') return withTarget('Reading file');

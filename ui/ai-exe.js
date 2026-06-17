@@ -9613,6 +9613,7 @@ const agentRuntime = window.AIExeAgentRuntime && typeof window.AIExeAgentRuntime
   : null;
 const {
   generateAgentWriteFileContent,
+  generateAgentProjectFiles,
   generateAgentEditFileProgram,
   generateAgentRewriteExistingFileContent,
   buildAgentCompletionFallbackText,
@@ -9648,6 +9649,7 @@ const agentExecutor = window.AIExeAgentExecutor && typeof window.AIExeAgentExecu
     setActiveAgentStreamStatus,
     isAgentGeneratedContentTarget,
     generateAgentWriteFileContent,
+    generateAgentProjectFiles,
     isAgentTaskSoftwareProject,
     isAgentTaskGameLike,
     isExplicitReadmeOrDocsTask,
