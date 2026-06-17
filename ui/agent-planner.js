@@ -611,7 +611,14 @@
         return `ToolResult ${index + 1}: ${String(event && event.tool ? event.tool : 'unknown')}\n${observation}`;
       }).join('\n\n');
       const normalizedPath = normalizeWorkspacePath(path || '');
-      const generationHints = buildAgentFileGenerationHints(taskText, normalizedPath);
+      // A web project is "self-contained" when the plan ships a single HTML file with
+      // no separate stylesheet/script — that HTML must inline its CSS and JS so it runs
+      // when double-clicked (file://). Steers the HTML hints to embed rather than link.
+      const planFiles = Array.isArray(planSpec && planSpec.expectedFiles) ? planSpec.expectedFiles.map((p) => String(p || '')) : [];
+      const selfContained = /\.html?$/i.test(normalizedPath)
+        && planFiles.some((p) => /\.html?$/i.test(p))
+        && !planFiles.some((p) => /\.(css|scss|sass|less|js|mjs|cjs|ts|jsx|tsx)$/i.test(p));
+      const generationHints = buildAgentFileGenerationHints(taskText, normalizedPath, { selfContained });
       const projectState = buildAgentProjectStateContext(toolEvents, planSpec, normalizedPath);
       const template = await loadPromptTemplate('developer_agent_write_file');
       if (template) {

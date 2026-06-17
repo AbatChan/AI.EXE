@@ -20,6 +20,9 @@
 #include <string_view>
 #include <vector>
 
+#include "command_runner.h"
+#include "local_app_server.h"
+#include "run_target.h"
 #include "ui_constants.h"
 #include "web_runtime_bridge.h"
 
@@ -1197,6 +1200,72 @@ bool WorkspaceRevealEntry(const WebRuntimeBridge &runtime,
   return true;
 }
 
+// Runs a Python project in a visible Terminal window using whatever interpreter
+// is on the user's machine — nothing is bundled (matches the no-install scope).
+// Writes a temp .command that prefers python3, falls back to python, and prints
+// an install hint if neither exists, then opens it (Terminal runs .command files).
+bool LaunchPythonConsoleMac(const std::filesystem::path &root,
+                            const std::string &entry_filename,
+                            std::string *err) {
+  auto sh_quote = [](const std::string &s) {
+    // Single-quote for the shell: close, escaped-quote, reopen.
+    std::string out = "'";
+    for (char c : s) {
+      if (c == '\'') out += "'\\''";
+      else out += c;
+    }
+    out += "'";
+    return out;
+  };
+
+  // Run inside a project-local .venv so `pip install` works (a venv is not the
+  // "externally-managed" system Python — no PEP 668 error) and nothing pollutes
+  // the user's machine. requirements.txt (if the project ships one) is installed
+  // into the venv before the entry runs.
+  std::ostringstream script;
+  script << "#!/bin/bash\n"
+         << "cd " << sh_quote(root.string()) << " || exit 1\n"
+         << "PY=\"\"\n"
+         << "if command -v python3 >/dev/null 2>&1; then PY=python3\n"
+         << "elif command -v python >/dev/null 2>&1; then PY=python\n"
+         << "fi\n"
+         << "if [ -z \"$PY\" ]; then\n"
+         << "  echo 'Python is not installed. Install it from https://python.org'\n"
+         << "else\n"
+         << "  if [ ! -d .venv ]; then echo 'Setting up a virtual environment (.venv)...'; \"$PY\" -m venv .venv; fi\n"
+         << "  VPY=.venv/bin/python\n"
+         << "  if [ ! -x \"$VPY\" ]; then VPY=\"$PY\"; fi\n"
+         << "  if [ -f requirements.txt ]; then echo 'Installing dependencies...'; \"$VPY\" -m pip install --quiet --disable-pip-version-check -r requirements.txt; fi\n"
+         << "  \"$VPY\" " << sh_quote(entry_filename) << "\n"
+         << "fi\n"
+         << "echo\n"
+         << "read -n 1 -s -r -p 'Press any key to close this window...'\n";
+
+  NSString *tmpDir = NSTemporaryDirectory();
+  NSString *scriptPath = [tmpDir stringByAppendingPathComponent:
+      [NSString stringWithFormat:@"aiexe-run-%u.command",
+          (unsigned)[[NSProcessInfo processInfo] processIdentifier]]];
+  NSString *contents = [NSString stringWithUTF8String:script.str().c_str()];
+  NSError *writeErr = nil;
+  if (![contents writeToFile:scriptPath
+                  atomically:YES
+                    encoding:NSUTF8StringEncoding
+                       error:&writeErr]) {
+    if (err) *err = "Could not prepare the Python launcher.";
+    return false;
+  }
+  NSFileManager *fm = [NSFileManager defaultManager];
+  [fm setAttributes:@{NSFilePosixPermissions : @(0755)}
+       ofItemAtPath:scriptPath
+              error:nil];
+  NSURL *url = [NSURL fileURLWithPath:scriptPath];
+  if (!url || ![[NSWorkspace sharedWorkspace] openURL:url]) {
+    if (err) *err = "Could not open a Terminal to run the project.";
+    return false;
+  }
+  return true;
+}
+
 std::string StatusToJson(const WebRuntimeStatus &s) {
   std::ostringstream oss;
   oss << "{"
@@ -1780,6 +1849,65 @@ std::string BuildStreamEvent(const std::string &id, bool done,
   } else if (action == "workspaceCloseRoot") {
     ClearWorkspaceRootOverride();
     message = "Project closed.";
+  } else if (action == "runWorkspaceApp") {
+    const std::filesystem::path root = WorkspaceRootOrEmpty();
+    if (root.empty()) {
+      ok = false;
+      message = "No project is open to run.";
+    } else {
+      const RunTarget target = DetectRunTarget(root);
+      if (target.kind == RunTargetKind::kWeb) {
+        std::string url = StartLocalAppServer(root, &op_err);
+        if (url.empty()) {
+          ok = false;
+          message = op_err.empty() ? "Could not start the local app server." : op_err;
+        } else {
+          const std::string rel = target.entry.filename().string();
+          if (rel != "index.html") url += rel;  // base URL already ends with '/'
+          NSURL *appUrl = [NSURL URLWithString:[NSString stringWithUTF8String:url.c_str()]];
+          if (appUrl) {
+            [[NSWorkspace sharedWorkspace] openURL:appUrl];
+          }
+          output = url;
+          message = "App running.";
+        }
+      } else if (target.kind == RunTargetKind::kPython) {
+        const std::string entry = target.entry.filename().string();
+        if (LaunchPythonConsoleMac(root, entry, &op_err)) {
+          output = entry;
+          message = std::string("Running ") + entry + " in Terminal.";
+        } else {
+          ok = false;
+          message = op_err.empty() ? "Could not run the Python project." : op_err;
+        }
+      } else {
+        ok = false;
+        message = "Nothing to run here — add an index.html (web app) or a .py file (Python).";
+      }
+    }
+  } else if (action == "runCommand") {
+    const std::filesystem::path root = WorkspaceRootOrEmpty();
+    const std::string program = ExtractJsonStringField(requestJson, "program");
+    const std::string args_line = ExtractJsonStringField(requestJson, "argsLine");
+    if (root.empty()) {
+      ok = false;
+      message = "No project is open.";
+    } else {
+      std::vector<std::string> args;
+      std::string token;
+      std::istringstream iss(args_line);
+      while (std::getline(iss, token, '\n')) {
+        if (!token.empty()) args.push_back(token);
+      }
+      const CommandRunResult cr = RunProjectCommand(root, program, args, 60);
+      if (!cr.err.empty()) {
+        ok = false;
+        message = cr.err;
+      } else {
+        output = cr.output;
+        message = cr.timed_out ? "timed_out" : ("exit_code=" + std::to_string(cr.exit_code));
+      }
+    }
   } else if (action == "windowMoveBy") {
     if (!_window) {
       ok = false;
