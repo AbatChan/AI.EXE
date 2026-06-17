@@ -167,6 +167,7 @@
       if (isAgentTaskSoftwareProject(lower)) {
         hints.push('Build the complete, working feature the request describes. Match the quality and depth you would produce answering this in a normal chat — do not ship a reduced stub or "first pass".');
         hints.push('Prefer self-contained code with as few external runtime requirements as possible unless the user explicitly requested a stack.');
+        hints.push('Keep embedded sample/mock/demo data SMALL: a handful of SHORT plain-text examples, not long multi-paragraph essays. Do NOT put markdown code fences (```), backticks, or nested template literals inside canned string data — they break JS string/template parsing and bloat the file. Build the real feature logic; mock content is just placeholder.');
       }
       if (/\b(pdf|printable|brochure|whitepaper|white paper|flyer|invoice|resume|cv|certificate|one[- ]?pager)\b/.test(lower)) {
         hints.push('DOCUMENT/PDF request: a real PDF is binary and CANNOT be authored as text — do NOT output LaTeX or a .pdf file. Produce a single SELF-CONTAINED, print-ready HTML document. Put all CSS in one inline <style> block, use clean document styling (readable body text, generous margins, page-friendly headings, @page margins), and add a fixed "Save as PDF" button at the top that calls window.print(). Hide that button in the print output with @media print { .no-print { display: none } }. The user opens the file and clicks Save as PDF (or Ctrl+P) to get a perfect PDF.');
@@ -596,18 +597,11 @@
         // and style every class/ID the HTML and JS actually use, rather than being
         // written blind before the JS exists. README always last so it references
         // real, finished files.
-        const fileWritePriority = (p) => {
-          const n = normalizeWorkspacePath(p || '');
-          if (n === '/README.md') return 5;
-          if (/\.(css|scss|sass|less)$/i.test(n)) return 4;
-          if (/\.(js|mjs|cjs|ts|jsx|tsx)$/i.test(n)) return 3;
-          if (/\.html?$/i.test(n)) return 1;
-          return 2;
-        };
+        // Keep the plan's order; only push README last (stable sort).
         const nextPath = expectedFiles
           .map((path) => normalizeWorkspacePath(path || ''))
           .filter((path) => path && path !== '/src' && !writtenPaths.includes(path))
-          .sort((a, b) => fileWritePriority(a) - fileWritePriority(b))[0] || '';
+          .sort((a, b) => (a === '/README.md' ? 1 : 0) - (b === '/README.md' ? 1 : 0))[0] || '';
         if (nextPath) {
           const lastAttemptForPath = Array.isArray(toolEvents)
             ? [...toolEvents].reverse().find((event) => (
@@ -1263,7 +1257,7 @@
       ));
     }
 
-    function computeAgentChecklistProgress(items, toolEvents) {
+    function computeAgentChecklistProgress(items, toolEvents, planSpec = null) {
       const list = Array.isArray(items) ? items.map((t) => String(t || '').trim()).filter(Boolean) : [];
       const events = Array.isArray(toolEvents) ? toolEvents : [];
       const mutations = events.filter((e) => e && e.ok
@@ -1271,10 +1265,20 @@
       const anyValidationPassed = events.some((e) => e
         && String(e.tool || '').toLowerCase() === 'validate_files' && e.validationPassed === true);
       const haystacks = mutations.map((e) => `${String(e.path || '')} ${String(e.content || '')} ${String(e.observation || '')}`.toLowerCase());
+      // Nothing is "done" until every planned file exists (markup keywords else
+      // falsely credit behavior that lives in an unwritten file).
+      const norm = (p) => `/${String(p || '').replace(/^\/+/, '')}`;
+      const writtenPaths = new Set(mutations.map((e) => norm(e.path)));
+      const plannedFiles = Array.isArray(planSpec && planSpec.expectedFiles)
+        ? planSpec.expectedFiles.map(norm).filter((p) => p && p !== '/' && p !== '/README.md')
+        : [];
+      const allPlannedWritten = plannedFiles.every((p) => writtenPaths.has(p));
       return list.map((text) => {
         const keywords = agentChecklistKeywords(text);
         let done = false;
-        if (keywords.length) {
+        if (!allPlannedWritten) {
+          done = false;  // project is incomplete — never report a criterion as met yet
+        } else if (keywords.length) {
           done = haystacks.some((h) => keywords.some((k) => h.includes(k)));
         } else if (mutations.length > 0 && anyValidationPassed) {
           // Generic criterion (no distinctive keyword) — credited once work shipped.
