@@ -1354,25 +1354,27 @@
               : ' Note: this looks thin for a usable project file; expand it into a real MVP if the request needs more than a stub.';
           }
         }
-        // Never save content that is structurally broken unless it replaces a file
-        // that is already broken (a repair attempt is always allowed through).
+        // Save a fresh file even if it's incomplete — never discard generated work;
+        // the WARNING below + a continuation pass finish it from the saved state.
+        // Only block a structure-breaking EDIT that would corrupt an existing good file.
         const newContentStructureIssue = getStructuralIssueForPath(path, content);
         if (newContentStructureIssue) {
           const priorKnownContent = creatingNewFile ? '' : getLatestKnownContentForPath(toolEvents, path);
           const priorBroken = Boolean(priorKnownContent && getStructuralIssueForPath(path, priorKnownContent));
-          if (!priorBroken) {
-            if (typeof deps.recordDebugTrace === 'function') {
-              const c = String(content || '');
-              deps.recordDebugTrace('agent_write_structural_reject', {
-                path, issue: String(newContentStructureIssue).slice(0, 200),
-                len: String(c.length), fromInline: String(modelSuppliedComplete && content === initialInlineContent),
-                tail: deps.debugPreview(c.slice(-160), 160),
-              }, { path, issue: newContentStructureIssue, len: c.length, tail: c.slice(-300) });
-            }
+          if (typeof deps.recordDebugTrace === 'function') {
+            const c = String(content || '');
+            deps.recordDebugTrace('agent_write_structural_issue', {
+              path, issue: String(newContentStructureIssue).slice(0, 200),
+              len: String(c.length), creatingNewFile: String(creatingNewFile),
+              action: creatingNewFile ? 'saved_incomplete' : (priorBroken ? 'saved_repair' : 'blocked_edit'),
+              tail: deps.debugPreview(c.slice(-160), 160),
+            }, { path, issue: newContentStructureIssue, len: c.length, tail: c.slice(-300) });
+          }
+          if (!creatingNewFile && !priorBroken) {
             return {
               ok: false,
               mutated,
-              observation: `write_file blocked for ${path}: the new content ${newContentStructureIssue}. Nothing was saved. Provide the complete corrected file with all tags/braces paired.`,
+              observation: `write_file blocked for ${path}: the new content ${newContentStructureIssue}. The existing file was kept. Use edit_file for a targeted change instead of rewriting the whole file.`,
             };
           }
         }
@@ -1413,7 +1415,7 @@
             structuralIssue: String(newContentStructureIssue || 'none'),
           }, { path });
         }
-        observation = `write_file ok: ${path} (${content.length} chars)${primaryQualityNote}${docRedirectNote}\nThe saved file matches the generated content exactly — do not re-read ${path} to verify.${newContentStructureIssue ? `\nWARNING: the saved content still fails to parse — it ${newContentStructureIssue}. Fix this before finishing.` : ''}`;
+        observation = `write_file ok: ${path} (${content.length} chars)${primaryQualityNote}${docRedirectNote}\nThe saved file matches the generated content exactly — do not re-read ${path} to verify.${newContentStructureIssue ? `\nWARNING: the saved file looks incomplete — it ${newContentStructureIssue}. Continue it from where it ends by APPENDING the rest with edit_file — do NOT rewrite the whole file.` : ''}`;
         return {
           ok: true,
           mutated,
