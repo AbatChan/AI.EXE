@@ -601,11 +601,18 @@
         ? planSpec.doneCriteria.filter(Boolean)
         : [];
       let lastChecklistSignature = '';
+      let reviewNarrated = false;
       const refreshChecklist = () => {
         if (!checklistItems.length || typeof deps.computeAgentChecklistProgress !== 'function') return null;
-        const progress = deps.computeAgentChecklistProgress(checklistItems, toolEvents);
+        const progress = deps.computeAgentChecklistProgress(checklistItems, toolEvents, planSpec);
         const doneCount = progress.filter((p) => p && p.done).length;
+        const allDone = doneCount >= progress.length && progress.length > 0;
         const signature = progress.map((p) => `${p.done ? '1' : '0'}:${p.text}`).join('|');
+        // Narrate a review beat the moment everything's built, before ticking.
+        if (allDone && !reviewNarrated) {
+          reviewNarrated = true;
+          appendAgentNarration('All files are in place — reviewing the plan to confirm every item is met.');
+        }
         if (signature !== lastChecklistSignature) {
           lastChecklistSignature = signature;
           appendAgentActivity({
@@ -621,7 +628,7 @@
           doneCount,
           total: progress.length,
           remaining: progress.filter((p) => p && !p.done).map((p) => p.text),
-          allDone: doneCount >= progress.length && progress.length > 0,
+          allDone,
         };
       };
       refreshChecklist();
