@@ -207,6 +207,86 @@
       return generateFullAgentFile(prompt, path);
     }
 
+    // Split one multi-file response into {path, content}. Maps each fenced block to
+    // an expected file by a nearby filename label, else by language→extension, else order.
+    function parseMultiFileBlocks(text, expectedFiles) {
+      const expected = (Array.isArray(expectedFiles) ? expectedFiles : []).map((p) => String(p || ''));
+      const baseOf = (p) => String(p || '').replace(/^.*\//, '').toLowerCase();
+      const matchExpected = (name) => {
+        const b = baseOf(name);
+        return expected.find((p) => baseOf(p) === b) || '';
+      };
+      const langExt = { html: 'html', htm: 'html', css: 'css', scss: 'css', javascript: 'js', js: 'js', mjs: 'js', json: 'json', python: 'py', py: 'py', md: 'md', markdown: 'md' };
+      const used = new Set();
+      const out = [];
+      const re = /```([a-z0-9]*)[^\n]*\n([\s\S]*?)```/gi;
+      let m;
+      while ((m = re.exec(String(text || ''))) !== null) {
+        const lang = String(m[1] || '').toLowerCase();
+        const body = String(m[2] || '').replace(/\s+$/, '');
+        if (!body.trim()) continue;
+        const before = String(text || '').slice(Math.max(0, m.index - 200), m.index);
+        const names = before.match(/[\w./-]+\.(?:html?|css|scss|m?js|cjs|json|py|md|txt|svg)/gi) || [];
+        let path = names.length ? matchExpected(names[names.length - 1]) : '';
+        if (!path) {
+          const ext = langExt[lang] || lang;
+          path = expected.find((p) => !used.has(p) && new RegExp(`\\.${ext}$`, 'i').test(p)) || '';
+        }
+        if (!path) path = expected.find((p) => !used.has(p)) || '';
+        if (path && !used.has(path)) { used.add(path); out.push({ path, content: body }); }
+      }
+      return out;
+    }
+
+    // Single-pass project generation: one model call emits ALL files (like chat),
+    // far more reliable than slow, stall-prone per-file generation.
+    async function generateAgentProjectFiles(taskText, planSpec) {
+      const expected = (Array.isArray(planSpec && planSpec.expectedFiles) ? planSpec.expectedFiles : [])
+        .map((p) => String(p || '')).filter((p) => p && p !== '/' && p !== '/src');
+      if (!expected.length) return [];
+      const contract = String(planSpec && planSpec.projectContract ? planSpec.projectContract : '');
+      const prompt = [
+        'Generate a complete, working software project in ONE response.',
+        `TASK:\n${String(taskText || '').trim()}`,
+        contract ? `\nPROJECT CONTRACT:\n${contract}` : '',
+        `\nProduce EVERY one of these files, each COMPLETE and final — no placeholders, no TODOs, no "rest of code" comments, no truncation:`,
+        expected.map((p) => `- ${p}`).join('\n'),
+        '',
+        'FORMAT: for EACH file, write a header line `=== <path> ===` then the full file in a fenced code block. Example:',
+        '=== /index.html ===',
+        '```html',
+        '<!doctype html> ...complete file...',
+        '```',
+        '',
+        'Output the files in the order listed. No commentary before, between, or after the blocks.',
+      ].filter(Boolean).join('\n');
+
+      const budget = Math.max(1, Number(getAgentFileOutputBudget()) || agentFileContentMaxTokens);
+      const beat = () => { if (typeof deps.markAgentToolProgress === 'function') deps.markAgentToolProgress(); };
+      let streamed = '';
+      const remote = await deps.requestSelectedRemoteTextCompletion(prompt, budget, '', {
+        preferStreaming: true,
+        onDelta: (delta) => { beat(); if (delta) streamed += String(delta); },
+      });
+      let raw = (remote && remote.ok && String(remote.output || '').trim()) ? String(remote.output || '') : streamed;
+      if (!raw.trim()) {
+        const external = await requestExternalAgentPlanner(prompt, budget, agentFileGenerationRequestTimeoutMs);
+        if (external && external.ok) raw = String(external.output || '');
+      }
+      if (!raw.trim()) return [];
+      const files = parseMultiFileBlocks(raw, expected).map((f) => ({
+        path: f.path,
+        content: deps.sanitizeAgentGeneratedFileContent(f.content, f.path),
+      })).filter((f) => f.content && f.content.trim());
+      if (typeof deps.recordDebugTrace === 'function') {
+        deps.recordDebugTrace('agent_project_onepass', {
+          expected: String(expected.length), parsed: String(files.length),
+          files: files.map((f) => f.path).join(', '), rawLen: String(raw.length),
+        }, { expected, parsed: files.map((f) => f.path), rawLen: raw.length });
+      }
+      return files;
+    }
+
     async function generateAgentEditFileProgram(taskText, toolEvents, path, currentContent, priorAttempt = '', planSpec = null) {
       const prompt = await deps.buildAgentEditFileContentPrompt(taskText, toolEvents, path, currentContent, priorAttempt, planSpec);
       // Live feedback while the harness GENERATES edit content (only happens when the
@@ -564,6 +644,7 @@
     return {
       requestExternalAgentPlanner,
       generateAgentWriteFileContent,
+      generateAgentProjectFiles,
       generateAgentEditFileProgram,
       generateAgentRewriteExistingFileContent,
       looksTruncatedFileContent,
