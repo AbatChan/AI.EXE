@@ -5037,6 +5037,35 @@ function getOpenAiCompatibleAuthHeader(provider, apiKey, endpointUrl = '') {
 
 // Map raw provider HTTP errors to plain-language messages; raw detail stays in
 // the debug trace via the generic branch only.
+// On a 429, the provider tells us when it's safe to retry. Prefer that over a
+// blind guess. Best-effort: a cross-origin fetch can only read these headers if
+// the provider sends Access-Control-Expose-Headers, so callers must fall back.
+// Returns a wait in ms (capped), or 0 when no usable hint is present.
+function parseRateLimitRetryMs(response) {
+  if (!response || !response.headers || typeof response.headers.get !== 'function') return 0;
+  const cap = 60000;
+  try {
+    const ra = response.headers.get('retry-after');
+    if (ra) {
+      const secs = Number(ra);
+      if (Number.isFinite(secs)) return Math.max(0, Math.min(secs * 1000, cap));
+      const when = Date.parse(ra);
+      if (Number.isFinite(when)) return Math.max(0, Math.min(when - Date.now(), cap));
+    }
+    const reset = response.headers.get('x-ratelimit-reset-requests')
+      || response.headers.get('x-ratelimit-reset-tokens');
+    if (reset) {
+      const n = Number(reset);
+      if (Number.isFinite(n)) {
+        // Either a duration in seconds or an absolute unix-seconds timestamp.
+        const ms = n > 1e6 ? (n * 1000 - Date.now()) : n * 1000;
+        if (ms > 0) return Math.min(ms, cap);
+      }
+    }
+  } catch (_) { }
+  return 0;
+}
+
 function humanizeProviderErrorMessage(label, status, rawBody = '') {
   const name = String(label || 'The AI provider').replace(/\s*Test$/i, '').trim() || 'The AI provider';
   let detail = String(rawBody || '').trim();
@@ -5058,7 +5087,7 @@ function humanizeProviderErrorMessage(label, status, rawBody = '') {
     return `${name} doesn't recognize the selected model. Pick a different model in Settings.`;
   }
   if (code === 429) {
-    return `${name} is rate-limiting requests right now. Wait a moment and try again.`;
+    return `${name} is rate-limiting requests (you've hit your plan's per-minute cap — large models like the 480B coder allow ~20/min). Wait a minute, or switch to a lighter/faster model, then try again.`;
   }
   if (code >= 500) {
     return `${name} is having a temporary problem on its side (${code}). Try again in a bit.`;
@@ -6146,6 +6175,7 @@ async function streamOpenAiCompatibleChatCompletion(provider, prompt, handlers =
       return {
         ok: false,
         httpStatus: response.status,
+        retryAfterMs: response.status === 429 ? parseRateLimitRetryMs(response) : 0,
         message,
       };
     }
@@ -6290,6 +6320,7 @@ async function streamAnthropicChatCompletion(prompt, handlers = {}, options = {}
       return {
         ok: false,
         httpStatus: response.status,
+        retryAfterMs: response.status === 429 ? parseRateLimitRetryMs(response) : 0,
         message: humanizeProviderErrorMessage(def.label, response.status, body || response.statusText || ''),
       };
     }
@@ -6385,9 +6416,10 @@ const agentStepFunctionSchema = {
         thought: { type: 'string', description: 'Optional: one short sentence for the user. Omit if nothing new to say.' },
         action: { type: 'string', enum: ['tool', 'final'] },
         message: { type: 'string', description: 'User-facing message or final answer.' },
-        tool: { type: 'string', enum: ['none', 'new_project', 'list_dir', 'search_files', 'read_file', 'write_file', 'edit_file', 'validate_files', 'mkdir', 'move', 'delete'] },
+        tool: { type: 'string', enum: ['none', 'new_project', 'list_dir', 'search_files', 'read_file', 'write_file', 'edit_file', 'validate_files', 'check_code', 'run_app', 'run_command', 'mkdir', 'move', 'delete'] },
         path: { type: 'string' },
         content: { type: 'string' },
+        command: { type: 'string', description: 'For run_command: the command to run (python/pip/node/npm only), e.g. "python main.py" or "pip install -r requirements.txt".' },
         src_path: { type: 'string' },
         dst_path: { type: 'string' },
         scope: { type: 'string', description: 'Optional path prefix or specific file to restrict search_files to, e.g. /ui or /ui/agent-executor.js.' },
@@ -6436,6 +6468,7 @@ async function requestOpenAiCompatibleTextCompletion(provider, prompt, maxTokens
       return {
         ok: false,
         httpStatus: status,
+        retryAfterMs: status === 429 ? parseRateLimitRetryMs(response) : 0,
         message: humanizeProviderErrorMessage(def && def.label, status, errMsg ? String(errMsg) : ''),
       };
     }
@@ -10151,6 +10184,13 @@ function collapseAllFolders(...args) {
 async function openWorkspaceProject(...args) {
   if (workspaceActions && typeof workspaceActions.openWorkspaceProject === 'function') {
     return workspaceActions.openWorkspaceProject(...args);
+  }
+  return undefined;
+}
+
+async function runWorkspaceApp(...args) {
+  if (workspaceActions && typeof workspaceActions.runWorkspaceApp === 'function') {
+    return workspaceActions.runWorkspaceApp(...args);
   }
   return undefined;
 }

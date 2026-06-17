@@ -24,9 +24,9 @@ option(AI_EXE_UI_REMEMBER_LAYOUT "Remember panel layout in local storage" ON)
 option(AI_EXE_ENABLE_REMOTE_PROVIDERS "Enable hosted/API inference providers in the UI" ON)
 option(AI_EXE_ENABLE_DEV_PLANNER "Enable localhost development planner endpoint in the UI" OFF)
 set(AI_EXE_WEBVIEW2_DIR "" CACHE PATH "Microsoft.Web.WebView2 NuGet package root (provides WebView2.h + WebView2Loader.dll for the Windows GUI). Without it the GUI builds in a non-rendering fallback mode.")
-set(AI_EXE_APP_VERSION "4.0.2" CACHE STRING "AI.EXE app and UI version" FORCE)
-set(AI_EXE_BUILD_TAG "plan-level-doc-redirect" CACHE STRING "Human-readable AI.EXE build tag" FORCE)
-set(AI_EXE_BUILD_LABEL "v${AI_EXE_APP_VERSION} (${AI_EXE_BUILD_TAG} 2026-06-15)")
+set(AI_EXE_APP_VERSION "4.2.0" CACHE STRING "AI.EXE app and UI version" FORCE)
+set(AI_EXE_BUILD_TAG "agent-run-command" CACHE STRING "Human-readable AI.EXE build tag" FORCE)
+set(AI_EXE_BUILD_LABEL "v${AI_EXE_APP_VERSION} (${AI_EXE_BUILD_TAG} 2026-06-16)")
 
 if(AI_EXE_UI_ANIMATIONS_DEFAULT)
   set(AI_EXE_UI_ANIMATIONS_DEFAULT_CPP "true")
@@ -121,6 +121,7 @@ if(WIN32)
     src/web_runtime_bridge.cpp
     src/inference_engine.cpp
     src/process_runner.cpp
+    src/local_app_server.cpp
     src/app.rc
   )
 
@@ -131,7 +132,7 @@ if(WIN32)
     target_include_directories(ai_exe_gui PRIVATE "${AI_EXE_WEBVIEW2_DIR}/build/native/include")
   endif()
   target_compile_definitions(ai_exe_gui PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
-  target_link_libraries(ai_exe_gui PRIVATE shlwapi ole32 advapi32 bcrypt dwmapi)
+  target_link_libraries(ai_exe_gui PRIVATE shlwapi ole32 advapi32 bcrypt dwmapi ws2_32)
 
   add_custom_command(TARGET ai_exe_gui POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:ai_exe_gui>/ui"
@@ -245,6 +246,7 @@ if(APPLE)
   add_executable(ai_exe_gui_mac MACOSX_BUNDLE
     src/gui_main_mac_web.mm
     src/web_runtime_bridge.cpp
+    src/local_app_server.cpp
     ${AI_EXE_RUNTIME_SOURCES}
     ${MAC_UI_HTML}
     ${MAC_UI_CSS}

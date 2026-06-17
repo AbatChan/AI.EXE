@@ -677,6 +677,26 @@
       }
     }
 
+    async function runWorkspaceApp() {
+      deps.closeExplorerMenus();
+      if (!deps.ensureSignedIn()) return;
+      if (!deps.nativeBridge.available()) {
+        window.alert('Native runtime bridge unavailable.');
+        return;
+      }
+      if (!deps.getWorkspaceRootName || !deps.getWorkspaceRootName()) {
+        window.alert('Open a project first, then click Run to launch it.');
+        return;
+      }
+      // Serves the open project over http://127.0.0.1 and opens it in the browser.
+      // file:// breaks ES modules, fetch(), and many APIs ("only the UI shows");
+      // a real http origin makes the generated app actually work.
+      const response = await deps.invokeWorkspaceAction('runWorkspaceApp', {});
+      if (!response || !response.ok) {
+        window.alert((response && response.message) || 'Failed to run the project.');
+      }
+    }
+
     return {
       getWorkspaceCreateParentPath,
       startWorkspaceDraft,
@@ -699,6 +719,7 @@
       collapseAllFolders,
       openWorkspaceProject,
       closeWorkspaceProject,
+      runWorkspaceApp,
       deleteSelectedWorkspaceItems,
     };
   }

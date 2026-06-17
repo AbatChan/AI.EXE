@@ -152,10 +152,11 @@
       return false;
     }
 
-    function buildAgentFileGenerationHints(taskText, path) {
+    function buildAgentFileGenerationHints(taskText, path, options) {
       const normalized = normalizeWorkspacePath(path || '');
       const hints = [];
       const lower = String(taskText || '').toLowerCase();
+      const selfContained = !!(options && options.selfContained);
       if (normalized === '/README.md') {
         hints.push('Describe what the project does.');
         hints.push('Include setup and run instructions.');
@@ -178,15 +179,24 @@
       }
       hints.push('Problem-solving (apply with judgment when something is wrong): read the actual error — its message + file:line is the real failure point; fix THAT, not a guess. Trace to the ROOT cause (where the bad value originates), not the symptom. When two things must agree (markup↔styles↔script, code↔its data, a function↔its caller), make them follow ONE shared contract and fix it consistently on a single side — do not ping-pong edits between files. Make the smallest change that fixes the cause; prefer a guard/normalize at the source over patching every consumer; then verify and stop.');
       if (/\.html?$/i.test(normalized)) {
-        hints.push('Return only HTML markup for this file.');
-        hints.push('Do not output CSS rules as the main body of this file.');
-        hints.push('Do not output JavaScript as the main body of this file.');
-        hints.push('If the project has separate style.css or script.js files, prefer linking them instead of embedding large inline <style> or <script> blocks.');
-        hints.push('Pages are opened directly from disk (file://). Inter-page and asset links must be RELATIVE (menu.html, ./style.css, ../style.css from a subfolder) — root-relative paths like /menu.html resolve to the filesystem root and break.');
-        hints.push('OFFLINE: load JS as classic scripts — <script src="js/app.js"></script> in dependency order. Do NOT use <script type="module"> or import/export anywhere; ES modules do not load from file:// and silently break the whole page. Share code via globals on window.');
-        hints.push('Keep markup semantic and compact. Use reusable classes and stable IDs that CSS and JS can share. IDs must be unique — never leave two copies of a section.');
-        hints.push('If a change replaces an existing structure (e.g. moving inline sections into separate pages), remove the superseded markup and links in the same pass — never leave two competing implementations.');
-        hints.push('Guideline: for UI control icons, prefer clean inline SVG over emoji (emoji render inconsistently and look less polished). Not a hard rule — any consistent icon approach is fine.');
+        if (selfContained) {
+          hints.push('Produce ONE self-contained index.html: put ALL CSS in a single inline <style> in <head>, and ALL JavaScript in a single classic <script> at the end of <body>. A self-contained file always works when double-clicked (file://) — it is the most reliable way to ship a runnable app.');
+          hints.push('Do NOT use <script type="module">, import, or export anywhere — ES modules do not load from file:// and silently break the whole page. Keep the script as one plain classic <script>.');
+          hints.push('Never load local data with fetch() or XMLHttpRequest — under file:// the browser blocks them and the app silently fails. Embed any data (levels, config, JSON, CSV rows, save state) directly as a JavaScript const/object in the script.');
+          hints.push('Keep markup semantic and compact. Use reusable classes and stable IDs that the CSS and JS share. IDs must be unique — never leave two copies of a section.');
+          hints.push('Guideline: for UI control icons, prefer clean inline SVG over emoji (emoji render inconsistently and look less polished). Not a hard rule — any consistent icon approach is fine.');
+        } else {
+          hints.push('Return only HTML markup for this file.');
+          hints.push('Do not output CSS rules as the main body of this file.');
+          hints.push('Do not output JavaScript as the main body of this file.');
+          hints.push('If the project has separate style.css or script.js files, prefer linking them instead of embedding large inline <style> or <script> blocks.');
+          hints.push('Pages are opened directly from disk (file://). Inter-page and asset links must be RELATIVE (menu.html, ./style.css, ../style.css from a subfolder) — root-relative paths like /menu.html resolve to the filesystem root and break.');
+          hints.push('OFFLINE: load JS as classic scripts — <script src="js/app.js"></script> in dependency order. Do NOT use <script type="module"> or import/export anywhere; ES modules do not load from file:// and silently break the whole page. Share code via globals on window.');
+          hints.push('Never load local data with fetch() or XMLHttpRequest — under file:// the browser blocks them and the app silently fails. Embed any data (levels, config, JSON, CSV rows, save state) directly in the script instead.');
+          hints.push('Keep markup semantic and compact. Use reusable classes and stable IDs that CSS and JS can share. IDs must be unique — never leave two copies of a section.');
+          hints.push('If a change replaces an existing structure (e.g. moving inline sections into separate pages), remove the superseded markup and links in the same pass — never leave two competing implementations.');
+          hints.push('Guideline: for UI control icons, prefer clean inline SVG over emoji (emoji render inconsistently and look less polished). Not a hard rule — any consistent icon approach is fine.');
+        }
       }
       if (/\.css$/i.test(normalized)) {
         hints.push('Return only CSS for this file.');
@@ -202,8 +212,17 @@
         hints.push('Return only JavaScript or TypeScript source for this file.');
         hints.push('Do not output HTML, <script> tags, or CSS rules.');
         hints.push('OFFLINE: the page opens directly from disk (file://), where ES modules do NOT load. Do NOT use import/export or <script type="module">. Use plain classic scripts loaded via <script src="..."> in dependency order, and share code by exposing it on window (e.g. window.AppStore = ...). import/export will silently break the whole app offline.');
+        hints.push('Never fetch() or XMLHttpRequest local project files (JSON/CSV/text) — under file:// the browser blocks these requests and they silently fail. Embed the data as a JavaScript const/object in the source instead.');
         hints.push('Keep script focused on core behavior and DOM interactions. Avoid large decorative systems unless required.');
         hints.push('Keep one source of truth per setting: a script default must match the corresponding HTML control\'s min/max/value and the unit the code applies (0–1 vs 0–100, px vs unitless), and must not conflict with a CSS variable default. Drive effects through ONE mechanism (either CSS variables or inline styles), and give interactive effects visible non-zero defaults so the result shows before any control is touched.');
+      }
+      if (/\.py$/i.test(normalized)) {
+        hints.push('Prefer the Python standard library; only use a third-party package (pygame, numpy, requests, flask, etc.) when the task genuinely needs one.');
+        hints.push('Do NOT install packages at runtime from inside the code (no subprocess pip install, no os.system("pip ..."), no "try import except install" blocks). That fails on modern Python with "externally-managed-environment" (PEP 668). If the project needs third-party packages, list them in a requirements.txt file (one package per line) — the Run button installs them into a virtual environment automatically.');
+        hints.push('For Pygame, write `import pygame` as usual but list `pygame-ce` (NOT `pygame`) in requirements.txt — pygame-ce is the drop-in community edition that works on current Python (3.13/3.14); the original pygame package crashes there with a pygame.font circular-import error.');
+      }
+      if (/(^|\/)requirements\.txt$/i.test(normalized)) {
+        hints.push('List exactly the third-party packages this project imports, one per line. No standard-library modules, no version pins unless the task requires a specific version, no comments or prose. For Pygame use `pygame-ce` (drop-in, works on current Python), not `pygame`.');
       }
       return hints;
     }
@@ -299,6 +318,7 @@
       let startLine = 0;
       let endLine = 0;
       let scope = '';
+      let command = '';
 
       if (typeof DOMParser !== 'undefined' && /<decision>/i.test(candidate)) {
         try {
@@ -379,6 +399,7 @@
           srcPath = String(parsed.src_path || parsed.srcPath || '');
           dstPath = String(parsed.dst_path || parsed.dstPath || '');
           content = String(parsed.content || '');
+          command = String(parsed.command || '');
           if (String(parsed.thought || '').trim()) thought = String(parsed.thought).trim();
           if (parsed.offset != null) offset = Number(parsed.offset) || 0;
           if (parsed.start_line != null) startLine = Number(parsed.start_line) || 0;
@@ -406,6 +427,7 @@
         srcPath = readStringValue('src_path') || readStringValue('srcPath');
         dstPath = readStringValue('dst_path') || readStringValue('dstPath');
         if (!String(content || '').trim()) content = readStringValue('content');
+        if (!String(command || '').trim()) command = readStringValue('command');
         const readNumberValue = (key) => {
           const m = jsonish.match(new RegExp(`"${key}"\\s*:\\s*(\\d+)`, 'i'));
           return m ? (Number(m[1]) || 0) : 0;
@@ -419,7 +441,7 @@
         return null;
       }
       const normalizedAction = String(action || '').trim().toLowerCase();
-      const validTools = ['none', 'new_project', 'list_dir', 'search_files', 'read_file', 'write_file', 'edit_file', 'validate_files', 'check_code', 'run_app', 'mkdir', 'move', 'delete'];
+      const validTools = ['none', 'new_project', 'list_dir', 'search_files', 'read_file', 'write_file', 'edit_file', 'validate_files', 'check_code', 'run_app', 'run_command', 'mkdir', 'move', 'delete'];
       let resolvedAction = normalizedAction;
       let resolvedTool = String(tool || '').toLowerCase();
       // Auto-repair: model put tool name in action field (e.g. "action": "read_file")
@@ -453,6 +475,7 @@
         tool: validTools.includes(resolvedTool) ? resolvedTool : 'none',
         path: String(path || '').trim(),
         content: String(content || ''),
+        command: String(command || '').trim(),
         srcPath: String(srcPath || '').trim(),
         dstPath: String(dstPath || '').trim(),
         thought: String(thought || '').trim(),
@@ -1314,7 +1337,10 @@
         return [base ? `/${base.replace(/-/g, '_')}.py` : '/main.py'];
       }
       if (String(primaryStack || '').toLowerCase() === 'web') {
-        return ['/index.html', '/style.css', '/script.js'];
+        // Default to a single self-contained index.html (inline CSS + classic JS) so a
+        // double-clicked file just works (file://). The model can still plan separate
+        // style.css/script.js explicitly when a larger structure is warranted.
+        return ['/index.html'];
       }
       return base ? [`/${base}.txt`] : ['/main.txt'];
     }
@@ -1380,6 +1406,7 @@
         lines.push('Python project contract:');
         lines.push('- Include a complete, runnable script with clear functions and minimal dependencies.');
         lines.push('- Split into additional files only when the plan explicitly includes them or the project needs modules.');
+        lines.push('- If the code imports any third-party package (e.g. pygame, numpy, requests), add a requirements.txt listing them (one per line) and do NOT pip-install at runtime — the Run button installs requirements.txt into a virtual environment.');
       }
       if (files.includes('/README.md')) {
         lines.push('README: project purpose, local run instructions, and the actual file names.');
@@ -1595,11 +1622,12 @@
         expectedFiles = buildFallbackExpectedFiles(taskKind, primaryStack, projectName || deriveProjectNameFromTask(taskText));
       }
       if (taskKind === 'project' && !singleHtmlFileProject && !simpleSingleFileProject && (primaryStack === 'web' || looksLikeWebProjectTask)) {
-        ['/index.html', '/style.css', '/script.js'].forEach((path) => {
-          if (!expectedFiles.includes(path) && !expectedFiles.some((item) => new RegExp(`\\.${path.split('.').pop()}$`, 'i').test(item))) {
-            expectedFiles.push(path);
-          }
-        });
+        // Ensure the project has an HTML entry point. Default is a single self-contained
+        // index.html; only honor separate style.css/script.js when the model planned them
+        // (so a multi-file structure is opt-in, not forced — single files run from file://
+        // most reliably). If the model planned css/js but no html, add index.html to host them.
+        const hasHtml = expectedFiles.some((item) => /\.html?$/i.test(item));
+        if (!hasHtml) expectedFiles.unshift('/index.html');
       }
       if (taskKind === 'project' && needsReadme && !expectedFiles.includes('/README.md')) {
         expectedFiles.push('/README.md');

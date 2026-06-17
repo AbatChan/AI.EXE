@@ -31,6 +31,9 @@
 #include <thread>
 #include <vector>
 
+#include "command_runner.h"
+#include "local_app_server.h"
+#include "run_target.h"
 #include "ui_constants.h"
 #include "web_runtime_bridge.h"
 
@@ -927,6 +930,66 @@ bool WorkspaceRevealEntry(const WebRuntimeBridge &runtime,
   return true;
 }
 
+// Runs a Python project in a console window using whatever interpreter is on
+// the user's machine — nothing is bundled (matches the no-install scope). Writes
+// a temp .bat that prefers `python`, falls back to the `py` launcher, and prints
+// an install hint if neither exists, then opens it (a console runs .bat files).
+bool LaunchPythonConsoleWin(const std::filesystem::path &root,
+                            const std::string &entry_filename,
+                            std::string *err) {
+  // Run inside a project-local .venv so `pip install` works without touching the
+  // system Python, and install requirements.txt (if present) before the entry.
+  // `where` picks the interpreter; the chosen one is used for venv + run.
+  std::ostringstream bat;
+  bat << "@echo off\r\n"
+      << "cd /d \"" << root.string() << "\"\r\n"
+      << "set \"PY=\"\r\n"
+      << "where python >nul 2>nul && set \"PY=python\"\r\n"
+      << "if not defined PY (where py >nul 2>nul && set \"PY=py\")\r\n"
+      << "if not defined PY (\r\n"
+      << "  echo Python is not installed. Install it from https://python.org\r\n"
+      << "  goto end\r\n"
+      << ")\r\n"
+      << "if not exist \".venv\\Scripts\\python.exe\" (\r\n"
+      << "  echo Setting up a virtual environment ^(.venv^)...\r\n"
+      << "  %PY% -m venv .venv\r\n"
+      << ")\r\n"
+      << "set \"VPY=.venv\\Scripts\\python.exe\"\r\n"
+      << "if not exist \"%VPY%\" set \"VPY=%PY%\"\r\n"
+      << "if exist requirements.txt (\r\n"
+      << "  echo Installing dependencies...\r\n"
+      << "  \"%VPY%\" -m pip install --quiet --disable-pip-version-check -r requirements.txt\r\n"
+      << ")\r\n"
+      << "\"%VPY%\" \"" << entry_filename << "\"\r\n"
+      << ":end\r\n"
+      << "echo.\r\n"
+      << "pause\r\n";
+
+  wchar_t temp_dir[MAX_PATH] = {0};
+  if (GetTempPathW(MAX_PATH, temp_dir) == 0) {
+    if (err) *err = "Could not locate a temp folder for the launcher.";
+    return false;
+  }
+  std::wstring bat_path = std::wstring(temp_dir) + L"aiexe-run-" +
+                          std::to_wstring(GetCurrentProcessId()) + L".bat";
+  std::ofstream out(bat_path, std::ios::binary | std::ios::trunc);
+  if (!out) {
+    if (err) *err = "Could not prepare the Python launcher.";
+    return false;
+  }
+  const std::string text = bat.str();
+  out.write(text.data(), static_cast<std::streamsize>(text.size()));
+  out.close();
+
+  HINSTANCE result = ShellExecuteW(nullptr, L"open", bat_path.c_str(), nullptr,
+                                   root.wstring().c_str(), SW_SHOWNORMAL);
+  if (reinterpret_cast<INT_PTR>(result) <= 32) {
+    if (err) *err = "Could not open a console to run the project.";
+    return false;
+  }
+  return true;
+}
+
 std::string StatusToJson(const WebRuntimeStatus &s) {
   std::ostringstream oss;
   oss << "{"
@@ -1603,6 +1666,64 @@ private:
     } else if (action == "workspaceCloseRoot") {
       ClearWorkspaceRootOverride();
       message = "Project closed.";
+    } else if (action == "runWorkspaceApp") {
+      const std::filesystem::path root = WorkspaceRootOrEmpty();
+      if (root.empty()) {
+        ok = false;
+        message = "No project is open to run.";
+      } else {
+        const RunTarget target = DetectRunTarget(root);
+        if (target.kind == RunTargetKind::kWeb) {
+          std::string url = StartLocalAppServer(root, &op_err);
+          if (url.empty()) {
+            ok = false;
+            message = op_err.empty() ? "Could not start the local app server." : op_err;
+          } else {
+            const std::string rel = target.entry.filename().string();
+            if (rel != "index.html") url += rel;  // base URL already ends with '/'
+            std::wstring wurl(url.begin(), url.end());
+            ShellExecuteW(nullptr, L"open", wurl.c_str(), nullptr, nullptr,
+                          SW_SHOWNORMAL);
+            output = url;
+            message = "App running.";
+          }
+        } else if (target.kind == RunTargetKind::kPython) {
+          const std::string entry = target.entry.filename().string();
+          if (LaunchPythonConsoleWin(root, entry, &op_err)) {
+            output = entry;
+            message = std::string("Running ") + entry + " in a console.";
+          } else {
+            ok = false;
+            message = op_err.empty() ? "Could not run the Python project." : op_err;
+          }
+        } else {
+          ok = false;
+          message = "Nothing to run here — add an index.html (web app) or a .py file (Python).";
+        }
+      }
+    } else if (action == "runCommand") {
+      const std::filesystem::path root = WorkspaceRootOrEmpty();
+      const std::string program = ExtractJsonStringField(request_json, "program");
+      const std::string args_line = ExtractJsonStringField(request_json, "argsLine");
+      if (root.empty()) {
+        ok = false;
+        message = "No project is open.";
+      } else {
+        std::vector<std::string> args;
+        std::string token;
+        std::istringstream iss(args_line);
+        while (std::getline(iss, token, '\n')) {
+          if (!token.empty()) args.push_back(token);
+        }
+        const CommandRunResult cr = RunProjectCommand(root, program, args, 60);
+        if (!cr.err.empty()) {
+          ok = false;
+          message = cr.err;
+        } else {
+          output = cr.output;
+          message = cr.timed_out ? "timed_out" : ("exit_code=" + std::to_string(cr.exit_code));
+        }
+      }
     } else if (action == "applyUpdate") {
       const std::string url = ExtractJsonStringField(request_json, "url");
       if (url.empty()) {
