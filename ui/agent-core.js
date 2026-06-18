@@ -1538,14 +1538,6 @@
       if (taskKind === 'edit' && isWorkspaceEmpty) {
         taskKind = 'project';
       }
-      // A pasted runtime/console error or stack trace in an open workspace is a FIX
-      // request, not analysis — the planner model often labels it 'analysis' and the
-      // agent then "identifies the cause" and finalizes WITHOUT fixing. Force edit so
-      // it must mutate (no-phantom-finish then requires a real change).
-      const looksLikePastedError = /\b(?:uncaught|reference\s?error|type\s?error|syntax\s?error|range\s?error|is not defined|is not a function|cannot read (?:propert|of)|unexpected token|stack trace)\b|\bat\s+\S+:\d+:\d+/i.test(String(taskText || ''));
-      if (taskKind === 'analysis' && looksLikePastedError && hasOpenWorkspaceContext() && !isWorkspaceEmpty) {
-        taskKind = 'edit';
-      }
       // The user explicitly approved creating a new project at preflight. Force
       // project scope BEFORE the derived fields (expectedFiles, finalRequiresRealFiles)
       // are computed, so the plan is coherent — not just a relabelled edit/analysis
