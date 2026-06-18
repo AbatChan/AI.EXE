@@ -595,6 +595,12 @@
       if (!planActivity && planSpec && planSpec.summary) {
         appendAgentNarration(planSpec.summary);
       }
+      // Surface a multi-phase build plan so the user knows it's staged and can
+      // Continue between phases (phase 1 is a runnable core; later phases extend it).
+      const agentPhases = Array.isArray(planSpec && planSpec.phases) ? planSpec.phases.filter(Boolean) : [];
+      if (agentPhases.length > 1) {
+        appendAgentNarration(`Building in ${agentPhases.length} phases — phase 1 is a runnable version, then press Continue for each next phase:\n${agentPhases.map((p, i) => `  ${i + 1}. ${p}`).join('\n')}`);
+      }
 
       // Harness-driven checklist from planSpec.doneCriteria (marked done mechanically).
       const checklistItems = Array.isArray(planSpec && planSpec.doneCriteria)
