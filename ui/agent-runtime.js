@@ -203,7 +203,14 @@
         // REGENERATE from the top. Appending that duplicates the file ("starts
         // over"). Detect a from-the-top restart and keep the better single copy.
         const norm = (s) => String(s || '').replace(/^```[a-z0-9]*\s*/i, '').trimStart();
-        const isRestart = norm(next.output).slice(0, 120) === norm(raw).slice(0, 120);
+        // Strip leading fences + comment lines, then check for a file-START token —
+        // a genuine continuation is a mid-file fragment, so if the chunk begins a
+        // whole new file the model regenerated (often with a different header that
+        // an exact prefix match misses) → keep the better copy, don't append a dupe.
+        const stripLead = (s) => String(s || '').replace(/^```[a-z0-9]*\s*/i, '')
+          .replace(/^(?:\s*\/\/[^\n]*\n|\s*\/\*[\s\S]*?\*\/\s*|\s*<!--[\s\S]*?-->\s*)+/, '').trimStart();
+        const isFreshFile = /^(?:['"]use strict['"]|;?\(function\b|<!doctype|<html[\s>]|:root\b|import\s|@import\s)/i.test(stripLead(next.output));
+        const isRestart = isFreshFile || norm(next.output).slice(0, 120) === norm(raw).slice(0, 120);
         if (isRestart) {
           const regenLonger = next.output.length >= raw.length;
           passTrace(guard, { reason, beforeLen: before, restart: true, nextChunkLen: next.output.length, kept: regenLonger ? 'regenerated' : 'original', nextTruncated: Boolean(next.truncated) });
