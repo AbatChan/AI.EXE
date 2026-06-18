@@ -9605,6 +9605,20 @@ const agentRuntime = window.AIExeAgentRuntime && typeof window.AIExeAgentRuntime
     markAgentToolProgress,
     updateAgentStreamingFile,
     clearAgentStreamingFile,
+    // Persist a file to disk mid-generation so it's created + visible in the
+    // workspace and progress isn't lost if generation stops.
+    persistAgentFile: async (path, content) => {
+      try {
+        const p = normalizeWorkspacePath(path || '');
+        if (!p || p === '/') return;
+        const parent = parentWorkspacePath(p);
+        if (parent && parent !== '/' && parent !== '.') await invokeWorkspaceAction('workspaceMkdir', { path: parent });
+        const res = await invokeWorkspaceAction('workspaceWriteFile', { path: p, content: String(content || '') });
+        if (res && res.ok) {
+          upsertWorkspaceTreeEntry({ kind: 'file', path: p, name: workspaceBaseName(p), sizeBytes: estimateTextBytes(String(content || '')), updatedAt: nowTs(), optimisticUntil: nowTs() + 5000 });
+        }
+      } catch (_) { }
+    },
     nativeBridge,
     normalizeWorkspacePath,
     deriveProjectNameFromTask,
