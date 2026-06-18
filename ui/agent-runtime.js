@@ -183,6 +183,12 @@
         }, { path: String(path || ''), pass, ...info });
       };
       passTrace(0, { len: raw.length, truncatedSignal: Boolean(first.truncated), looksTruncated: looksTruncatedFileContent(raw, path), tail: raw.slice(-120) });
+      // Persist after the first pass so the file is created + visible in the
+      // workspace and the partial isn't lost if generation stops.
+      const persistPartial = (text) => {
+        if (typeof deps.persistAgentFile === 'function') deps.persistAgentFile(path, deps.sanitizeAgentGeneratedFileContent(text, path));
+      };
+      persistPartial(raw);
       // Append until whole instead of regenerating from scratch on truncation.
       while (guard < 6 && (wasTruncated || looksTruncatedFileContent(raw, path))) {
         guard += 1;
@@ -204,10 +210,12 @@
           if (!regenLonger) break;            // restart wasn't better — stop, don't append a duplicate
           raw = next.output;                  // keep the (longer) regeneration; while-cond re-checks completeness
           wasTruncated = next.truncated;
+          persistPartial(raw);
           continue;
         }
         raw = stitchFileContinuation(raw, next.output);
         wasTruncated = next.truncated;
+        persistPartial(raw);
         passTrace(guard, { reason, beforeLen: before, addedLen: raw.length - before, nextChunkLen: next.output.length, nextTruncated: Boolean(next.truncated), tail: raw.slice(-120) });
         if (raw.length <= before) break;
       }
