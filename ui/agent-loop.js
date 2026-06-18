@@ -1236,9 +1236,28 @@
             continue;
           }
         }
+        // Size of the last successful write for a path (from writtenContent or the
+        // "(N chars)" observation), so we can tell a stub from a complete file.
+        const lastWriteCharsFor = (p) => {
+          if (!Array.isArray(toolEvents)) return -1;
+          for (let i = toolEvents.length - 1; i >= 0; i -= 1) {
+            const e = toolEvents[i];
+            if (e && e.ok && String(e.tool || '').toLowerCase() === 'write_file' && deps.normalizeWorkspacePath(e.path || '') === p) {
+              if (typeof e.writtenContent === 'string') return e.writtenContent.length;
+              const m = String(e.observation || '').match(/\((\d+)\s*chars\)/);
+              return m ? Number(m[1]) : -1;
+            }
+          }
+          return -1;
+        };
         if (decision.action === 'tool' && String(decision.tool || '').toLowerCase() === 'write_file') {
           const writePath = deps.normalizeWorkspacePath(decision.path || '');
-          if (writePath && lastWriteWithoutFailureSince(writePath)) {
+          // Allow rewriting a tiny STUB with substantially more content — that's a
+          // legitimate expansion (e.g. a 1-line README), not a polish loop.
+          const savedLen = lastWriteCharsFor(writePath);
+          const newLen = String(decision.content || '').length;
+          const expandingStub = savedLen >= 0 && savedLen < 200 && newLen > Math.max(200, savedLen * 2);
+          if (writePath && !expandingStub && lastWriteWithoutFailureSince(writePath)) {
             recordDebugTrace('agent_repeat_rewrite_blocked', {
               chatId: String(chatId || ''), step: String(step), path: writePath,
             }, { chatId: String(chatId || ''), step, path: writePath });
