@@ -597,15 +597,16 @@
         // and style every class/ID the HTML and JS actually use, rather than being
         // written blind before the JS exists. README always last so it references
         // real, finished files.
-        // Fresh multi-file project: generate ALL files in one pass (like chat) — far
-        // more reliable than slow, stall-prone per-file generation. Only when nothing
-        // is written yet and no generate_project was already attempted.
+        // Single-pass project generation (generate_project) is kept but OFF by default
+        // so we generate per-file again (visible progress + investigate the per-file path).
+        // Flip ENABLE_SINGLE_PASS_PROJECT_GEN to true to use the one-call path.
+        const ENABLE_SINGLE_PASS_PROJECT_GEN = false;
         const codeFilesToCreate = expectedFiles
           .map((path) => normalizeWorkspacePath(path || ''))
           .filter((path) => path && path !== '/src' && path !== '/README.md' && !writtenPaths.includes(path));
         const onePassAlreadyTried = Array.isArray(toolEvents)
           && toolEvents.some((e) => e && String(e.tool || '').toLowerCase() === 'generate_project');
-        if (codeFilesToCreate.length >= 2 && writtenPaths.length === 0 && !onePassAlreadyTried) {
+        if (ENABLE_SINGLE_PASS_PROJECT_GEN && codeFilesToCreate.length >= 2 && writtenPaths.length === 0 && !onePassAlreadyTried) {
           return {
             action: 'tool',
             tool: 'generate_project',
