@@ -103,19 +103,43 @@
       if (typeof deps.markAgentToolProgress === 'function') deps.markAgentToolProgress();
     };
 
-    async function runRawAgentFileInference(prompt, onPartial = null) {
+    async function runRawAgentFileInference(prompt, onPartial = null, label = '') {
       const budget = Math.max(1, Number(getAgentFileOutputBudget()) || agentFileContentMaxTokens);
+      const startedAt = Date.now();
       let streamed = '';
+      let deltaCount = 0;
+      let firstDeltaMs = -1;
+      let lastDeltaAt = startedAt;
+      let maxGapMs = 0;
+      const logFileInfer = (route, output, truncated) => {
+        if (typeof deps.recordDebugTrace !== 'function') return;
+        deps.recordDebugTrace('agent_file_inference', {
+          label: String(label || ''), route, promptChars: String(String(prompt || '').length),
+          budget: String(budget), deltas: String(deltaCount),
+          firstDeltaMs: String(firstDeltaMs), maxGapMs: String(maxGapMs),
+          totalMs: String(Date.now() - startedAt), outChars: String(String(output || '').length),
+          truncated: String(Boolean(truncated)),
+        }, { label, route, deltaCount, firstDeltaMs, maxGapMs, totalMs: Date.now() - startedAt, outChars: String(output || '').length, truncated: Boolean(truncated) });
+      };
       const remote = await deps.requestSelectedRemoteTextCompletion(prompt, budget, '', {
         preferStreaming: true,
         onDelta: (delta) => {
           beatToolProgress();
+          if (delta) {
+            const now = Date.now();
+            if (firstDeltaMs < 0) firstDeltaMs = now - startedAt;
+            maxGapMs = Math.max(maxGapMs, now - lastDeltaAt);
+            lastDeltaAt = now;
+            deltaCount += 1;
+          }
           if (typeof onPartial === 'function' && delta) { streamed += String(delta); onPartial(streamed); }
         },
       });
       if (remote && remote.ok && String(remote.output || '').trim()) {
+        logFileInfer('remote', remote.output, remote.truncated);
         return { output: String(remote.output || ''), truncated: Boolean(remote.truncated) };
       }
+      logFileInfer('remote_empty', '', remote && remote.truncated);
       const external = await requestExternalAgentPlanner(prompt, budget, agentFileGenerationRequestTimeoutMs);
       if (external && external.ok && String(external.output || '').trim()) {
         return { output: String(external.output || ''), truncated: Boolean(external.truncated) };
@@ -142,7 +166,7 @@
         if (typeof deps.updateAgentStreamingFile === 'function') deps.updateAgentStreamingFile(path, String(text || ''));
       };
       beat();
-      const first = await runRawAgentFileInference(prompt, emitPartial);
+      const first = await runRawAgentFileInference(prompt, emitPartial, `${path} (initial)`);
       beat();
       let raw = first.output;
       if (!raw) {
@@ -165,7 +189,7 @@
         const reason = wasTruncated ? 'provider_truncated' : 'looks_truncated';
         const continuationPrompt = `${prompt}\n\nPARTIAL_OUTPUT_ALREADY_SAVED (do NOT repeat any of this):\n${raw.slice(-1600)}\n\nContinue the file from exactly where it stopped. Output ONLY the remaining content — no repetition, no commentary, no code fences.`;
         const carried = raw;
-        const next = await runRawAgentFileInference(continuationPrompt, (partial) => emitPartial(stitchFileContinuation(carried, partial)));
+        const next = await runRawAgentFileInference(continuationPrompt, (partial) => emitPartial(stitchFileContinuation(carried, partial)), `${path} (continue ${guard})`);
         beat();
         if (!next.output || !next.output.trim()) { passTrace(guard, { reason, added: 0, note: 'empty_continuation' }); break; }
         const before = raw.length;
