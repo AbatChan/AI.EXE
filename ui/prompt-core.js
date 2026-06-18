@@ -131,7 +131,7 @@
       developer_agent_plan: [
         'Return exactly one JSON object. No prose. No markdown.',
         'ENVIRONMENT: You are OFFLINE. Built apps run only by opening a file in a browser — vanilla HTML/CSS/JS + localStorage. There is no server, npm/build step, framework (React/Next/Vue), hosted database, or internet. primary_stack must be "python", "web", or "generic". If the request needs an online/framework/server/database stack, plan the closest fully-offline vanilla version instead (the agent will explain the limitation to the user at execution time).',
-        'Keys: task_kind, project_name, primary_stack, needs_readme, needs_run_instructions, final_requires_real_files, expected_files, affected_files, files_to_inspect, done_criteria, validation, summary',
+        'Keys: task_kind, project_name, primary_stack, needs_readme, needs_run_instructions, final_requires_real_files, expected_files, affected_files, files_to_inspect, done_criteria, validation, summary, phases',
         'task_kind: "project" | "edit" | "analysis"',
         'primary_stack: "python" | "web" | "generic"',
         'needs_readme: "yes" | "no"',
@@ -143,6 +143,7 @@
         "done_criteria: the user-facing plan checklist (also injected to guide the agent) — 3 to 5 plain-language outcomes in the user's terms. Group related capabilities into ONE item; never split things that belong together.",
         'validation: short pipe-delimited validation steps such as validate_files, syntax check, browser check, or manual review',
         'summary: one short natural sentence the user can read directly before execution starts',
+        'phases: empty string for a small/medium project; for a LARGE or complex project, 2-4 pipe-delimited build phases where phase 1 produces a complete RUNNABLE minimal version and each later phase adds a coherent set of features. Phase 1 must stand on its own; later phases build on it via Continue.',
         'Rules:',
         '- Infer the task dynamically from the user request and chat history.',
         '- If a workspace is already open and the request can reasonably apply to that current project, prefer task_kind="edit" or task_kind="analysis" over task_kind="project".',
