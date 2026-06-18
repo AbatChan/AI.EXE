@@ -1569,6 +1569,7 @@
       let affectedFiles = parseAgentPlanPathList(parsed && parsed.affected_files ? parsed.affected_files : '').map(mapBinaryDocPath);
       let filesToInspect = parseAgentPlanPathList(parsed && parsed.files_to_inspect ? parsed.files_to_inspect : '');
       const doneCriteria = parseAgentPlanTextList(parsed && parsed.done_criteria ? parsed.done_criteria : '', 5); // cap 5
+      const phases = parseAgentPlanTextList(parsed && parsed.phases ? parsed.phases : '', 4); // cap 4
       const validationSteps = parseAgentPlanTextList(parsed && parsed.validation ? parsed.validation : '', 6);
       const looksLikeWebProjectTask = taskKind === 'project' && (WEB_TASK_HINT_REGEX.test(lower) || /\bcalculator\b/.test(lower));
       const singleHtmlFileProject = taskKind === 'project' && isSingleHtmlFileRequest(taskText);
@@ -1669,6 +1670,7 @@
         affectedFiles,
         filesToInspect,
         doneCriteria,
+        phases,
         validationSteps,
         projectContract: buildAgentProjectContract(taskText, taskKind, primaryStack, expectedFiles),
         summary: parsedSummary,
@@ -1738,6 +1740,7 @@
         affectedFiles: taskKind === 'edit' ? [] : fallbackExpectedFiles.slice(),
         filesToInspect: taskKind === 'edit' ? fallbackExpectedFiles.slice() : [],
         doneCriteria: [],
+        phases: [],
         validationSteps: taskKind === 'project' ? ['validate_files'] : [],
         projectContract: buildAgentProjectContract(taskText, taskKind, primaryStack, fallbackExpectedFiles),
         summary: '',
