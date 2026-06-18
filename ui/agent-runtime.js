@@ -193,6 +193,19 @@
         beat();
         if (!next.output || !next.output.trim()) { passTrace(guard, { reason, added: 0, note: 'empty_continuation' }); break; }
         const before = raw.length;
+        // Some models (deepseek) ignore "continue from where it stopped" and
+        // REGENERATE from the top. Appending that duplicates the file ("starts
+        // over"). Detect a from-the-top restart and keep the better single copy.
+        const norm = (s) => String(s || '').replace(/^```[a-z0-9]*\s*/i, '').trimStart();
+        const isRestart = norm(next.output).slice(0, 120) === norm(raw).slice(0, 120);
+        if (isRestart) {
+          const regenLonger = next.output.length >= raw.length;
+          passTrace(guard, { reason, beforeLen: before, restart: true, nextChunkLen: next.output.length, kept: regenLonger ? 'regenerated' : 'original', nextTruncated: Boolean(next.truncated) });
+          if (!regenLonger) break;            // restart wasn't better — stop, don't append a duplicate
+          raw = next.output;                  // keep the (longer) regeneration; while-cond re-checks completeness
+          wasTruncated = next.truncated;
+          continue;
+        }
         raw = stitchFileContinuation(raw, next.output);
         wasTruncated = next.truncated;
         passTrace(guard, { reason, beforeLen: before, addedLen: raw.length - before, nextChunkLen: next.output.length, nextTruncated: Boolean(next.truncated), tail: raw.slice(-120) });
