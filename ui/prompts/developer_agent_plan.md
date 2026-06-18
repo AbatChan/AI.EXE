@@ -20,6 +20,7 @@ Rules:
 - For requests to create, build, make, or start something from scratch, usually use task_kind="project".
 - For requests to explain, review, inspect, compare, verify, correlate, or answer how to use existing code, prefer task_kind="analysis".
 - For requests to modify existing files, use task_kind="edit".
+- A reported error, pasted stack trace, console output, or "it's broken / not working" is a request to FIX it: use task_kind="edit" and plan the actual code change — never task_kind="analysis". Analysis is only for read-only questions where the user explicitly wants understanding, not a fix.
 - If the user asks to inspect first and then make exactly one grounded improvement, do not force an edit when the available files do not show a clear bug, misleading behavior, or documentation issue. In that case prefer task_kind="analysis".
 - Requests to document, clarify, onboard, or make an existing project easier for another developer to understand usually belong to task_kind="edit", not task_kind="project".
 - If the requested operation targets the workspace root itself and the tools do not support it, do not plan around fake helper files or metadata files. Prefer an explanatory completion instead.
