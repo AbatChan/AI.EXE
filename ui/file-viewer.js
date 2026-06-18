@@ -368,16 +368,22 @@
         cm.setValue(tab.content || '');
         setSuppressFileViewerEditorChange(false);
       });
-      if (window.AIExeCodeMirror && surface) surface.classList.add('cm-active');
-      if (surface) surface.classList.toggle('no-highlight', !tab.highlightEnabled);
-      if (editor && editor.value !== String(tab.content || '')) editor.value = String(tab.content || '');
-      renderFileViewerLineNumbers(tab.content || '');
-      if (tab.highlightEnabled) {
-        renderFileViewerHighlight(tab.content || '', tab.language || inferFileViewerLanguage(tab.path));
-      } else if (codeEl) {
-        codeEl.textContent = '';
+      // CodeMirror virtualizes + highlights itself. When it's the renderer, skip the
+      // legacy full-file highlight overlay + manual line-numbers entirely — rendering
+      // them into hidden DOM is the main lag on large files.
+      const cmRenders = !!window.AIExeCodeMirror;
+      if (cmRenders && surface) surface.classList.add('cm-active');
+      if (!cmRenders) {
+        if (surface) surface.classList.toggle('no-highlight', !tab.highlightEnabled);
+        if (editor && editor.value !== String(tab.content || '')) editor.value = String(tab.content || '');
+        renderFileViewerLineNumbers(tab.content || '');
+        if (tab.highlightEnabled) {
+          renderFileViewerHighlight(tab.content || '', tab.language || inferFileViewerLanguage(tab.path));
+        } else if (codeEl) {
+          codeEl.textContent = '';
+        }
+        syncFileViewerScroll();
       }
-      syncFileViewerScroll();
       resetFileViewerSearchState();
       const state = getFileViewerSearchState();
       if (search && !search.classList.contains('hidden') && state.query) updateFileViewerSearch();
@@ -395,8 +401,10 @@
         cm.setValue(tab.content);
         setSuppressFileViewerEditorChange(false);
       }
-      renderFileViewerLineNumbers(tab.content);
-      if (tab.highlightEnabled) renderFileViewerHighlight(tab.content, tab.language || inferFileViewerLanguage(tab.path));
+      if (!window.AIExeCodeMirror) {
+        renderFileViewerLineNumbers(tab.content);
+        if (tab.highlightEnabled) renderFileViewerHighlight(tab.content, tab.language || inferFileViewerLanguage(tab.path));
+      }
       renderTabBar();
       syncFileViewerScroll();
       if (search && !search.classList.contains('hidden') && getFileViewerSearchState().query) updateFileViewerSearch();
