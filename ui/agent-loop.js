@@ -2197,6 +2197,9 @@
               chatId: String(chatId || ''),
               step: String(step),
               autoFinalized: 'true',
+              planSource: String(planSpec && planSpec._planSource || 'model'),
+              planRaw: deps.debugPreview(String(planSpec && planSpec._planRaw || ''), 280),
+              planFiles: deps.debugPreview((planSpec && Array.isArray(planSpec.expectedFiles) ? planSpec.expectedFiles.join(' | ') : ''), 160),
               finalPreview: deps.debugPreview(finalText, 260),
             }, {
               chatId: String(chatId || ''),
