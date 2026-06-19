@@ -799,6 +799,12 @@
         if (fb && typeof fb === 'object') {
           fb._planSource = res && res.timedOut ? 'fallback:timeout' : 'fallback:infer_fail';
           fb._planRaw = String((res && res.message) || '').slice(0, 300);
+          // Hard provider failure (out of credits / bad key / forbidden): the run
+          // must NOT proceed with a degraded plan and claim success — flag it so the
+          // loop can stop and show the user the real reason.
+          if (res && (res.hardFail || [401, 402, 403].includes(Number(res.httpStatus)))) {
+            fb._planHardError = String(res.message || '').trim() || 'The inference provider rejected the request.';
+          }
         }
         return fb;
       }
