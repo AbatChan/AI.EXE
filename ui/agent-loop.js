@@ -662,11 +662,8 @@
           title: String(active.title || ''),
           tasks: (Array.isArray(active.tasks) ? active.tasks : []).filter((t) => t && !t.done).map((t) => t.text),
         };
-        if (filePhases && activeIndex > 0) {
-          appendAgentNarration(`Continuing — Phase ${activeIndex + 1} of ${phases.length}: ${active.title}.`);
-        } else {
-          appendAgentNarration(`Building in ${phases.length} phases — phase 1 is a runnable version, then press Continue for each next phase:\n${phases.map((p, i) => `  ${i + 1}. ${p.title}`).join('\n')}`);
-        }
+        // No phase-plan narration here — the pinned phase tracker UI already shows
+        // the phases, the active one, and per-phase sub-tasks.
         if (typeof deps.setAgentPhaseTracker === 'function') {
           deps.setAgentPhaseTracker({
             chatId,
