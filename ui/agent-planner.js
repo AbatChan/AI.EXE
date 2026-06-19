@@ -807,14 +807,28 @@
         parsed = JSON.parse(String(res.output || '').trim());
       } catch (_) {
         const raw = String(res.output || '');
-        const start = raw.indexOf('{');
-        const end = raw.lastIndexOf('}');
-        if (start >= 0 && end > start) {
-          try {
-            parsed = JSON.parse(raw.slice(start, end + 1));
-          } catch (_) {
-            parsed = null;
+        // first{..last} breaks when the model wraps the JSON in prose/reasoning that
+        // itself contains braces. Scan from EACH '{' for a string-aware balanced
+        // object and parse the first one that succeeds — robust to fences, a prose
+        // preamble, and trailing commentary deepseek tends to add.
+        const tryBalancedFrom = (s, from) => {
+          let depth = 0; let inStr = false; let esc = false;
+          for (let i = from; i < s.length; i += 1) {
+            const c = s[i];
+            if (inStr) {
+              if (esc) esc = false; else if (c === '\\') esc = true; else if (c === '"') inStr = false;
+              continue;
+            }
+            if (c === '"') inStr = true;
+            else if (c === '{') depth += 1;
+            else if (c === '}') { depth -= 1; if (depth === 0) return s.slice(from, i + 1); }
           }
+          return '';
+        };
+        for (let idx = raw.indexOf('{'); idx >= 0 && !parsed; idx = raw.indexOf('{', idx + 1)) {
+          const candidate = tryBalancedFrom(raw, idx);
+          if (!candidate) break;
+          try { parsed = JSON.parse(candidate); } catch (_) { parsed = null; }
         }
       }
       if (parsed) {
