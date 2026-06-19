@@ -492,6 +492,11 @@
       const taskKind = String(planSpec && planSpec.taskKind ? planSpec.taskKind : '').toLowerCase();
       const expectedFiles = Array.isArray(planSpec && planSpec.expectedFiles) ? planSpec.expectedFiles : [];
       if (taskKind === 'project') {
+        // Phased builds are model-driven per phase: the deterministic write loop
+        // (which writes ALL expectedFiles at once) is skipped so each run scopes to
+        // the current phase. Bootstrap + repair + final validate/run stay on.
+        const phasedProject = Array.isArray(planSpec && planSpec.phases)
+          && planSpec.phases.filter((p) => p && p.title).length >= 2;
         const explicitSeparateWorkspaceIntent = /\b(new project|new workspace|fresh workspace|another project|separate project|different project|start from scratch|from scratch)\b/i.test(String(taskText || ''));
         const hasWorkspace = hasOpenWorkspaceContext();
         const projectCreated = Array.isArray(toolEvents)
@@ -601,6 +606,9 @@
         // so we generate per-file again (visible progress + investigate the per-file path).
         // Flip ENABLE_SINGLE_PASS_PROJECT_GEN to true to use the one-call path.
         const ENABLE_SINGLE_PASS_PROJECT_GEN = false;
+        // Phased: let the model write the current phase's files itself (return null
+        // → decision prompt). Skip straight to the all-written validate/run check.
+        if (!phasedProject) {
         const codeFilesToCreate = expectedFiles
           .map((path) => normalizeWorkspacePath(path || ''))
           .filter((path) => path && path !== '/src' && path !== '/README.md' && !writtenPaths.includes(path));
@@ -697,6 +705,7 @@
             }
           }
         }
+        } // end !phasedProject (phased = model drives writes + validate/run per phase)
       }
       if (taskKind === 'analysis') return null;
       const inferredEditTask = taskKind === 'edit' || !/\b(create|build|make|start|setup|set up)\b/i.test(String(taskText || ''));

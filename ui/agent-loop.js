@@ -136,6 +136,10 @@
       const startedAt = Date.now();
       const deadlineAt = startedAt + deps.agentTotalTimeoutMs;
       let planSpec = null;
+      // Phased build state (declared out here so the finally can keep the tracker
+      // pinned between phases). phaseState = { phases, activeIndex } for this run.
+      let phaseState = null;
+      let keepPhaseTrackerPinned = false;
       // Guaranteed finalizer (see the matching finally at the end): the run must
       // never exit — via early return, stop, or a thrown error — while the chat
       // still shows an in-progress "...". loader. The send-button state is always
@@ -597,17 +601,50 @@
       }
       // Surface a multi-phase build plan so the user knows it's staged and can
       // Continue between phases (phase 1 is a runnable core; later phases extend it).
+      // .aiexe/plan.md is the cross-run source of truth: on a Continue we read the
+      // ticked boxes back and resume from the first unfinished phase.
+      const projectDisplayName = String(planSpec && planSpec.projectName || '');
+      const readAgentPlanFilePhases = async () => {
+        if (typeof deps.parseAgentPlanMarkdown !== 'function') return null;
+        try {
+          const res = await deps.invokeWorkspaceAction('workspaceReadFile', { path: '/.aiexe/plan.md' });
+          if (!res || !res.ok) return null;
+          const parsed = deps.parseAgentPlanMarkdown(String(res.output || ''));
+          return parsed && Array.isArray(parsed.phases) && parsed.phases.length ? parsed.phases : null;
+        } catch (_) { return null; }
+      };
       const agentPhases = Array.isArray(planSpec && planSpec.phases)
         ? planSpec.phases.filter((p) => p && p.title)
         : [];
       if (agentPhases.length > 1) {
-        appendAgentNarration(`Building in ${agentPhases.length} phases — phase 1 is a runnable version, then press Continue for each next phase:\n${agentPhases.map((p, i) => `  ${i + 1}. ${p.title}`).join('\n')}`);
+        // Existing plan.md (with ticks) wins over the freshly re-planned phases so a
+        // Continue resumes exactly where the last run left off.
+        const filePhases = await readAgentPlanFilePhases();
+        const phases = (filePhases && filePhases.length) ? filePhases : agentPhases;
+        planSpec.phases = phases;
+        let activeIndex = typeof deps.firstUnfinishedPhaseIndex === 'function'
+          ? deps.firstUnfinishedPhaseIndex(phases) : 0;
+        if (activeIndex < 0) activeIndex = phases.length - 1;
+        phaseState = { phases, activeIndex };
+        keepPhaseTrackerPinned = true;
+        const active = phases[activeIndex] || {};
+        planSpec._activePhase = {
+          number: activeIndex + 1,
+          total: phases.length,
+          title: String(active.title || ''),
+          tasks: (Array.isArray(active.tasks) ? active.tasks : []).filter((t) => t && !t.done).map((t) => t.text),
+        };
+        if (filePhases && activeIndex > 0) {
+          appendAgentNarration(`Continuing — Phase ${activeIndex + 1} of ${phases.length}: ${active.title}.`);
+        } else {
+          appendAgentNarration(`Building in ${phases.length} phases — phase 1 is a runnable version, then press Continue for each next phase:\n${phases.map((p, i) => `  ${i + 1}. ${p.title}`).join('\n')}`);
+        }
         if (typeof deps.setAgentPhaseTracker === 'function') {
           deps.setAgentPhaseTracker({
             chatId,
-            projectName: String(planSpec && planSpec.projectName || ''),
-            phases: agentPhases,
-            activeIndex: 0,
+            projectName: projectDisplayName,
+            phases,
+            activeIndex,
             allDone: false,
           });
         }
@@ -630,6 +667,9 @@
           reviewNarrated = true;
           appendAgentNarration('All files are in place — reviewing the plan to confirm every item is met.');
         }
+        // Phased builds show the phase tracker as the single plan view — skip the
+        // duplicate flat "Plan N/N" card (its criteria don't line up with phases).
+        if (phaseState) return { progress, doneCount, total: progress.length, remaining: progress.filter((p) => p && !p.done).map((p) => p.text), allDone };
         if (signature !== lastChecklistSignature) {
           lastChecklistSignature = signature;
           appendAgentActivity({
@@ -672,6 +712,55 @@
           planFileWritten = false; // retry next step
         }
       };
+      // Force-rewrite plan.md from the current planSpec.phases (used to tick boxes
+      // when a phase completes — the file is the durable cross-run state).
+      const persistAgentPlanFile = async () => {
+        if (typeof deps.buildAgentPlanMarkdown !== 'function') return;
+        try {
+          await deps.invokeWorkspaceAction('workspaceMkdir', { path: '/.aiexe' });
+          await deps.invokeWorkspaceAction('workspaceWriteFile', {
+            path: '/.aiexe/plan.md',
+            content: deps.buildAgentPlanMarkdown(planSpec),
+          });
+          planFileWritten = true;
+        } catch (_) { /* best-effort */ }
+      };
+      // Mark the active phase's boxes done in plan.md and advance. Returns the next
+      // unfinished phase index (-1 = all done). Shared by the model-FINAL hook and
+      // the per-run mutation-budget backstop below.
+      const completeActivePhase = async () => {
+        if (!phaseState) return null;
+        const idx = phaseState.activeIndex;
+        const donePhase = phaseState.phases[idx] || { tasks: [] };
+        const doneTasks = Array.isArray(donePhase.tasks) ? donePhase.tasks : [];
+        doneTasks.forEach((t) => { if (t) t.done = true; });
+        if (!doneTasks.length) donePhase.done = true;
+        planSpec.phases = phaseState.phases;
+        await persistAgentPlanFile();
+        const nextIdx = deps.firstUnfinishedPhaseIndex(phaseState.phases);
+        if (typeof deps.setAgentPhaseTracker === 'function') {
+          deps.setAgentPhaseTracker({
+            chatId,
+            projectName: projectDisplayName,
+            phases: phaseState.phases,
+            activeIndex: nextIdx >= 0 ? nextIdx : phaseState.phases.length - 1,
+            allDone: nextIdx < 0,
+          });
+        }
+        if (nextIdx < 0) keepPhaseTrackerPinned = false;
+        return { idx, donePhase, nextIdx };
+      };
+      // Per-run budget so a model that ignores the phase scope (deepseek tends to
+      // plow through every page) can't build the whole project in one run and time
+      // out. Sized to the phase's OWN planned sub-tasks (not hardcoded), min 3.
+      const phaseMutationBudget = () => {
+        if (!phaseState) return Infinity;
+        const tasks = Array.isArray(phaseState.phases[phaseState.activeIndex] && phaseState.phases[phaseState.activeIndex].tasks)
+          ? phaseState.phases[phaseState.activeIndex].tasks : [];
+        return Math.max(3, tasks.length);
+      };
+      const countRunMutations = () => toolEvents.filter((e) => e && e.ok
+        && ['write_file', 'edit_file'].includes(String(e.tool || '').toLowerCase())).length;
 
       const sameFailureLimit = 3;
       const failureStreak = { key: '', count: 0 };
@@ -1164,7 +1253,11 @@
             setAgentProgress('Reviewing...');
             continue;
           }
-          const finalCheck = deps.validateAgentFinalDecision(taskText, toolEvents, planSpec);
+          // Whole-project completion advisories are scoped to the FULL build — they
+          // wrongly flag a phased run's early phase as "incomplete" and push the
+          // model to build everything at once. Skip them for phased builds (the
+          // phase scope governs completion); the runtime-error nudge above still runs.
+          const finalCheck = phaseState ? { ok: true, missing: [] } : deps.validateAgentFinalDecision(taskText, toolEvents, planSpec);
           // Advisory gate (not a veto): on the first finish attempt with planned
           // items still unmet, surface them as a tool observation and let the
           // model decide. We never override its decision or hard-stop on this.
@@ -1189,10 +1282,39 @@
             setAgentProgress('Reviewing...');
             continue;
           }
-          const unmetCriteria = await getUnmetCriteriaNudge();
+          const unmetCriteria = phaseState ? null : await getUnmetCriteriaNudge();
           if (unmetCriteria) {
             pushCriteriaNudgeObservation(unmetCriteria);
             continue;
+          }
+          // Phased build: a model FINAL ends the CURRENT phase, not the project.
+          // Tick this phase's boxes in plan.md (the source of truth); if more phases
+          // remain, stop here with a Continue chip instead of finishing the project.
+          if (phaseState && typeof deps.firstUnfinishedPhaseIndex === 'function') {
+            const res = await completeActivePhase();
+            if (res && res.nextIdx >= 0) {
+              const nextPhase = phaseState.phases[res.nextIdx] || {};
+              setAgentProgress('Phase complete.');
+              let phaseMsg = deps.sanitizeAssistantText(decision.message || '') || '';
+              phaseMsg = `${phaseMsg ? `${phaseMsg}\n\n` : ''}✅ Phase ${res.idx + 1}${res.donePhase.title ? ` — ${res.donePhase.title}` : ''} is built. Press **Continue** to build Phase ${res.nextIdx + 1}${nextPhase.title ? ` — ${nextPhase.title}` : ''}.`;
+              if (agentHasWorkspaceMutations()) {
+                await deps.refreshWorkspaceTree(true);
+              }
+              deps.consumeLiveAssistantText();
+              deps.commitAssistantMessage(chatId, phaseMsg, phaseMsg, {
+                agentActivities,
+                agentMeta: agentMetaWithRevert({ startedAt, completedAt: Date.now(), collapsed: true }),
+                forceNeedsContinue: true,
+              });
+              recordDebugTrace('agent_phase_complete', {
+                chatId: String(chatId || ''),
+                step: String(step),
+                phase: String(res.idx + 1),
+                next: String(res.nextIdx + 1),
+              }, { chatId: String(chatId || ''), step, phaseState, toolEvents });
+              return true;
+            }
+            // Last phase done — tracker faded by completeActivePhase; fall through.
           }
           // Honor the model's final decision: requirements met, or it reaffirmed
           // finishing after the single advisory nudge.
@@ -1763,6 +1885,46 @@
               : `Progress ${cl.doneCount}/${cl.total} — continuing...`);
           }
         }
+        // Phased backstop: if the model keeps building past this phase's budget
+        // (ignoring the "return final" instruction), bound the run so one run can't
+        // build the whole project and time out. Honors the planner's own phase
+        // sizing; the user advances with Continue.
+        if (phaseState && toolResult && toolResult.ok && toolResult.mutated
+          && countRunMutations() >= phaseMutationBudget()) {
+          const isLastPhase = phaseState.activeIndex >= phaseState.phases.length - 1;
+          if (agentHasWorkspaceMutations()) {
+            await deps.refreshWorkspaceTree(true);
+          }
+          deps.consumeLiveAssistantText();
+          if (!isLastPhase) {
+            // Earlier phase: tick it and hand off to the next.
+            const res = await completeActivePhase();
+            const nextPhase = phaseState.phases[res.nextIdx] || {};
+            setAgentProgress('Phase complete.');
+            const phaseMsg = `✅ Phase ${res.idx + 1}${res.donePhase.title ? ` — ${res.donePhase.title}` : ''} is built. Press **Continue** to build Phase ${res.nextIdx + 1}${nextPhase.title ? ` — ${nextPhase.title}` : ''}.`;
+            deps.commitAssistantMessage(chatId, phaseMsg, phaseMsg, {
+              agentActivities,
+              agentMeta: agentMetaWithRevert({ startedAt, completedAt: Date.now(), collapsed: true }),
+              forceNeedsContinue: true,
+            });
+          } else {
+            // Last phase: don't falsely mark it done — bound the run and resume it.
+            setAgentProgress('Paused.');
+            const cur = phaseState.phases[phaseState.activeIndex] || {};
+            const pausedMsg = `I've built a chunk of the final phase. Press **Continue** to build Phase ${phaseState.activeIndex + 1}${cur.title ? ` — ${cur.title}` : ''}'s remaining files.`;
+            deps.commitAssistantMessage(chatId, pausedMsg, pausedMsg, {
+              agentActivities,
+              agentMeta: agentMetaWithRevert({ startedAt, completedAt: Date.now(), collapsed: true }),
+              forceNeedsContinue: true,
+            });
+          }
+          recordDebugTrace('agent_phase_budget_stop', {
+            chatId: String(chatId || ''), step: String(step),
+            phase: String(phaseState.activeIndex + 1), lastPhase: String(isLastPhase),
+            mutations: String(countRunMutations()),
+          }, { chatId: String(chatId || ''), step, phaseState, toolEvents });
+          return true;
+        }
         // A tool that hit the execution timeout will NOT recover on retry — the local
         // model is simply too slow for this operation. Abandon immediately with a clean
         // message instead of burning multiple 150s timeouts (that was the 11-minute hang).
@@ -2156,10 +2318,12 @@
         });
         throw err;
       } finally {
-        // Phase tracker is run-scoped — fade it out when the run ends. Step 3 will
-        // keep it pinned with a Continue chip between phases instead.
+        // Keep the tracker pinned between phases (a phased run that ended with more
+        // phases to go); only clear it when no phased run is in flight.
         try {
-          if (typeof deps.clearAgentPhaseTracker === 'function') deps.clearAgentPhaseTracker(chatId);
+          if (!keepPhaseTrackerPinned && typeof deps.clearAgentPhaseTracker === 'function') {
+            deps.clearAgentPhaseTracker(chatId);
+          }
         } catch (_) { /* best-effort */ }
         // If we reach here with the live assistant stream still connected, no exit
         // path committed it — finalize so the loader can't get stuck and the work so
