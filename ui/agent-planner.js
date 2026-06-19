@@ -796,7 +796,10 @@
       ]);
       if (!res || !res.ok) {
         const fb = buildFallbackAgentPlanSpec(taskText, { chatId, forceProjectScope });
-        if (fb && typeof fb === 'object') fb._planSource = res && res.timedOut ? 'fallback:timeout' : 'fallback:infer_fail';
+        if (fb && typeof fb === 'object') {
+          fb._planSource = res && res.timedOut ? 'fallback:timeout' : 'fallback:infer_fail';
+          fb._planRaw = String((res && res.message) || '').slice(0, 300);
+        }
         return fb;
       }
       let parsed = null;
@@ -820,7 +823,10 @@
         return spec;
       }
       const fb = buildFallbackAgentPlanSpec(taskText, { chatId, forceProjectScope });
-      if (fb && typeof fb === 'object') fb._planSource = 'fallback:parse';
+      if (fb && typeof fb === 'object') {
+        fb._planSource = 'fallback:parse';
+        fb._planRaw = String(res.output || '').slice(0, 300);
+      }
       return fb;
     }
 
