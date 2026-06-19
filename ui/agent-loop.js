@@ -555,6 +555,31 @@
       // "empty project is done" plan that finalized after new_project with no files.)
       const approvedNewProject = Boolean(requestToken && requestToken.approvedNewProject);
       planSpec = await deps.buildAgentPlanSpec(chatId, taskText, { forceProjectScope: approvedNewProject });
+      // Hard provider failure while planning (out of credits / bad key / forbidden):
+      // stop NOW and tell the user the real reason instead of silently building a
+      // degraded single-file fallback and claiming "Validation passed".
+      if (planSpec && planSpec._planHardError) {
+        deps.setThinkingStatus('');
+        setAgentProgress('Stopped.');
+        appendAgentActivity({
+          kind: 'error',
+          title: 'Inference unavailable',
+          detail: String(planSpec._planHardError),
+          status: 'error',
+        });
+        deps.consumeLiveAssistantText();
+        const msg = `I couldn't plan this build — ${String(planSpec._planHardError)}`;
+        deps.commitAssistantMessage(chatId, msg, msg, {
+          agentActivities,
+          agentMeta: agentMetaWithRevert({ startedAt, completedAt: Date.now(), collapsed: false }),
+          forceNeedsContinue: true,
+        });
+        recordDebugTrace('agent_plan_hard_error', {
+          chatId: String(chatId || ''),
+          reason: deps.debugPreview(String(planSpec._planHardError), 240),
+        }, { chatId: String(chatId || ''), planSpec });
+        return true;
+      }
       // Safety net: if a planner ever returns a non-project plan despite the flag,
       // rebuild a coherent project plan rather than leaving derived fields stale.
       if (approvedNewProject && planSpec && String(planSpec.taskKind || '').toLowerCase() !== 'project'

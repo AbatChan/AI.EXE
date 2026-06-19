@@ -9573,7 +9573,10 @@ async function requestAgentPlannerInferenceInner(prompt, maxTokens, grammar = ''
       };
     }
     const remoteMsg = (remote && remote.message) || `${remoteProvider} API unavailable — check your connection.`;
-    return { ok: false, message: remoteMsg };
+    // Surface hard provider failures (out of credits / bad key / forbidden) so the
+    // caller can stop and tell the user instead of silently degrading to a fallback
+    // plan and reporting fake success.
+    return { ok: false, message: remoteMsg, httpStatus: (remote && remote.httpStatus) || 0, hardFail: Boolean(hardFail) };
   }
   return requestNativeAgentPlannerInference(prompt, maxTokens, grammar);
 }
