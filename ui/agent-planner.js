@@ -795,7 +795,9 @@
         }), agentStepTimeoutMs)),
       ]);
       if (!res || !res.ok) {
-        return buildFallbackAgentPlanSpec(taskText, { chatId, forceProjectScope });
+        const fb = buildFallbackAgentPlanSpec(taskText, { chatId, forceProjectScope });
+        if (fb && typeof fb === 'object') fb._planSource = res && res.timedOut ? 'fallback:timeout' : 'fallback:infer_fail';
+        return fb;
       }
       let parsed = null;
       try {
@@ -812,9 +814,14 @@
           }
         }
       }
-      return parsed
-        ? deps.normalizeAgentPlanSpec(parsed, taskText, { chatId, forceProjectScope })
-        : buildFallbackAgentPlanSpec(taskText, { chatId, forceProjectScope });
+      if (parsed) {
+        const spec = deps.normalizeAgentPlanSpec(parsed, taskText, { chatId, forceProjectScope });
+        if (spec && typeof spec === 'object') spec._planSource = 'model';
+        return spec;
+      }
+      const fb = buildFallbackAgentPlanSpec(taskText, { chatId, forceProjectScope });
+      if (fb && typeof fb === 'object') fb._planSource = 'fallback:parse';
+      return fb;
     }
 
     // Relevance-ranked context: the per-turn window is recency-first, but a pure
