@@ -597,9 +597,20 @@
       }
       // Surface a multi-phase build plan so the user knows it's staged and can
       // Continue between phases (phase 1 is a runnable core; later phases extend it).
-      const agentPhases = Array.isArray(planSpec && planSpec.phases) ? planSpec.phases.filter(Boolean) : [];
+      const agentPhases = Array.isArray(planSpec && planSpec.phases)
+        ? planSpec.phases.filter((p) => p && p.title)
+        : [];
       if (agentPhases.length > 1) {
-        appendAgentNarration(`Building in ${agentPhases.length} phases — phase 1 is a runnable version, then press Continue for each next phase:\n${agentPhases.map((p, i) => `  ${i + 1}. ${p}`).join('\n')}`);
+        appendAgentNarration(`Building in ${agentPhases.length} phases — phase 1 is a runnable version, then press Continue for each next phase:\n${agentPhases.map((p, i) => `  ${i + 1}. ${p.title}`).join('\n')}`);
+        if (typeof deps.setAgentPhaseTracker === 'function') {
+          deps.setAgentPhaseTracker({
+            chatId,
+            projectName: String(planSpec && planSpec.projectName || ''),
+            phases: agentPhases,
+            activeIndex: 0,
+            allDone: false,
+          });
+        }
       }
 
       // Harness-driven checklist from planSpec.doneCriteria (marked done mechanically).
@@ -640,6 +651,28 @@
       refreshChecklist();
       setAgentProgress('Starting...');
 
+      // .aiexe/plan.md = the phased build's source of truth (checkboxes are state).
+      // Write it once the project workspace exists; opportunistic because the
+      // workspace is created mid-run by the first create step.
+      let planFileWritten = false;
+      const ensureAgentPlanFile = async () => {
+        if (planFileWritten || agentPhases.length < 2) return;
+        if (typeof deps.buildAgentPlanMarkdown !== 'function') return;
+        const ws = typeof deps.getWorkspaceContext === 'function' ? deps.getWorkspaceContext() || {} : {};
+        const rootReady = Boolean(ws.rootLoaded || String(ws.workspaceRootName || '').trim() || Number(ws.rootEntryCount) > 0);
+        if (!rootReady) return;
+        planFileWritten = true;
+        try {
+          await deps.invokeWorkspaceAction('workspaceMkdir', { path: '/.aiexe' });
+          await deps.invokeWorkspaceAction('workspaceWriteFile', {
+            path: '/.aiexe/plan.md',
+            content: deps.buildAgentPlanMarkdown(planSpec),
+          });
+        } catch (_) {
+          planFileWritten = false; // retry next step
+        }
+      };
+
       const sameFailureLimit = 3;
       const failureStreak = { key: '', count: 0 };
       // "One repair, then ship": count how many times validate_files has failed. After
@@ -658,6 +691,7 @@
       };
       for (let step = 1; step <= deps.agentMaxSteps; step += 1) {
         if (!deps.isInferenceActive(requestToken)) return true;
+        await ensureAgentPlanFile();
         if (Date.now() >= deadlineAt) {
           recordDebugTrace('agent_timeout', {
             chatId: String(chatId || ''),
@@ -2122,6 +2156,11 @@
         });
         throw err;
       } finally {
+        // Phase tracker is run-scoped — fade it out when the run ends. Step 3 will
+        // keep it pinned with a Continue chip between phases instead.
+        try {
+          if (typeof deps.clearAgentPhaseTracker === 'function') deps.clearAgentPhaseTracker(chatId);
+        } catch (_) { /* best-effort */ }
         // If we reach here with the live assistant stream still connected, no exit
         // path committed it — finalize so the loader can't get stuck and the work so
         // far is persisted (the workspace files already are). Best-effort: this must

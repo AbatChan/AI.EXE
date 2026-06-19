@@ -12,7 +12,7 @@ files_to_inspect: pipe-delimited root-relative paths that should be read before 
 done_criteria: the user-facing plan checklist (also injected to guide the agent) — 3 to 5 plain-language outcomes in the user's terms. Group related capabilities into ONE item; never split things that belong together.
 validation: short pipe-delimited validation steps such as validate_files, syntax check, browser check, or manual review
 summary: one short natural sentence the user can read directly before execution starts
-phases: empty string for a small/medium project; for a LARGE or complex project, 2-4 pipe-delimited build phases where phase 1 produces a complete RUNNABLE minimal version and each later phase adds a coherent set of features (e.g. "Runnable skeleton: layout + navigation | Core features: data + main interactions | Polish: animations, edge cases, persistence"). Phase 1 must stand on its own; later phases build on it via Continue.
+phases: empty string for a small/medium project. For a LARGE or complex project, 2-4 build phases separated by " | ". Phase 1 must produce a complete RUNNABLE minimal version; each later phase adds a coherent feature set that builds on it. Give each phase a short title, then " :: ", then 2-5 concrete sub-tasks separated by " ; ". Example: "Runnable skeleton :: page layout ; top navigation ; empty board renders | Core gameplay :: piece movement ; line clears ; live score | Polish :: animations ; pause and restart ; high-score persistence". Phase 1 stands alone; later phases run on Continue.
 
 Rules:
 - Infer the task dynamically from the user request and chat history.

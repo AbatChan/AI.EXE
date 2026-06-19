@@ -1351,6 +1351,102 @@
       return items.slice(0, maxItems);
     }
 
+    // Phases carry sub-tasks: "Title :: task ; task ; task | Title2 :: ...".
+    // Also tolerate the model emitting a JSON array of {title, tasks}. Returns
+    // [{ title, tasks:[{ text, done:false }] }].
+    function parseAgentPlanPhases(raw, maxPhases = 4, maxTasks = 6) {
+      const mkTasks = (list) => (Array.isArray(list) ? list : [])
+        .map((t) => String(t || '').trim())
+        .filter(Boolean)
+        .slice(0, maxTasks)
+        .map((text) => ({ text, done: false }));
+      if (Array.isArray(raw)) {
+        return raw.map((p) => {
+          if (p && typeof p === 'object') {
+            const title = String(p.title || p.name || '').trim();
+            const tasks = Array.isArray(p.tasks) ? p.tasks : (Array.isArray(p.sub_tasks) ? p.sub_tasks : []);
+            return { title, tasks: mkTasks(tasks) };
+          }
+          return { title: String(p || '').trim(), tasks: [] };
+        }).filter((p) => p.title).slice(0, maxPhases);
+      }
+      const text = String(raw || '').trim();
+      if (!text) return [];
+      return text.split('|').map((chunk) => {
+        const part = String(chunk || '').trim();
+        if (!part) return null;
+        const idx = part.indexOf('::');
+        if (idx < 0) return { title: part, tasks: [] };
+        const title = part.slice(0, idx).trim();
+        const tasks = part.slice(idx + 2).split(/\s*;\s*|\s*•\s*/);
+        return title ? { title, tasks: mkTasks(tasks) } : null;
+      }).filter(Boolean).slice(0, maxPhases);
+    }
+
+    // .aiexe/plan.md is the cross-run source of truth: `## Phase N · title` +
+    // `- [ ]`/`- [x]` sub-tasks. The checkboxes ARE the state.
+    function buildAgentPlanMarkdown(planSpec) {
+      const spec = planSpec && typeof planSpec === 'object' ? planSpec : {};
+      const phases = Array.isArray(spec.phases) ? spec.phases : [];
+      const name = String(spec.projectName || 'project').trim();
+      const lines = [`# Build plan — ${name}`, ''];
+      if (String(spec.summary || '').trim()) {
+        lines.push(`> ${String(spec.summary).trim()}`, '');
+      }
+      phases.forEach((phase, i) => {
+        const title = String((phase && phase.title) || `Phase ${i + 1}`).trim();
+        lines.push(`## Phase ${i + 1} · ${title}`);
+        const tasks = Array.isArray(phase && phase.tasks) ? phase.tasks : [];
+        if (tasks.length === 0) {
+          lines.push(`- [${phase && phase.done ? 'x' : ' '}] ${title}`);
+        }
+        tasks.forEach((task) => {
+          const txt = String((task && task.text) || task || '').trim();
+          if (txt) lines.push(`- [${task && task.done ? 'x' : ' '}] ${txt}`);
+        });
+        lines.push('');
+      });
+      return `${lines.join('\n').trim()}\n`;
+    }
+
+    // Read plan.md back into phases (source of truth across runs). The first
+    // unchecked box is the single resume point.
+    function parseAgentPlanMarkdown(markdown) {
+      const text = String(markdown || '');
+      const phases = [];
+      let summary = '';
+      let current = null;
+      text.split(/\r?\n/).forEach((rawLine) => {
+        const line = rawLine.trim();
+        if (!line) return;
+        if (!summary && /^>\s+/.test(line)) { summary = line.replace(/^>\s+/, '').trim(); return; }
+        const head = line.match(/^##\s+Phase\s+\d+\s*[·:.\-]?\s*(.*)$/i);
+        if (head) {
+          current = { title: head[1].trim(), tasks: [] };
+          phases.push(current);
+          return;
+        }
+        const box = line.match(/^-\s*\[([ xX])\]\s+(.*)$/);
+        if (box && current) {
+          current.tasks.push({ text: box[2].trim(), done: box[1].toLowerCase() === 'x' });
+        }
+      });
+      return { phases, summary };
+    }
+
+    // First phase whose tasks aren't all checked — the one resume rule.
+    function firstUnfinishedPhaseIndex(phases) {
+      const list = Array.isArray(phases) ? phases : [];
+      for (let i = 0; i < list.length; i += 1) {
+        const tasks = Array.isArray(list[i] && list[i].tasks) ? list[i].tasks : [];
+        const allDone = tasks.length > 0
+          ? tasks.every((t) => t && t.done)
+          : Boolean(list[i] && list[i].done);
+        if (!allDone) return i;
+      }
+      return -1;
+    }
+
     function buildFallbackExpectedFiles(taskKind, primaryStack, projectName = '') {
       if (String(taskKind || '').toLowerCase() !== 'project') return [];
       const base = String(projectName || '')
@@ -1569,7 +1665,7 @@
       let affectedFiles = parseAgentPlanPathList(parsed && parsed.affected_files ? parsed.affected_files : '').map(mapBinaryDocPath);
       let filesToInspect = parseAgentPlanPathList(parsed && parsed.files_to_inspect ? parsed.files_to_inspect : '');
       const doneCriteria = parseAgentPlanTextList(parsed && parsed.done_criteria ? parsed.done_criteria : '', 5); // cap 5
-      const phases = parseAgentPlanTextList(parsed && parsed.phases ? parsed.phases : '', 4); // cap 4
+      const phases = parseAgentPlanPhases(parsed && parsed.phases ? parsed.phases : ''); // [{title,tasks}]
       const validationSteps = parseAgentPlanTextList(parsed && parsed.validation ? parsed.validation : '', 6);
       const looksLikeWebProjectTask = taskKind === 'project' && (WEB_TASK_HINT_REGEX.test(lower) || /\bcalculator\b/.test(lower));
       const singleHtmlFileProject = taskKind === 'project' && isSingleHtmlFileRequest(taskText);
@@ -1764,6 +1860,10 @@
       applyAgentEditProgram,
       computeAgentChecklistProgress,
       renderAgentChecklist,
+      parseAgentPlanPhases,
+      buildAgentPlanMarkdown,
+      parseAgentPlanMarkdown,
+      firstUnfinishedPhaseIndex,
       buildFallbackExpectedFiles,
       buildAgentProjectContract,
       getPlannedFileRoles,
