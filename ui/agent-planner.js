@@ -1080,10 +1080,9 @@
             ? `Remaining sub-tasks for THIS phase:\n${activePhase.tasks.map((t) => `  - ${t}`).join('\n')}`
             : '',
           activePhase.number === 1
-            ? 'Phase 1 must be a COMPLETE, RUNNABLE minimal version of the project (it runs on its own). Keep it SMALL — build only the sub-tasks listed above; do NOT build later phases\' pages/screens/features now. The workspace was just created and is empty — start writing files immediately; do NOT read_file or list_dir the root or the project name.'
-            : 'Build on the files already in the workspace from earlier phases — read them first if needed, then extend them. Do not rewrite finished files from scratch.',
-          `STRICT SCOPE: build ONLY the files needed for the ${activePhase.tasks && activePhase.tasks.length ? activePhase.tasks.length : 'few'} sub-task(s) above (roughly that many files) — NOT the whole project. Do not create pages or screens that belong to later phases.`,
-          'When this phase\'s sub-tasks are built and it runs, validate_files (and run_app if runnable) then return {"action":"final"} — do NOT continue into the next phase. The user presses Continue to advance; the next run picks up the next phase.',
+            ? 'Phase 1 must be a COMPLETE, RUNNABLE minimal version of the project (it runs on its own).'
+            : 'Build on the files already in the workspace from earlier phases — extend them, do not rewrite from scratch.',
+          'Do ONLY this phase. When this phase\'s sub-tasks are built and it runs, validate_files (and run_app if runnable) then return {"action":"final"} — do NOT start the next phase. The user presses Continue to advance; the next run picks up the next phase.',
           '===',
         ].filter(Boolean).join('\n')
         : '';

@@ -1027,14 +1027,6 @@ let authMode = 'login';
 let pendingInferenceCount = 0;
 let activeInferenceRequest = null;
 let inferenceIdleResolvers = [];
-// In-flight agent inference fetches (file generation, decisions). Registered so a
-// cancel/abort can stop them — the non-streaming remote fetch had no abort signal,
-// so a cancelled file generation kept running and committed minutes later.
-const inFlightInferenceControllers = new Set();
-function abortAllInFlightInferenceControllers(reason = 'cancelled') {
-  inFlightInferenceControllers.forEach((c) => { try { c.abort(reason); } catch (_) { /* noop */ } });
-  inFlightInferenceControllers.clear();
-}
 const thinkingStartedByChatId = new Map();
 const pendingPreflightConfirmations = new Map();
 const smartTitleRenamePending = new Set();
@@ -1360,16 +1352,6 @@ function markAgentToolProgress() { lastAgentToolProgressAt = Date.now(); }
 function getLastAgentToolProgressAt() { return lastAgentToolProgressAt; }
 // Live file-write streaming: hold the partial content of the file being generated
 // so the work panel can render it filling in. Committed by write_file separately.
-// The model often wraps streamed file content in a ```lang fence; the committed
-// file is de-fenced by sanitizeAgentGeneratedFileContent, but the LIVE stream
-// showed the raw fence. Strip a leading wrapper fence (and its closer) for display
-// only — and only when a leading fence is present, so genuine markdown is untouched.
-function stripStreamDisplayFences(text) {
-  const s = String(text || '');
-  const lead = s.match(/^﻿?\s*```[a-z0-9]*[^\n]*\n/i);
-  if (!lead) return s;
-  return s.slice(lead[0].length).replace(/\n?```\s*$/i, '');
-}
 function updateAgentStreamingFile(path, content) {
   if (!activeAgentStreamState) return;
   const prev = activeAgentStreamState.streamingFile;
@@ -1379,7 +1361,7 @@ function updateAgentStreamingFile(path, content) {
       path: String(path || ''),
     });
   }
-  activeAgentStreamState.streamingFile = { path: String(path || ''), content: stripStreamDisplayFences(content) };
+  activeAgentStreamState.streamingFile = { path: String(path || ''), content: String(content || '') };
   scheduleLiveStreamRender();
 }
 function clearAgentStreamingFile() {
@@ -5886,7 +5868,6 @@ function abortInFlightInference(reason = 'abandoned') {
   if (token.abortController) {
     try { token.abortController.abort(); } catch (_) { }
   }
-  abortAllInFlightInferenceControllers(reason);
   pushDebugTrace('inference_aborted', {
     chatId: String(token.chatId || ''),
     streamId: String(token.streamId || ''),
@@ -5936,9 +5917,6 @@ function cancelActiveInference() {
       token.abortController.abort();
     } catch (_) { }
   }
-  // Stop any in-flight agent inference (file generation / decisions) that doesn't
-  // ride the token's own controller — otherwise it keeps running and commits late.
-  abortAllInFlightInferenceControllers('user_cancelled');
   clearTypingIndicator();
   const activeAgentState = activeAgentStreamState && String(activeAgentStreamState.chatId || '') === String(token.chatId || '')
     ? {
@@ -5969,10 +5947,6 @@ function cancelActiveInference() {
   resolveChatNamingFallback(String(token.chatId || ''), 'New Chat');
   setThinkingStatus('Cancelled');
   completeInferenceRequest(token);
-  // A cancel mid-run can leave the explorer stuck on its loading skeleton (a
-  // project was created but the tree never finished rendering) — refresh it so it
-  // reflects the real files now on disk instead of looking like work is ongoing.
-  try { void refreshWorkspaceTree(true); } catch (_) { /* best-effort */ }
   setTimeout(() => {
     if (pendingInferenceCount === 0) {
       setThinkingStatus('');
@@ -6460,7 +6434,7 @@ const agentStepFunctionSchema = {
   },
 };
 
-async function requestOpenAiCompatibleTextCompletion(provider, prompt, maxTokens, systemPrompt = '', signal = null) {
+async function requestOpenAiCompatibleTextCompletion(provider, prompt, maxTokens, systemPrompt = '') {
   if (!remoteProvidersEnabled) return null;
   const def = getInferenceProviderDef(provider);
   const apiKey = getProviderApiKey(provider);
@@ -6475,7 +6449,6 @@ async function requestOpenAiCompatibleTextCompletion(provider, prompt, maxTokens
   try {
     const response = await fetch(endpointUrl, {
       method: 'POST',
-      ...(signal ? { signal } : {}),
       headers: {
         Authorization: getOpenAiCompatibleAuthHeader(provider, apiKey, endpointUrl),
         'Content-Type': 'application/json',
@@ -6551,21 +6524,11 @@ async function requestAnthropicTextCompletion(prompt, maxTokens) {
 }
 
 async function requestSelectedRemoteTextCompletion(prompt, maxTokens, systemPrompt = '', extra = {}) {
-  // Don't start (or retry) an agent inference once the run was cancelled — this is
-  // what stopped a cancelled file generation from re-firing and committing late.
-  if (activeInferenceRequest && activeInferenceRequest.cancelled) {
-    return { ok: false, cancelled: true, message: 'Cancelled.' };
-  }
-  const controller = (extra && extra.abortController instanceof AbortController)
-    ? extra.abortController
-    : new AbortController();
-  inFlightInferenceControllers.add(controller);
   noteAgentInferenceStart(String(prompt || '').length + String(systemPrompt || '').length);
   let result = null;
   try {
-    result = await requestRemoteTextCompletionForCapability('agent.writeFile', prompt, maxTokens, { systemPrompt, ...extra, abortController: controller });
+    result = await requestRemoteTextCompletionForCapability('agent.writeFile', prompt, maxTokens, { systemPrompt, ...extra });
   } finally {
-    inFlightInferenceControllers.delete(controller);
     noteAgentInferenceEnd(result && result.ok ? String(result.output || '').length : 0);
   }
   return result;
@@ -6600,8 +6563,7 @@ async function requestRemoteTextCompletionForCapability(capability, prompt, maxT
     const result = await requestAnthropicTextCompletion(prompt, maxTokens);
     return result ? { ...result, workerId: worker.id, provider, model: getProviderModel(provider) } : result;
   }
-  const abortSignal = options && options.abortController instanceof AbortController ? options.abortController.signal : null;
-  const result = await requestOpenAiCompatibleTextCompletion(provider, prompt, maxTokens, options && options.systemPrompt ? options.systemPrompt : '', abortSignal);
+  const result = await requestOpenAiCompatibleTextCompletion(provider, prompt, maxTokens, options && options.systemPrompt ? options.systemPrompt : '');
   return result ? { ...result, workerId: worker.id, provider, model: getProviderModel(provider) } : result;
 }
 
@@ -9560,7 +9522,6 @@ async function requestAgentPlannerInferenceInner(prompt, maxTokens, grammar = ''
     let remote = await requestSelectedRemoteTextCompletion(prompt, maxTokens, systemPrompt);
     // Only retry for transient failures (rate limit / network). Skip retry for auth/credits errors.
     const hardFail = remote && !remote.ok && remote.httpStatus && (remote.httpStatus === 401 || remote.httpStatus === 402 || remote.httpStatus === 403);
-    if (remote && remote.cancelled) return { ok: false, cancelled: true, message: 'Cancelled.' };
     if ((!remote || !remote.ok) && !hardFail) {
       await new Promise((resolve) => setTimeout(resolve, 2500));
       remote = await requestSelectedRemoteTextCompletion(prompt, maxTokens, systemPrompt);

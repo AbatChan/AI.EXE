@@ -725,42 +725,6 @@
           planFileWritten = true;
         } catch (_) { /* best-effort */ }
       };
-      // Mark the active phase's boxes done in plan.md and advance. Returns the next
-      // unfinished phase index (-1 = all done). Shared by the model-FINAL hook and
-      // the per-run mutation-budget backstop below.
-      const completeActivePhase = async () => {
-        if (!phaseState) return null;
-        const idx = phaseState.activeIndex;
-        const donePhase = phaseState.phases[idx] || { tasks: [] };
-        const doneTasks = Array.isArray(donePhase.tasks) ? donePhase.tasks : [];
-        doneTasks.forEach((t) => { if (t) t.done = true; });
-        if (!doneTasks.length) donePhase.done = true;
-        planSpec.phases = phaseState.phases;
-        await persistAgentPlanFile();
-        const nextIdx = deps.firstUnfinishedPhaseIndex(phaseState.phases);
-        if (typeof deps.setAgentPhaseTracker === 'function') {
-          deps.setAgentPhaseTracker({
-            chatId,
-            projectName: projectDisplayName,
-            phases: phaseState.phases,
-            activeIndex: nextIdx >= 0 ? nextIdx : phaseState.phases.length - 1,
-            allDone: nextIdx < 0,
-          });
-        }
-        if (nextIdx < 0) keepPhaseTrackerPinned = false;
-        return { idx, donePhase, nextIdx };
-      };
-      // Per-run budget so a model that ignores the phase scope (deepseek tends to
-      // plow through every page) can't build the whole project in one run and time
-      // out. Sized to the phase's OWN planned sub-tasks (not hardcoded), min 3.
-      const phaseMutationBudget = () => {
-        if (!phaseState) return Infinity;
-        const tasks = Array.isArray(phaseState.phases[phaseState.activeIndex] && phaseState.phases[phaseState.activeIndex].tasks)
-          ? phaseState.phases[phaseState.activeIndex].tasks : [];
-        return Math.max(3, tasks.length);
-      };
-      const countRunMutations = () => toolEvents.filter((e) => e && e.ok
-        && ['write_file', 'edit_file'].includes(String(e.tool || '').toLowerCase())).length;
 
       const sameFailureLimit = 3;
       const failureStreak = { key: '', count: 0 };
@@ -1291,12 +1255,28 @@
           // Tick this phase's boxes in plan.md (the source of truth); if more phases
           // remain, stop here with a Continue chip instead of finishing the project.
           if (phaseState && typeof deps.firstUnfinishedPhaseIndex === 'function') {
-            const res = await completeActivePhase();
-            if (res && res.nextIdx >= 0) {
-              const nextPhase = phaseState.phases[res.nextIdx] || {};
+            const idx = phaseState.activeIndex;
+            const donePhase = phaseState.phases[idx] || { tasks: [] };
+            const doneTasks = Array.isArray(donePhase.tasks) ? donePhase.tasks : [];
+            doneTasks.forEach((t) => { if (t) t.done = true; });
+            if (!doneTasks.length) donePhase.done = true;
+            planSpec.phases = phaseState.phases;
+            await persistAgentPlanFile();
+            const nextIdx = deps.firstUnfinishedPhaseIndex(phaseState.phases);
+            if (nextIdx >= 0) {
+              const nextPhase = phaseState.phases[nextIdx] || {};
+              if (typeof deps.setAgentPhaseTracker === 'function') {
+                deps.setAgentPhaseTracker({
+                  chatId,
+                  projectName: projectDisplayName,
+                  phases: phaseState.phases,
+                  activeIndex: nextIdx,
+                  allDone: false,
+                });
+              }
               setAgentProgress('Phase complete.');
               let phaseMsg = deps.sanitizeAssistantText(decision.message || '') || '';
-              phaseMsg = `${phaseMsg ? `${phaseMsg}\n\n` : ''}✅ Phase ${res.idx + 1}${res.donePhase.title ? ` — ${res.donePhase.title}` : ''} is built. Press **Continue** to build Phase ${res.nextIdx + 1}${nextPhase.title ? ` — ${nextPhase.title}` : ''}.`;
+              phaseMsg = `${phaseMsg ? `${phaseMsg}\n\n` : ''}✅ Phase ${idx + 1}${donePhase.title ? ` — ${donePhase.title}` : ''} is built. Press **Continue** to build Phase ${nextIdx + 1}${nextPhase.title ? ` — ${nextPhase.title}` : ''}.`;
               if (agentHasWorkspaceMutations()) {
                 await deps.refreshWorkspaceTree(true);
               }
@@ -1309,12 +1289,22 @@
               recordDebugTrace('agent_phase_complete', {
                 chatId: String(chatId || ''),
                 step: String(step),
-                phase: String(res.idx + 1),
-                next: String(res.nextIdx + 1),
+                phase: String(idx + 1),
+                next: String(nextIdx + 1),
               }, { chatId: String(chatId || ''), step, phaseState, toolEvents });
               return true;
             }
-            // Last phase done — tracker faded by completeActivePhase; fall through.
+            // Last phase done — fade the tracker and fall through to a normal finish.
+            keepPhaseTrackerPinned = false;
+            if (typeof deps.setAgentPhaseTracker === 'function') {
+              deps.setAgentPhaseTracker({
+                chatId,
+                projectName: projectDisplayName,
+                phases: phaseState.phases,
+                activeIndex: phaseState.phases.length - 1,
+                allDone: true,
+              });
+            }
           }
           // Honor the model's final decision: requirements met, or it reaffirmed
           // finishing after the single advisory nudge.
@@ -1884,46 +1874,6 @@
               ? `All ${cl.total} planned items addressed — finalizing...`
               : `Progress ${cl.doneCount}/${cl.total} — continuing...`);
           }
-        }
-        // Phased backstop: if the model keeps building past this phase's budget
-        // (ignoring the "return final" instruction), bound the run so one run can't
-        // build the whole project and time out. Honors the planner's own phase
-        // sizing; the user advances with Continue.
-        if (phaseState && toolResult && toolResult.ok && toolResult.mutated
-          && countRunMutations() >= phaseMutationBudget()) {
-          const isLastPhase = phaseState.activeIndex >= phaseState.phases.length - 1;
-          if (agentHasWorkspaceMutations()) {
-            await deps.refreshWorkspaceTree(true);
-          }
-          deps.consumeLiveAssistantText();
-          if (!isLastPhase) {
-            // Earlier phase: tick it and hand off to the next.
-            const res = await completeActivePhase();
-            const nextPhase = phaseState.phases[res.nextIdx] || {};
-            setAgentProgress('Phase complete.');
-            const phaseMsg = `✅ Phase ${res.idx + 1}${res.donePhase.title ? ` — ${res.donePhase.title}` : ''} is built. Press **Continue** to build Phase ${res.nextIdx + 1}${nextPhase.title ? ` — ${nextPhase.title}` : ''}.`;
-            deps.commitAssistantMessage(chatId, phaseMsg, phaseMsg, {
-              agentActivities,
-              agentMeta: agentMetaWithRevert({ startedAt, completedAt: Date.now(), collapsed: true }),
-              forceNeedsContinue: true,
-            });
-          } else {
-            // Last phase: don't falsely mark it done — bound the run and resume it.
-            setAgentProgress('Paused.');
-            const cur = phaseState.phases[phaseState.activeIndex] || {};
-            const pausedMsg = `I've built a chunk of the final phase. Press **Continue** to build Phase ${phaseState.activeIndex + 1}${cur.title ? ` — ${cur.title}` : ''}'s remaining files.`;
-            deps.commitAssistantMessage(chatId, pausedMsg, pausedMsg, {
-              agentActivities,
-              agentMeta: agentMetaWithRevert({ startedAt, completedAt: Date.now(), collapsed: true }),
-              forceNeedsContinue: true,
-            });
-          }
-          recordDebugTrace('agent_phase_budget_stop', {
-            chatId: String(chatId || ''), step: String(step),
-            phase: String(phaseState.activeIndex + 1), lastPhase: String(isLastPhase),
-            mutations: String(countRunMutations()),
-          }, { chatId: String(chatId || ''), step, phaseState, toolEvents });
-          return true;
         }
         // A tool that hit the execution timeout will NOT recover on retry — the local
         // model is simply too slow for this operation. Abandon immediately with a clean
