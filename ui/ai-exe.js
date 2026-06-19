@@ -1027,6 +1027,14 @@ let authMode = 'login';
 let pendingInferenceCount = 0;
 let activeInferenceRequest = null;
 let inferenceIdleResolvers = [];
+// In-flight agent inference fetches (file generation, decisions). Registered so a
+// cancel/abort can stop them — the non-streaming remote fetch had no abort signal,
+// so a cancelled file generation kept running and committed minutes later.
+const inFlightInferenceControllers = new Set();
+function abortAllInFlightInferenceControllers(reason = 'cancelled') {
+  inFlightInferenceControllers.forEach((c) => { try { c.abort(reason); } catch (_) { /* noop */ } });
+  inFlightInferenceControllers.clear();
+}
 const thinkingStartedByChatId = new Map();
 const pendingPreflightConfirmations = new Map();
 const smartTitleRenamePending = new Set();
@@ -1352,6 +1360,16 @@ function markAgentToolProgress() { lastAgentToolProgressAt = Date.now(); }
 function getLastAgentToolProgressAt() { return lastAgentToolProgressAt; }
 // Live file-write streaming: hold the partial content of the file being generated
 // so the work panel can render it filling in. Committed by write_file separately.
+// The model often wraps streamed file content in a ```lang fence; the committed
+// file is de-fenced by sanitizeAgentGeneratedFileContent, but the LIVE stream
+// showed the raw fence. Strip a leading wrapper fence (and its closer) for display
+// only — and only when a leading fence is present, so genuine markdown is untouched.
+function stripStreamDisplayFences(text) {
+  const s = String(text || '');
+  const lead = s.match(/^﻿?\s*```[a-z0-9]*[^\n]*\n/i);
+  if (!lead) return s;
+  return s.slice(lead[0].length).replace(/\n?```\s*$/i, '');
+}
 function updateAgentStreamingFile(path, content) {
   if (!activeAgentStreamState) return;
   const prev = activeAgentStreamState.streamingFile;
@@ -1361,7 +1379,7 @@ function updateAgentStreamingFile(path, content) {
       path: String(path || ''),
     });
   }
-  activeAgentStreamState.streamingFile = { path: String(path || ''), content: String(content || '') };
+  activeAgentStreamState.streamingFile = { path: String(path || ''), content: stripStreamDisplayFences(content) };
   scheduleLiveStreamRender();
 }
 function clearAgentStreamingFile() {
@@ -5868,6 +5886,7 @@ function abortInFlightInference(reason = 'abandoned') {
   if (token.abortController) {
     try { token.abortController.abort(); } catch (_) { }
   }
+  abortAllInFlightInferenceControllers(reason);
   pushDebugTrace('inference_aborted', {
     chatId: String(token.chatId || ''),
     streamId: String(token.streamId || ''),
@@ -5917,6 +5936,9 @@ function cancelActiveInference() {
       token.abortController.abort();
     } catch (_) { }
   }
+  // Stop any in-flight agent inference (file generation / decisions) that doesn't
+  // ride the token's own controller — otherwise it keeps running and commits late.
+  abortAllInFlightInferenceControllers('user_cancelled');
   clearTypingIndicator();
   const activeAgentState = activeAgentStreamState && String(activeAgentStreamState.chatId || '') === String(token.chatId || '')
     ? {
@@ -5947,6 +5969,10 @@ function cancelActiveInference() {
   resolveChatNamingFallback(String(token.chatId || ''), 'New Chat');
   setThinkingStatus('Cancelled');
   completeInferenceRequest(token);
+  // A cancel mid-run can leave the explorer stuck on its loading skeleton (a
+  // project was created but the tree never finished rendering) — refresh it so it
+  // reflects the real files now on disk instead of looking like work is ongoing.
+  try { void refreshWorkspaceTree(true); } catch (_) { /* best-effort */ }
   setTimeout(() => {
     if (pendingInferenceCount === 0) {
       setThinkingStatus('');
@@ -6434,7 +6460,7 @@ const agentStepFunctionSchema = {
   },
 };
 
-async function requestOpenAiCompatibleTextCompletion(provider, prompt, maxTokens, systemPrompt = '') {
+async function requestOpenAiCompatibleTextCompletion(provider, prompt, maxTokens, systemPrompt = '', signal = null) {
   if (!remoteProvidersEnabled) return null;
   const def = getInferenceProviderDef(provider);
   const apiKey = getProviderApiKey(provider);
@@ -6449,6 +6475,7 @@ async function requestOpenAiCompatibleTextCompletion(provider, prompt, maxTokens
   try {
     const response = await fetch(endpointUrl, {
       method: 'POST',
+      ...(signal ? { signal } : {}),
       headers: {
         Authorization: getOpenAiCompatibleAuthHeader(provider, apiKey, endpointUrl),
         'Content-Type': 'application/json',
@@ -6524,11 +6551,21 @@ async function requestAnthropicTextCompletion(prompt, maxTokens) {
 }
 
 async function requestSelectedRemoteTextCompletion(prompt, maxTokens, systemPrompt = '', extra = {}) {
+  // Don't start (or retry) an agent inference once the run was cancelled — this is
+  // what stopped a cancelled file generation from re-firing and committing late.
+  if (activeInferenceRequest && activeInferenceRequest.cancelled) {
+    return { ok: false, cancelled: true, message: 'Cancelled.' };
+  }
+  const controller = (extra && extra.abortController instanceof AbortController)
+    ? extra.abortController
+    : new AbortController();
+  inFlightInferenceControllers.add(controller);
   noteAgentInferenceStart(String(prompt || '').length + String(systemPrompt || '').length);
   let result = null;
   try {
-    result = await requestRemoteTextCompletionForCapability('agent.writeFile', prompt, maxTokens, { systemPrompt, ...extra });
+    result = await requestRemoteTextCompletionForCapability('agent.writeFile', prompt, maxTokens, { systemPrompt, ...extra, abortController: controller });
   } finally {
+    inFlightInferenceControllers.delete(controller);
     noteAgentInferenceEnd(result && result.ok ? String(result.output || '').length : 0);
   }
   return result;
@@ -6563,7 +6600,8 @@ async function requestRemoteTextCompletionForCapability(capability, prompt, maxT
     const result = await requestAnthropicTextCompletion(prompt, maxTokens);
     return result ? { ...result, workerId: worker.id, provider, model: getProviderModel(provider) } : result;
   }
-  const result = await requestOpenAiCompatibleTextCompletion(provider, prompt, maxTokens, options && options.systemPrompt ? options.systemPrompt : '');
+  const abortSignal = options && options.abortController instanceof AbortController ? options.abortController.signal : null;
+  const result = await requestOpenAiCompatibleTextCompletion(provider, prompt, maxTokens, options && options.systemPrompt ? options.systemPrompt : '', abortSignal);
   return result ? { ...result, workerId: worker.id, provider, model: getProviderModel(provider) } : result;
 }
 
@@ -7434,7 +7472,7 @@ function lastAssistantLooksIncompleteAgentRun(chat) {
   const msg = findLastAssistantMessage(chat);
   const text = String(msg && msg.text ? msg.text : '');
   if (!text) return false;
-  return /did not pass the project quality check|continue or retry without losing|left in its current state|hit an error before finishing|timed out before finishing|returned an invalid planning step|could not complete all tool steps|continue from the current (?:project|workspace) state/i.test(text);
+  return /did not pass the project quality check|continue or retry without losing|left in its current state|hit an error before finishing|timed out before finishing|returned an invalid planning step|could not complete all tool steps|continue from the current (?:project|workspace) state|to build phase \d/i.test(text);
 }
 
 // When the user just says "retry"/"continue" after an interrupted agent build,
@@ -9522,6 +9560,7 @@ async function requestAgentPlannerInferenceInner(prompt, maxTokens, grammar = ''
     let remote = await requestSelectedRemoteTextCompletion(prompt, maxTokens, systemPrompt);
     // Only retry for transient failures (rate limit / network). Skip retry for auth/credits errors.
     const hardFail = remote && !remote.ok && remote.httpStatus && (remote.httpStatus === 401 || remote.httpStatus === 402 || remote.httpStatus === 403);
+    if (remote && remote.cancelled) return { ok: false, cancelled: true, message: 'Cancelled.' };
     if ((!remote || !remote.ok) && !hardFail) {
       await new Promise((resolve) => setTimeout(resolve, 2500));
       remote = await requestSelectedRemoteTextCompletion(prompt, maxTokens, systemPrompt);
@@ -9740,6 +9779,8 @@ const agentLoop = window.AIExeAgentLoop && typeof window.AIExeAgentLoop.createAg
     computeAgentChecklistProgress,
     renderAgentChecklist,
     buildAgentPlanMarkdown,
+    parseAgentPlanMarkdown,
+    firstUnfinishedPhaseIndex,
     setAgentPhaseTracker,
     clearAgentPhaseTracker,
     setThinkingStatus: (text) => {
@@ -11535,7 +11576,19 @@ function sanitizeHref(rawHref) {
 // as its own card above the input for the owning chat. (.aiexe/plan.md = truth.)
 let activePhaseTracker = null;
 let phaseTrackerCollapsed = false;
+// Accordion: which phase rows are expanded (re-seeded to the active phase when it
+// advances; the user can open/close any phase in between).
+const phaseTrackerExpanded = new Set();
+let phaseTrackerExpandedFor = -1;
 const AGENT_PLAN_FILE = '/.aiexe/plan.md';
+
+// A phase is done when it has tasks and they're all ticked (or a task-less phase
+// is explicitly flagged done) — derived from plan.md state, not position.
+function phaseIsDone(phase) {
+  if (!phase) return false;
+  const tasks = Array.isArray(phase.tasks) ? phase.tasks : [];
+  return tasks.length ? tasks.every((t) => t && t.done) : Boolean(phase.done);
+}
 
 function setAgentPhaseTracker(state) {
   activePhaseTracker = state && typeof state === 'object' ? state : null;
@@ -11567,22 +11620,35 @@ function renderPhaseTracker() {
     return;
   }
   const activeIndex = Math.max(0, Math.min(phases.length - 1, Number(state.activeIndex) || 0));
+  // Re-seed the open accordion to the active phase whenever it advances.
+  if (phaseTrackerExpandedFor !== activeIndex) {
+    phaseTrackerExpandedFor = activeIndex;
+    phaseTrackerExpanded.clear();
+    phaseTrackerExpanded.add(activeIndex);
+  }
   const name = String(state.projectName || '').trim();
+  const doneTotal = phases.filter((p) => phaseIsDone(p)).length;
   const headLabel = `${name ? `Building ${escapeHtml(name)}` : 'Building'} · Phase ${activeIndex + 1} of ${phases.length}`;
+  const chevron = '<svg class="phase-row-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>';
   const rows = phases.map((phase, i) => {
-    const status = i < activeIndex ? 'done' : (i === activeIndex ? 'active' : 'pending');
-    const mark = status === 'done' ? '✓' : (status === 'active' ? '●' : '○');
+    const done = phaseIsDone(phase);
+    const status = done ? 'done' : (i === activeIndex ? 'active' : 'pending');
     const tasks = Array.isArray(phase.tasks) ? phase.tasks : [];
-    const doneCount = status === 'done' ? tasks.length : tasks.filter((t) => t && t.done).length;
+    const doneCount = tasks.filter((t) => t && t.done).length;
     const count = tasks.length ? `<span class="phase-row-count">${doneCount}/${tasks.length}</span>` : '';
+    const expanded = phaseTrackerExpanded.has(i);
+    const check = `<span class="phase-row-check ${status}">${done ? '✓' : ''}</span>`;
     let tasksHtml = '';
-    if (status === 'active' && tasks.length) {
+    if (expanded && tasks.length) {
       tasksHtml = `<div class="phase-row-tasks">${tasks.map((t) => {
         const tdone = Boolean(t && t.done);
         return `<div class="phase-task${tdone ? ' done' : ''}"><span class="phase-task-box">${tdone ? '✓' : ''}</span><span class="phase-task-label">${escapeHtml(String((t && t.text) || ''))}</span></div>`;
       }).join('')}</div>`;
     }
-    return `<div class="phase-row ${status}"><div class="phase-row-main"><span class="phase-row-mark">${mark}</span><span class="phase-row-title">${escapeHtml(String(phase.title || ''))}</span>${count}</div>${tasksHtml}</div>`;
+    return `<div class="phase-row ${status}${expanded ? ' expanded' : ''}">`
+      + `<button class="phase-row-main" type="button" data-phase-toggle="${i}" aria-expanded="${expanded ? 'true' : 'false'}"${tasks.length ? '' : ' disabled'}>`
+      + `${check}<span class="phase-row-title">Phase ${i + 1} · ${escapeHtml(String(phase.title || ''))}</span>${count}${tasks.length ? chevron : ''}`
+      + `</button>${tasksHtml}</div>`;
   }).join('');
   phaseTracker.innerHTML = `
     <div class="phase-tracker-head">
@@ -11590,6 +11656,7 @@ function renderPhaseTracker() {
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>
       </button>
       <span class="phase-tracker-title">${headLabel}</span>
+      <span class="phase-tracker-progress">${doneTotal}/${phases.length}</span>
       <button class="phase-tracker-viewplan" type="button" id="phaseTrackerViewPlan">View plan</button>
     </div>
     <div class="phase-tracker-phases">${rows}</div>`;
@@ -11606,6 +11673,14 @@ function renderPhaseTracker() {
       renderPhaseTracker();
     });
   }
+  phaseTracker.querySelectorAll('[data-phase-toggle]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const idx = Number(btn.getAttribute('data-phase-toggle'));
+      if (phaseTrackerExpanded.has(idx)) phaseTrackerExpanded.delete(idx);
+      else phaseTrackerExpanded.add(idx);
+      renderPhaseTracker();
+    });
+  });
 }
 
 function renderInlineMarkdown(text) {
