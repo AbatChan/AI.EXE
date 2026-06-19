@@ -583,6 +583,8 @@
         chatId: String(chatId || ''),
         taskPreview: deps.debugPreview(taskText, 300),
         planKind: String(planSpec && planSpec.taskKind || ''),
+        planSource: String(planSpec && planSpec._planSource || 'model'),
+        planPhases: String(planSpec && Array.isArray(planSpec.phases) ? planSpec.phases.length : 0),
         planProject: deps.debugPreview(String(planSpec && planSpec.projectName || ''), 80),
         planFiles: deps.debugPreview((planSpec && Array.isArray(planSpec.expectedFiles) ? planSpec.expectedFiles.join(' | ') : ''), 220),
       }, {
