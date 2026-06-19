@@ -1068,6 +1068,26 @@
         ].filter(Boolean).join('\n')
         : '(none)';
 
+      // Phased builds: scope this run to the current phase only (the model drives
+      // per-phase; .aiexe/plan.md is the source of truth across Continues).
+      const activePhase = planSpec && planSpec._activePhase;
+      const phaseScope = activePhase && activePhase.title
+        ? [
+          '',
+          '=== PHASED BUILD — THIS RUN BUILDS ONE PHASE ONLY ===',
+          `You are on Phase ${activePhase.number} of ${activePhase.total}: ${activePhase.title}`,
+          activePhase.tasks && activePhase.tasks.length
+            ? `Remaining sub-tasks for THIS phase:\n${activePhase.tasks.map((t) => `  - ${t}`).join('\n')}`
+            : '',
+          activePhase.number === 1
+            ? 'Phase 1 must be a COMPLETE, RUNNABLE minimal version of the project (it runs on its own). Keep it SMALL — build only the sub-tasks listed above; do NOT build later phases\' pages/screens/features now. The workspace was just created and is empty — start writing files immediately; do NOT read_file or list_dir the root or the project name.'
+            : 'Build on the files already in the workspace from earlier phases — read them first if needed, then extend them. Do not rewrite finished files from scratch.',
+          `STRICT SCOPE: build ONLY the files needed for the ${activePhase.tasks && activePhase.tasks.length ? activePhase.tasks.length : 'few'} sub-task(s) above (roughly that many files) — NOT the whole project. Do not create pages or screens that belong to later phases.`,
+          'When this phase\'s sub-tasks are built and it runs, validate_files (and run_app if runnable) then return {"action":"final"} — do NOT continue into the next phase. The user presses Continue to advance; the next run picks up the next phase.',
+          '===',
+        ].filter(Boolean).join('\n')
+        : '';
+
       const template = await loadPromptTemplate('developer_agent_decision');
       const vars = {
         AGENT_STEP: Number(stepIndex),
@@ -1079,7 +1099,7 @@
         PENDING_REQUIREMENTS: summarizeAgentPendingRequirements(taskText, toolEvents, planSpec),
         TOOL_RESULTS: toolLog || '(none yet)',
         TASK: String(taskText || '').trim(),
-        PLAN_SUMMARY: planSummary,
+        PLAN_SUMMARY: phaseScope ? `${planSummary}\n${phaseScope}` : planSummary,
       };
       const prompt = renderPromptTemplate(template, vars);
       // Split at the dynamic section so remote APIs receive proper system/user roles.
