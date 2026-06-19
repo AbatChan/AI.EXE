@@ -10727,6 +10727,14 @@ function loadStoredChats() {
         pendingAttachments: normalizePendingAttachmentList(chat.pendingAttachments),
         manualContext: typeof chat.manualContext === 'string' ? chat.manualContext.slice(0, 4000) : '',
         pendingPreflightConfirmation: normalizeStoredPendingPreflightConfirmation(chat.pendingPreflightConfirmation),
+        phaseTracker: (chat.phaseTracker && typeof chat.phaseTracker === 'object'
+          && Array.isArray(chat.phaseTracker.phases) && chat.phaseTracker.phases.length > 1)
+          ? {
+            projectName: String(chat.phaseTracker.projectName || ''),
+            phases: chat.phaseTracker.phases,
+            activeIndex: Number(chat.phaseTracker.activeIndex) || 0,
+          }
+          : null,
         branchLinks: normalizeBranchLinks(activeThread.branchLinks),
         pendingBranchLink: activeThread.pendingBranchLink ? { ...activeThread.pendingBranchLink } : null,
         threads,
@@ -11593,14 +11601,36 @@ function phaseIsDone(phase) {
   return tasks.length ? tasks.every((t) => t && t.done) : Boolean(phase.done);
 }
 
+// Persist a lightweight tracker snapshot on the owning chat so the pinned tracker
+// survives an app reload / chat switch (plan.md stays the durable build truth; this
+// is just the UI rehydration source). Cleared when the build finishes (allDone).
+function persistPhaseTrackerToChat(state) {
+  try {
+    const cid = state && state.chatId;
+    if (!cid) return;
+    const chat = findChatById(cid);
+    if (!chat) return;
+    chat.phaseTracker = (state.allDone || !Array.isArray(state.phases) || state.phases.length < 2)
+      ? null
+      : { projectName: String(state.projectName || ''), phases: state.phases, activeIndex: Number(state.activeIndex) || 0 };
+    saveChats();
+  } catch (_) { /* best-effort */ }
+}
+
 function setAgentPhaseTracker(state) {
   activePhaseTracker = state && typeof state === 'object' ? state : null;
+  if (activePhaseTracker) persistPhaseTrackerToChat(activePhaseTracker);
   renderPhaseTracker();
 }
 
 function clearAgentPhaseTracker(chatId) {
   if (activePhaseTracker && chatId && activePhaseTracker.chatId !== chatId) return;
+  const ownerId = (activePhaseTracker && activePhaseTracker.chatId) || chatId;
   activePhaseTracker = null;
+  try {
+    const chat = ownerId ? findChatById(ownerId) : null;
+    if (chat && chat.phaseTracker) { chat.phaseTracker = null; saveChats(); }
+  } catch (_) { /* best-effort */ }
   renderPhaseTracker();
 }
 
@@ -11612,6 +11642,19 @@ async function openAgentPlanFile() {
 
 function renderPhaseTracker() {
   if (!phaseTracker) return;
+  // Rehydrate from the active chat's persisted snapshot after a reload or when
+  // switching back to a phased build (the in-memory state is lost on reload).
+  const activeChatForTracker = typeof getActiveChat === 'function' ? getActiveChat() : null;
+  if (activeChatForTracker && activeChatForTracker.phaseTracker
+    && (!activePhaseTracker || activePhaseTracker.chatId !== activeChatForTracker.id)) {
+    activePhaseTracker = {
+      chatId: activeChatForTracker.id,
+      projectName: String(activeChatForTracker.phaseTracker.projectName || ''),
+      phases: Array.isArray(activeChatForTracker.phaseTracker.phases) ? activeChatForTracker.phaseTracker.phases : [],
+      activeIndex: Number(activeChatForTracker.phaseTracker.activeIndex) || 0,
+      allDone: false,
+    };
+  }
   const state = activePhaseTracker;
   const phases = state && Array.isArray(state.phases) ? state.phases.filter((p) => p && p.title) : [];
   const visible = Boolean(state && phases.length > 1 && state.chatId === activeChatId && !state.allDone);
