@@ -241,7 +241,8 @@
       } catch (_) {
         parsed = {};
       }
-      const hiddenSystemFiles = new Set(['.DS_Store', 'Thumbs.db', 'desktop.ini', '.Spotlight-V100', '.Trashes', '.fseventsd']);
+      // .aiexe/ holds the agent's phased-build plan (source of truth) — hidden from the user.
+      const hiddenSystemFiles = new Set(['.DS_Store', 'Thumbs.db', 'desktop.ini', '.Spotlight-V100', '.Trashes', '.fseventsd', '.aiexe']);
       const fetchedChildren = Array.isArray(parsed.entries)
         ? parsed.entries.map(mapWorkspaceEntry).filter((e) => !hiddenSystemFiles.has(e.name) && !e.name.startsWith('._'))
         : [];

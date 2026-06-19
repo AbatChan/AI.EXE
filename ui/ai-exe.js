@@ -686,6 +686,7 @@ const artifactCopyBtn = document.getElementById('artifactCopyBtn');
 const mainInput = document.getElementById('mainInput');
 const inputRow = document.getElementById('inputRow');
 const composerConfirm = document.getElementById('composerConfirm');
+const phaseTracker = document.getElementById('phaseTracker');
 const composerConfirmTitle = document.getElementById('composerConfirmTitle');
 const composerConfirmOptions = document.getElementById('composerConfirmOptions');
 const composerConfirmDismissBtn = document.getElementById('composerConfirmDismissBtn');
@@ -9463,6 +9464,10 @@ const {
   applyAgentEditProgram,
   computeAgentChecklistProgress,
   renderAgentChecklist,
+  parseAgentPlanPhases,
+  buildAgentPlanMarkdown,
+  parseAgentPlanMarkdown,
+  firstUnfinishedPhaseIndex,
   buildFallbackExpectedFiles,
   shouldFallbackPlanNeedReadme,
   isExplicitReadmeOrDocsTask,
@@ -9734,6 +9739,9 @@ const agentLoop = window.AIExeAgentLoop && typeof window.AIExeAgentLoop.createAg
     buildAgentPlanActivity,
     computeAgentChecklistProgress,
     renderAgentChecklist,
+    buildAgentPlanMarkdown,
+    setAgentPhaseTracker,
+    clearAgentPhaseTracker,
     setThinkingStatus: (text) => {
       // While the agent elapsed timer owns the below-input status, ignore the
       // loop's blanking calls so the live "Xs" counter keeps ticking. Honor any
@@ -11523,6 +11531,83 @@ function sanitizeHref(rawHref) {
     : '';
 }
 
+// Pinned phased-build tracker. Run-scoped state set by the agent loop; rendered
+// as its own card above the input for the owning chat. (.aiexe/plan.md = truth.)
+let activePhaseTracker = null;
+let phaseTrackerCollapsed = false;
+const AGENT_PLAN_FILE = '/.aiexe/plan.md';
+
+function setAgentPhaseTracker(state) {
+  activePhaseTracker = state && typeof state === 'object' ? state : null;
+  renderPhaseTracker();
+}
+
+function clearAgentPhaseTracker(chatId) {
+  if (activePhaseTracker && chatId && activePhaseTracker.chatId !== chatId) return;
+  activePhaseTracker = null;
+  renderPhaseTracker();
+}
+
+async function openAgentPlanFile() {
+  try {
+    await openFileTab(AGENT_PLAN_FILE, 'plan.md');
+  } catch (_) { /* file may not exist yet */ }
+}
+
+function renderPhaseTracker() {
+  if (!phaseTracker) return;
+  const state = activePhaseTracker;
+  const phases = state && Array.isArray(state.phases) ? state.phases.filter((p) => p && p.title) : [];
+  const visible = Boolean(state && phases.length > 1 && state.chatId === activeChatId && !state.allDone);
+  if (!visible) {
+    phaseTracker.classList.remove('visible', 'fading');
+    phaseTracker.classList.add('hidden');
+    phaseTracker.setAttribute('aria-hidden', 'true');
+    phaseTracker.innerHTML = '';
+    return;
+  }
+  const activeIndex = Math.max(0, Math.min(phases.length - 1, Number(state.activeIndex) || 0));
+  const name = String(state.projectName || '').trim();
+  const headLabel = `${name ? `Building ${escapeHtml(name)}` : 'Building'} · Phase ${activeIndex + 1} of ${phases.length}`;
+  const rows = phases.map((phase, i) => {
+    const status = i < activeIndex ? 'done' : (i === activeIndex ? 'active' : 'pending');
+    const mark = status === 'done' ? '✓' : (status === 'active' ? '●' : '○');
+    const tasks = Array.isArray(phase.tasks) ? phase.tasks : [];
+    const doneCount = status === 'done' ? tasks.length : tasks.filter((t) => t && t.done).length;
+    const count = tasks.length ? `<span class="phase-row-count">${doneCount}/${tasks.length}</span>` : '';
+    let tasksHtml = '';
+    if (status === 'active' && tasks.length) {
+      tasksHtml = `<div class="phase-row-tasks">${tasks.map((t) => {
+        const tdone = Boolean(t && t.done);
+        return `<div class="phase-task${tdone ? ' done' : ''}"><span class="phase-task-box">${tdone ? '✓' : ''}</span><span class="phase-task-label">${escapeHtml(String((t && t.text) || ''))}</span></div>`;
+      }).join('')}</div>`;
+    }
+    return `<div class="phase-row ${status}"><div class="phase-row-main"><span class="phase-row-mark">${mark}</span><span class="phase-row-title">${escapeHtml(String(phase.title || ''))}</span>${count}</div>${tasksHtml}</div>`;
+  }).join('');
+  phaseTracker.innerHTML = `
+    <div class="phase-tracker-head">
+      <button class="phase-tracker-collapse" type="button" id="phaseTrackerCollapse" aria-label="${phaseTrackerCollapsed ? 'Expand phases' : 'Collapse phases'}" aria-expanded="${phaseTrackerCollapsed ? 'false' : 'true'}">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>
+      </button>
+      <span class="phase-tracker-title">${headLabel}</span>
+      <button class="phase-tracker-viewplan" type="button" id="phaseTrackerViewPlan">View plan</button>
+    </div>
+    <div class="phase-tracker-phases">${rows}</div>`;
+  phaseTracker.classList.remove('hidden', 'fading');
+  phaseTracker.classList.toggle('collapsed', phaseTrackerCollapsed);
+  phaseTracker.classList.add('visible');
+  phaseTracker.setAttribute('aria-hidden', 'false');
+  const viewBtn = document.getElementById('phaseTrackerViewPlan');
+  if (viewBtn) viewBtn.addEventListener('click', openAgentPlanFile);
+  const collapseBtn = document.getElementById('phaseTrackerCollapse');
+  if (collapseBtn) {
+    collapseBtn.addEventListener('click', () => {
+      phaseTrackerCollapsed = !phaseTrackerCollapsed;
+      renderPhaseTracker();
+    });
+  }
+}
+
 function renderInlineMarkdown(text) {
   return markdownRendererApi.renderInlineMarkdown
     ? markdownRendererApi.renderInlineMarkdown(text)
@@ -11724,6 +11809,7 @@ function renderActiveChat(...args) {
   // returning to that chat reattaches its live progress row.
   syncAgentElapsedStatusForActiveChat();
   syncLiveInferenceUiState();
+  renderPhaseTracker();
   return result;
 }
 
