@@ -808,6 +808,8 @@
       const mustExplicitlyDelete = /\b(delete|remove|trash)\b/.test(taskLower);
       const planExpectedFiles = Array.isArray(planSpec && planSpec.expectedFiles) ? planSpec.expectedFiles : [];
       const projectTask = String(planSpec && planSpec.taskKind || '').toLowerCase() === 'project';
+      const phasedProject = Array.isArray(planSpec && planSpec.phases)
+        && planSpec.phases.filter((p) => p && p.title).length >= 2;
       const workspaceContext = typeof deps.getWorkspaceContext === 'function' ? deps.getWorkspaceContext() : null;
       const workspaceStatusSnapshot = typeof deps.requestWorkspaceStatusSnapshot === 'function'
         ? await deps.requestWorkspaceStatusSnapshot()
@@ -845,6 +847,7 @@
         const normalized = deps.normalizeWorkspacePath(candidatePath || '');
         if (!normalized || normalized === '/') return true;
         if (!projectTask) return true;
+        if (phasedProject) return true; // model drives file creation per phase
         if (!planExpectedFiles.length) return true;
         if (normalized === '/README.md') return Boolean(planSpec && planSpec.needsReadme);
         // requirements.txt is a standard Python deliverable — the Run button

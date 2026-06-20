@@ -621,10 +621,15 @@
         workspaceStatusSnapshot,
       });
       deps.resetActiveAgentStreamState();
-      const planActivity = deps.buildAgentPlanActivity(planSpec);
-      appendAgentActivity(planActivity);
-      if (!planActivity && planSpec && planSpec.summary) {
-        appendAgentNarration(planSpec.summary);
+      const phasedProjectRun = Array.isArray(planSpec && planSpec.phases)
+        && planSpec.phases.filter((p) => p && p.title).length >= 2;
+      // Phased: skip the generic summary; a phase-aware acknowledgment is generated below.
+      if (!phasedProjectRun) {
+        const planActivity = deps.buildAgentPlanActivity(planSpec);
+        appendAgentActivity(planActivity);
+        if (!planActivity && planSpec && planSpec.summary) {
+          appendAgentNarration(planSpec.summary);
+        }
       }
       // .aiexe/plan.md is the cross-run source of truth; resume at first unfinished phase.
       const projectDisplayName = String(planSpec && planSpec.projectName || '');
@@ -668,6 +673,30 @@
             allDone: false,
           });
         }
+        // Model-generated, phase-aware opening line (not hardcoded). Replaces the
+        // generic summary so the user hears what THIS phase will do.
+        try {
+          const pendingTasks = (Array.isArray(active.tasks) ? active.tasks : [])
+            .filter((t) => t && !t.done).map((t) => t.text);
+          const ackPrompt = [
+            'Write ONE short, natural, first-person sentence telling the user what you will do in this build phase.',
+            'Output ONLY the sentence — no preamble, no quotes, no markdown, no labels.',
+            activeIndex === 0
+              ? 'This is the FIRST of several phases — say you are starting with this phase and will build the rest in later phases the user continues.'
+              : `This is phase ${activeIndex + 1} of ${phases.length} — say you are continuing the build and what this phase adds.`,
+            `Overall goal: ${String((planSpec && planSpec.summary) || taskText || '').trim()}`,
+            `Phase ${activeIndex + 1} of ${phases.length}: ${String(active.title || '').trim()}`,
+            pendingTasks.length ? `This phase covers: ${pendingTasks.join('; ')}` : '',
+            'Sentence:',
+          ].filter(Boolean).join('\n');
+          const ackRes = await deps.requestAgentPlannerInference(ackPrompt, 160, '');
+          if (ackRes && ackRes.ok) {
+            let ack = String(deps.sanitizeAssistantText(String(ackRes.output || '')) || '')
+              .split('\n').map((s) => s.trim()).filter(Boolean)[0] || '';
+            ack = ack.replace(/^["'`]+|["'`]+$/g, '').trim();
+            if (ack && !/^[{<[]/.test(ack)) appendAgentNarration(ack);
+          }
+        } catch (_) { /* best-effort; the tracker still shows the phases */ }
       }
 
       // Harness-driven checklist from planSpec.doneCriteria (marked done mechanically).
