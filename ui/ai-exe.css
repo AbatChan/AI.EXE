@@ -5526,6 +5526,13 @@ html.platform-mac .settings-sidebar {
   gap: 7px;
   font-size: 12px;
   color: rgba(190, 202, 222, 0.74);
+  border-radius: 6px;
+  margin-left: -3px;
+  padding: 1px 3px;
+}
+
+.phase-task.live-new {
+  animation: phaseTaskLiveNew 1.35s ease-out;
 }
 
 .phase-task-box {
@@ -5559,6 +5566,21 @@ html.platform-mac .settings-sidebar {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+@keyframes phaseTaskLiveNew {
+  0% {
+    background: rgba(126, 214, 159, 0);
+    box-shadow: 0 0 0 0 rgba(126, 214, 159, 0);
+  }
+  18% {
+    background: rgba(126, 214, 159, 0.14);
+    box-shadow: 0 0 0 1px rgba(126, 214, 159, 0.18);
+  }
+  100% {
+    background: rgba(126, 214, 159, 0);
+    box-shadow: 0 0 0 0 rgba(126, 214, 159, 0);
+  }
 }
 
 .composer-confirm {
