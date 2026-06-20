@@ -88,6 +88,39 @@
     return null;
   }
 
+  function extractFileLikeTaskPaths(text, normalizeWorkspacePath) {
+    const norm = typeof normalizeWorkspacePath === 'function' ? normalizeWorkspacePath : (p) => String(p || '');
+    const out = [];
+    const raw = String(text || '');
+    const rx = /(^|[\s"'`(])((?:\/|\.\/)?[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*\.(?:html?|css|js|mjs|cjs|ts|tsx|jsx|json|md|txt|py|php|java|c|cpp|h|hpp|cs|go|rs|rb|swift|kt|sql|xml|svg|csv|yml|yaml))(?![A-Za-z0-9_.-])/g;
+    let m;
+    while ((m = rx.exec(raw))) {
+      const p = norm(String(m[2] || '').replace(/^\.\//, '/'));
+      if (p && !out.includes(p)) out.push(p);
+    }
+    return out;
+  }
+
+  function markPhaseTaskLiveProgressForPath(phaseState, rawPath, normalizeWorkspacePath) {
+    if (!phaseState || !Array.isArray(phaseState.phases)) return 0;
+    const norm = typeof normalizeWorkspacePath === 'function' ? normalizeWorkspacePath : (p) => String(p || '');
+    const path = norm(rawPath || '');
+    if (!path) return 0;
+    const activeIndex = Math.max(0, Math.min(phaseState.phases.length - 1, Number(phaseState.activeIndex) || 0));
+    const phase = phaseState.phases[activeIndex];
+    const tasks = Array.isArray(phase && phase.tasks) ? phase.tasks : [];
+    let changed = 0;
+    tasks.forEach((task) => {
+      if (!task || task.done || task.liveDone) return;
+      const matches = extractFileLikeTaskPaths(task.text || task, norm);
+      if (matches.includes(path)) {
+        task.liveDone = true;
+        changed += 1;
+      }
+    });
+    return changed;
+  }
+
   function createAgentLoop(deps) {
     const recordDebugTrace = typeof deps.recordDebugTrace === 'function'
       ? deps.recordDebugTrace
@@ -812,6 +845,19 @@
         }
         if (nextIdx < 0) keepPhaseTrackerPinned = false;
         return { idx, donePhase, nextIdx };
+      };
+      const refreshPhaseLiveProgress = (rawPath) => {
+        if (!phaseState || typeof deps.setAgentPhaseTracker !== 'function') return 0;
+        const changed = markPhaseTaskLiveProgressForPath(phaseState, rawPath, deps.normalizeWorkspacePath);
+        if (!changed) return 0;
+        deps.setAgentPhaseTracker({
+          chatId,
+          projectName: projectDisplayName,
+          phases: phaseState.phases,
+          activeIndex: phaseState.activeIndex,
+          allDone: false,
+        });
+        return changed;
       };
       // Per-run mutation budget (sized to the phase's sub-tasks) so one run can't
       // build everything and time out.
@@ -1972,6 +2018,9 @@
         if (toolResult && toolResult.ok
           && (toolResult.mutated || String(decision.tool || '').toLowerCase() === 'validate_files')) {
           const cl = refreshChecklist();
+          if (toolResult.mutated) {
+            refreshPhaseLiveProgress(toolResult.writtenPath || decision.path || '');
+          }
           if (cl && cl.total) {
             setAgentProgress(cl.allDone
               ? `All ${cl.total} planned items addressed — finalizing...`
@@ -2453,5 +2502,7 @@
     deriveAgentFailureSignature,
     countInspectionsSinceMutation,
     evaluateRepeatedRead,
+    extractFileLikeTaskPaths,
+    markPhaseTaskLiveProgressForPath,
   };
 })(window);
