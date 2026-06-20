@@ -625,6 +625,9 @@
         && planSpec.phases.filter((p) => p && p.title).length >= 2;
       // Phased: skip the generic summary; a phase-aware acknowledgment is generated below.
       if (!phasedProjectRun) {
+        // A non-phased run (e.g. a follow-up edit) must not show the stale phase
+        // tracker left over from this chat's earlier phased build.
+        if (typeof deps.clearAgentPhaseTracker === 'function') deps.clearAgentPhaseTracker(chatId);
         const planActivity = deps.buildAgentPlanActivity(planSpec);
         appendAgentActivity(planActivity);
         if (!planActivity && planSpec && planSpec.summary) {
@@ -2338,21 +2341,20 @@
         }
       }
       let fallback = '';
-      if (cl && cl.allDone) {
-        // Work is done — let the model write the wrap-up naturally rather than a template.
-        const workspaceLabel = deps.getWorkspaceRootName() || deps.deriveProjectNameFromTask(taskText) || 'project';
+      const workspaceLabel = deps.getWorkspaceRootName() || deps.deriveProjectNameFromTask(taskText) || 'project';
+      // Let the model write the wrap-up naturally (grounded in the real diffs)
+      // whenever there was progress — done OR out-of-steps — instead of a robotic
+      // "N of M planned items / Still to do: ..." dump.
+      if ((cl && cl.allDone) || fallbackChanged.length || (cl && cl.doneCount > 0)) {
         fallback = String(await deps.generateAgentCompletionText(taskText, toolEvents, workspaceLabel, planSpec) || '').trim();
       }
+      if (fallback && !(cl && cl.allDone)) {
+        fallback += " I didn't get to finish everything — press Continue and I'll keep going.";
+      }
       if (!fallback) {
-        if (cl && cl.total && !cl.allDone) {
-          fallback = `I ran out of steps with ${cl.doneCount} of ${cl.total} planned items done.${changedClause}${remainingClause} Press Continue to finish the rest, or leave it here.`;
-        } else if (cl && cl.allDone) {
-          fallback = `Done — I made the planned changes.${changedClause}`;
-        } else if (fallbackChanged.length) {
-          fallback = `I ran out of steps before fully wrapping up.${changedClause} Press Continue to keep going, or tell me what to adjust.`;
-        } else {
-          fallback = 'I could not finish in time. Press Continue to keep going, or tell me the exact change you want.';
-        }
+        fallback = fallbackChanged.length
+          ? "I made some changes but didn't fully wrap up — press Continue to keep going, or tell me what to adjust."
+          : "I couldn't finish in time — press Continue to keep going, or tell me the exact change you want.";
       }
       if (unresolvedValidationClause) fallback += unresolvedValidationClause;
       deps.setThinkingStatus('');
