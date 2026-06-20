@@ -2462,7 +2462,6 @@ function saveEditedUserMessage(chatId, messageTs, nextText) {
   chatAutoScrollPinned = true;
   // Edit-and-resend in this chat — keep its current project, don't re-ask new-vs-current.
   void requestAssistantReply(chat.id, buildPromptWithInputAugments(cleaned), true, {
-    skipNewProjectConfirmation: true,
     forceCurrentWorkspace: true,
   });
 }
@@ -2570,7 +2569,6 @@ function retryAssistantMessage(chatId, messageTs) {
   chatAutoScrollPinned = true;
   // Retry of an existing turn — keep using the chat's current project, don't re-ask new-vs-current.
   void requestAssistantReply(chat.id, buildPromptWithInputAugments(userMessage), true, {
-    skipNewProjectConfirmation: true,
     forceCurrentWorkspace: true,
   });
 }
@@ -6919,7 +6917,7 @@ async function requestPreflightRouteDecision(chatId, latestUserMessage, options 
   // the confirm as a "follow-up". (modify_existing_workspace IS a follow-up; this isn't.)
   if (agentEnabled && sameChatWorkspaceFollowup && decision.route === 'agent'
     && buildIntent === 'create_or_build_deliverable'
-    && !(options && options.skipNewProjectConfirmation)) {
+    && !(options && options.forceCurrentWorkspace)) {
     decision.route = 'confirm';
     decision.shouldAskUser = true;
     decision.shouldCreateProject = true;
@@ -13401,7 +13399,7 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
         const preflightDecision = await requestPreflightRouteDecision(chatId, promptText, {
           agentEnabled: developerAgentEnabled,
           canvasEnabled: canvasModeUiEnabled,
-          skipNewProjectConfirmation: Boolean(requestToken.skipNewProjectConfirmation),
+          forceCurrentWorkspace: Boolean(requestToken.forceCurrentWorkspace),
         });
         const preflightDebug = preflightDecision && preflightDecision._debug ? preflightDecision._debug : null;
         const workspaceDebug = getWorkspaceDebugSnapshot();
