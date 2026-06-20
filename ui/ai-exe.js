@@ -11675,11 +11675,11 @@ function renderPhaseTracker() {
   }
   const name = String(state.projectName || '').trim();
   const doneTotal = phases.filter((p) => phaseIsDone(p)).length;
-  const activeTasks = Array.isArray(phases[activeIndex] && phases[activeIndex].tasks) ? phases[activeIndex].tasks : [];
-  const activeDoneCount = activeTasks.filter((t) => t && (t.done || t.liveDone)).length;
+  const allTasks = phases.flatMap((p) => (Array.isArray(p && p.tasks) ? p.tasks : []));
+  const allDoneCount = allTasks.filter((t) => t && (t.done || t.liveDone)).length;
   const headLabel = `${name ? `Building ${escapeHtml(name)}` : 'Building'} · Phase ${activeIndex + 1}/${phases.length}`;
-  const progressLabel = activeTasks.length
-    ? `${activeDoneCount} of ${activeTasks.length} tasks`
+  const progressLabel = allTasks.length
+    ? `${allDoneCount}/${allTasks.length} tasks`
     : `${doneTotal}/${phases.length} phases`;
   const chevron = '<svg class="phase-row-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>';
   const rows = phases.map((phase, i) => {
