@@ -1027,9 +1027,7 @@ let authMode = 'login';
 let pendingInferenceCount = 0;
 let activeInferenceRequest = null;
 let inferenceIdleResolvers = [];
-// In-flight agent inference fetches (file generation, decisions). Registered so a
-// cancel/abort can stop them — the non-streaming remote fetch had no abort signal,
-// so a cancelled file generation kept running and committed minutes later.
+// In-flight agent inference fetches, so cancel/abort can actually stop them.
 const inFlightInferenceControllers = new Set();
 function abortAllInFlightInferenceControllers(reason = 'cancelled') {
   inFlightInferenceControllers.forEach((c) => { try { c.abort(reason); } catch (_) { /* noop */ } });
@@ -5936,8 +5934,6 @@ function cancelActiveInference() {
       token.abortController.abort();
     } catch (_) { }
   }
-  // Stop any in-flight agent inference (file generation / decisions) that doesn't
-  // ride the token's own controller — otherwise it keeps running and commits late.
   abortAllInFlightInferenceControllers('user_cancelled');
   clearTypingIndicator();
   const activeAgentState = activeAgentStreamState && String(activeAgentStreamState.chatId || '') === String(token.chatId || '')
@@ -5969,9 +5965,7 @@ function cancelActiveInference() {
   resolveChatNamingFallback(String(token.chatId || ''), 'New Chat');
   setThinkingStatus('Cancelled');
   completeInferenceRequest(token);
-  // A cancel mid-run can leave the explorer stuck on its loading skeleton (a
-  // project was created but the tree never finished rendering) — refresh it so it
-  // reflects the real files now on disk instead of looking like work is ongoing.
+  // Refresh the tree so a cancel doesn't leave the explorer on its loading skeleton.
   try { void refreshWorkspaceTree(true); } catch (_) { /* best-effort */ }
   setTimeout(() => {
     if (pendingInferenceCount === 0) {
@@ -6551,8 +6545,7 @@ async function requestAnthropicTextCompletion(prompt, maxTokens) {
 }
 
 async function requestSelectedRemoteTextCompletion(prompt, maxTokens, systemPrompt = '', extra = {}) {
-  // Don't start (or retry) an agent inference once the run was cancelled — this is
-  // what stopped a cancelled file generation from re-firing and committing late.
+  // Don't start/retry an agent inference once the run was cancelled.
   if (activeInferenceRequest && activeInferenceRequest.cancelled) {
     return { ok: false, cancelled: true, message: 'Cancelled.' };
   }
@@ -9573,9 +9566,7 @@ async function requestAgentPlannerInferenceInner(prompt, maxTokens, grammar = ''
       };
     }
     const remoteMsg = (remote && remote.message) || `${remoteProvider} API unavailable — check your connection.`;
-    // Surface hard provider failures (out of credits / bad key / forbidden) so the
-    // caller can stop and tell the user instead of silently degrading to a fallback
-    // plan and reporting fake success.
+    // Propagate hard failures (credits/key) so the caller can stop, not degrade.
     return { ok: false, message: remoteMsg, httpStatus: (remote && remote.httpStatus) || 0, hardFail: Boolean(hardFail) };
   }
   return requestNativeAgentPlannerInference(prompt, maxTokens, grammar);
@@ -11601,9 +11592,7 @@ function phaseIsDone(phase) {
   return tasks.length ? tasks.every((t) => t && t.done) : Boolean(phase.done);
 }
 
-// Persist a lightweight tracker snapshot on the owning chat so the pinned tracker
-// survives an app reload / chat switch (plan.md stays the durable build truth; this
-// is just the UI rehydration source). Cleared when the build finishes (allDone).
+// Snapshot the tracker on the owning chat so it survives reload (cleared when done).
 function persistPhaseTrackerToChat(state) {
   try {
     const cid = state && state.chatId;
@@ -11642,8 +11631,7 @@ async function openAgentPlanFile() {
 
 function renderPhaseTracker() {
   if (!phaseTracker) return;
-  // Rehydrate from the active chat's persisted snapshot after a reload or when
-  // switching back to a phased build (the in-memory state is lost on reload).
+  // Rehydrate from the active chat's snapshot after reload / chat switch.
   const activeChatForTracker = typeof getActiveChat === 'function' ? getActiveChat() : null;
   if (activeChatForTracker && activeChatForTracker.phaseTracker
     && (!activePhaseTracker || activePhaseTracker.chatId !== activeChatForTracker.id)) {

@@ -114,9 +114,7 @@
       // finish with planned items still unmet, then trust its judgment.
       let finalNudges = 0;
       let runAppFinishNudges = 0;
-      // Phased builds: a model that tries to "finish" a phase having written nothing
-      // that run (just read files and declared it done) must be pushed to actually
-      // build the phase's pages before the phase is marked complete.
+      // Block completing a phase when the model wrote nothing that run.
       let phaseEmptyFinalNudges = 0;
       // The latest run_app since the last write, IF it still reports errors — used to
       // refuse a clean finish over an unrepaired runtime failure (ok:true+runErrorCount
@@ -140,8 +138,7 @@
       const startedAt = Date.now();
       const deadlineAt = startedAt + deps.agentTotalTimeoutMs;
       let planSpec = null;
-      // Phased build state (declared out here so the finally can keep the tracker
-      // pinned between phases). phaseState = { phases, activeIndex } for this run.
+      // Phased state (out here so the finally can keep the tracker pinned).
       let phaseState = null;
       let keepPhaseTrackerPinned = false;
       // Guaranteed finalizer (see the matching finally at the end): the run must
@@ -559,9 +556,7 @@
       // "empty project is done" plan that finalized after new_project with no files.)
       const approvedNewProject = Boolean(requestToken && requestToken.approvedNewProject);
       planSpec = await deps.buildAgentPlanSpec(chatId, taskText, { forceProjectScope: approvedNewProject });
-      // Hard provider failure while planning (out of credits / bad key / forbidden):
-      // stop NOW and tell the user the real reason instead of silently building a
-      // degraded single-file fallback and claiming "Validation passed".
+      // Hard provider failure while planning (credits/key) — stop, tell the user.
       if (planSpec && planSpec._planHardError) {
         deps.setThinkingStatus('');
         setAgentProgress('Stopped.');
@@ -631,10 +626,7 @@
       if (!planActivity && planSpec && planSpec.summary) {
         appendAgentNarration(planSpec.summary);
       }
-      // Surface a multi-phase build plan so the user knows it's staged and can
-      // Continue between phases (phase 1 is a runnable core; later phases extend it).
-      // .aiexe/plan.md is the cross-run source of truth: on a Continue we read the
-      // ticked boxes back and resume from the first unfinished phase.
+      // .aiexe/plan.md is the cross-run source of truth; resume at first unfinished phase.
       const projectDisplayName = String(planSpec && planSpec.projectName || '');
       const readAgentPlanFilePhases = async () => {
         if (typeof deps.parseAgentPlanMarkdown !== 'function') return null;
@@ -649,8 +641,7 @@
         ? planSpec.phases.filter((p) => p && p.title)
         : [];
       if (agentPhases.length > 1) {
-        // Existing plan.md (with ticks) wins over the freshly re-planned phases so a
-        // Continue resumes exactly where the last run left off.
+        // plan.md (with ticks) wins over freshly re-planned phases on Continue.
         const filePhases = await readAgentPlanFilePhases();
         const phases = (filePhases && filePhases.length) ? filePhases : agentPhases;
         planSpec.phases = phases;
@@ -659,11 +650,7 @@
         if (activeIndex < 0) activeIndex = phases.length - 1;
         phaseState = { phases, activeIndex };
         keepPhaseTrackerPinned = true;
-        // A phased build is ALWAYS a project build, even on Continue. The re-planner
-        // sees the now-populated workspace and tends to reclassify the resume as
-        // "edit" (→ review existing files, build nothing) — force project scope back
-        // so the per-phase model-driven generation keeps building the remaining pages.
-        planSpec.taskKind = 'project';
+        planSpec.taskKind = 'project'; // re-planner reclassifies Continue as 'edit'; force back
         const active = phases[activeIndex] || {};
         planSpec._activePhase = {
           number: activeIndex + 1,
@@ -671,8 +658,7 @@
           title: String(active.title || ''),
           tasks: (Array.isArray(active.tasks) ? active.tasks : []).filter((t) => t && !t.done).map((t) => t.text),
         };
-        // No phase-plan narration here — the pinned phase tracker UI already shows
-        // the phases, the active one, and per-phase sub-tasks.
+        // No narration — the phase tracker UI shows the plan.
         if (typeof deps.setAgentPhaseTracker === 'function') {
           deps.setAgentPhaseTracker({
             chatId,
@@ -701,8 +687,7 @@
           reviewNarrated = true;
           appendAgentNarration('All files are in place — reviewing the plan to confirm every item is met.');
         }
-        // Phased builds show the phase tracker as the single plan view — skip the
-        // duplicate flat "Plan N/N" card (its criteria don't line up with phases).
+        // Phased: tracker is the plan view; skip the duplicate flat "Plan N/N" card.
         if (phaseState) return { progress, doneCount, total: progress.length, remaining: progress.filter((p) => p && !p.done).map((p) => p.text), allDone };
         if (signature !== lastChecklistSignature) {
           lastChecklistSignature = signature;
@@ -746,8 +731,7 @@
           planFileWritten = false; // retry next step
         }
       };
-      // Force-rewrite plan.md from the current planSpec.phases (used to tick boxes
-      // when a phase completes — the file is the durable cross-run state).
+      // Force-rewrite plan.md from planSpec.phases (tick boxes on phase completion).
       const persistAgentPlanFile = async () => {
         if (typeof deps.buildAgentPlanMarkdown !== 'function') return;
         try {
@@ -759,9 +743,7 @@
           planFileWritten = true;
         } catch (_) { /* best-effort */ }
       };
-      // Mark the active phase's boxes done in plan.md and advance. Returns the next
-      // unfinished phase index (-1 = all done). Shared by the model-FINAL hook and
-      // the per-run mutation-budget backstop below.
+      // Tick the active phase done in plan.md, advance; returns next index (-1 = done).
       const completeActivePhase = async () => {
         if (!phaseState) return null;
         const idx = phaseState.activeIndex;
@@ -784,9 +766,8 @@
         if (nextIdx < 0) keepPhaseTrackerPinned = false;
         return { idx, donePhase, nextIdx };
       };
-      // Per-run budget so a model that ignores the phase scope (deepseek tends to
-      // plow through every page) can't build the whole project in one run and time
-      // out. Sized to the phase's OWN planned sub-tasks (not hardcoded), min 3.
+      // Per-run mutation budget (sized to the phase's sub-tasks) so one run can't
+      // build everything and time out.
       const phaseMutationBudget = () => {
         if (!phaseState) return Infinity;
         const tasks = Array.isArray(phaseState.phases[phaseState.activeIndex] && phaseState.phases[phaseState.activeIndex].tasks)
@@ -1067,10 +1048,7 @@
 
         if (!decision._deterministic) {
           const isFinal = decision.action === 'final' || String(decision.tool || '').toLowerCase() === 'none';
-          // Only narrate the model's OWN thought/message. Don't auto-synthesize a
-          // "Writing the X" line: it's pre-execution, so a blocked/reordered/guarded
-          // write (e.g. a premature README) leaks a line for an action that never
-          // happened. The file activity cards already show what's actually written.
+          // Narrate only the model's own thought; synthesized "Writing X" leaked on blocked writes.
           const narration = isFinal ? '' : (decision.thought || decision.message || '');
           if (narration) appendAgentNarration(narration);
         } else if (!deterministicBatchNarrated) {
@@ -1322,13 +1300,9 @@
             pushCriteriaNudgeObservation(unmetCriteria);
             continue;
           }
-          // Phased build: a model FINAL ends the CURRENT phase, not the project.
-          // Tick this phase's boxes in plan.md (the source of truth); if more phases
-          // remain, stop here with a Continue chip instead of finishing the project.
+          // Phased: a model FINAL ends the current phase, not the project.
           if (phaseState && typeof deps.firstUnfinishedPhaseIndex === 'function') {
-            // Don't let a phase complete with NO files written this run — the model
-            // sometimes just reads existing files and declares the project "already
-            // complete", which would skip this phase's pages. Push it to build first.
+            // No files written this run → don't complete the phase; push to build.
             if (countRunMutations() === 0 && phaseEmptyFinalNudges < 2) {
               phaseEmptyFinalNudges += 1;
               const activeP = phaseState.phases[phaseState.activeIndex] || {};
@@ -1346,8 +1320,7 @@
               setAgentProgress('Building this phase...');
               continue;
             }
-            // Still nothing written after the nudges — do NOT mark the phase done
-            // (that would skip its pages). Stop and let Continue retry this phase.
+            // Still nothing after nudges — stop for Continue-retry, don't false-complete.
             if (countRunMutations() === 0) {
               const activeP = phaseState.phases[phaseState.activeIndex] || {};
               setAgentProgress('Stopped.');
@@ -1957,10 +1930,7 @@
               : `Progress ${cl.doneCount}/${cl.total} — continuing...`);
           }
         }
-        // Phased backstop: if the model keeps building past this phase's budget
-        // (ignoring the "return final" instruction), bound the run so one run can't
-        // build the whole project and time out. Honors the planner's own phase
-        // sizing; the user advances with Continue.
+        // Backstop: bound the run at the phase's mutation budget so it can't time out.
         if (phaseState && toolResult && toolResult.ok && toolResult.mutated
           && countRunMutations() >= phaseMutationBudget()) {
           const isLastPhase = phaseState.activeIndex >= phaseState.phases.length - 1;
