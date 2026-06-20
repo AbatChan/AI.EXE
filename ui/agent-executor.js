@@ -802,6 +802,24 @@
       return issues;
     }
 
+    // Safety net: some models (qwen Hermes/double-escaped output) hand back file
+    // content still JSON-escaped — literal \n and \" with no real newlines — which
+    // writes the whole file onto one line. Decode it when clearly escaped.
+    const decodeEscapedFileContent = (s) => {
+      const text = String(s || '');
+      const literalEscapes = (text.match(/\\[nt"]/g) || []).length;
+      const realNewlines = (text.match(/\n/g) || []).length;
+      if (literalEscapes < 3 || realNewlines > 1) return text;
+      try {
+        const decoded = JSON.parse(`"${text.replace(/\r?\n/g, '\\n')}"`);
+        if (decoded && /\n/.test(decoded)) return decoded;
+      } catch (_) { /* fall through */ }
+      return text
+        .replace(/\\\\/g, ' ')
+        .replace(/\\n/g, '\n').replace(/\\r/g, '\r').replace(/\\t/g, '\t')
+        .replace(/\\"/g, '"').replace(/\\'/g, "'")
+        .replace(/ /g, '\\');
+    };
     async function executeDeveloperToolCall(chatId, decision, taskText, toolEvents = [], planSpec = null, runOptions = {}) {
       const tool = String(decision && decision.tool ? decision.tool : '').toLowerCase();
       const taskLower = String(taskText || '').toLowerCase();
@@ -1155,7 +1173,7 @@
         const skipped = [];
         for (const f of (Array.isArray(files) ? files : [])) {
           const fpath = deps.normalizeWorkspacePath(f && f.path || '');
-          const fcontent = String(f && f.content || '');
+          const fcontent = decodeEscapedFileContent(String(f && f.content || ''));
           if (!fpath || fpath === '/' || !fcontent.trim()) continue;
           if (!planAllowsPath(fpath)) { skipped.push(`${fpath} (outside plan)`); continue; }
           const parent = deps.parentWorkspacePath(fpath);
@@ -1275,7 +1293,7 @@
           if (currentRead && currentRead.ok) originalContent = String(currentRead.output || '');
         }
         deps.setActiveAgentStreamStatus(chatId, `${creatingNewFile ? 'Writing' : 'Editing'} ${path}...`);
-        let content = String(decision.content || '');
+        let content = decodeEscapedFileContent(String(decision.content || ''));
         const shouldAutoGenerate = deps.isAgentGeneratedContentTarget(path, taskText);
         const initialInlineContent = content;
         const inlineStructureIssue = String(content).trim() ? getStructuralIssueForPath(path, content) : '';
