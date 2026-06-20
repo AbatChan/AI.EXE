@@ -1058,10 +1058,11 @@
 
         if (!decision._deterministic) {
           const isFinal = decision.action === 'final' || String(decision.tool || '').toLowerCase() === 'none';
-          const isExplore = ['read_file', 'search_files', 'list_dir'].includes(String(decision.tool || '').toLowerCase());
-          // Don't pre-narrate a FINAL message — a rejected finish would otherwise
-          // leave a stray conclusion in the feed; an accepted one shows when committed.
-          const narration = isFinal ? '' : (decision.thought || decision.message || (isExplore ? '' : synthesizeToolNarration(decision)));
+          // Only narrate the model's OWN thought/message. Don't auto-synthesize a
+          // "Writing the X" line: it's pre-execution, so a blocked/reordered/guarded
+          // write (e.g. a premature README) leaks a line for an action that never
+          // happened. The file activity cards already show what's actually written.
+          const narration = isFinal ? '' : (decision.thought || decision.message || '');
           if (narration) appendAgentNarration(narration);
         } else if (!deterministicBatchNarrated) {
           const batchThought = decision.thought;
