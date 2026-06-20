@@ -121,6 +121,36 @@
     return changed;
   }
 
+  function getActivePhaseFileTaskGaps(phaseState, normalizeWorkspacePath) {
+    if (!phaseState || !Array.isArray(phaseState.phases)) return [];
+    const norm = typeof normalizeWorkspacePath === 'function' ? normalizeWorkspacePath : (p) => String(p || '');
+    const activeIndex = Math.max(0, Math.min(phaseState.phases.length - 1, Number(phaseState.activeIndex) || 0));
+    const phase = phaseState.phases[activeIndex];
+    const tasks = Array.isArray(phase && phase.tasks) ? phase.tasks : [];
+    const gaps = [];
+    tasks.forEach((task) => {
+      if (!task || task.done || task.liveDone) return;
+      const paths = extractFileLikeTaskPaths(task.text || task, norm);
+      if (paths.length) gaps.push({ text: String(task.text || task || '').trim(), path: paths[0], paths });
+    });
+    return gaps;
+  }
+
+  function activePhaseFilePaths(phaseState, normalizeWorkspacePath) {
+    if (!phaseState || !Array.isArray(phaseState.phases)) return [];
+    const norm = typeof normalizeWorkspacePath === 'function' ? normalizeWorkspacePath : (p) => String(p || '');
+    const activeIndex = Math.max(0, Math.min(phaseState.phases.length - 1, Number(phaseState.activeIndex) || 0));
+    const phase = phaseState.phases[activeIndex];
+    const tasks = Array.isArray(phase && phase.tasks) ? phase.tasks : [];
+    const paths = [];
+    tasks.forEach((task) => {
+      extractFileLikeTaskPaths(task && (task.text || task), norm).forEach((p) => {
+        if (p && !paths.includes(p)) paths.push(p);
+      });
+    });
+    return paths;
+  }
+
   function createAgentLoop(deps) {
     const recordDebugTrace = typeof deps.recordDebugTrace === 'function'
       ? deps.recordDebugTrace
@@ -328,6 +358,17 @@
       const buildStoppedWithWorkText = async (blockerNote) => {
         const hasMutations = toolEvents.some((event) => event && event.ok && isMutationTool(event.tool));
         if (!hasMutations) return blockerNote;
+        if (phaseState) {
+          const changed = [...new Set(toolEvents
+            .filter((event) => event && event.ok && ['write_file', 'edit_file'].includes(String(event.tool || '').toLowerCase()))
+            .map((event) => deps.normalizeWorkspacePath(event.path || ''))
+            .filter(Boolean))];
+          const gaps = getActivePhaseFileTaskGaps(phaseState, deps.normalizeWorkspacePath);
+          const activeP = phaseState.phases[phaseState.activeIndex] || {};
+          const changedText = changed.length ? `Changed: ${changed.slice(0, 6).join(', ')}.` : 'No phase files were changed.';
+          const remainingText = gaps.length ? `Still to do in Phase ${phaseState.activeIndex + 1}: ${gaps.map((g) => g.text || g.path).join('; ')}.` : `Phase ${phaseState.activeIndex + 1} still needs validation or review.`;
+          return `Phase ${phaseState.activeIndex + 1}${activeP.title ? ` (${activeP.title})` : ''} is not complete yet. ${changedText} ${remainingText}\n\n${blockerNote}`;
+        }
         const workspaceLabel = deps.getWorkspaceRootName() || deps.deriveProjectNameFromTask(taskText) || 'project';
         const base = String(await deps.generateAgentCompletionText(taskText, toolEvents, workspaceLabel, planSpec) || '').trim();
         return base ? `${base}\n\n${blockerNote}` : blockerNote;
@@ -859,6 +900,39 @@
         });
         return changed;
       };
+      const hasValidationPassedSinceLatestMutation = () => {
+        let latestMutation = -1;
+        let latestValidation = null;
+        let latestValidationIndex = -1;
+        for (let i = 0; i < toolEvents.length; i += 1) {
+          const event = toolEvents[i];
+          if (!event) continue;
+          const tool = String(event.tool || '').toLowerCase();
+          if (event.ok && ['write_file', 'edit_file'].includes(tool)) latestMutation = i;
+          if (tool === 'validate_files') {
+            latestValidation = event;
+            latestValidationIndex = i;
+          }
+        }
+        return Boolean(latestValidation && latestValidationIndex > latestMutation && latestValidation.validationPassed === true);
+      };
+      const latestValidationFailureSinceLatestMutation = () => {
+        let latestMutation = -1;
+        let latestValidation = null;
+        let latestValidationIndex = -1;
+        for (let i = 0; i < toolEvents.length; i += 1) {
+          const event = toolEvents[i];
+          if (!event) continue;
+          const tool = String(event.tool || '').toLowerCase();
+          if (event.ok && ['write_file', 'edit_file'].includes(tool)) latestMutation = i;
+          if (tool === 'validate_files') {
+            latestValidation = event;
+            latestValidationIndex = i;
+          }
+        }
+        if (latestValidation && latestValidationIndex > latestMutation && latestValidation.validationPassed === false) return latestValidation;
+        return null;
+      };
       // Per-run mutation budget (sized to the phase's sub-tasks) so one run can't
       // build everything and time out.
       const phaseMutationBudget = () => {
@@ -1139,6 +1213,31 @@
         decision.srcPath = normalizeDecisionPath(decision.srcPath || '');
         decision.dstPath = normalizeDecisionPath(decision.dstPath || '');
 
+        if (phaseState && decision.action === 'tool' && String(decision.tool || '').toLowerCase() === 'validate_files') {
+          const missingPhaseFiles = getActivePhaseFileTaskGaps(phaseState, deps.normalizeWorkspacePath);
+          if (missingPhaseFiles.length) {
+            const missing = missingPhaseFiles[0];
+            decision = {
+              action: 'tool',
+              tool: 'write_file',
+              path: missing.path,
+              content: '',
+              command: '',
+              srcPath: '',
+              dstPath: '',
+              message: `Create ${missing.path} before validating Phase ${phaseState.activeIndex + 1}.`,
+              thought: `Phase ${phaseState.activeIndex + 1} is missing ${missing.path}; write it before validation.`,
+              raw: '[phase-missing-file-before-validate]',
+              _deterministic: true,
+            };
+            recordDebugTrace('agent_phase_validate_redirected_to_missing_file', {
+              chatId: String(chatId || ''),
+              step: String(step),
+              path: missing.path,
+            }, { chatId: String(chatId || ''), step, missingPhaseFiles });
+          }
+        }
+
         if (!decision._deterministic) {
           const isFinal = decision.action === 'final' || String(decision.tool || '').toLowerCase() === 'none';
           // Narrate only the model's own thought; synthesized "Writing X" leaked on blocked writes.
@@ -1395,6 +1494,53 @@
           }
           // Phased: a model FINAL ends the current phase, not the project.
           if (phaseState && typeof deps.firstUnfinishedPhaseIndex === 'function') {
+            const missingPhaseFiles = getActivePhaseFileTaskGaps(phaseState, deps.normalizeWorkspacePath);
+            if (missingPhaseFiles.length) {
+              const missing = missingPhaseFiles[0];
+              toolEvents.push({
+                tool: 'final_check',
+                ok: false,
+                observation: `Do not finish Phase ${phaseState.activeIndex + 1} yet. This phase still needs ${missingPhaseFiles.map((g) => g.text || g.path).join('; ')}. Create the next missing file now with write_file: ${missing.path}.`,
+              });
+              recordDebugTrace('agent_phase_final_missing_files_blocked', {
+                chatId: String(chatId || ''), step: String(step),
+                phase: String(phaseState.activeIndex + 1),
+                nextPath: missing.path,
+              }, { chatId: String(chatId || ''), step, missingPhaseFiles, phaseState });
+              setAgentProgress('Building this phase...');
+              continue;
+            }
+            const validationFailure = latestValidationFailureSinceLatestMutation();
+            if (validationFailure) {
+              const issue = Array.isArray(validationFailure.validationIssues) && validationFailure.validationIssues.length
+                ? String(validationFailure.validationIssues[0] || '')
+                : String(validationFailure.observation || '').slice(0, 240);
+              toolEvents.push({
+                tool: 'final_check',
+                ok: false,
+                observation: `Do not finish Phase ${phaseState.activeIndex + 1} yet. The latest validate_files check still failed${issue ? `: ${issue}` : ''}. Fix the specific issue with edit_file, then validate again.`,
+              });
+              recordDebugTrace('agent_phase_final_failed_validation_blocked', {
+                chatId: String(chatId || ''), step: String(step),
+                phase: String(phaseState.activeIndex + 1),
+                issue: deps.debugPreview(issue, 260),
+              }, { chatId: String(chatId || ''), step, validationFailure, phaseState });
+              setAgentProgress('Repairing...');
+              continue;
+            }
+            if (!hasValidationPassedSinceLatestMutation()) {
+              toolEvents.push({
+                tool: 'final_check',
+                ok: false,
+                observation: `Do not finish Phase ${phaseState.activeIndex + 1} yet. Run validate_files once after the phase files are written, then finish only if it passes.`,
+              });
+              recordDebugTrace('agent_phase_final_needs_validation', {
+                chatId: String(chatId || ''), step: String(step),
+                phase: String(phaseState.activeIndex + 1),
+              }, { chatId: String(chatId || ''), step, phaseState, toolEvents });
+              setAgentProgress('Checking files...');
+              continue;
+            }
             // No files written this run → don't complete the phase; push to build.
             if (countRunMutations() === 0 && phaseEmptyFinalNudges < 2) {
               phaseEmptyFinalNudges += 1;
@@ -1692,8 +1838,14 @@
         let toolResult;
         try {
           if (typeof deps.markAgentToolProgress === 'function') deps.markAgentToolProgress();
+          const toolPlanSpec = phaseState && String(decision.tool || '').toLowerCase() === 'validate_files'
+            ? {
+              ...planSpec,
+              expectedFiles: activePhaseFilePaths(phaseState, deps.normalizeWorkspacePath),
+            }
+            : planSpec;
           // Capture + swallow so a late abort of an abandoned tool can't throw unhandled.
-          const toolPromise = deps.executeDeveloperToolCall(chatId, decision, taskText, toolEvents, planSpec, {
+          const toolPromise = deps.executeDeveloperToolCall(chatId, decision, taskText, toolEvents, toolPlanSpec, {
             approvedNewProject: Boolean(requestToken && requestToken.approvedNewProject),
             skipNewProjectConfirmation: Boolean(requestToken && requestToken.skipNewProjectConfirmation),
             forceCurrentWorkspace: Boolean(requestToken && requestToken.forceCurrentWorkspace),
@@ -2411,9 +2563,18 @@
       // whenever there was progress — done OR out-of-steps — instead of a robotic
       // "N of M planned items / Still to do: ..." dump.
       if ((cl && cl.allDone) || fallbackChanged.length || (cl && cl.doneCount > 0)) {
-        fallback = String(await deps.generateAgentCompletionText(taskText, toolEvents, workspaceLabel, planSpec) || '').trim();
+        if (phaseState) {
+          const gaps = getActivePhaseFileTaskGaps(phaseState, deps.normalizeWorkspacePath);
+          const activeP = phaseState.phases[phaseState.activeIndex] || {};
+          fallback = `Phase ${phaseState.activeIndex + 1}${activeP.title ? ` (${activeP.title})` : ''} is not complete yet.`;
+          if (fallbackChanged.length) fallback += ` Changed: ${fallbackChanged.slice(0, 6).join(', ')}.`;
+          if (gaps.length) fallback += ` Still to do: ${gaps.map((g) => g.text || g.path).join('; ')}.`;
+          fallback += " Press Continue and I'll keep going from this phase.";
+        } else {
+          fallback = String(await deps.generateAgentCompletionText(taskText, toolEvents, workspaceLabel, planSpec) || '').trim();
+        }
       }
-      if (fallback && !(cl && cl.allDone)) {
+      if (fallback && !phaseState && !(cl && cl.allDone)) {
         fallback += " I didn't get to finish everything — press Continue and I'll keep going.";
       }
       if (!fallback) {
@@ -2504,5 +2665,7 @@
     evaluateRepeatedRead,
     extractFileLikeTaskPaths,
     markPhaseTaskLiveProgressForPath,
+    getActivePhaseFileTaskGaps,
+    activePhaseFilePaths,
   };
 })(window);

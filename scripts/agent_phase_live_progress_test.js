@@ -63,4 +63,15 @@ assert.equal(
   'does not mark semantic or unrelated tasks',
 );
 
+assert.deepEqual(
+  loop.activePhaseFilePaths(phaseState, normalizeWorkspacePath),
+  ['/index.html', '/css/design-tokens.css', '/css/style.css'],
+  'derives active phase file paths only',
+);
+assert.deepEqual(
+  loop.getActivePhaseFileTaskGaps(phaseState, normalizeWorkspacePath).map((gap) => gap.path),
+  ['/index.html', '/css/design-tokens.css'],
+  'reports active phase file tasks that are not done or live-done',
+);
+
 console.log('Passed phase live progress tests.');
