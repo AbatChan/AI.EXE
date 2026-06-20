@@ -111,22 +111,20 @@ const cases = [
     },
   },
   {
-    name: 'broad website strategy terms do not become accidental public HTML pages',
+    name: 'requested page count caps accidental extra public HTML pages',
     run: () => core.normalizeAgentPlanSpec({
       task_kind: 'project',
       primary_stack: 'web',
-      expected_files: '/index.html|/product.html|/pricing.html|/about.html|/contact.html|/css/design-tokens.css|/css/style.css|/js/components.js|/js/script.js|/brand-strategy.html|/visual-identity.html|/typography.html|/design-system.html|/motion-system.html',
-      phases: 'Runnable core :: index.html ; css/design-tokens.css ; css/style.css ; js/components.js ; js/script.js | Product pages :: product.html ; pricing.html ; about.html ; contact.html | Brand & design system :: brand strategy ; visual identity ; typography ; design system ; motion system',
+      expected_files: '/index.html|/product.html|/pricing.html|/about.html|/contact.html|/css/design-tokens.css|/css/style.css|/js/components.js|/js/script.js|/brand-strategy.html|/visual-identity.html|/typography.html|/design-system.html|/motion-system.html|/extra-conversion-map.html',
+      phases: 'Runnable core :: index.html ; css/design-tokens.css ; css/style.css ; js/components.js ; js/script.js | Product pages :: product.html ; pricing.html ; about.html ; contact.html | Project notes :: brand-strategy.html ; visual-identity.html ; typography.html ; design-system.html ; motion-system.html ; extra-conversion-map.html',
     }, 'build a five-page SaaS website with brand strategy, visual identity, typography, design system, motion system, CRO, SEO, and implementation guide', { chatId: 'chat_owns_ws', forceProjectScope: true }),
     expect: (spec) => {
-      assert.ok(!spec.expectedFiles.includes('/brand-strategy.html'), 'brand strategy must not become a public page');
-      assert.ok(!spec.expectedFiles.includes('/visual-identity.html'), 'visual identity must not become a public page');
-      assert.ok(!spec.expectedFiles.includes('/typography.html'), 'typography guidance must not become a public page');
-      assert.ok(!spec.expectedFiles.includes('/design-system.html'), 'design system guidance must not become a public page');
-      assert.ok(!spec.expectedFiles.includes('/motion-system.html'), 'motion guidance must not become a public page');
+      const htmlFiles = spec.expectedFiles.filter((file) => /\.html?$/.test(file));
+      assert.deepEqual(htmlFiles, ['/index.html', '/product.html', '/pricing.html', '/about.html', '/contact.html'],
+        'public HTML files must stay capped to the requested five pages');
       assert.ok(spec.expectedFiles.includes('/README.md'), 'written strategy notes should be redirected to README');
       assert.ok(spec.phases.some((phase) => (phase.tasks || []).some((task) => /README\.md/.test(String(task.text || task)))),
-        'phase tasks should be redirected to README instead of pseudo-pages');
+        'phase tasks should be redirected to README instead of surplus public pages');
     },
   },
   {

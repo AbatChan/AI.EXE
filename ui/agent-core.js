@@ -1518,16 +1518,16 @@
       };
     }
 
-    function isAccidentalDesignDocPage(path) {
-      const slug = String(path || '').toLowerCase().replace(/^\/+/, '').replace(/\.html?$/i, '');
-      return /^(?:brand(?:-strategy|-guide)?|visual(?:-identity)?|typography|design(?:-system|-guide)?|motion(?:-system)?|cro|seo|content(?:-strategy)?|implementation(?:-guide)?|style(?:-guide)?)$/.test(slug);
-    }
-
-    function taskExplicitlyAsksForDesignDocPages(taskText = '') {
+    function requestedPublicHtmlPageLimit(taskText = '') {
       const lower = String(taskText || '').toLowerCase();
-      const designTerms = '(?:brand strategy|visual identity|typography|design system|motion system|style guide|seo|cro|content strategy|implementation guide)';
-      return new RegExp(`\\b(?:public|navigable|separate|dedicated)?\\s*(?:pages?|screens?|routes?)\\s+(?:for|called|named|about|covering)\\s+[^.]{0,120}\\b${designTerms}\\b`).test(lower)
-        || new RegExp(`\\b${designTerms}\\b\\s+(?:as|into)\\s+(?:public|navigable|separate|dedicated)?\\s*(?:pages?|screens?|routes?)\\b`).test(lower);
+      const words = {
+        one: 1, two: 2, three: 3, four: 4, five: 5,
+        six: 6, seven: 7, eight: 8, nine: 9, ten: 10,
+      };
+      const numeric = lower.match(/\b(\d{1,2})\s*[- ]?\s*(?:page|screen|route)s?\b/);
+      if (numeric) return Math.max(1, Math.min(20, Number(numeric[1]) || 0));
+      const word = lower.match(/\b(one|two|three|four|five|six|seven|eight|nine|ten)\s*[- ]?\s*(?:page|screen|route)s?\b/);
+      return word ? words[word[1]] : 0;
     }
 
     function buildAgentProjectContract(taskText = '', taskKind = '', primaryStack = '', expectedFiles = []) {
@@ -1566,7 +1566,7 @@
         }
         if (htmlFiles.length > 1 && (cssFile || scriptFile)) {
           lines.push('- Multi-page consistency: use the same logo/header/nav/footer/CTA source of truth on every page. Prefer shared hooks rendered by js/components.js when that file is planned; otherwise copy the exact same class structure, not a redesigned variant.');
-          lines.push('- Strategy/design-system deliverables belong in shared tokens/CSS/components and README/docs, not accidental public pages like brand-strategy.html, typography.html, or motion-system.html unless those pages were explicitly requested as navigation items.');
+          lines.push('- Public HTML pages must match the planned public page count/scope. Strategy, design-system, SEO, CRO, and implementation-guide deliverables belong in shared tokens/CSS/components and README/docs unless the user explicitly requested them as navigable pages.');
         }
         if (/\bsurprise|reveal|secret|easter egg\b/.test(lower)) {
           lines.push(`- Shared interaction contract: include a primary button with id="surprise-btn" and a reveal region with id="surprise-panel"${htmlFile ? ` in ${htmlFile}` : ''}.`);
@@ -1773,28 +1773,29 @@
       if (docsOnlyTask && expectedFiles.length === 0) {
         expectedFiles = ['/README.md'];
       }
-      const explicitDesignDocPages = taskExplicitlyAsksForDesignDocPages(taskText);
-      const accidentalDesignDocPages = taskKind === 'project' && !explicitDesignDocPages
-        ? expectedFiles.filter((path) => /\.html?$/i.test(path) && isAccidentalDesignDocPage(path))
-        : [];
-      if (accidentalDesignDocPages.length > 0) {
-        const removed = new Set(accidentalDesignDocPages.map((path) => normalizeWorkspacePath(path)));
+      const publicHtmlLimit = taskKind === 'project' && (primaryStack === 'web' || looksLikeWebProjectTask)
+        ? requestedPublicHtmlPageLimit(taskText) : 0;
+      const plannedHtmlFiles = expectedFiles.filter((path) => /\.html?$/i.test(path));
+      if (publicHtmlLimit > 0 && plannedHtmlFiles.length > publicHtmlLimit) {
+        const keptHtml = plannedHtmlFiles.slice(0, publicHtmlLimit);
+        const keptHtmlSet = new Set(keptHtml.map((path) => normalizeWorkspacePath(path)));
+        const removed = new Set(plannedHtmlFiles
+          .filter((path) => !keptHtmlSet.has(normalizeWorkspacePath(path)))
+          .map((path) => normalizeWorkspacePath(path)));
         expectedFiles = expectedFiles.filter((path) => !removed.has(normalizeWorkspacePath(path)));
-        const askedForDesignNotes = /\b(?:brand strategy|visual identity|typography|design system|motion system|style guide|seo|cro|content strategy|implementation guide|design direction|strategy)\b/i.test(lower);
-        if (askedForDesignNotes && !expectedFiles.includes('/README.md')) {
+        const askedForWrittenNotes = /\b(?:strategy|guide|documentation|docs?|notes?|identity|typography|system|seo|cro|motion|content|implementation|brand)\b/i.test(lower);
+        if (askedForWrittenNotes && !expectedFiles.includes('/README.md')) {
           expectedFiles.push('/README.md');
         }
-        const designDocTask = /\b(?:brand strategy|visual identity|typography|design system|motion system|style guide|seo|cro|content strategy|implementation guide)\b/i;
         phases = phases.map((phase) => {
           const tasks = Array.isArray(phase && phase.tasks) ? phase.tasks : [];
           const keptTasks = tasks.filter((task) => {
             const text = String((task && task.text) || task || '');
             const normalizedTaskPath = normalizeWorkspacePath(text.split(/\s+/)[0] || '');
-            if (removed.has(normalizedTaskPath)) return false;
-            return !designDocTask.test(text) || /\.(?:css|js|md)\b/i.test(text);
+            return !removed.has(normalizedTaskPath);
           });
-          if (keptTasks.length === 0 && expectedFiles.includes('/README.md') && designDocTask.test(String(phase && phase.title || ''))) {
-            keptTasks.push({ text: 'README.md brand/design notes', done: false });
+          if (keptTasks.length === 0 && expectedFiles.includes('/README.md')) {
+            keptTasks.push({ text: 'README.md project notes', done: false });
           }
           return Object.assign({}, phase, { tasks: keptTasks });
         }).filter((phase) => Array.isArray(phase && phase.tasks) && phase.tasks.length > 0);
