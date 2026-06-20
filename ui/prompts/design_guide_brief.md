@@ -1,24 +1,31 @@
-Make the UI clean and modern (2026). Restraint reads premium; busy reads amateur.
+Build a modern 2026 UI: task-first, readable, responsive, and restrained. The first screen should contain the usable product/app/tool unless a landing page is explicitly requested.
 
-- Color: 60/30/10 — near-neutral bg, ONE accent, neutral text. No pure #000/#fff. Body text ≥4.5:1 contrast.
-- Type: ONE font; sizes 12/14/16/20/25/31/39 (body 16); weights 400 + 600/700; line-height 1.5 (1.2 headings); paragraphs ≤65ch.
-- Space: 8px grid (4,8,12,16,24,32,48,64,96); generous whitespace; padding inside ≤ gap between.
-- Shape: radius 8–12 (consistent); soft low-opacity shadows only; 1px hairline borders.
-- Layout: centered max-width ~1100–1280; flex/grid with gaps; mobile-first; touch targets ≥44px.
-- Motion: only hover/feedback/entrances; 150–250ms; ease-out (never linear); animate opacity/transform; honor prefers-reduced-motion; visible :focus-visible.
-- One clear primary action per screen; consistent components (one primary button style, one card style).
+- Product job: identify the user task, one primary action, required context, and screen type (app, dashboard, editor, form, marketplace, content, marketing).
+- Hierarchy: typography and spacing do most of the work. One clear primary action; chrome stays quiet.
+- Layout: use a clean app shell/section/grid appropriate to the task. Avoid nested cards. Constrain content (1100-1280px; prose <=65ch). Mobile-first, no clipping/overlap, touch targets >=44px.
+- Color: neutral system + one accent. No pure #fff/#000, no rainbow palettes. Semantic colors only for meaning. Body contrast >=4.5:1; UI/large text >=3:1.
+- Type: one font family; sizes 12/14/16/20/24/30/38/48; body 16px minimum 14px; weights mostly 400 and 600/700; no negative letter spacing.
+- Space: 8px scale (4,8,12,16,24,32,48,64,96). Use whitespace for grouping; repeated components use repeated gaps.
+- Shape/depth: radius scale 4/8/12-16/pill; subtle 1px borders; soft shadows only when elevation matters.
+- Components: include hover, active, selected, disabled, loading, empty/error, and visible :focus-visible states where relevant.
+- Imagery: if the subject is a product/place/person/food/portfolio/object, show clear relevant bitmap imagery; do not use abstract gradients as the subject.
+- Motion: 120-250ms, ease-out/ease-in-out, opacity/transform, consistent, never gratuitous, honor prefers-reduced-motion.
+- Avoid dated UI: huge generic gradient heroes, glassmorphism/neumorphism, bouncy effects, heavy dark shadows, random radii, tiny grey text, centered long paragraphs, decorative clutter.
 
-Drop these tokens in :root and USE them everywhere:
+Use these tokens as the default system:
 ```css
 :root{
-  --bg:#fafafa;--surface:#fff;--border:#e7e7ea;--text:#1a1a1a;--muted:#6b7280;--accent:#4f46e5;--accent-contrast:#fff;
+  color-scheme:light;
+  --bg:#f8fafc;--surface:#fff;--surface-2:#f1f5f9;--border:#e2e8f0;--text:#0f172a;--muted:#64748b;
+  --accent:#2563eb;--accent-strong:#1d4ed8;--accent-soft:#dbeafe;--accent-contrast:#fff;
+  --danger:#dc2626;--success:#16a34a;--warning:#d97706;
   --font:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
-  --s-1:4px;--s-2:8px;--s-3:12px;--s-4:16px;--s-6:24px;--s-8:32px;--s-12:48px;--s-16:64px;
-  --radius:12px;--radius-sm:8px;--shadow:0 1px 2px rgba(0,0,0,.06),0 4px 12px rgba(0,0,0,.08);
-  --ease:cubic-bezier(0.2,0,0,1);--dur:200ms;
+  --text-xs:12px;--text-sm:14px;--text-md:16px;--text-lg:20px;--text-xl:24px;--text-2xl:30px;--text-3xl:38px;--text-4xl:48px;
+  --s-1:4px;--s-2:8px;--s-3:12px;--s-4:16px;--s-6:24px;--s-8:32px;--s-12:48px;--s-16:64px;--s-24:96px;
+  --radius-sm:6px;--radius:10px;--radius-lg:14px;--radius-pill:9999px;
+  --shadow-sm:0 1px 2px rgba(15,23,42,.06);--shadow-md:0 8px 24px rgba(15,23,42,.08);--focus:0 0 0 3px rgba(37,99,235,.24);
+  --ease:cubic-bezier(.2,0,0,1);--ease-move:cubic-bezier(.4,0,.2,1);--dur:180ms;
 }
-@media (prefers-color-scheme:dark){:root{--bg:#0f1115;--surface:#171a21;--border:#262a33;--text:#e8eaed;--muted:#9aa3b2}}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:var(--font);line-height:1.5}
+@media (prefers-color-scheme:dark){:root{color-scheme:dark;--bg:#0b1020;--surface:#111827;--surface-2:#172033;--border:#273449;--text:#e5e7eb;--muted:#9ca3af;--accent:#60a5fa;--accent-strong:#93c5fd;--accent-soft:rgba(96,165,250,.16);--accent-contrast:#08111f}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:var(--font);font-size:var(--text-md);line-height:1.5}:focus-visible{outline:none;box-shadow:var(--focus)}
 ```
-
-Avoid: pure black on white, many fonts/colors, off-grid spacing, heavy dark shadows, linear/bouncy motion, tiny (<14px) or low-contrast text, decorative clutter.
