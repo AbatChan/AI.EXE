@@ -1129,7 +1129,7 @@
             : '',
           activePhase.number === 1
             ? 'Phase 1 must be a COMPLETE, RUNNABLE minimal version of the project (it runs on its own). Keep it SMALL — build only the sub-tasks listed above; do NOT build later phases\' pages/screens/features now. The workspace was just created and is empty — start writing files immediately; do NOT read_file or list_dir the root or the project name.'
-            : 'Build on the files already in the workspace from earlier phases — read them first if needed, then extend them. Do not rewrite finished files from scratch.',
+            : 'This phase\'s sub-tasks are NEW pages/files that DO NOT EXIST yet — you MUST CREATE them now with write_file. You may read ONE existing page first to match its design/header/footer, but reading is not the work: the deliverable is the new files. Earlier phases built only part of the site, so do NOT conclude the project is "already complete" or offer a written plan instead of code — build this phase\'s pages.',
           `STRICT SCOPE: build ONLY the files needed for the ${activePhase.tasks && activePhase.tasks.length ? activePhase.tasks.length : 'few'} sub-task(s) above (roughly that many files) — NOT the whole project. Do not create pages or screens that belong to later phases.`,
           activePhase.number < activePhase.total
             ? 'Do NOT write README.md or other documentation in this phase — docs come in the FINAL phase only. Build the actual app/page files for this phase first.'
