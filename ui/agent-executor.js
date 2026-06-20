@@ -905,7 +905,7 @@
         const chatOwnsOpenWorkspace = typeof deps.chatHasPriorAgentWorkspaceWork === 'function'
           && deps.chatHasPriorAgentWorkspaceWork(chatId);
         const approvedNewProjectRun = Boolean(runOptions.approvedNewProject || runOptions.skipNewProjectConfirmation);
-        if (hasOpenWorkspace && canonicalWorkspaceRootName && openWorkspaceEntryCount > 0 && !explicitSeparateWorkspaceIntent && chatOwnsOpenWorkspace && !approvedNewProjectRun) {
+        if (hasOpenWorkspace && canonicalWorkspaceRootName && openWorkspaceEntryCount > 0 && !explicitSeparateWorkspaceIntent && (chatOwnsOpenWorkspace || runOptions.forceCurrentWorkspace) && !approvedNewProjectRun) {
           return {
             ok: false,
             mutated,
