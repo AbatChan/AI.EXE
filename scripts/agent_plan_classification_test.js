@@ -110,6 +110,38 @@ const cases = [
       assert.ok(spec.expectedFiles.includes('/contact.html'), 'later pages must survive normalization');
     },
   },
+  {
+    name: 'broad website strategy terms do not become accidental public HTML pages',
+    run: () => core.normalizeAgentPlanSpec({
+      task_kind: 'project',
+      primary_stack: 'web',
+      expected_files: '/index.html|/product.html|/pricing.html|/about.html|/contact.html|/css/design-tokens.css|/css/style.css|/js/components.js|/js/script.js|/brand-strategy.html|/visual-identity.html|/typography.html|/design-system.html|/motion-system.html',
+      phases: 'Runnable core :: index.html ; css/design-tokens.css ; css/style.css ; js/components.js ; js/script.js | Product pages :: product.html ; pricing.html ; about.html ; contact.html | Brand & design system :: brand strategy ; visual identity ; typography ; design system ; motion system',
+    }, 'build a five-page SaaS website with brand strategy, visual identity, typography, design system, motion system, CRO, SEO, and implementation guide', { chatId: 'chat_owns_ws', forceProjectScope: true }),
+    expect: (spec) => {
+      assert.ok(!spec.expectedFiles.includes('/brand-strategy.html'), 'brand strategy must not become a public page');
+      assert.ok(!spec.expectedFiles.includes('/visual-identity.html'), 'visual identity must not become a public page');
+      assert.ok(!spec.expectedFiles.includes('/typography.html'), 'typography guidance must not become a public page');
+      assert.ok(!spec.expectedFiles.includes('/design-system.html'), 'design system guidance must not become a public page');
+      assert.ok(!spec.expectedFiles.includes('/motion-system.html'), 'motion guidance must not become a public page');
+      assert.ok(spec.expectedFiles.includes('/README.md'), 'written strategy notes should be redirected to README');
+      assert.ok(spec.phases.some((phase) => (phase.tasks || []).some((task) => /README\.md/.test(String(task.text || task)))),
+        'phase tasks should be redirected to README instead of pseudo-pages');
+    },
+  },
+  {
+    name: 'explicitly requested design documentation pages are preserved',
+    run: () => core.normalizeAgentPlanSpec({
+      task_kind: 'project',
+      primary_stack: 'web',
+      expected_files: '/index.html|/typography.html|/design-system.html|/motion-system.html|/css/style.css',
+    }, 'create a design system documentation website with public pages for typography, design system, and motion system', { chatId: 'chat_owns_ws', forceProjectScope: true }),
+    expect: (spec) => {
+      assert.ok(spec.expectedFiles.includes('/typography.html'), 'explicit typography page should survive');
+      assert.ok(spec.expectedFiles.includes('/design-system.html'), 'explicit design-system page should survive');
+      assert.ok(spec.expectedFiles.includes('/motion-system.html'), 'explicit motion-system page should survive');
+    },
+  },
 ];
 
 let failures = 0;
