@@ -96,6 +96,20 @@ const cases = [
       assert.ok(Array.isArray(spec.expectedFiles) && spec.expectedFiles.length > 0, 'expectedFiles must be populated');
     },
   },
+  {
+    name: 'multi-page web plans preserve pages plus shared source-of-truth files',
+    run: () => core.normalizeAgentPlanSpec({
+      task_kind: 'project',
+      primary_stack: 'web',
+      expected_files: '/index.html|/product.html|/pricing.html|/about.html|/contact.html|/css/design-tokens.css|/css/style.css|/js/components.js|/js/script.js',
+    }, 'build a five-page SaaS website', { chatId: 'chat_owns_ws', forceProjectScope: true }),
+    expect: (spec) => {
+      assert.equal(spec.taskKind, 'project');
+      assert.equal(spec.expectedFiles.length, 9, 'expectedFiles should keep pages plus shared assets');
+      assert.ok(spec.expectedFiles.includes('/js/components.js'), 'shared components file must survive normalization');
+      assert.ok(spec.expectedFiles.includes('/contact.html'), 'later pages must survive normalization');
+    },
+  },
 ];
 
 let failures = 0;
