@@ -114,6 +114,10 @@
       // finish with planned items still unmet, then trust its judgment.
       let finalNudges = 0;
       let runAppFinishNudges = 0;
+      // Phased builds: a model that tries to "finish" a phase having written nothing
+      // that run (just read files and declared it done) must be pushed to actually
+      // build the phase's pages before the phase is marked complete.
+      let phaseEmptyFinalNudges = 0;
       // The latest run_app since the last write, IF it still reports errors — used to
       // refuse a clean finish over an unrepaired runtime failure (ok:true+runErrorCount
       // >0 is a failure; ok:false = page wouldn't load).
@@ -655,6 +659,11 @@
         if (activeIndex < 0) activeIndex = phases.length - 1;
         phaseState = { phases, activeIndex };
         keepPhaseTrackerPinned = true;
+        // A phased build is ALWAYS a project build, even on Continue. The re-planner
+        // sees the now-populated workspace and tends to reclassify the resume as
+        // "edit" (→ review existing files, build nothing) — force project scope back
+        // so the per-phase model-driven generation keeps building the remaining pages.
+        planSpec.taskKind = 'project';
         const active = phases[activeIndex] || {};
         planSpec._activePhase = {
           number: activeIndex + 1,
@@ -1317,6 +1326,43 @@
           // Tick this phase's boxes in plan.md (the source of truth); if more phases
           // remain, stop here with a Continue chip instead of finishing the project.
           if (phaseState && typeof deps.firstUnfinishedPhaseIndex === 'function') {
+            // Don't let a phase complete with NO files written this run — the model
+            // sometimes just reads existing files and declares the project "already
+            // complete", which would skip this phase's pages. Push it to build first.
+            if (countRunMutations() === 0 && phaseEmptyFinalNudges < 2) {
+              phaseEmptyFinalNudges += 1;
+              const activeP = phaseState.phases[phaseState.activeIndex] || {};
+              const pendingTasks = (Array.isArray(activeP.tasks) ? activeP.tasks : [])
+                .filter((t) => t && !t.done).map((t) => t.text);
+              toolEvents.push({
+                tool: 'final_check',
+                ok: false,
+                observation: `You are on Phase ${phaseState.activeIndex + 1} (${activeP.title}) but have NOT created any files this run — reading existing pages is not enough. This phase's deliverables are NEW pages/files that DO NOT EXIST yet: ${pendingTasks.join('; ') || activeP.title}. Create each one now with write_file (build the real page, matching the existing site's design/header/footer), then finish. Do NOT respond that the project is already complete or offer a written plan — earlier phases only built part of the site.`,
+              });
+              recordDebugTrace('agent_phase_empty_final_nudge', {
+                chatId: String(chatId || ''), step: String(step),
+                phase: String(phaseState.activeIndex + 1), attempt: String(phaseEmptyFinalNudges),
+              }, { chatId: String(chatId || ''), step, pendingTasks });
+              setAgentProgress('Building this phase...');
+              continue;
+            }
+            // Still nothing written after the nudges — do NOT mark the phase done
+            // (that would skip its pages). Stop and let Continue retry this phase.
+            if (countRunMutations() === 0) {
+              const activeP = phaseState.phases[phaseState.activeIndex] || {};
+              setAgentProgress('Stopped.');
+              deps.consumeLiveAssistantText();
+              const msg = `This phase didn't get built — Phase ${phaseState.activeIndex + 1}${activeP.title ? ` (${activeP.title})` : ''} still needs its pages. Press **Continue** to build Phase ${phaseState.activeIndex + 1} again.`;
+              deps.commitAssistantMessage(chatId, msg, msg, {
+                agentActivities,
+                agentMeta: agentMetaWithRevert({ startedAt, completedAt: Date.now(), collapsed: true }),
+                forceNeedsContinue: true,
+              });
+              recordDebugTrace('agent_phase_no_work', {
+                chatId: String(chatId || ''), step: String(step), phase: String(phaseState.activeIndex + 1),
+              }, { chatId: String(chatId || ''), step, phaseState });
+              return true;
+            }
             const res = await completeActivePhase();
             if (res && res.nextIdx >= 0) {
               const nextPhase = phaseState.phases[res.nextIdx] || {};
