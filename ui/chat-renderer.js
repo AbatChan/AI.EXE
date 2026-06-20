@@ -1423,7 +1423,13 @@
         },
         edit: { running: 'Applying changes', done: `Updated ${count} file${count !== 1 ? 's' : ''}` },
         validate: { running: 'Checking files', done: validateHasIssues ? 'Checked files \u2014 issues found' : 'Checked files \u2014 no issues found' },
-        cleanup: { running: 'Cleaning up', done: `Cleaned up ${count} item${count !== 1 ? 's' : ''}` },
+        cleanup: { running: 'Organizing files', done: (() => {
+          const moves = items.filter((a) => a && a.kind === 'move').length;
+          const deletes = items.filter((a) => a && a.kind === 'delete').length;
+          if (moves && !deletes) return `Moved ${moves} item${moves !== 1 ? 's' : ''}`;
+          if (deletes && !moves) return `Removed ${deletes} item${deletes !== 1 ? 's' : ''}`;
+          return `Reorganized ${count} item${count !== 1 ? 's' : ''}`;
+        })() },
       };
       const labels = labelsByPhase[phase] || { running: 'Working', done: `${count} steps` };
       const label = groupStatus === 'running' ? labels.running : labels.done;
