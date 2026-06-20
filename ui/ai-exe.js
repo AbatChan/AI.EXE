@@ -11591,6 +11591,8 @@ let phaseTrackerCollapsed = false;
 // advances; the user can open/close any phase in between).
 const phaseTrackerExpanded = new Set();
 let phaseTrackerExpandedFor = -1;
+const phaseTrackerLiveSeen = new Set();
+const phaseTrackerLiveHighlight = new Set();
 const AGENT_PLAN_FILE = '/.aiexe/plan.md';
 
 // A phase is done when it has tasks and they're all ticked (or a task-less phase
@@ -11625,6 +11627,8 @@ function clearAgentPhaseTracker(chatId) {
   if (activePhaseTracker && chatId && activePhaseTracker.chatId !== chatId) return;
   const ownerId = (activePhaseTracker && activePhaseTracker.chatId) || chatId;
   activePhaseTracker = null;
+  phaseTrackerLiveSeen.clear();
+  phaseTrackerLiveHighlight.clear();
   try {
     const chat = ownerId ? findChatById(ownerId) : null;
     if (chat && chat.phaseTracker) { chat.phaseTracker = null; saveChats(); }
@@ -11671,7 +11675,12 @@ function renderPhaseTracker() {
   }
   const name = String(state.projectName || '').trim();
   const doneTotal = phases.filter((p) => phaseIsDone(p)).length;
-  const headLabel = `${name ? `Building ${escapeHtml(name)}` : 'Building'} · Phase ${activeIndex + 1} of ${phases.length}`;
+  const activeTasks = Array.isArray(phases[activeIndex] && phases[activeIndex].tasks) ? phases[activeIndex].tasks : [];
+  const activeDoneCount = activeTasks.filter((t) => t && (t.done || t.liveDone)).length;
+  const headLabel = `${name ? `Building ${escapeHtml(name)}` : 'Building'} · Phase ${activeIndex + 1}/${phases.length}`;
+  const progressLabel = activeTasks.length
+    ? `${activeDoneCount}/${activeTasks.length} tasks`
+    : `${doneTotal}/${phases.length} phases`;
   const chevron = '<svg class="phase-row-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>';
   const rows = phases.map((phase, i) => {
     const done = phaseIsDone(phase);
@@ -11685,7 +11694,20 @@ function renderPhaseTracker() {
     if (expanded && tasks.length) {
       tasksHtml = `<div class="phase-row-tasks">${tasks.map((t) => {
         const tdone = Boolean(t && (t.done || t.liveDone));
-        return `<div class="phase-task${tdone ? ' done' : ''}"><span class="phase-task-box">${tdone ? '✓' : ''}</span><span class="phase-task-label">${escapeHtml(String((t && t.text) || ''))}</span></div>`;
+        const key = `${state.chatId || ''}:${i}:${String((t && t.text) || '')}`;
+        let liveNew = false;
+        if (t && t.liveDone && !t.done && !phaseTrackerLiveSeen.has(key)) {
+          phaseTrackerLiveSeen.add(key);
+          phaseTrackerLiveHighlight.add(key);
+          liveNew = true;
+          window.setTimeout(() => {
+            phaseTrackerLiveHighlight.delete(key);
+            renderPhaseTracker();
+          }, 1400);
+        } else {
+          liveNew = phaseTrackerLiveHighlight.has(key);
+        }
+        return `<div class="phase-task${tdone ? ' done' : ''}${liveNew ? ' live-new' : ''}"><span class="phase-task-box">${tdone ? '✓' : ''}</span><span class="phase-task-label">${escapeHtml(String((t && t.text) || ''))}</span></div>`;
       }).join('')}</div>`;
     }
     return `<div class="phase-row ${status}${expanded ? ' expanded' : ''}">`
@@ -11699,7 +11721,7 @@ function renderPhaseTracker() {
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>
       </button>
       <span class="phase-tracker-title">${headLabel}</span>
-      <span class="phase-tracker-progress">${doneTotal}/${phases.length}</span>
+      <span class="phase-tracker-progress">${progressLabel}</span>
       <button class="phase-tracker-viewplan" type="button" id="phaseTrackerViewPlan">View plan</button>
     </div>
     <div class="phase-tracker-phases">${rows}</div>`;
