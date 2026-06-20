@@ -307,6 +307,16 @@
         const detail = String(cleaned || '').trim();
         if (!detail || detail.length < 8) return;
         if (detail === lastNarrationDetail) return;
+        // Skip a near-duplicate of the previous line (models often restate the same
+        // thought on consecutive steps): drop it if it shares most significant words.
+        if (lastNarrationDetail) {
+          const sig = (s) => new Set(String(s || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter((w) => w.length > 3));
+          const a = sig(detail); const b = sig(lastNarrationDetail);
+          if (a.size >= 4) {
+            let inter = 0; a.forEach((w) => { if (b.has(w)) inter += 1; });
+            if (inter / a.size >= 0.65) return;
+          }
+        }
         appendAgentActivity({
           kind: 'thought',
           title: '',
@@ -621,19 +631,6 @@
         workspaceStatusSnapshot,
       });
       deps.resetActiveAgentStreamState();
-      const phasedProjectRun = Array.isArray(planSpec && planSpec.phases)
-        && planSpec.phases.filter((p) => p && p.title).length >= 2;
-      // Phased: skip the generic summary; a phase-aware acknowledgment is generated below.
-      if (!phasedProjectRun) {
-        // A non-phased run (e.g. a follow-up edit) must not show the stale phase
-        // tracker left over from this chat's earlier phased build.
-        if (typeof deps.clearAgentPhaseTracker === 'function') deps.clearAgentPhaseTracker(chatId);
-        const planActivity = deps.buildAgentPlanActivity(planSpec);
-        appendAgentActivity(planActivity);
-        if (!planActivity && planSpec && planSpec.summary) {
-          appendAgentNarration(planSpec.summary);
-        }
-      }
       // .aiexe/plan.md is the cross-run source of truth; resume at first unfinished phase.
       const projectDisplayName = String(planSpec && planSpec.projectName || '');
       const readAgentPlanFilePhases = async () => {
@@ -645,13 +642,31 @@
           return parsed && Array.isArray(parsed.phases) && parsed.phases.length ? parsed.phases : null;
         } catch (_) { return null; }
       };
-      const agentPhases = Array.isArray(planSpec && planSpec.phases)
-        ? planSpec.phases.filter((p) => p && p.title)
-        : [];
-      if (agentPhases.length > 1) {
-        // plan.md (with ticks) wins over freshly re-planned phases on Continue.
-        const filePhases = await readAgentPlanFilePhases();
-        const phases = (filePhases && filePhases.length) ? filePhases : agentPhases;
+      // Decide phased from plan.md (authoritative on a Continue/resume, even if the
+      // re-planner dropped phases this turn) OR from the fresh plan (first run). On a
+      // fresh non-resume request we ignore plan.md so an unrelated edit doesn't
+      // resurrect the phase tracker.
+      const planPhases = Array.isArray(planSpec && planSpec.phases)
+        ? planSpec.phases.filter((p) => p && p.title) : [];
+      const isResume = Boolean(requestToken && requestToken.isAgentResume);
+      const filePhases = await readAgentPlanFilePhases();
+      const fileHasUnfinished = filePhases && filePhases.length >= 2
+        && typeof deps.firstUnfinishedPhaseIndex === 'function'
+        && deps.firstUnfinishedPhaseIndex(filePhases) >= 0;
+      const phasesSource = (isResume && fileHasUnfinished) ? filePhases : planPhases;
+      const phasedProjectRun = phasesSource.length >= 2;
+      if (!phasedProjectRun) {
+        // A non-phased run (e.g. a follow-up edit) must not show a stale phase tracker.
+        if (typeof deps.clearAgentPhaseTracker === 'function') deps.clearAgentPhaseTracker(chatId);
+        const planActivity = deps.buildAgentPlanActivity(planSpec);
+        appendAgentActivity(planActivity);
+        if (!planActivity && planSpec && planSpec.summary) {
+          appendAgentNarration(planSpec.summary);
+        }
+      }
+      if (phasedProjectRun) {
+        // plan.md (with ticks) wins over freshly re-planned phases on resume.
+        const phases = (isResume && fileHasUnfinished) ? filePhases : ((filePhases && filePhases.length) ? filePhases : planPhases);
         planSpec.phases = phases;
         let activeIndex = typeof deps.firstUnfinishedPhaseIndex === 'function'
           ? deps.firstUnfinishedPhaseIndex(phases) : 0;
@@ -747,7 +762,7 @@
       // workspace is created mid-run by the first create step.
       let planFileWritten = false;
       const ensureAgentPlanFile = async () => {
-        if (planFileWritten || agentPhases.length < 2) return;
+        if (planFileWritten || !phaseState) return;
         if (typeof deps.buildAgentPlanMarkdown !== 'function') return;
         const ws = typeof deps.getWorkspaceContext === 'function' ? deps.getWorkspaceContext() || {} : {};
         const rootReady = Boolean(ws.rootLoaded || String(ws.workspaceRootName || '').trim() || Number(ws.rootEntryCount) > 0);
@@ -1373,7 +1388,8 @@
               const nextPhase = phaseState.phases[res.nextIdx] || {};
               setAgentProgress('Phase complete.');
               let phaseMsg = deps.sanitizeAssistantText(decision.message || '') || '';
-              phaseMsg = `${phaseMsg ? `${phaseMsg}\n\n` : ''}✅ Phase ${res.idx + 1}${res.donePhase.title ? ` — ${res.donePhase.title}` : ''} is built. Press **Continue** to build Phase ${res.nextIdx + 1}${nextPhase.title ? ` — ${nextPhase.title}` : ''}.`;
+              const handoff = `Phase ${res.idx + 1}${res.donePhase.title ? ` (${res.donePhase.title})` : ''} is done — press Continue to build Phase ${res.nextIdx + 1}${nextPhase.title ? ` — ${nextPhase.title}` : ''}.`;
+              phaseMsg = phaseMsg ? `${phaseMsg}\n\n${handoff}` : handoff;
               if (agentHasWorkspaceMutations()) {
                 await deps.refreshWorkspaceTree(true);
               }
@@ -1975,7 +1991,7 @@
             const res = await completeActivePhase();
             const nextPhase = phaseState.phases[res.nextIdx] || {};
             setAgentProgress('Phase complete.');
-            const phaseMsg = `✅ Phase ${res.idx + 1}${res.donePhase.title ? ` — ${res.donePhase.title}` : ''} is built. Press **Continue** to build Phase ${res.nextIdx + 1}${nextPhase.title ? ` — ${nextPhase.title}` : ''}.`;
+            const phaseMsg = `Phase ${res.idx + 1}${res.donePhase.title ? ` (${res.donePhase.title})` : ''} is done — press Continue to build Phase ${res.nextIdx + 1}${nextPhase.title ? ` — ${nextPhase.title}` : ''}.`;
             deps.commitAssistantMessage(chatId, phaseMsg, phaseMsg, {
               agentActivities,
               agentMeta: agentMetaWithRevert({ startedAt, completedAt: Date.now(), collapsed: true }),
