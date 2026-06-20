@@ -2011,7 +2011,22 @@
         if (name === 'delete') return withTarget('Deleting');
         return withTarget(`Running ${name || 'tool'}`);
       }
-      if (phase === 'done') return withTarget('Completed');
+      if (phase === 'done') {
+        if (name === 'new_project') return 'Created project workspace';
+        if (name === 'generate_project') return 'Generated project files';
+        if (name === 'list_dir') return withTarget('Scanned');
+        if (name === 'search_files') return withTarget('Searched');
+        if (name === 'read_file') return withTarget('Read');
+        if (name === 'write_file') return withTarget('Wrote');
+        if (name === 'edit_file') return withTarget('Edited');
+        if (name === 'validate_files') return 'Checked files';
+        if (name === 'check_code') return 'Checked syntax';
+        if (name === 'run_app') return 'Ran the app';
+        if (name === 'mkdir') return withTarget('Created folder');
+        if (name === 'move') return withTarget('Moved');
+        if (name === 'delete') return withTarget('Deleted');
+        return withTarget('Done');
+      }
       return withTarget('Failed');
     }
 
