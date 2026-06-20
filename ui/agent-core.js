@@ -1507,18 +1507,32 @@
 
     function getPlannedFileRoles(expectedFiles = []) {
       const files = Array.isArray(expectedFiles) ? expectedFiles.map((path) => normalizeWorkspacePath(path || '')).filter(Boolean) : [];
+      const htmlFiles = files.filter((path) => /\.html?$/i.test(path));
       return {
         files,
-        htmlFile: files.find((path) => /\.html?$/i.test(path)) || '',
+        htmlFiles,
+        htmlFile: htmlFiles[0] || '',
         cssFile: files.find((path) => /\.(css|scss|sass|less)$/i.test(path)) || '',
         scriptFile: files.find((path) => /\.(js|mjs|cjs|ts|jsx|tsx)$/i.test(path)) || '',
         pythonFile: files.find((path) => /\.py$/i.test(path)) || '',
       };
     }
 
+    function isAccidentalDesignDocPage(path) {
+      const slug = String(path || '').toLowerCase().replace(/^\/+/, '').replace(/\.html?$/i, '');
+      return /^(?:brand(?:-strategy|-guide)?|visual(?:-identity)?|typography|design(?:-system|-guide)?|motion(?:-system)?|cro|seo|content(?:-strategy)?|implementation(?:-guide)?|style(?:-guide)?)$/.test(slug);
+    }
+
+    function taskExplicitlyAsksForDesignDocPages(taskText = '') {
+      const lower = String(taskText || '').toLowerCase();
+      const designTerms = '(?:brand strategy|visual identity|typography|design system|motion system|style guide|seo|cro|content strategy|implementation guide)';
+      return new RegExp(`\\b(?:public|navigable|separate|dedicated)?\\s*(?:pages?|screens?|routes?)\\s+(?:for|called|named|about|covering)\\s+[^.]{0,120}\\b${designTerms}\\b`).test(lower)
+        || new RegExp(`\\b${designTerms}\\b\\s+(?:as|into)\\s+(?:public|navigable|separate|dedicated)?\\s*(?:pages?|screens?|routes?)\\b`).test(lower);
+    }
+
     function buildAgentProjectContract(taskText = '', taskKind = '', primaryStack = '', expectedFiles = []) {
       if (String(taskKind || '').toLowerCase() !== 'project') return '';
-      const { files, htmlFile, cssFile, scriptFile } = getPlannedFileRoles(expectedFiles);
+      const { files, htmlFiles, htmlFile, cssFile, scriptFile } = getPlannedFileRoles(expectedFiles);
       const lower = String(taskText || '').toLowerCase();
       const lines = [];
       lines.push(`Planned files: ${files.join(', ') || '(none)'}`);
@@ -1536,17 +1550,23 @@
         }
         if (htmlFile && cssFile) {
           const cssHref = cssFile.replace(/^\//, '');
-          lines.push(`- ${htmlFile} must include <link rel="stylesheet" href="${cssHref}"> in <head>.`);
-          lines.push(`- ${htmlFile} must not contain a <style> block or large inline style attributes.`);
+          const pageList = htmlFiles.length > 1 ? htmlFiles.join(', ') : htmlFile;
+          lines.push(`- Every HTML page (${pageList}) must include <link rel="stylesheet" href="${cssHref}"> in <head>.`);
+          lines.push('- No planned HTML page may contain a <style> block or large inline style attributes when shared CSS is planned.');
           lines.push(`- ${cssFile} must contain the visual design and only CSS.`);
           lines.push(`- ${cssFile}: design tokens, layout, responsive rules, and a reusable animation set; prefer shared selectors over a unique one-off style for every element.`);
         }
         if (htmlFile && scriptFile) {
           const scriptSrc = scriptFile.replace(/^\//, '');
-          lines.push(`- ${htmlFile} must include <script src="${scriptSrc}" defer></script>.`);
-          lines.push(`- ${htmlFile} must not contain inline JavaScript.`);
-          lines.push(`- ${scriptFile} must only reference IDs/classes that exist in ${htmlFile}.`);
+          const pageList = htmlFiles.length > 1 ? htmlFiles.join(', ') : htmlFile;
+          lines.push(`- Every HTML page that needs behavior (${pageList}) must include <script src="${scriptSrc}" defer></script>.`);
+          lines.push('- Planned HTML pages must not contain inline JavaScript.');
+          lines.push(`- ${scriptFile} must only reference IDs/classes/hooks that exist in the planned HTML pages.`);
           lines.push(`- ${scriptFile}: implement the full behavior the request needs, organized with reusable functions.`);
+        }
+        if (htmlFiles.length > 1 && (cssFile || scriptFile)) {
+          lines.push('- Multi-page consistency: use the same logo/header/nav/footer/CTA source of truth on every page. Prefer shared hooks rendered by js/components.js when that file is planned; otherwise copy the exact same class structure, not a redesigned variant.');
+          lines.push('- Strategy/design-system deliverables belong in shared tokens/CSS/components and README/docs, not accidental public pages like brand-strategy.html, typography.html, or motion-system.html unless those pages were explicitly requested as navigation items.');
         }
         if (/\bsurprise|reveal|secret|easter egg\b/.test(lower)) {
           lines.push(`- Shared interaction contract: include a primary button with id="surprise-btn" and a reveal region with id="surprise-panel"${htmlFile ? ` in ${htmlFile}` : ''}.`);
@@ -1697,7 +1717,7 @@
       let affectedFiles = parseAgentPlanPathList(parsed && parsed.affected_files ? parsed.affected_files : '').map(mapBinaryDocPath);
       let filesToInspect = parseAgentPlanPathList(parsed && parsed.files_to_inspect ? parsed.files_to_inspect : '');
       const doneCriteria = parseAgentPlanTextList(parsed && parsed.done_criteria ? parsed.done_criteria : '', 5); // cap 5
-      const phases = parseAgentPlanPhases(parsed && parsed.phases ? parsed.phases : ''); // [{title,tasks}]
+      let phases = parseAgentPlanPhases(parsed && parsed.phases ? parsed.phases : ''); // [{title,tasks}]
       const validationSteps = parseAgentPlanTextList(parsed && parsed.validation ? parsed.validation : '', 6);
       const looksLikeWebProjectTask = taskKind === 'project' && (WEB_TASK_HINT_REGEX.test(lower) || /\bcalculator\b/.test(lower));
       const singleHtmlFileProject = taskKind === 'project' && isSingleHtmlFileRequest(taskText);
@@ -1752,6 +1772,32 @@
       }
       if (docsOnlyTask && expectedFiles.length === 0) {
         expectedFiles = ['/README.md'];
+      }
+      const explicitDesignDocPages = taskExplicitlyAsksForDesignDocPages(taskText);
+      const accidentalDesignDocPages = taskKind === 'project' && !explicitDesignDocPages
+        ? expectedFiles.filter((path) => /\.html?$/i.test(path) && isAccidentalDesignDocPage(path))
+        : [];
+      if (accidentalDesignDocPages.length > 0) {
+        const removed = new Set(accidentalDesignDocPages.map((path) => normalizeWorkspacePath(path)));
+        expectedFiles = expectedFiles.filter((path) => !removed.has(normalizeWorkspacePath(path)));
+        const askedForDesignNotes = /\b(?:brand strategy|visual identity|typography|design system|motion system|style guide|seo|cro|content strategy|implementation guide|design direction|strategy)\b/i.test(lower);
+        if (askedForDesignNotes && !expectedFiles.includes('/README.md')) {
+          expectedFiles.push('/README.md');
+        }
+        const designDocTask = /\b(?:brand strategy|visual identity|typography|design system|motion system|style guide|seo|cro|content strategy|implementation guide)\b/i;
+        phases = phases.map((phase) => {
+          const tasks = Array.isArray(phase && phase.tasks) ? phase.tasks : [];
+          const keptTasks = tasks.filter((task) => {
+            const text = String((task && task.text) || task || '');
+            const normalizedTaskPath = normalizeWorkspacePath(text.split(/\s+/)[0] || '');
+            if (removed.has(normalizedTaskPath)) return false;
+            return !designDocTask.test(text) || /\.(?:css|js|md)\b/i.test(text);
+          });
+          if (keptTasks.length === 0 && expectedFiles.includes('/README.md') && designDocTask.test(String(phase && phase.title || ''))) {
+            keptTasks.push({ text: 'README.md brand/design notes', done: false });
+          }
+          return Object.assign({}, phase, { tasks: keptTasks });
+        }).filter((phase) => Array.isArray(phase && phase.tasks) && phase.tasks.length > 0);
       }
       if (taskKind === 'edit' && expectedFiles.length === 0 && affectedFiles.length > 0) {
         expectedFiles = affectedFiles.slice();

@@ -7466,6 +7466,27 @@ function isBareAgentResumeRequest(text) {
   return /^(?:(?:ok(?:ay)?|yes|yeah|yep|sure|please|pls|now|just|then|so|and|can you|could you)\s+)*(?:retry|retry it|try again|try it again|try once more|once more|redo|redo it|do it again|again|continue|continue building|keep going|carry on|go on|go ahead|proceed|resume|finish|finish it|finish up|finish the project|finish building|complete it|complete the project)$/.test(t);
 }
 
+function isNaturalAgentResumeRequest(text) {
+  const t = String(text || '').trim().toLowerCase().replace(/\s+/g, ' ');
+  if (!t) return false;
+  if (isBareAgentResumeRequest(t)) return true;
+  if (/^(?:why|what|how|when|where|who)\b/.test(t)) return false;
+  return /^(?:(?:ok(?:ay)?|yes|yeah|yep|sure|please|pls|now|just|then|so|and|bro|yo|can you|could you|you can|let'?s|go ahead and)\s+)*(?:(?:retry|try again|continue|continue building|keep going|carry on|go on|go ahead|proceed|resume)\b|(?:finish(?:\s+up)?|complete|wrap up)\b.{0,80}\b(?:it|this|task|build|project|phase|current)\b|(?:move to|start|do)\s+(?:the\s+)?next phase\b)/.test(t);
+}
+
+function chatHasUnfinishedPhaseTracker(chat) {
+  const tracker = chat && chat.phaseTracker;
+  const phases = tracker && Array.isArray(tracker.phases) ? tracker.phases : [];
+  return phases.length > 1 && phases.some((phase) => !phaseIsDone(phase));
+}
+
+function shouldTreatAsAgentResumeRequest(chatId, text) {
+  if (isBareAgentResumeRequest(text)) return true;
+  if (!isNaturalAgentResumeRequest(text)) return false;
+  const chat = findChatById(chatId);
+  return Boolean(chatHasUnfinishedPhaseTracker(chat) || lastAssistantLooksIncompleteAgentRun(chat));
+}
+
 function lastAssistantLooksIncompleteAgentRun(chat) {
   if (chat && chat.needsContinue) return true;
   const msg = findLastAssistantMessage(chat);
@@ -9900,8 +9921,9 @@ function getExperimentalAgentTaskText(promptText = '') {
 
 async function requestSelectedDeveloperAgentReply(requestToken, chatId, rawPromptText) {
   // Mark Continue/Retry/resume so a phased build resumes from plan.md even if the
-  // re-planner drops phases this turn (and so unrelated fresh edits don't).
-  if (requestToken) requestToken.isAgentResume = isBareAgentResumeRequest(rawPromptText);
+  // re-planner drops phases this turn. Natural phrasing like "finish phase 1 then
+  // ..." also resumes, but only when this chat already has an unfinished build.
+  if (requestToken) requestToken.isAgentResume = shouldTreatAsAgentResumeRequest(chatId, rawPromptText);
   const promptText = resolveAgentResumeTaskText(chatId, rawPromptText);
   // Keep a live elapsed counter below the input for the whole agent run, and make
   // sure it is always torn down when the run ends (success, stop, or throw).
@@ -13350,20 +13372,20 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
       const workspaceStateComparison = getWorkspaceStateComparison();
       const workspaceStatusSnapshot = await requestWorkspaceStatusSnapshot();
       const continuationChat = findChatById(chatId);
-      // Treat short "continue"/"retry"/"redo"/"finish it" replies as a resume.
-      // This only gates INTO agent resume below when the assistant actually
-      // stopped mid-build (lastAssistantAskedContinue) or needsContinue is set,
-      // so a loose match here is safe — it never hijacks an unrelated request.
-      const continuationOnly = isBareAgentResumeRequest(promptText);
+      // Treat bare continuation and natural phased phrasing as a resume. The
+      // phase-tracker check keeps "finish phase 1 then ..." attached to plan.md
+      // instead of being handled as a fresh edit that clears the tracker.
+      const continuationOnly = shouldTreatAsAgentResumeRequest(chatId, promptText);
       const lastAssistantForContinuation = findLastAssistantMessage(continuationChat);
       const lastAssistantAskedContinue = /ask me to continue|continue from the current (?:project|workspace) state|did not pass the project quality check|continue or retry without losing/i.test(
         String(lastAssistantForContinuation && lastAssistantForContinuation.text ? lastAssistantForContinuation.text : ''),
       );
+      const unfinishedPhaseTracker = chatHasUnfinishedPhaseTracker(continuationChat);
       if (
         developerAgentEnabled
         && continuationOnly
         && continuationChat
-        && (continuationChat.needsContinue || lastAssistantAskedContinue)
+        && (continuationChat.needsContinue || lastAssistantAskedContinue || unfinishedPhaseTracker)
       ) {
         requestToken.operationKind = 'agent';
         setThinkingStatus('Continuing changes...');
