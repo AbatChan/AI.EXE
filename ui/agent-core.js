@@ -359,6 +359,29 @@
         content = contentMatch ? contentMatch[1] : '';
       }
 
+      // qwen / Hermes tool-call format: <tool_call><function=agent_step>
+      // <parameter=NAME>VALUE</parameter>... Parse it directly so qwen's primary
+      // output doesn't fail and fall to the (slow) repair inference every step.
+      if (!action && /<parameter\s*=/i.test(candidate)) {
+        const hermes = (key, keepInner) => {
+          const m = candidate.match(new RegExp(`<parameter\\s*=\\s*["']?${key}["']?\\s*>([\\s\\S]*?)</parameter>`, 'i'));
+          if (!m) return '';
+          return keepInner ? m[1].replace(/^\r?\n/, '').replace(/\s+$/, '') : m[1].trim();
+        };
+        action = hermes('action');
+        tool = hermes('tool');
+        path = hermes('path');
+        message = hermes('message');
+        content = hermes('content', true);
+        command = hermes('command');
+        srcPath = hermes('src_path') || hermes('srcPath');
+        dstPath = hermes('dst_path') || hermes('dstPath');
+        const th = hermes('thought'); if (th && !thought) thought = th;
+        offset = Number(hermes('offset')) || offset;
+        startLine = Number(hermes('start_line')) || startLine;
+        endLine = Number(hermes('end_line')) || endLine;
+      }
+
       if (!action && /"action"\s*:\s*"[^"]+"/i.test(candidate)) {
         let parsed = null;
         const jsonCandidates = [candidate, ...extractJsonObjects(candidate), ...extractJsonObjects(raw)];
