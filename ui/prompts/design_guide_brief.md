@@ -8,6 +8,7 @@ Modern UI rules. Follow these for every HTML/CSS file unless the user overrides 
 - Type: one font; sizes 12/14/16/20/24/30/38/48; body 16px, never below 14px; weights 400/600/700; no negative letter spacing.
 - Space/depth: 8px scale (4,8,12,16,24,32,48,64,96); radius 6/10/14/pill; 1px borders; soft shadows only for real elevation.
 - Components need hover, active, disabled/loading, empty/error, selected, and visible :focus-visible states where relevant.
+- Multi-page sites need source-of-truth files: shared CSS plus a shared classic components script for repeated header/nav/logo/footer/CTA. Do not rebuild those inline per page.
 - Use real/relevant imagery for inspectable subjects (product, place, person, food, portfolio, object). Do not use abstract gradients as the subject.
 - Motion: 120-250ms, ease-out/ease-in-out, opacity/transform only, consistent, honor prefers-reduced-motion.
 
