@@ -611,12 +611,13 @@
       return sections.join('\n\n').trim();
     }
 
-    // design_guide.md injected into HTML/CSS generation for clean modern visuals.
+    // Condensed design brief injected into HTML/CSS generation (full design_guide.md
+    // kept as reference; the brief is ~1/4 the tokens to avoid per-file bloat).
     async function loadDesignFoundationFor(normalizedPath) {
       if (!/\.(html?|css)$/i.test(String(normalizedPath || ''))) return '';
-      const guide = await loadPromptTemplate('design_guide');
+      const guide = await loadPromptTemplate('design_guide_brief');
       return guide
-        ? `\n\n=== DESIGN FOUNDATION — apply these defaults so the UI looks clean, modern, and consistent ===\n${guide}\n=== end design foundation ===\n`
+        ? `\n\n=== DESIGN FOUNDATION (apply these defaults) ===\n${guide}\n===\n`
         : '';
     }
 
@@ -1079,9 +1080,19 @@
           return `EarlierResult ${index + 1}: ${String(event && event.tool ? event.tool : 'unknown')} ${String(event && event.path ? event.path : '')}\n${observation}`;
         }).join('\n\n')}\n\n`
         : '';
+      // Keep only the last few tool results in full; compact older large read/list
+      // dumps to a pointer (re-read on demand) so the prompt doesn't balloon with
+      // stale file contents — the main driver of context bloat / degradation.
+      const FULL_TOOL_TAIL = 3;
       const toolLog = diagnosticsLog + expandedReadLog + relevantOlderLog + inspectedNote + recentEvents.map((event, index) => {
-        const observation = String(event && event.observation ? event.observation : '').slice(0, agentMaxToolOutputChars);
-        return `ToolResult ${index + 1}: ${String(event && event.tool ? event.tool : 'unknown')}\n${observation}`;
+        const tool = String(event && event.tool ? event.tool : 'unknown');
+        const obs = String(event && event.observation ? event.observation : '');
+        const isTail = index >= recentEvents.length - FULL_TOOL_TAIL;
+        if (!isTail && obs.length > 1200 && ['read_file', 'list_dir', 'search_files'].includes(tool.toLowerCase())) {
+          const p = String(event && event.path ? event.path : '');
+          return `ToolResult ${index + 1}: ${tool} ${p} — ${obs.length} chars (omitted to save context; read_file again if you need it)`;
+        }
+        return `ToolResult ${index + 1}: ${tool}\n${obs.slice(0, agentMaxToolOutputChars)}`;
       }).join('\n\n');
       const planSummary = planSpec
         ? [
