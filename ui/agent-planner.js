@@ -611,6 +611,17 @@
       return sections.join('\n\n').trim();
     }
 
+    // The design foundation (ui/prompts/design_guide.md) — injected into UI file
+    // generation so the model produces clean, modern, consistent visuals. Only for
+    // HTML/CSS (where design lives); kept in one .md so it's easy to evolve.
+    async function loadDesignFoundationFor(normalizedPath) {
+      if (!/\.(html?|css)$/i.test(String(normalizedPath || ''))) return '';
+      const guide = await loadPromptTemplate('design_guide');
+      return guide
+        ? `\n\n=== DESIGN FOUNDATION — apply these defaults so the UI looks clean, modern, and consistent ===\n${guide}\n=== end design foundation ===\n`
+        : '';
+    }
+
     async function buildAgentWriteFileContentPrompt(taskText, toolEvents, path, priorAttempt = '', planSpec = null) {
       const toolLog = (toolEvents || []).slice(-6).map((event, index) => {
         const observation = String(event && event.observation ? event.observation : '').slice(0, agentMaxToolOutputChars);
@@ -624,6 +635,7 @@
         && !planFiles.some((p) => /\.(css|scss|sass|less|js|mjs|cjs|ts|jsx|tsx)$/i.test(p));
       const generationHints = buildAgentFileGenerationHints(taskText, normalizedPath, { selfContained });
       const projectState = buildAgentProjectStateContext(toolEvents, planSpec, normalizedPath);
+      const designFoundation = await loadDesignFoundationFor(normalizedPath);
       const template = await loadPromptTemplate('developer_agent_write_file');
       if (template) {
         return renderPromptTemplate(template, {
@@ -634,7 +646,7 @@
           TASK: String(taskText || '').trim(),
           RECENT_TOOL_RESULTS: toolLog || '(none yet)',
           PREVIOUS_ATTEMPT_TO_IMPROVE: priorAttempt ? String(priorAttempt).slice(0, 1800) : '',
-        });
+        }) + designFoundation;
       }
       return [
         'Write the complete final contents for one project file.',
@@ -655,6 +667,7 @@
         priorAttempt
           ? `PREVIOUS_ATTEMPT_TO_IMPROVE:\nThe previous generation was rejected because it was either too short or contained placeholders (e.g. "todo", "coming soon"). Expand this code into a fully working implementation:\n${String(priorAttempt).slice(0, 1800)}`
           : '',
+        designFoundation || '',
         'FILE_CONTENT:',
       ].filter(Boolean).join('\n');
     }
@@ -731,6 +744,7 @@
       const normalizedPath = normalizeWorkspacePath(path || '');
       const projectState = buildAgentProjectStateContext(toolEvents, planSpec, normalizedPath);
       const rewriteHints = buildAgentFileGenerationHints(taskText, normalizedPath);
+      const designFoundation = await loadDesignFoundationFor(normalizedPath);
       const template = await loadPromptTemplate('developer_agent_rewrite_file');
       if (template) {
         return renderPromptTemplate(template, {
@@ -742,7 +756,7 @@
           RECENT_TOOL_RESULTS: toolLog || '(none yet)',
           PREVIOUS_ATTEMPT_TO_IMPROVE: priorAttempt ? String(priorAttempt).slice(0, 1800) : '',
           CURRENT_FILE: String(currentContent || '').slice(0, 22000),
-        });
+        }) + designFoundation;
       }
       return [
         'Rewrite the complete final contents for one existing file after applying the requested edits.',
@@ -763,6 +777,7 @@
           : '',
         'CURRENT_FILE:',
         String(currentContent || '').slice(0, 22000),
+        designFoundation || '',
         'FILE_CONTENT:',
       ].filter(Boolean).join('\n');
     }
