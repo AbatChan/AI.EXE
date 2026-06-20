@@ -2460,7 +2460,11 @@ function saveEditedUserMessage(chatId, messageTs, nextText) {
 
   beginInferenceRequest();
   chatAutoScrollPinned = true;
-  void requestAssistantReply(chat.id, buildPromptWithInputAugments(cleaned), true);
+  // Edit-and-resend in this chat — keep its current project, don't re-ask new-vs-current.
+  void requestAssistantReply(chat.id, buildPromptWithInputAugments(cleaned), true, {
+    skipNewProjectConfirmation: true,
+    forceCurrentWorkspace: true,
+  });
 }
 
 function isRetryableAssistantMessage(chatId, messageTs) {
@@ -2564,7 +2568,11 @@ function retryAssistantMessage(chatId, messageTs) {
 
   beginInferenceRequest();
   chatAutoScrollPinned = true;
-  void requestAssistantReply(chat.id, buildPromptWithInputAugments(userMessage), true);
+  // Retry of an existing turn — keep using the chat's current project, don't re-ask new-vs-current.
+  void requestAssistantReply(chat.id, buildPromptWithInputAugments(userMessage), true, {
+    skipNewProjectConfirmation: true,
+    forceCurrentWorkspace: true,
+  });
 }
 
 function makeChatId() {
@@ -6910,7 +6918,8 @@ async function requestPreflightRouteDecision(chatId, latestUserMessage, options 
   // the existing workspace to be rewritten into a different app, and don't suppress
   // the confirm as a "follow-up". (modify_existing_workspace IS a follow-up; this isn't.)
   if (agentEnabled && sameChatWorkspaceFollowup && decision.route === 'agent'
-    && buildIntent === 'create_or_build_deliverable') {
+    && buildIntent === 'create_or_build_deliverable'
+    && !(options && options.skipNewProjectConfirmation)) {
     decision.route = 'confirm';
     decision.shouldAskUser = true;
     decision.shouldCreateProject = true;
@@ -13392,6 +13401,7 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
         const preflightDecision = await requestPreflightRouteDecision(chatId, promptText, {
           agentEnabled: developerAgentEnabled,
           canvasEnabled: canvasModeUiEnabled,
+          skipNewProjectConfirmation: Boolean(requestToken.skipNewProjectConfirmation),
         });
         const preflightDebug = preflightDecision && preflightDecision._debug ? preflightDecision._debug : null;
         const workspaceDebug = getWorkspaceDebugSnapshot();
