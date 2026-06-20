@@ -9900,6 +9900,9 @@ function getExperimentalAgentTaskText(promptText = '') {
 }
 
 async function requestSelectedDeveloperAgentReply(requestToken, chatId, rawPromptText) {
+  // Mark Continue/Retry/resume so a phased build resumes from plan.md even if the
+  // re-planner drops phases this turn (and so unrelated fresh edits don't).
+  if (requestToken) requestToken.isAgentResume = isBareAgentResumeRequest(rawPromptText);
   const promptText = resolveAgentResumeTaskText(chatId, rawPromptText);
   // Keep a live elapsed counter below the input for the whole agent run, and make
   // sure it is always torn down when the run ends (success, stop, or throw).
