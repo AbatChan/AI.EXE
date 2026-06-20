@@ -11679,7 +11679,7 @@ function renderPhaseTracker() {
   const activeDoneCount = activeTasks.filter((t) => t && (t.done || t.liveDone)).length;
   const headLabel = `${name ? `Building ${escapeHtml(name)}` : 'Building'} · Phase ${activeIndex + 1}/${phases.length}`;
   const progressLabel = activeTasks.length
-    ? `${activeDoneCount}/${activeTasks.length} tasks`
+    ? `${activeDoneCount} of ${activeTasks.length} tasks`
     : `${doneTotal}/${phases.length} phases`;
   const chevron = '<svg class="phase-row-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>';
   const rows = phases.map((phase, i) => {
