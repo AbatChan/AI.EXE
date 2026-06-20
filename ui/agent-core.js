@@ -191,6 +191,7 @@
           hints.push('Do not output CSS rules as the main body of this file.');
           hints.push('Do not output JavaScript as the main body of this file.');
           hints.push('SHARED STYLES: this is a multi-file project with a shared stylesheet (e.g. css/style.css, plus css/design-tokens.css if present — see PROJECT_STATE for the real paths). EVERY page MUST `<link rel="stylesheet" href="...">` that shared stylesheet in <head> and rely on it for the design system (tokens, layout, header/footer, components). Do NOT paste a big inline <style> block re-declaring the whole design system in each page — that duplicates CSS, bloats every page, and makes pages drift out of sync. Only a TINY inline <style> for genuinely page-unique tweaks is acceptable; shared/repeated styling belongs in the shared stylesheet. Use the SAME header/footer/nav markup and the same class names across all pages so the shared CSS styles them identically.');
+          hints.push('SHARED COMPONENTS: for multi-page sites, repeated header/nav/logo/footer/CTA markup should come from one classic shared script such as js/components.js. Pages should contain small hooks like <div data-site-header></div> / <div data-site-footer></div>, load the shared component script, and pass the active page via body data-page or location. Do NOT rebuild a different nav/footer/theme inline on each page.');
           hints.push('Pages are opened directly from disk (file://). Inter-page and asset links must be RELATIVE (menu.html, ./style.css, ../style.css from a subfolder) — root-relative paths like /menu.html resolve to the filesystem root and break.');
           hints.push('OFFLINE: load JS as classic scripts — <script src="js/app.js"></script> in dependency order. Do NOT use <script type="module"> or import/export anywhere; ES modules do not load from file:// and silently break the whole page. Share code via globals on window.');
           hints.push('Never load local data with fetch() or XMLHttpRequest — under file:// the browser blocks them and the app silently fails. Embed any data (levels, config, JSON, CSV rows, save state) directly in the script instead.');
@@ -1353,7 +1354,7 @@
         .split('|')
         .map((item) => normalizeWorkspacePath(item))
         .filter((item) => item && item !== '/')
-        .slice(0, 8);
+        .slice(0, 16);
     }
 
     function parseAgentPlanPathList(raw) {
