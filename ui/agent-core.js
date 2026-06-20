@@ -492,11 +492,7 @@
       const taskKind = String(planSpec && planSpec.taskKind ? planSpec.taskKind : '').toLowerCase();
       const expectedFiles = Array.isArray(planSpec && planSpec.expectedFiles) ? planSpec.expectedFiles : [];
       if (taskKind === 'project') {
-        // Phased builds are FULLY model-driven per phase: only the new_project
-        // bootstrap below is deterministic. Everything after (write loop, validation
-        // repair, validate/run shortcut) is skipped — the deterministic validation
-        // repair could write the repair-instruction text into a stub file and fight
-        // the per-phase generation. The model handles writes + validate + run itself.
+        // Phased = fully model-driven: only new_project below is deterministic.
         const phasedProject = Array.isArray(planSpec && planSpec.phases)
           && planSpec.phases.filter((p) => p && p.title).length >= 2;
         const explicitSeparateWorkspaceIntent = /\b(new project|new workspace|fresh workspace|another project|separate project|different project|start from scratch|from scratch)\b/i.test(String(taskText || ''));
@@ -515,8 +511,7 @@
             raw: '[fallback-project-new-project]',
           };
         }
-        // Phased: hand the rest entirely to the model (no deterministic repair/loop).
-        if (phasedProject) return null;
+        if (phasedProject) return null; // model drives writes/validate/run
         const writtenPaths = Array.isArray(toolEvents)
           ? toolEvents
             .filter((event) => event && event.ok && ['write_file', 'edit_file', 'mkdir'].includes(String(event.tool || '').toLowerCase()))

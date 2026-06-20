@@ -1807,11 +1807,7 @@
         for (const path of targets) {
           const response = await deps.invokeWorkspaceAction('workspaceReadFile', { path });
           if (!response || !response.ok) {
-            // A planned file that doesn't exist yet is NOT a validation failure —
-            // in a phased build the later-phase pages are created on later runs.
-            // Flagging it as an issue used to trigger a repair that wrote the error
-            // text into a stub file. Skip missing files; validate what exists.
-            continue;
+            continue; // missing planned file (e.g. a later phase) — skip, not a failure
           }
           readableCount += 1;
           const content = String(response.output || '');
@@ -1824,9 +1820,7 @@
           }
         }
         if (readableCount === 0) {
-          // None of the planned files exist on disk yet — nothing to validate.
-          // Return non-passing WITHOUT validationIssues so it doesn't trigger a
-          // content repair; the model should write the files first.
+          // Nothing exists yet — non-passing but no validationIssues (so no repair).
           return { ok: false, mutated, observation: 'validate_files: none of the planned files exist yet — write the files first, then validate.' };
         }
         const mechanicalAdvisory = completenessAdvisory;

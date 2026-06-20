@@ -611,9 +611,7 @@
       return sections.join('\n\n').trim();
     }
 
-    // The design foundation (ui/prompts/design_guide.md) — injected into UI file
-    // generation so the model produces clean, modern, consistent visuals. Only for
-    // HTML/CSS (where design lives); kept in one .md so it's easy to evolve.
+    // design_guide.md injected into HTML/CSS generation for clean modern visuals.
     async function loadDesignFoundationFor(normalizedPath) {
       if (!/\.(html?|css)$/i.test(String(normalizedPath || ''))) return '';
       const guide = await loadPromptTemplate('design_guide');
@@ -814,9 +812,7 @@
         if (fb && typeof fb === 'object') {
           fb._planSource = res && res.timedOut ? 'fallback:timeout' : 'fallback:infer_fail';
           fb._planRaw = String((res && res.message) || '').slice(0, 300);
-          // Hard provider failure (out of credits / bad key / forbidden): the run
-          // must NOT proceed with a degraded plan and claim success — flag it so the
-          // loop can stop and show the user the real reason.
+          // Hard provider failure (credits/key/forbidden) — flag so the loop stops.
           if (res && (res.hardFail || [401, 402, 403].includes(Number(res.httpStatus)))) {
             fb._planHardError = String(res.message || '').trim() || 'The inference provider rejected the request.';
           }
@@ -828,10 +824,7 @@
         parsed = JSON.parse(String(res.output || '').trim());
       } catch (_) {
         const raw = String(res.output || '');
-        // first{..last} breaks when the model wraps the JSON in prose/reasoning that
-        // itself contains braces. Scan from EACH '{' for a string-aware balanced
-        // object and parse the first one that succeeds — robust to fences, a prose
-        // preamble, and trailing commentary deepseek tends to add.
+        // Balanced-brace scan from each '{' — robust to prose/fences around the JSON.
         const tryBalancedFrom = (s, from) => {
           let depth = 0; let inStr = false; let esc = false;
           for (let i = from; i < s.length; i += 1) {
@@ -1116,8 +1109,7 @@
         ].filter(Boolean).join('\n')
         : '(none)';
 
-      // Phased builds: scope this run to the current phase only (the model drives
-      // per-phase; .aiexe/plan.md is the source of truth across Continues).
+      // Scope this run to the current phase only.
       const activePhase = planSpec && planSpec._activePhase;
       const phaseScope = activePhase && activePhase.title
         ? [
