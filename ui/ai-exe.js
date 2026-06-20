@@ -11677,14 +11677,14 @@ function renderPhaseTracker() {
     const done = phaseIsDone(phase);
     const status = done ? 'done' : (i === activeIndex ? 'active' : 'pending');
     const tasks = Array.isArray(phase.tasks) ? phase.tasks : [];
-    const doneCount = tasks.filter((t) => t && t.done).length;
+    const doneCount = tasks.filter((t) => t && (t.done || t.liveDone)).length;
     const count = tasks.length ? `<span class="phase-row-count">${doneCount}/${tasks.length}</span>` : '';
     const expanded = phaseTrackerExpanded.has(i);
     const check = `<span class="phase-row-check ${status}">${done ? '✓' : ''}</span>`;
     let tasksHtml = '';
     if (expanded && tasks.length) {
       tasksHtml = `<div class="phase-row-tasks">${tasks.map((t) => {
-        const tdone = Boolean(t && t.done);
+        const tdone = Boolean(t && (t.done || t.liveDone));
         return `<div class="phase-task${tdone ? ' done' : ''}"><span class="phase-task-box">${tdone ? '✓' : ''}</span><span class="phase-task-label">${escapeHtml(String((t && t.text) || ''))}</span></div>`;
       }).join('')}</div>`;
     }
