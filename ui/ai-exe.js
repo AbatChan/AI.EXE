@@ -4198,8 +4198,7 @@ function applyAgentProjectChatName(chatId, planSpec = null) {
     : 0;
   if (aiCount > 0 || userCount !== 1) return false;
   // The project name IS the chat title for a project task. kebab-case slug ->
-  // spaced Title Case (e.g. "factory-logistics-simulator" -> "Factory Logistics
-  // Simulator"). Only fall back to a name derived from the user's message when
+  // spaced Title Case. Only fall back to a name derived from the user's message when
   // there is somehow no usable project name (the user asked for this priority).
   const prettyName = normalizeChatName(toAutoTitleCase(sourceName.replace(/[-_]+/g, ' ')) || sourceName);
   const userDerivedName = deriveFallbackChatNameFromUser(chat, prettyName);
