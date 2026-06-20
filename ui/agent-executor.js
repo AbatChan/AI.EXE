@@ -1803,12 +1803,17 @@
         const issues = [];
         const fileContents = {};
         const completenessAdvisory = [];
+        let readableCount = 0;
         for (const path of targets) {
           const response = await deps.invokeWorkspaceAction('workspaceReadFile', { path });
           if (!response || !response.ok) {
-            issues.push(`${path}: could not be read for validation`);
+            // A planned file that doesn't exist yet is NOT a validation failure —
+            // in a phased build the later-phase pages are created on later runs.
+            // Flagging it as an issue used to trigger a repair that wrote the error
+            // text into a stub file. Skip missing files; validate what exists.
             continue;
           }
+          readableCount += 1;
           const content = String(response.output || '');
           fileContents[path] = content;
           const fileIssues = validateGeneratedFile(path, content, taskText, planSpec);
@@ -1817,6 +1822,12 @@
             && !deps.isLikelyCompletePrimarySource(path, content, taskText)) {
             completenessAdvisory.push(`${path}: may be thinner than the requested feature set — expand it only if something is actually missing`);
           }
+        }
+        if (readableCount === 0) {
+          // None of the planned files exist on disk yet — nothing to validate.
+          // Return non-passing WITHOUT validationIssues so it doesn't trigger a
+          // content repair; the model should write the files first.
+          return { ok: false, mutated, observation: 'validate_files: none of the planned files exist yet — write the files first, then validate.' };
         }
         const mechanicalAdvisory = completenessAdvisory;
         const webConsistencyIssues = validateWebProjectConsistency(fileContents, planSpec, mechanicalAdvisory);
