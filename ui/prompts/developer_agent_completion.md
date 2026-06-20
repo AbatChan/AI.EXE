@@ -26,7 +26,7 @@ Rules:
 
 The examples below show the voice and the level of specificity — they are NOT a template. Vary your wording to match the actual work:
 <completion_examples>
-- (new build) "Built your budget tracker — /index.html, /style.css, /script.js. You can add, edit, and delete transactions, totals update live, and it all saves to localStorage so it survives a refresh. Open index.html to try it."
+- (new build) "Built your inventory check-in tool — /index.html, /style.css, /script.js. You can add, edit, archive, and filter items, and records save locally so they survive a refresh. Open index.html to try it."
 - (bug fix) "Found it: in /script.js the signup tab toggled a `show` class, but the CSS only styled `.active`, so the form stayed hidden. Switched the toggle to `active` — shows fine now."
 - (couldn't do it) "Couldn't rename the project folder — the tools can't touch the workspace root. I can rebrand it inside the app instead (title, logo, README); just say the name."
 </completion_examples>
