@@ -1522,12 +1522,16 @@
     function getPlannedFileRoles(expectedFiles = []) {
       const files = Array.isArray(expectedFiles) ? expectedFiles.map((path) => normalizeWorkspacePath(path || '')).filter(Boolean) : [];
       const htmlFiles = files.filter((path) => /\.html?$/i.test(path));
+      const cssFiles = files.filter((path) => /\.(css|scss|sass|less)$/i.test(path));
+      const scriptFiles = files.filter((path) => /\.(js|mjs|cjs|ts|jsx|tsx)$/i.test(path));
       return {
         files,
         htmlFiles,
         htmlFile: htmlFiles[0] || '',
-        cssFile: files.find((path) => /\.(css|scss|sass|less)$/i.test(path)) || '',
-        scriptFile: files.find((path) => /\.(js|mjs|cjs|ts|jsx|tsx)$/i.test(path)) || '',
+        cssFiles,
+        cssFile: cssFiles[0] || '',
+        scriptFiles,
+        scriptFile: scriptFiles[0] || '',
         pythonFile: files.find((path) => /\.py$/i.test(path)) || '',
       };
     }
@@ -1544,9 +1548,59 @@
       return word ? words[word[1]] : 0;
     }
 
+    function extractPlannedPathFromPhaseTask(task) {
+      const text = String((task && task.text) || task || '');
+      const match = text.match(/(?:^|\s)(\/?[a-z0-9._-]+(?:\/[a-z0-9._-]+)*\.(?:html?|css|scss|sass|less|js|mjs|cjs|ts|jsx|tsx|md|txt|json|csv|py))\b/i);
+      return match ? normalizeWorkspacePath(match[1]) : '';
+    }
+
+    function phaseTaskForPath(path) {
+      return { text: String(path || '').replace(/^\//, ''), done: false };
+    }
+
+    function normalizeWebProjectPhases(phases = [], expectedFiles = [], primaryStack = '') {
+      const isWeb = String(primaryStack || '').toLowerCase() === 'web'
+        || expectedFiles.some((path) => /\.html?$/i.test(String(path || '')));
+      const list = Array.isArray(phases) ? phases.filter((phase) => phase && phase.title) : [];
+      if (!isWeb || list.length < 2) return list;
+      const expected = expectedFiles.map((path) => normalizeWorkspacePath(path || '')).filter(Boolean);
+      const expectedSet = new Set(expected);
+      const htmlFiles = expected.filter((path) => /\.html?$/i.test(path));
+      if (htmlFiles.length < 2) return list;
+      const cssFiles = expected.filter((path) => /\.(css|scss|sass|less)$/i.test(path));
+      const scriptFiles = expected.filter((path) => /\.(js|mjs|cjs|ts|jsx|tsx)$/i.test(path));
+      const docs = expected.filter((path) => /\.(md|txt)$/i.test(path));
+      const primaryHtml = htmlFiles[0] || '';
+      const foundation = [
+        ...cssFiles.filter((path) => /design[-_]?tokens|tokens|theme|variables/i.test(path)),
+        ...cssFiles.filter((path) => !/design[-_]?tokens|tokens|theme|variables/i.test(path)),
+        ...scriptFiles.filter((path) => /components?|shared|layout/i.test(path)),
+        primaryHtml,
+        ...scriptFiles.filter((path) => !/components?|shared|layout/i.test(path)),
+      ].filter((path, index, arr) => path && arr.indexOf(path) === index);
+      const foundationSet = new Set(foundation);
+      const normalized = [];
+      const first = Object.assign({}, list[0], { tasks: foundation.map(phaseTaskForPath) });
+      normalized.push(first);
+      list.slice(1).forEach((phase) => {
+        const tasks = (Array.isArray(phase.tasks) ? phase.tasks : [])
+          .map((task) => {
+            const path = extractPlannedPathFromPhaseTask(task);
+            return path && expectedSet.has(path) && !foundationSet.has(path) ? phaseTaskForPath(path) : null;
+          })
+          .filter(Boolean);
+        if (tasks.length > 0) {
+          normalized.push(Object.assign({}, phase, { tasks }));
+        } else if (docs.length > 0 && /\b(brand|design|identity|typography|motion|style|strategy|seo|cro|guide|docs?|readme|notes?)\b/i.test(`${phase.title} ${(phase.tasks || []).map((task) => String((task && task.text) || task || '')).join(' ')}`)) {
+          normalized.push(Object.assign({}, phase, { tasks: [phaseTaskForPath(docs[0])] }));
+        }
+      });
+      return normalized;
+    }
+
     function buildAgentProjectContract(taskText = '', taskKind = '', primaryStack = '', expectedFiles = []) {
       if (String(taskKind || '').toLowerCase() !== 'project') return '';
-      const { files, htmlFiles, htmlFile, cssFile, scriptFile } = getPlannedFileRoles(expectedFiles);
+      const { files, htmlFiles, htmlFile, cssFiles, cssFile, scriptFile } = getPlannedFileRoles(expectedFiles);
       const lower = String(taskText || '').toLowerCase();
       const lines = [];
       lines.push(`Planned files: ${files.join(', ') || '(none)'}`);
@@ -1563,12 +1617,12 @@
           lines.push(`- ${htmlFile}: semantic structure with the requested sections, shared classes, and stable IDs.`);
         }
         if (htmlFile && cssFile) {
-          const cssHref = cssFile.replace(/^\//, '');
+          const cssHrefs = cssFiles.map((path) => path.replace(/^\//, ''));
           const pageList = htmlFiles.length > 1 ? htmlFiles.join(', ') : htmlFile;
-          lines.push(`- Every HTML page (${pageList}) must include <link rel="stylesheet" href="${cssHref}"> in <head>.`);
+          lines.push(`- Every HTML page (${pageList}) must include these stylesheet links in <head>: ${cssHrefs.map((href) => `<link rel="stylesheet" href="${href}">`).join(' ')}`);
           lines.push('- No planned HTML page may contain a <style> block or large inline style attributes when shared CSS is planned.');
-          lines.push(`- ${cssFile} must contain the visual design and only CSS.`);
-          lines.push(`- ${cssFile}: design tokens, layout, responsive rules, and a reusable animation set; prefer shared selectors over a unique one-off style for every element.`);
+          lines.push(`- Planned CSS files (${cssFiles.join(', ')}) must contain the visual design and only CSS.`);
+          lines.push(`- ${cssFile}: design tokens, layout, responsive rules, and reusable animation/motion rules; prefer shared selectors over a unique one-off style for every element.`);
         }
         if (htmlFile && scriptFile) {
           const scriptSrc = scriptFile.replace(/^\//, '');
@@ -1847,6 +1901,7 @@
       if (taskKind === 'project' && needsReadme && !expectedFiles.includes('/README.md')) {
         expectedFiles.push('/README.md');
       }
+      phases = normalizeWebProjectPhases(phases, expectedFiles, primaryStack);
       const parsedSummary = String(parsed && parsed.summary ? parsed.summary : '').trim().slice(0, 220);
       return {
         taskKind,

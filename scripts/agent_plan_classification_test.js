@@ -111,6 +111,44 @@ const cases = [
     },
   },
   {
+    name: 'web phases put brand/design foundations before entry HTML',
+    run: () => core.normalizeAgentPlanSpec({
+      task_kind: 'project',
+      primary_stack: 'web',
+      expected_files: '/index.html|/css/design-tokens.css|/css/style.css|/css/motion-system.css|/js/components.js|/js/script.js|/product.html|/pricing.html|/about.html|/contact.html',
+      phases: 'Runnable core :: index.html hero+nav ; css/design-tokens.css ; css/style.css ; js/components.js ; js/script.js | Branding & Design System :: brand identity ; visual design system ; motion system | Product Pages :: product.html ; pricing.html ; about.html ; contact.html',
+    }, 'build a five-page SaaS website with brand strategy, visual identity, typography, design system, motion system, CRO, SEO, and implementation guide', { chatId: 'chat_owns_ws', forceProjectScope: true }),
+    expect: (spec) => {
+      const phaseTitles = spec.phases.map((phase) => phase.title);
+      assert.ok(!phaseTitles.some((title) => /branding\s*&\s*design system/i.test(title)),
+        'semantic branding phase should not survive as a separate implementation phase');
+      const firstTasks = spec.phases[0].tasks.map((task) => task.text);
+      assert.deepEqual(firstTasks.slice(0, 4),
+        ['css/design-tokens.css', 'css/style.css', 'css/motion-system.css', 'js/components.js'],
+        'source-of-truth CSS/components should come before index.html in Phase 1');
+      assert.ok(firstTasks.indexOf('index.html') > firstTasks.indexOf('css/style.css'),
+        'index.html should be generated after the shared design system');
+      assert.ok(spec.phases.some((phase) => (phase.tasks || []).some((task) => task.text === 'product.html')),
+        'product pages should remain in a later phase');
+      assert.ok(/css\/motion-system\.css/.test(spec.projectContract),
+        'project contract should mention all planned CSS files so extra CSS is not orphaned');
+    },
+  },
+  {
+    name: 'single-page web apps keep semantic feature phases',
+    run: () => core.normalizeAgentPlanSpec({
+      task_kind: 'project',
+      primary_stack: 'web',
+      expected_files: '/index.html|/css/style.css|/js/script.js',
+      phases: 'Runnable skeleton :: index.html layout ; css/style.css ; js/script.js | Core workflow :: create records ; update status ; filter list | Extras :: import/export ; saved views',
+    }, 'build a single-page workflow tracker web app', { chatId: 'chat_owns_ws', forceProjectScope: true }),
+    expect: (spec) => {
+      assert.equal(spec.phases.length, 3, 'single-page app feature phases should be preserved');
+      assert.ok(spec.phases[1].tasks.some((task) => /create records/.test(task.text)),
+        'semantic app workflow task should survive');
+    },
+  },
+  {
     name: 'requested page count caps accidental extra public HTML pages',
     run: () => core.normalizeAgentPlanSpec({
       task_kind: 'project',
