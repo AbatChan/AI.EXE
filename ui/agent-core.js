@@ -247,6 +247,19 @@
     function parseAgentDecision(outputText) {
       const raw = String(outputText || '').trim();
       if (!raw) return null;
+      const scrubDecisionNarration = (value) => {
+        let s = String(value || '').trim();
+        if (!s) return '';
+        s = s.replace(/^```[a-z]*\s*/i, '').replace(/\s*```$/i, '').trim();
+        const cut = s.search(/<\s*(?:tool_call|function=agent_step|parameter\s*=|decision\b)/i);
+        if (cut >= 0) s = s.slice(0, cut).trim();
+        const jsonCut = s.search(/\{\s*"action"\s*:/i);
+        if (jsonCut >= 0) s = s.slice(0, jsonCut).trim();
+        if (/<\s*(?:tool_call|function=agent_step|parameter\s*=)|<\/parameter>/i.test(s)) return '';
+        if (/^\s*(?:\{|\[|<)/.test(s)) return '';
+        if (/Keys:\s+action,\s+message,\s+tool/i.test(s) || /Rules:\s*-\s*One step only/i.test(s) || /Return EXACTLY ONE JSON object/i.test(s)) return '';
+        return s;
+      };
       const extractJsonObjects = (text) => {
         const src = String(text || '');
         const candidates = [];
@@ -290,17 +303,18 @@
         return Array.from(new Set(candidates.map((item) => String(item || '').trim()).filter(Boolean)));
       };
       let thought = '';
-      const firstCurly = raw.indexOf('{');
-      const firstDecision = raw.indexOf('<decision>');
-      const firstMarker = firstCurly >= 0 && firstDecision >= 0 ? Math.min(firstCurly, firstDecision) : Math.max(firstCurly, firstDecision);
+      const firstMarker = [
+        raw.indexOf('{'),
+        raw.search(/<decision\b/i),
+        raw.search(/<tool_call\b/i),
+        raw.search(/<function=agent_step\b/i),
+        raw.search(/<parameter\s*=/i),
+      ].filter((idx) => idx >= 0).sort((a, b) => a - b)[0] ?? -1;
       if (firstMarker > 0) {
         let t = raw.slice(0, firstMarker).replace(/```[a-z]*\s*$/i, '').trim();
         t = t.replace(/^```[a-z]*\s*/i, '').trim();
         t = t.replace(/^<\/?thought>\s*/gi, '').replace(/<\/?thought>$/gi, '').trim();
-        if (t.length > 5) thought = t;
-        if (/Keys:\s+action,\s+message,\s+tool/i.test(thought) || /Rules:\s*-\s*One step only/i.test(thought) || /Return EXACTLY ONE JSON object/i.test(thought)) {
-          thought = '';
-        }
+        thought = scrubDecisionNarration(t);
       }
       let candidate = raw.replace(/^```[a-z]*\s*/i, '').replace(/\s*```$/i, '').trim();
       const decisionBlockMatch = candidate.match(/<decision>[\s\S]*?<\/decision>/i);
@@ -496,14 +510,14 @@
       }
       return {
         action: resolvedAction,
-        message: String(message || '').trim(),
+        message: scrubDecisionNarration(message),
         tool: validTools.includes(resolvedTool) ? resolvedTool : 'none',
         path: String(path || '').trim(),
         content: String(content || ''),
         command: String(command || '').trim(),
         srcPath: String(srcPath || '').trim(),
         dstPath: String(dstPath || '').trim(),
-        thought: String(thought || '').trim(),
+        thought: scrubDecisionNarration(thought),
         offset: Math.max(0, Number(offset) || 0),
         start_line: Math.max(0, Number(startLine) || 0),
         end_line: Math.max(0, Number(endLine) || 0),

@@ -380,6 +380,7 @@
         const cleaned = deps.sanitizeAssistantText ? deps.sanitizeAssistantText(text) : text;
         const detail = String(cleaned || '').trim();
         if (!detail || detail.length < 8) return;
+        if (/<\s*(?:tool_call|function=agent_step|parameter\s*=)|<\/parameter>/i.test(detail)) return;
         if (detail === lastNarrationDetail) return;
         // Skip a near-duplicate of the previous line (models often restate the same
         // thought on consecutive steps): drop it if it shares most significant words.
