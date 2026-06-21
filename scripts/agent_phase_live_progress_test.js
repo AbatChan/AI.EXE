@@ -74,4 +74,24 @@ assert.deepEqual(
   'reports active phase file tasks that are not done or live-done',
 );
 
+assert.equal(
+  loop.shouldSuppressAgentNarration("I'll start by creating the HTML skeleton.", '', []),
+  false,
+  'allows an initial startup narration before file writes',
+);
+assert.equal(
+  loop.shouldSuppressAgentNarration("I'll start by creating the HTML skeleton.", '', [
+    { tool: 'write_file', path: '/index.html', ok: true },
+  ]),
+  true,
+  'suppresses stale startup narration after a file has already been written',
+);
+assert.equal(
+  loop.shouldSuppressAgentNarration('There it is — the CSS import is missing, fixing it now.', '', [
+    { tool: 'write_file', path: '/index.html', ok: true },
+  ]),
+  false,
+  'keeps concrete found/fixing narration after a file write',
+);
+
 console.log('Passed phase live progress tests.');

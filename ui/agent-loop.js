@@ -42,6 +42,19 @@
     return inspections;
   }
 
+  function shouldSuppressAgentNarration(text, lastNarrationDetail = '', toolEvents = []) {
+    const detail = String(text || '').trim();
+    if (!detail || detail.length < 8) return true;
+    if (/<\s*(?:tool_call|function=agent_step|parameter\s*=)|<\/parameter>/i.test(detail)) return true;
+    if (detail === String(lastNarrationDetail || '').trim()) return true;
+    const hasFileMutation = (Array.isArray(toolEvents) ? toolEvents : []).some((event) => event && event.ok
+      && ['write_file', 'edit_file'].includes(String(event.tool || '').toLowerCase()));
+    if (hasFileMutation && /^(?:i(?:'|’)ll|i will|i(?:'|’)m going to|i am going to|let me|i(?:'|’)m|i am)\s+(?:start|begin|create|build|set up|write|make|add|work on)\b/i.test(detail)) {
+      return true;
+    }
+    return false;
+  }
+
   // Range/truncation-aware read-loop guard: blocks exact re-reads, re-reads of a
   // fully-seen file, and a hard cap — but allows paging forward while truncated.
   function summarizeReadRange(ev) {
@@ -379,9 +392,7 @@
       const appendAgentNarration = (text) => {
         const cleaned = deps.sanitizeAssistantText ? deps.sanitizeAssistantText(text) : text;
         const detail = String(cleaned || '').trim();
-        if (!detail || detail.length < 8) return;
-        if (/<\s*(?:tool_call|function=agent_step|parameter\s*=)|<\/parameter>/i.test(detail)) return;
-        if (detail === lastNarrationDetail) return;
+        if (shouldSuppressAgentNarration(detail, lastNarrationDetail, toolEvents)) return;
         // Skip a near-duplicate of the previous line (models often restate the same
         // thought on consecutive steps): drop it if it shares most significant words.
         if (lastNarrationDetail) {
@@ -2663,6 +2674,7 @@
     createAgentLoop,
     deriveAgentFailureSignature,
     countInspectionsSinceMutation,
+    shouldSuppressAgentNarration,
     evaluateRepeatedRead,
     extractFileLikeTaskPaths,
     markPhaseTaskLiveProgressForPath,
