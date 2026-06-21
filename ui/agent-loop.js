@@ -1853,6 +1853,9 @@
           const toolPlanSpec = phaseState && String(decision.tool || '').toLowerCase() === 'validate_files'
             ? {
               ...planSpec,
+              _allExpectedFiles: Array.isArray(planSpec && planSpec.expectedFiles)
+                ? planSpec.expectedFiles
+                : [],
               expectedFiles: activePhaseFilePaths(phaseState, deps.normalizeWorkspacePath),
             }
             : planSpec;
