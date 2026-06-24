@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI.EXE Workshop</title>
+  <style>
+    :root{
+      --bg:#0b1020;--surface:#111827;--surface-2:#172033;--border:#273449;--text:#e5e7eb;
+      --muted:#9ca3af;--accent:#60a5fa;--accent-strong:#93c5fd;--ok:#22c55e;--bad:#ef4444;
+      --warn:#f59e0b;--r:10px;--font:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+    }
+    *{box-sizing:border-box}
+    body{margin:0;background:var(--bg);color:var(--text);font-family:var(--font);font-size:15px;line-height:1.5}
+    header{display:flex;align-items:center;gap:12px;padding:14px 20px;border-bottom:1px solid var(--border);background:var(--surface)}
+    header h1{font-size:18px;margin:0;font-weight:700}
+    .dot{width:10px;height:10px;border-radius:50%;background:var(--muted);display:inline-block}
+    .dot.ok{background:var(--ok)} .dot.bad{background:var(--bad)}
+    .status{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:13px}
+    .wrap{display:grid;grid-template-columns:1fr 1fr;gap:16px;padding:20px;max-width:1280px;margin:0 auto}
+    .card{background:var(--surface);border:1px solid var(--border);border-radius:var(--r);padding:16px}
+    .card h2{font-size:13px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);margin:0 0 12px}
+    label{display:block;font-size:13px;color:var(--muted);margin:10px 0 4px}
+    input,select,textarea,button{font-family:inherit;font-size:14px}
+    input,select,textarea{width:100%;background:var(--surface-2);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:9px 11px}
+    textarea{min-height:96px;resize:vertical}
+    .row{display:flex;gap:10px} .row>*{flex:1}
+    button{cursor:pointer;border:1px solid var(--accent);background:var(--accent);color:#08111f;border-radius:8px;padding:9px 14px;font-weight:600}
+    button.secondary{background:transparent;color:var(--accent-strong);border-color:var(--border)}
+    button:disabled{opacity:.5;cursor:not-allowed}
+    .muted{color:var(--muted);font-size:13px}
+    pre{background:#0a0f1c;border:1px solid var(--border);border-radius:8px;padding:11px;overflow:auto;max-height:280px;font-size:12.5px;white-space:pre-wrap;word-break:break-word}
+    .pill{display:inline-block;font-size:11px;padding:2px 8px;border-radius:999px;border:1px solid var(--border);color:var(--muted);margin:0 4px 4px 0}
+    .pill.ready{color:var(--ok);border-color:#14532d} .pill.todo{color:var(--muted)}
+    .bar{height:6px;background:var(--surface-2);border-radius:4px;overflow:hidden;margin-top:6px}
+    .bar>span{display:block;height:100%;background:var(--accent)}
+    a.dl{display:inline-block;margin-top:10px;color:var(--accent-strong);font-weight:600}
+    .full{grid-column:1/-1}
+    .filelist{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px}
+    .filelist button{background:var(--surface-2);color:var(--text);border-color:var(--border);font-weight:500;padding:5px 10px;font-size:12.5px}
+    .filelist button.active{border-color:var(--accent);color:var(--accent-strong)}
+  </style>
+</head>
+<body>
+  <header>
+    <h1>AI.EXE Workshop</h1>
+    <span class="status"><span id="dot" class="dot"></span><span id="statusText">connecting…</span></span>
+    <span style="flex:1"></span>
+    <span class="status" id="subsystems"></span>
+  </header>
+
+  <div class="wrap">
+    <div class="card">
+      <h2>Connection &amp; API key</h2>
+      <label>Backend URL</label>
+      <input id="backendUrl" />
+      <label>Provider (Venice / OpenAI-compatible)</label>
+      <div class="row">
+        <input id="providerUrl" placeholder="https://api.venice.ai/api/v1" style="flex:2" />
+        <input id="providerModel" placeholder="model" style="flex:1" />
+        <button class="secondary" style="flex:0 0 auto" onclick="saveProvider()">Save</button>
+      </div>
+      <div class="row" style="margin-top:6px">
+        <button class="secondary" onclick="preset('local')">Local (Ollama)</button>
+        <button class="secondary" onclick="preset('venice')">Venice</button>
+        <button class="secondary" onclick="preset('proxy')">Venice E2EE proxy</button>
+      </div>
+      <p class="muted" id="providerState">—</p>
+      <label>Provider API key (stored on the backend; not needed for a Local model)</label>
+      <div class="row">
+        <input id="apiKey" type="password" placeholder="sk-…" />
+        <button class="secondary" style="flex:0 0 auto" onclick="saveKey()">Save key</button>
+      </div>
+      <p class="muted" id="keyState">—</p>
+      <h2 style="margin-top:14px">Usage</h2>
+      <p class="muted" id="usageText">—</p>
+      <div class="bar"><span id="creditBar" style="width:0%"></span></div>
+      <p class="muted" id="providerBalance" style="margin-top:6px"></p>
+    </div>
+
+    <div class="card">
+      <h2>Generate</h2>
+      <label>Prompt</label>
+      <textarea id="prompt" placeholder="e.g. a CLI tool that adds two numbers passed as arguments"></textarea>
+      <div class="row">
+        <div>
+          <label>Output type</label>
+          <select id="target">
+            <option value="py">Python script (.py)</option>
+            <option value="exe">Executable (.exe / native)</option>
+            <option value="html">Web page (.html)</option>
+          </select>
+        </div>
+        <div>
+          <label>Project name</label>
+          <input id="projectName" placeholder="my-tool" />
+        </div>
+      </div>
+      <label style="display:flex;align-items:center;gap:8px;margin-top:12px">
+        <input type="checkbox" id="autocorrect" checked style="width:auto" /> auto-correct failures (retry)
+      </label>
+      <div class="row" style="margin-top:14px">
+        <button id="goBtn" onclick="run()">Generate</button>
+        <button class="secondary" onclick="loadStatus();loadUsage()">Refresh</button>
+      </div>
+      <p class="muted" id="genStatus" style="margin-bottom:0">Ready.</p>
+    </div>
+
+    <div class="card full" id="resultCard" style="display:none">
+      <h2>Result</h2>
+      <div class="filelist" id="filelist"></div>
+      <pre id="fileContent"></pre>
+      <a class="dl" id="downloadLink" href="#" style="display:none" target="_blank" rel="noopener">⬇ Download artifact</a>
+      <h2 style="margin-top:14px">Output / logs</h2>
+      <pre id="logs"></pre>
+    </div>
+
+    <div class="card full">
+      <h2>EXE Connect · Workshop modules</h2>
+      <p class="muted">Upload software (.exe, .dll, .py, .wasm, .zip, .js, .bin, or a zipped folder); it lands in the workshop and can be connected to the AI.EXE core.</p>
+      <div class="row" style="align-items:center">
+        <input id="moduleFile" type="file" style="flex:2" />
+        <input id="moduleName" placeholder="module name (optional)" style="flex:1" />
+        <button style="flex:0 0 auto" onclick="uploadModule()">Upload</button>
+      </div>
+      <p class="muted" id="moduleStatus" style="margin-bottom:6px">—</p>
+      <div id="moduleList"></div>
+    </div>
+
+    <div class="card full">
+      <h2>PDF → Software</h2>
+      <p class="muted">Upload a spec PDF; it is split into sections, dispatched to specialized agents, stitched into a project, and packaged.</p>
+      <div class="row" style="align-items:center">
+        <input id="pdfFile" type="file" accept="application/pdf" style="flex:2" />
+        <input id="pdfName" placeholder="project name (optional)" style="flex:1" />
+        <button style="flex:0 0 auto" onclick="buildFromPdf()">Build</button>
+      </div>
+      <p class="muted" id="pdfStatus" style="margin-bottom:6px">—</p>
+      <a class="dl" id="pdfDownload" href="#" style="display:none" target="_blank" rel="noopener">⬇ Download project (.zip)</a>
+      <pre id="pdfLog" style="display:none"></pre>
+    </div>
+  </div>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    function base(){ return ($('backendUrl').value || '').replace(/\/+$/,''); }
+    $('backendUrl').value = (location.origin && location.origin.startsWith('http')) ? location.origin : 'http://127.0.0.1:8765';
+
+    let currentFiles = {};
+
+    async function api(path, opts){
+      const res = await fetch(base()+path, opts);
+      let data = null;
+      try { data = await res.json(); } catch(_) {}
+      if(!res.ok){ const msg = (data && (data.detail||data.error)) || (res.status+' '+res.statusText); throw new Error(msg); }
+      return data;
+    }
+
+    async function loadStatus(){
+      try{
+        const d = await api('/api/status');
+        $('dot').className = 'dot ok'; $('statusText').textContent = 'core online · v'+d.version;
+        $('subsystems').innerHTML = d.subsystems.map(s =>
+          `<span class="pill ${s.state==='ready'?'ready':'todo'}">${s.name}</span>`).join('');
+      }catch(e){ $('dot').className='dot bad'; $('statusText').textContent='backend offline'; $('subsystems').innerHTML=''; }
+    }
+
+    async function loadUsage(){
+      try{
+        const u = await api('/api/usage');
+        $('usageText').textContent = `${u.credits_used} / ${u.credits_limit} credits · ${u.requests_remaining_in_window}/${u.rate_limit_max} req left this minute` + (u.warning?(' · '+u.warning):'');
+        $('creditBar').style.width = Math.min(100, 100*u.credits_used/u.credits_limit)+'%';
+        const k = await api('/api/api-key');
+        $('keyState').textContent = k.set ? ('key set: '+k.masked) : 'no key set';
+        const p = await api('/api/provider');
+        $('providerState').textContent = p.configured ? ('provider: '+p.base_url+' · '+p.model) : 'no provider set';
+        if(!$('providerUrl').value && p.base_url) $('providerUrl').value = p.base_url;
+        if(!$('providerModel').value && p.model) $('providerModel').value = p.model;
+      }catch(e){ $('usageText').textContent = 'usage unavailable ('+e.message+')'; }
+    }
+
+    async function loadProviderUsage(){
+      try{
+        const p = await api('/api/provider-usage');
+        if(p.available && p.balances){
+          $('providerBalance').textContent = 'Venice balance: ' + Object.entries(p.balances).map(([k,v])=>`${v} ${k}`).join(' · ');
+        } else { $('providerBalance').textContent = ''; }
+      }catch(e){ $('providerBalance').textContent=''; }
+    }
+
+    function preset(p){
+      const presets = {
+        local: ['http://127.0.0.1:11434/v1', 'qwen2.5:0.5b'],   // Ollama on the laptop (free, no key)
+        venice: ['https://api.venice.ai/api/v1', 'deepseek-v4-pro'],
+        proxy: ['http://localhost:3000/v1', 'e2ee-qwen3-5-122b-a10b'], // Venice E2EE proxy
+      };
+      const [url, model] = presets[p] || presets.local;
+      $('providerUrl').value = url; $('providerModel').value = model;
+      $('providerState').textContent = (p==='local') ? 'Local model — no API key needed. Click Save.' : 'Click Save, then set your key.';
+    }
+
+    async function saveProvider(){
+      try{ const p = await api('/api/provider',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({base_url:$('providerUrl').value, model:$('providerModel').value})});
+        $('providerState').textContent = 'provider: '+p.base_url+' · '+p.model;
+      }catch(e){ $('providerState').textContent='error: '+e.message; }
+    }
+
+    async function saveKey(){
+      try{ const k = await api('/api/api-key',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({api_key:$('apiKey').value})});
+        $('keyState').textContent = 'key set: '+k.masked; $('apiKey').value=''; loadUsage(); loadProviderUsage();
+      }catch(e){ $('keyState').textContent='error: '+e.message; }
+    }
+
+    function showFiles(files){
+      currentFiles = files||{};
+      const names = Object.keys(currentFiles);
+      $('filelist').innerHTML = names.map((n,i)=>`<button class="${i===0?'active':''}" onclick="pickFile('${n.replace(/'/g,"\\'")}',this)">${n}</button>`).join('') || '<span class="muted">no files</span>';
+      $('fileContent').textContent = names.length ? currentFiles[names[0]] : '';
+    }
+    function pickFile(n,btn){ $('fileContent').textContent = currentFiles[n]||''; [...$('filelist').children].forEach(b=>b.className=''); btn.className='active'; }
+
+    async function run(){
+      const prompt = $('prompt').value.trim();
+      if(!prompt){ $('genStatus').textContent='Enter a prompt first.'; return; }
+      const target = $('target').value;
+      const project = ($('projectName').value.trim() || 'workshop-project');
+      const isWeb = target==='html';
+      $('goBtn').disabled = true; $('downloadLink').style.display='none';
+      $('resultCard').style.display='block'; $('logs').textContent=''; $('genStatus').textContent='Generating…';
+      try{
+        const gen = await api('/api/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+          prompt, project, language: isWeb?'web':'python', run: !isWeb, auto_correct: $('autocorrect').checked,
+          entry: isWeb?'index.html':'main.py', max_retries: 2
+        })});
+        showFiles(gen.files);
+        $('logs').textContent =
+          (gen.error?('ERROR: '+gen.error+'\n'):'') +
+          (gen.stdout?('STDOUT:\n'+gen.stdout+'\n'):'') +
+          (gen.stderr?('STDERR:\n'+gen.stderr+'\n'):'') +
+          (gen.attempts?('attempts: '+gen.attempts.length+(gen.stopped_reason?(' (stopped: '+gen.stopped_reason+')'):'')):'');
+        loadUsage(); loadProviderUsage();
+        if(!gen.ok && !isWeb){ $('genStatus').textContent='Generated, but the program did not run cleanly. See logs.'; }
+        else { $('genStatus').textContent='Generated. Packaging…'; }
+        // Package to the chosen artifact.
+        if(isWeb){
+          if(gen.files && Object.keys(gen.files).length){
+            $('downloadLink').href = base()+`/api/projects/${encodeURIComponent(project)}/download`;
+            $('downloadLink').textContent='⬇ Download site (.zip)'; $('downloadLink').style.display='inline-block';
+            $('genStatus').textContent='Web page generated.';
+          } else {
+            $('genStatus').textContent='No page produced — '+(gen.error||'the model returned no HTML')+'. See logs.';
+          }
+        } else {
+          const pkg = await api('/api/package',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+            target, project, entry:'main.py', name: project
+          })});
+          if(pkg.ok){
+            $('downloadLink').href = base()+pkg.download_path;
+            $('downloadLink').textContent = '⬇ Download '+pkg.artifact; $('downloadLink').style.display='inline-block';
+            $('genStatus').textContent = (target==='exe')?'Executable built ✓':'Python package ready ✓';
+          } else {
+            $('genStatus').textContent='Packaging failed: '+(pkg.error||'unknown');
+            if(pkg.build_log) $('logs').textContent += '\n\nBUILD LOG:\n'+pkg.build_log;
+          }
+        }
+      }catch(e){ $('genStatus').textContent='Error: '+e.message; }
+      finally{ $('goBtn').disabled=false; }
+    }
+
+    const STATUS_COLORS = {pending:'var(--warn)',connecting:'var(--accent)',connected:'var(--ok)',live:'var(--ok)',error:'var(--bad)'};
+    async function loadModules(){
+      try{
+        const d = await api('/api/modules');
+        if(!d.modules.length){ $('moduleList').innerHTML = '<p class="muted">No modules uploaded yet.</p>'; return; }
+        $('moduleList').innerHTML = d.modules.map(m => `
+          <div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-top:1px solid var(--border)">
+            <span class="dot" style="background:${STATUS_COLORS[m.status]||'var(--muted)'}"></span>
+            <b>${m.name}</b>
+            <span class="pill">${m.type}</span>
+            <span class="muted">${m.file_count} file(s) · ${m.status}</span>
+            <span style="flex:1"></span>
+            <button class="secondary" style="flex:0 0 auto;padding:5px 10px" onclick="connectModule('${m.id}')">Connect</button>
+            <button class="secondary" style="flex:0 0 auto;padding:5px 10px" onclick="deleteModule('${m.id}')">Remove</button>
+          </div>`).join('');
+      }catch(e){ $('moduleList').innerHTML = '<p class="muted">modules unavailable: '+e.message+'</p>'; }
+    }
+    async function uploadModule(){
+      const f = $('moduleFile').files[0];
+      if(!f){ $('moduleStatus').textContent='Choose a file first.'; return; }
+      const fd = new FormData(); fd.append('file', f); if($('moduleName').value) fd.append('name',$('moduleName').value);
+      $('moduleStatus').textContent='Uploading '+f.name+'…';
+      try{ const m = await api('/api/modules/upload',{method:'POST',body:fd});
+        $('moduleStatus').textContent='Uploaded "'+m.name+'" ('+m.status+').'; $('moduleFile').value=''; $('moduleName').value=''; loadModules();
+      }catch(e){ $('moduleStatus').textContent='Upload failed: '+e.message; }
+    }
+    async function connectModule(id){
+      try{ const m = await api('/api/modules/'+id+'/connect',{method:'POST'});
+        $('moduleStatus').textContent='Module "'+m.name+'" → '+m.status+(m.registration_token?(' (token '+m.registration_token.slice(0,8)+'…)'):''); loadModules();
+      }catch(e){ $('moduleStatus').textContent='Connect failed: '+e.message; }
+    }
+    async function deleteModule(id){
+      try{ await api('/api/modules/'+id,{method:'DELETE'}); loadModules(); }catch(e){ $('moduleStatus').textContent='Remove failed: '+e.message; }
+    }
+
+    async function buildFromPdf(){
+      const f = $('pdfFile').files[0];
+      if(!f){ $('pdfStatus').textContent='Choose a PDF first.'; return; }
+      const fd = new FormData(); fd.append('file', f); if($('pdfName').value) fd.append('name',$('pdfName').value);
+      $('pdfStatus').textContent='Parsing + dispatching to agents…'; $('pdfDownload').style.display='none'; $('pdfLog').style.display='none';
+      try{
+        const r = await api('/api/pdf-to-software', {method:'POST', body:fd});
+        $('pdfStatus').textContent = `Built "${r.project}" — ${r.sections.length} section(s), ${Object.keys(r.files).length} file(s)`+(r.run_ok===true?' · runs ✓':(r.run_ok===false?' · run had errors':''));
+        $('pdfLog').style.display='block';
+        $('pdfLog').textContent = 'BUILD LOG:\n'+r.build_log+'\n\nMAPPING:\n'+Object.entries(r.mapping).map(([k,v])=>`${k} → [${v.agent}] ${v.files.join(', ')}`).join('\n');
+        if(r.download_path){ $('pdfDownload').href = base()+r.download_path; $('pdfDownload').style.display='inline-block'; }
+        loadUsage();
+      }catch(e){ $('pdfStatus').textContent='Failed: '+e.message; }
+    }
+
+    loadStatus(); loadUsage(); loadModules(); loadProviderUsage(); setInterval(loadStatus, 6000);
+  </script>
+</body>
+</html>
