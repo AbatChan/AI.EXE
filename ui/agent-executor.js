@@ -270,8 +270,12 @@
         if (cssFile && /<style[\s>]/i.test(text)) {
           issues.push(`contains a page-local <style> block even though shared CSS is planned (${cssFile}); move those rules into the shared stylesheet and keep this HTML semantic`);
         }
-        if (scriptFile && /<script(?![^>]*\bsrc=)[\s>]/i.test(text)) {
-          issues.push(`contains inline <script> content even though ${scriptFile} exists`);
+        // Page-specific inline <script> (filters, accordions, form logic) is fine — it
+        // is NOT shared-code duplication, so it must not block. Only flag the genuine
+        // anti-pattern: an inline script re-rendering the shared shell (header/footer/nav).
+        if (scriptFile && /<script(?![^>]*\bsrc=)[\s>]/i.test(text)
+          && /\b(?:data-site-(?:header|footer)|renderHeader|renderFooter|injectShell|innerHTML\s*=\s*[`'"][^`'"]*<(?:header|footer|nav)\b)/i.test(text)) {
+          issues.push(`inline <script> appears to re-render the shared header/footer/nav even though ${scriptFile} provides them; remove the duplicate and load ${scriptFile} instead. Page-specific behavior can stay inline.`);
         }
         const htmlStructureIssue = getHtmlStructureIssue(text);
         if (htmlStructureIssue) issues.push(htmlStructureIssue);
