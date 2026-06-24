@@ -4846,6 +4846,52 @@ function saveAppSettings() {
     localStorage.setItem(settingsStorageKey, JSON.stringify(appSettings));
   } catch (_) { }
   if (typeof updateTokenRing === 'function') updateTokenRing();
+  syncBackendProviderConfig();
+}
+
+// Push the active OpenAI-compatible provider + key to the local AI.EXE backend so the
+// Workshop pipeline (generate / package / pdf-to-software) uses the SAME Venice config
+// entered here — and the key lives server-side (req §8), not only in localStorage.
+// Best-effort + deduped: a silent no-op when the backend isn't running.
+let lastBackendProviderSync = '';
+function getAIExeBackendUrl() {
+  const u = (appSettings && appSettings.backendUrl) ? String(appSettings.backendUrl).trim() : '';
+  return (u || 'http://127.0.0.1:8765').replace(/\/+$/, '');
+}
+function syncBackendProviderConfig() {
+  try {
+    const provider = getSelectedInferenceProvider();
+    if (provider === 'local') return;
+    const def = getInferenceProviderDef(provider);
+    if (def && def.protocol === 'anthropic') return; // backend is OpenAI-compatible only
+    const apiKey = String(getProviderApiKey(provider) || '').trim();
+    const model = String(getProviderModel(provider) || '').trim();
+    const baseUrl = String(getProviderEndpoint(provider) || '').trim().replace(/\/chat\/completions\/?$/i, '');
+    if (!apiKey || !baseUrl) return;
+    const sig = `${provider}|${baseUrl}|${model}|${apiKey.length}`;
+    if (sig === lastBackendProviderSync) return;
+    const base = getAIExeBackendUrl();
+    const post = (path, body) => fetch(base + path, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    // Mark synced ONLY after both POSTs succeed, so a failed push (backend not running
+    // yet) retries on the next tick instead of being lost.
+    Promise.all([
+      post('/api/provider', { base_url: baseUrl, model }),
+      post('/api/api-key', { api_key: apiKey }),
+    ]).then((rs) => { if (rs.every((r) => r && r.ok)) lastBackendProviderSync = sig; }).catch(() => {});
+  } catch (_) { /* best-effort */ }
+}
+
+// Keep trying to push the active provider/key to the backend until it lands once (then
+// deduped) — so you set Venice ONCE in Settings and it reaches the backend whenever the
+// backend is running, without re-saving each time.
+let backendSyncStarted = false;
+function startBackendProviderSync() {
+  if (backendSyncStarted) return;
+  backendSyncStarted = true;
+  syncBackendProviderConfig();
+  setInterval(syncBackendProviderConfig, 20000);
 }
 
 function getSelectedInferenceProvider() {
@@ -7489,10 +7535,13 @@ function shouldTreatAsAgentResumeRequest(chatId, text) {
 
 function lastAssistantLooksIncompleteAgentRun(chat) {
   if (chat && chat.needsContinue) return true;
+  // Deterministic marker survives intermediate messages, so Continue resumes even if you
+  // asked other things in between.
+  if (chat && chat.pendingAgentResume && chat.pendingAgentResume.task) return true;
   const msg = findLastAssistantMessage(chat);
   const text = String(msg && msg.text ? msg.text : '');
   if (!text) return false;
-  return /did not pass the project quality check|continue or retry without losing|left in its current state|hit an error before finishing|timed out before finishing|returned an invalid planning step|could not complete all tool steps|continue from the current (?:project|workspace) state|to build phase \d/i.test(text);
+  return /did not pass the project quality check|continue or retry without losing|left in its current state|hit an error before finishing|timed out before finishing|returned an invalid planning step|could not complete all tool steps|continue from the current (?:project|workspace) state|to build phase \d|took too long, so i stopped|i kept the files (?:that are )?already (?:done|written)|i'?ll continue from here/i.test(text);
 }
 
 // When the user just says "retry"/"continue" after an interrupted agent build,
@@ -7502,6 +7551,8 @@ function resolveAgentResumeTaskText(chatId, promptText) {
   const raw = String(promptText || '');
   if (!isBareAgentResumeRequest(raw)) return raw;
   const chat = findChatById(chatId);
+  // Prefer the deterministic marker (the real task), so it survives intermediate messages.
+  if (chat && chat.pendingAgentResume && chat.pendingAgentResume.task) return chat.pendingAgentResume.task;
   if (!chat || !Array.isArray(chat.messages) || !lastAssistantLooksIncompleteAgentRun(chat)) return raw;
   for (let i = chat.messages.length - 1; i >= 0; i -= 1) {
     const msg = chat.messages[i];
@@ -9533,6 +9584,7 @@ const {
   isExistingProjectMutationRequest,
   normalizeAgentPlanSpec,
   buildFallbackAgentPlanSpec,
+  harvestFoundationVocabulary,
 } = agentCore || {};
 
 async function requestNativeAgentPlannerInference(prompt, maxTokens, grammar = '') {
@@ -9802,6 +9854,7 @@ const agentLoop = window.AIExeAgentLoop && typeof window.AIExeAgentLoop.createAg
     buildAgentPlanMarkdown,
     parseAgentPlanMarkdown,
     firstUnfinishedPhaseIndex,
+    harvestFoundationVocabulary,
     setAgentPhaseTracker,
     clearAgentPhaseTracker,
     setThinkingStatus: (text) => {
@@ -9945,6 +9998,23 @@ async function requestSelectedDeveloperAgentReply(requestToken, chatId, rawPromp
     return await requestDeveloperAgentReply(requestToken, chatId, devTaskText);
   } finally {
     stopAgentElapsedTimer();
+    // Deterministic resume marker — survives intermediate messages (unlike needsContinue,
+    // which an in-between reply clears). Set when the build stops with more to do; cleared
+    // only when a RESUME run actually finishes it. Intermediate chat/edit runs (not a
+    // resume) leave it untouched, so "ask something, then Continue later" still resumes.
+    try {
+      const chat = findChatById(chatId);
+      if (chat) {
+        const task = String(promptText || '').trim();
+        if (chat.needsContinue && task) {
+          chat.pendingAgentResume = { task, at: Date.now() };
+          saveChats();
+        } else if (chat.pendingAgentResume && requestToken && requestToken.isAgentResume && !chat.needsContinue) {
+          delete chat.pendingAgentResume;
+          saveChats();
+        }
+      }
+    } catch (_) { /* best-effort */ }
   }
 }
 
@@ -10756,6 +10826,10 @@ function loadStoredChats() {
             phases: chat.phaseTracker.phases,
             activeIndex: Number(chat.phaseTracker.activeIndex) || 0,
           }
+          : null,
+        pendingAgentResume: (chat.pendingAgentResume && typeof chat.pendingAgentResume === 'object'
+          && chat.pendingAgentResume.task)
+          ? { task: String(chat.pendingAgentResume.task).slice(0, 8000), at: Number(chat.pendingAgentResume.at) || 0 }
           : null,
         branchLinks: normalizeBranchLinks(activeThread.branchLinks),
         pendingBranchLink: activeThread.pendingBranchLink ? { ...activeThread.pendingBranchLink } : null,
@@ -13311,6 +13385,15 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
     skipNewProjectConfirmation: Boolean(options && options.skipNewProjectConfirmation),
     forceCurrentWorkspace: Boolean(options && options.forceCurrentWorkspace),
   };
+  // A new run must NEVER overlap a still-live one. If a prior request is somehow still
+  // active — e.g. Continue pressed while a timed-out file-generation stream is still
+  // running in the background — two runs would fight over the same files and restart
+  // instead of resuming. Mark the old one cancelled and kill its streams first.
+  if (activeInferenceRequest && activeInferenceRequest !== requestToken && !activeInferenceRequest.done) {
+    try { activeInferenceRequest.cancelled = true; } catch (_) { /* noop */ }
+    try { abortInFlightInference('superseded_by_new_run'); } catch (_) { /* noop */ }
+    activeInferenceRequest = null;
+  }
   activeInferenceRequest = requestToken;
   thinkingStartedByChatId.set(String(chatId || ''), Number(requestToken.startedAt || Date.now()));
   showTypingIndicator(chatId, requestToken.startedAt);
@@ -14470,6 +14553,7 @@ async function resolveTypingFallback(chatId) {
 loadAuthStore();
 updateLoginUi();
 loadAppSettings();
+startBackendProviderSync();  // push the saved provider/key to the backend on startup + retry
 moveGlobalControlsIntoSidebar();
 setupMacTopbarNativeDrag();
 hydrateCustomTooltips(document);
