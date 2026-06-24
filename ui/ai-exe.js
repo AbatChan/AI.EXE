@@ -6637,6 +6637,9 @@ async function requestRemoteTextCompletionForCapability(capability, prompt, maxT
       onDelta: typeof options.onDelta === 'function' ? options.onDelta : undefined,
     }, {
       maxTokens: Math.max(1, Number(maxTokens) || 64),
+      // Wire the registered abortController into the actual stream so a timeout / new run
+      // can cancel it (was dropped here, leaving file-gen streams un-killable = ghosts).
+      abortController: options.abortController instanceof AbortController ? options.abortController : undefined,
     });
     return result ? { ...result, workerId: worker.id, provider, model: getProviderModel(provider) } : result;
   }
@@ -13385,10 +13388,11 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
     skipNewProjectConfirmation: Boolean(options && options.skipNewProjectConfirmation),
     forceCurrentWorkspace: Boolean(options && options.forceCurrentWorkspace),
   };
-  // A new run must NEVER overlap a still-live one. If a prior request is somehow still
-  // active — e.g. Continue pressed while a timed-out file-generation stream is still
-  // running in the background — two runs would fight over the same files and restart
-  // instead of resuming. Mark the old one cancelled and kill its streams first.
+  // A new run must NEVER overlap a still-live one. Kill any orphaned in-flight streams
+  // FIRST — e.g. a timed-out file-generation stream still running in the background. The
+  // timed-out run already returned and nulled activeInferenceRequest, so the conditional
+  // check below misses it; abort-all reaches the orphan's still-registered controllers.
+  try { abortAllInFlightInferenceControllers('superseded_by_new_run'); } catch (_) { /* noop */ }
   if (activeInferenceRequest && activeInferenceRequest !== requestToken && !activeInferenceRequest.done) {
     try { activeInferenceRequest.cancelled = true; } catch (_) { /* noop */ }
     try { abortInFlightInference('superseded_by_new_run'); } catch (_) { /* noop */ }
