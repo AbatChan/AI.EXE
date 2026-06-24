@@ -16,7 +16,8 @@
     "test:agent-const-reassign": "node scripts/agent_const_reassign_test.js",
     "test:agent-write-repair": "node scripts/agent_write_file_repair_test.js",
     "test:agent-planner-diagnostics": "node scripts/agent_planner_diagnostics_test.js",
-    "test:agent-grounding": "node scripts/agent_change_grounding_test.js"
+    "test:agent-grounding": "node scripts/agent_change_grounding_test.js",
+    "test:agent-foundation-vocab": "node scripts/agent_foundation_vocab_test.js"
   },
   "dependencies": {
     "@codemirror/commands": "^6.10.2",

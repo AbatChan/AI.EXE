@@ -190,7 +190,7 @@
           hints.push('Return only HTML markup for this file.');
           hints.push('Do not output CSS rules as the main body of this file.');
           hints.push('Do not output JavaScript as the main body of this file.');
-          hints.push('SHARED STYLES: this is a multi-file project with a shared stylesheet (e.g. css/style.css, plus css/design-tokens.css if present — see PROJECT_STATE for the real paths). EVERY page MUST `<link rel="stylesheet" href="...">` that shared stylesheet in <head> and rely on it for the design system (tokens, layout, header/footer, components). Do NOT paste a big inline <style> block re-declaring the whole design system in each page — that duplicates CSS, bloats every page, and makes pages drift out of sync. Only a TINY inline <style> for genuinely page-unique tweaks is acceptable; shared/repeated styling belongs in the shared stylesheet. Use the SAME header/footer/nav markup and the same class names across all pages so the shared CSS styles them identically.');
+          hints.push('SHARED STYLES: this is a multi-file project with a shared stylesheet (e.g. css/style.css — see PROJECT_STATE for the real paths). EVERY page MUST `<link rel="stylesheet" href="...">` that shared stylesheet in <head> and rely on it for the design system (tokens, layout, header/footer, components). Do NOT paste a big inline <style> block re-declaring the whole design system in each page — that duplicates CSS, bloats every page, and makes pages drift out of sync. Only a TINY inline <style> for genuinely page-unique tweaks is acceptable; shared/repeated styling belongs in the shared stylesheet. Use the SAME header/footer/nav markup and the same class names across all pages so the shared CSS styles them identically.');
           hints.push('SHARED COMPONENTS: for multi-page sites, repeated header/nav/logo/footer/CTA markup should come from one classic shared script such as js/components.js. Pages should contain small hooks like <div data-site-header></div> / <div data-site-footer></div>, load the shared component script, and pass the active page via body data-page or location. Do NOT rebuild a different nav/footer/theme inline on each page.');
           hints.push('Pages are opened directly from disk (file://). Inter-page and asset links must be RELATIVE (menu.html, ./style.css, ../style.css from a subfolder) — root-relative paths like /menu.html resolve to the filesystem root and break.');
           hints.push('OFFLINE: load JS as classic scripts — <script src="js/app.js"></script> in dependency order. Do NOT use <script type="module"> or import/export anywhere; ES modules do not load from file:// and silently break the whole page. Share code via globals on window.');
@@ -1571,11 +1571,14 @@
       const scriptFiles = expected.filter((path) => /\.(js|mjs|cjs|ts|jsx|tsx)$/i.test(path));
       const docs = expected.filter((path) => /\.(md|txt)$/i.test(path));
       const primaryHtml = htmlFiles[0] || '';
+      // Structure-first: the entry HTML is built FIRST so the CSS styles the real
+      // markup and the JS operates on real structure (same as writing markup before
+      // styling it). HTML → CSS (tokens, then base) → JS (components, then behavior).
       const foundation = [
+        primaryHtml,
         ...cssFiles.filter((path) => /design[-_]?tokens|tokens|theme|variables/i.test(path)),
         ...cssFiles.filter((path) => !/design[-_]?tokens|tokens|theme|variables/i.test(path)),
         ...scriptFiles.filter((path) => /components?|shared|layout/i.test(path)),
-        primaryHtml,
         ...scriptFiles.filter((path) => !/components?|shared|layout/i.test(path)),
       ].filter((path, index, arr) => path && arr.indexOf(path) === index);
       const foundationSet = new Set(foundation);
@@ -1991,6 +1994,48 @@
       };
     }
 
+    // Harvest shared vocab (stylesheets, tokens, classes, shell hooks) from already-built
+    // files so later pages reuse real names. Deterministic, no model call. '' if nothing built.
+    function harvestFoundationVocabulary(fileContents = {}) {
+      const entries = Object.entries(fileContents || {})
+        .map(([p, c]) => [String(p || ''), String(c || '')])
+        .filter(([p, c]) => p && c.trim());
+      if (!entries.length) return '';
+      // drop file-ext/unit false positives
+      const stop = new Set(['css', 'scss', 'sass', 'less', 'png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'ico', 'js', 'mjs', 'cjs', 'json', 'html', 'htm', 'woff', 'woff2', 'ttf', 'eot', 'map', 'min']);
+      const cssPaths = [];
+      const componentScripts = [];
+      const tokens = new Set();
+      const classes = new Set();
+      const dataHooks = new Set();
+      for (const [path, content] of entries) {
+        const lower = path.toLowerCase();
+        const rel = path.replace(/^\//, '');
+        if (/\.(css|scss|sass|less)$/.test(lower)) {
+          cssPaths.push(rel);
+          let m;
+          const tokRe = /--([a-zA-Z][\w-]*)\s*:/g;
+          while ((m = tokRe.exec(content)) && tokens.size < 48) tokens.add(`--${m[1]}`);
+          const clsRe = /\.([a-zA-Z_][\w-]{1,40})(?=[\s.,#:>{[)]|$)/g;
+          while ((m = clsRe.exec(content)) && classes.size < 80) {
+            if (!stop.has(m[1].toLowerCase())) classes.add(`.${m[1]}`);
+          }
+        }
+        if (/(?:^|\/)(?:components?|layout|shared|shell)\.[cm]?js$/.test(lower)) componentScripts.push(rel);
+        let dm;
+        const dataRe = /\bdata-([a-z][\w-]*)\b/g;
+        while ((dm = dataRe.exec(content)) && dataHooks.size < 20) dataHooks.add(`data-${dm[1]}`);
+      }
+      const lines = [];
+      const uniq = (arr) => Array.from(new Set(arr));
+      if (cssPaths.length) lines.push(`Link these stylesheet(s) — single source of truth for all styling: ${uniq(cssPaths).join(', ')}`);
+      if (componentScripts.length) lines.push(`Load shared component script(s) (they render the header/nav/footer): ${uniq(componentScripts).join(', ')}`);
+      if (dataHooks.size) lines.push(`Shared component placeholders: ${Array.from(dataHooks).slice(0, 8).map((d) => `<div ${d}></div>`).join(' ')}`);
+      if (tokens.size) lines.push(`Design tokens (use via var(--name)): ${Array.from(tokens).join(', ')}`);
+      if (classes.size) lines.push(`Existing CSS classes (reuse these — do NOT rename or duplicate): ${Array.from(classes).join(', ')}`);
+      return lines.join('\n').slice(0, 1800);
+    }
+
     return {
       deriveProjectNameFromTask,
       isAgentTaskGameLike,
@@ -2022,6 +2067,7 @@
       isOpenWorkspaceFollowupMutation,
       normalizeAgentPlanSpec,
       buildFallbackAgentPlanSpec,
+      harvestFoundationVocabulary,
     };
   }
 
