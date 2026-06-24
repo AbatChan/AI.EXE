@@ -101,35 +101,38 @@ const cases = [
     run: () => core.normalizeAgentPlanSpec({
       task_kind: 'project',
       primary_stack: 'web',
-      expected_files: '/index.html|/product.html|/pricing.html|/about.html|/contact.html|/css/design-tokens.css|/css/style.css|/js/components.js|/js/script.js',
+      expected_files: '/index.html|/product.html|/pricing.html|/about.html|/contact.html|/css/style.css|/js/components.js|/js/script.js',
     }, 'build a five-page SaaS website', { chatId: 'chat_owns_ws', forceProjectScope: true }),
     expect: (spec) => {
       assert.equal(spec.taskKind, 'project');
-      assert.equal(spec.expectedFiles.length, 9, 'expectedFiles should keep pages plus shared assets');
+      assert.equal(spec.expectedFiles.length, 8, 'expectedFiles should keep pages plus shared assets');
       assert.ok(spec.expectedFiles.includes('/js/components.js'), 'shared components file must survive normalization');
       assert.ok(spec.expectedFiles.includes('/contact.html'), 'later pages must survive normalization');
     },
   },
   {
-    name: 'web phases put brand/design foundations before entry HTML',
+    name: 'web phases are structure-first: entry HTML before CSS/JS',
     run: () => core.normalizeAgentPlanSpec({
       task_kind: 'project',
       primary_stack: 'web',
-      expected_files: '/index.html|/css/design-tokens.css|/css/style.css|/css/motion-system.css|/js/components.js|/js/script.js|/product.html|/pricing.html|/about.html|/contact.html',
-      phases: 'Runnable core :: index.html hero+nav ; css/design-tokens.css ; css/style.css ; js/components.js ; js/script.js | Branding & Design System :: brand identity ; visual design system ; motion system | Product Pages :: product.html ; pricing.html ; about.html ; contact.html',
+      expected_files: '/index.html|/css/style.css|/css/motion-system.css|/js/components.js|/js/script.js|/product.html|/pricing.html|/about.html|/contact.html',
+      phases: 'Runnable core :: index.html hero+nav ; css/style.css ; js/components.js ; js/script.js | Branding & Design System :: brand identity ; visual design system ; motion system | Product Pages :: product.html ; pricing.html ; about.html ; contact.html',
     }, 'build a five-page SaaS website with brand strategy, visual identity, typography, design system, motion system, CRO, SEO, and implementation guide', { chatId: 'chat_owns_ws', forceProjectScope: true }),
     expect: (spec) => {
       const phaseTitles = spec.phases.map((phase) => phase.title);
       assert.ok(!phaseTitles.some((title) => /branding\s*&\s*design system/i.test(title)),
         'semantic branding phase should not survive as a separate implementation phase');
+      // Assert the structure-first PRINCIPLE by file type, not by literal names —
+      // the model picks project-appropriate names; we only direct the ordering.
       const firstTasks = spec.phases[0].tasks.map((task) => task.text);
-      assert.deepEqual(firstTasks.slice(0, 4),
-        ['css/design-tokens.css', 'css/style.css', 'css/motion-system.css', 'js/components.js'],
-        'source-of-truth CSS/components should come before index.html in Phase 1');
-      assert.ok(firstTasks.indexOf('index.html') > firstTasks.indexOf('css/style.css'),
-        'index.html should be generated after the shared design system');
-      assert.ok(spec.phases.some((phase) => (phase.tasks || []).some((task) => task.text === 'product.html')),
-        'product pages should remain in a later phase');
+      const firstHtml = firstTasks.findIndex((t) => /\.html?$/i.test(t));
+      const firstCss = firstTasks.findIndex((t) => /\.(css|scss|sass|less)$/i.test(t));
+      const firstJs = firstTasks.findIndex((t) => /\.(js|mjs|cjs|ts|jsx|tsx)$/i.test(t));
+      assert.equal(firstHtml, 0, 'entry HTML should be the first file in Phase 1 (structure-first)');
+      assert.ok(firstCss > firstHtml, 'CSS should be ordered after the HTML it styles');
+      assert.ok(firstJs > firstCss, 'JS should be ordered after the CSS');
+      assert.ok(spec.phases.slice(1).some((phase) => (phase.tasks || []).some((task) => /\.html?$/i.test(task.text))),
+        'remaining pages should land in a later phase');
       assert.ok(/css\/motion-system\.css/.test(spec.projectContract),
         'project contract should mention all planned CSS files so extra CSS is not orphaned');
     },
@@ -153,8 +156,8 @@ const cases = [
     run: () => core.normalizeAgentPlanSpec({
       task_kind: 'project',
       primary_stack: 'web',
-      expected_files: '/index.html|/product.html|/pricing.html|/about.html|/contact.html|/css/design-tokens.css|/css/style.css|/js/components.js|/js/script.js|/brand-strategy.html|/visual-identity.html|/typography.html|/design-system.html|/motion-system.html|/extra-conversion-map.html',
-      phases: 'Runnable core :: index.html ; css/design-tokens.css ; css/style.css ; js/components.js ; js/script.js | Product pages :: product.html ; pricing.html ; about.html ; contact.html | Project notes :: brand-strategy.html ; visual-identity.html ; typography.html ; design-system.html ; motion-system.html ; extra-conversion-map.html',
+      expected_files: '/index.html|/product.html|/pricing.html|/about.html|/contact.html|/css/style.css|/js/components.js|/js/script.js|/brand-strategy.html|/visual-identity.html|/typography.html|/design-system.html|/motion-system.html|/extra-conversion-map.html',
+      phases: 'Runnable core :: index.html ; css/style.css ; js/components.js ; js/script.js | Product pages :: product.html ; pricing.html ; about.html ; contact.html | Project notes :: brand-strategy.html ; visual-identity.html ; typography.html ; design-system.html ; motion-system.html ; extra-conversion-map.html',
     }, 'build a five-page SaaS website with brand strategy, visual identity, typography, design system, motion system, CRO, SEO, and implementation guide', { chatId: 'chat_owns_ws', forceProjectScope: true }),
     expect: (spec) => {
       const htmlFiles = spec.expectedFiles.filter((file) => /\.html?$/.test(file));

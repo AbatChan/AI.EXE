@@ -164,6 +164,24 @@
     return paths;
   }
 
+  // Durable whole-project file list (every phase's files) from plan.md-backed phases.
+  // The re-planner shrinks planSpec.expectedFiles on a Continue, so the foundation
+  // css/js drops out of validation scope — use this instead so cross-page checks fire.
+  function allPhaseFilePaths(phaseState, normalizeWorkspacePath) {
+    if (!phaseState || !Array.isArray(phaseState.phases)) return [];
+    const norm = typeof normalizeWorkspacePath === 'function' ? normalizeWorkspacePath : (p) => String(p || '');
+    const paths = [];
+    phaseState.phases.forEach((phase) => {
+      const tasks = Array.isArray(phase && phase.tasks) ? phase.tasks : [];
+      tasks.forEach((task) => {
+        extractFileLikeTaskPaths(task && (task.text || task), norm).forEach((p) => {
+          if (p && !paths.includes(p)) paths.push(p);
+        });
+      });
+    });
+    return paths;
+  }
+
   function createAgentLoop(deps) {
     const recordDebugTrace = typeof deps.recordDebugTrace === 'function'
       ? deps.recordDebugTrace
@@ -767,6 +785,25 @@
           title: String(active.title || ''),
           tasks: (Array.isArray(active.tasks) ? active.tasks : []).filter((t) => t && !t.done).map((t) => t.text),
         };
+        // Harvest foundation vocab from earlier phases so this phase's pages reuse real
+        // tokens/classes/components. Empty on phase 1 (nothing built yet). Best-effort.
+        if (typeof deps.harvestFoundationVocabulary === 'function' && activeIndex > 0) {
+          try {
+            const allFiles = Array.isArray(planSpec.expectedFiles)
+              ? planSpec.expectedFiles.map((p) => deps.normalizeWorkspacePath(p || '')).filter(Boolean) : [];
+            const foundationPaths = allFiles.filter((p) => /\.(css|scss|sass|less)$/i.test(p)
+              || /(?:^|\/)(?:components?|layout|shared|shell)\.[cm]?js$/i.test(p));
+            const firstHtml = allFiles.find((p) => /\.html?$/i.test(p));
+            if (firstHtml) foundationPaths.push(firstHtml);
+            const foundationFiles = {};
+            for (const fp of Array.from(new Set(foundationPaths)).slice(0, 8)) {
+              const res = await deps.invokeWorkspaceAction('workspaceReadFile', { path: fp });
+              if (res && res.ok && String(res.output || '').trim()) foundationFiles[fp] = String(res.output || '');
+            }
+            const vocab = deps.harvestFoundationVocabulary(foundationFiles);
+            if (vocab) planSpec._foundationVocab = vocab;
+          } catch (_) { /* best-effort; v5.2.0 prompt rules still steer reuse */ }
+        }
         // No narration — the phase tracker UI shows the plan.
         if (typeof deps.setAgentPhaseTracker === 'function') {
           deps.setAgentPhaseTracker({
@@ -788,6 +825,9 @@
             activeIndex === 0
               ? 'This is the FIRST of several phases — say you are starting with this phase and will build the rest in later phases the user continues.'
               : `This is phase ${activeIndex + 1} of ${phases.length} — say you are continuing the build and what this phase adds.`,
+            activeIndex > 0
+              ? 'Reassure the user that you will REUSE the shared CSS and components already built (link them, no new per-page styles) so the design stays consistent.'
+              : '',
             `Overall goal: ${String((planSpec && planSpec.summary) || taskText || '').trim()}`,
             `Phase ${activeIndex + 1} of ${phases.length}: ${String(active.title || '').trim()}`,
             pendingTasks.length ? `This phase covers: ${pendingTasks.join('; ')}` : '',
@@ -1853,9 +1893,10 @@
           const toolPlanSpec = phaseState && String(decision.tool || '').toLowerCase() === 'validate_files'
             ? {
               ...planSpec,
-              _allExpectedFiles: Array.isArray(planSpec && planSpec.expectedFiles)
-                ? planSpec.expectedFiles
-                : [],
+              _allExpectedFiles: Array.from(new Set([
+                ...allPhaseFilePaths(phaseState, deps.normalizeWorkspacePath),
+                ...(Array.isArray(planSpec && planSpec.expectedFiles) ? planSpec.expectedFiles : []),
+              ])),
               expectedFiles: activePhaseFilePaths(phaseState, deps.normalizeWorkspacePath),
             }
             : planSpec;
