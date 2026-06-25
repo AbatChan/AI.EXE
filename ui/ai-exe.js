@@ -1163,6 +1163,19 @@ const inferenceProviderDefs = {
     protocol: 'openai',
     supportsToolCalling: true,
   },
+  veniceadapter: {
+    label: 'Venice Pro (local adapter)',
+    modelField: 'veniceAdapterModel',
+    endpointField: 'veniceAdapterEndpoint',
+    endpointLabel: 'Adapter URL',
+    endpointPlaceholder: 'http://127.0.0.1:9999',
+    modelPlaceholder: 'llama-3.1-405b-akash-api',
+    defaultModel: 'llama-3.1-405b-akash-api',
+    defaultEndpoint: 'http://127.0.0.1:9999',
+    endpointUrl: 'http://127.0.0.1:9999',
+    helpText: 'Native-Ollama adapter for your Venice Pro subscription — no API key, no credits. Temporary/testing only: it drives the Venice website via browser automation, so it is fragile and can break when Venice changes their site.',
+    protocol: 'ollama',
+  },
 };
 const inferenceProviderModelPresets = {
   huggingface: [
@@ -4864,22 +4877,22 @@ function syncBackendProviderConfig() {
     if (provider === 'local') return;
     const def = getInferenceProviderDef(provider);
     if (def && def.protocol === 'anthropic') return; // backend is OpenAI-compatible only
+    const isOllama = Boolean(def && def.protocol === 'ollama');
     const apiKey = String(getProviderApiKey(provider) || '').trim();
     const model = String(getProviderModel(provider) || '').trim();
     const baseUrl = String(getProviderEndpoint(provider) || '').trim().replace(/\/chat\/completions\/?$/i, '');
-    if (!apiKey || !baseUrl) return;
-    const sig = `${provider}|${baseUrl}|${model}|${apiKey.length}`;
+    if (!baseUrl || (!isOllama && !apiKey)) return;  // ollama (adapter) needs no key
+    const sig = `${provider}|${baseUrl}|${model}|${apiKey.length}|${isOllama}`;
     if (sig === lastBackendProviderSync) return;
     const base = getAIExeBackendUrl();
     const post = (path, body) => fetch(base + path, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
     });
-    // Mark synced ONLY after both POSTs succeed, so a failed push (backend not running
+    // Mark synced ONLY after the POSTs succeed, so a failed push (backend not running
     // yet) retries on the next tick instead of being lost.
-    Promise.all([
-      post('/api/provider', { base_url: baseUrl, model }),
-      post('/api/api-key', { api_key: apiKey }),
-    ]).then((rs) => { if (rs.every((r) => r && r.ok)) lastBackendProviderSync = sig; }).catch(() => {});
+    const posts = [post('/api/provider', { base_url: baseUrl, model, kind: isOllama ? 'ollama' : 'openai' })];
+    if (!isOllama) posts.push(post('/api/api-key', { api_key: apiKey }));
+    Promise.all(posts).then((rs) => { if (rs.every((r) => r && r.ok)) lastBackendProviderSync = sig; }).catch(() => {});
   } catch (_) { /* best-effort */ }
 }
 
@@ -4978,7 +4991,10 @@ function getConfiguredInferenceWorkers() {
     const apiKey = getProviderApiKey(provider);
     const model = getProviderModel(provider);
     const endpoint = getProviderEndpoint(provider);
-    const hasConfig = Boolean(apiKey && model && (def.protocol === 'anthropic' || endpoint));
+    // Native-Ollama providers (the Venice Pro adapter) need NO key — just a model + URL.
+    const hasConfig = def.protocol === 'ollama'
+      ? Boolean(model && endpoint)
+      : Boolean(apiKey && model && (def.protocol === 'anthropic' || endpoint));
     workers.push({
       id: `provider-${provider}`,
       type: 'hosted-provider',
@@ -5074,7 +5090,9 @@ function getProviderEndpoint(provider) {
   if (def.endpointField) {
     const value = String(appSettings && appSettings[def.endpointField] ? appSettings[def.endpointField] : '').trim();
     const endpoint = value || String(def.defaultEndpoint || def.endpointUrl || '').trim();
-    return normalizeOpenAiCompatibleEndpoint(endpoint);
+    // Native Ollama wants the raw base (we append /api/chat ourselves) — don't coerce it
+    // to an OpenAI /chat/completions URL.
+    return def.protocol === 'ollama' ? endpoint.replace(/\/+$/, '') : normalizeOpenAiCompatibleEndpoint(endpoint);
   }
   return normalizeOpenAiCompatibleEndpoint(String(def.endpointUrl || '').trim());
 }
@@ -5459,6 +5477,41 @@ function populateRemoteProviderFields(provider) {
   if (settingsProviderHelp) {
     settingsProviderHelp.textContent = def.helpText || '';
   }
+  updateProviderConnectionStatus(provider, def);
+}
+
+// Settings connection monitor: ping the selected provider (the adapter's /api/tags, or
+// /models for API providers) and show reachable + model count so the user can see, from
+// the frontend, whether the provider (esp. the Venice Pro adapter) is actually up.
+function updateProviderConnectionStatus(provider, def) {
+  if (!settingsProviderHelp || !settingsProviderHelp.parentNode) return;
+  let el = document.getElementById('settingsProviderStatus');
+  if (!el) {
+    el = document.createElement('p');
+    el.id = 'settingsProviderStatus';
+    el.style.cssText = 'font-size:12px;margin:6px 0 0;font-weight:600';
+    settingsProviderHelp.parentNode.insertBefore(el, settingsProviderHelp.nextSibling);
+  }
+  if (!def || provider === 'local') { el.textContent = ''; return; }
+  const isOllama = def.protocol === 'ollama';
+  const base = String(getProviderEndpoint(provider) || '').trim();
+  if (!base) { el.textContent = ''; return; }
+  const url = isOllama
+    ? base.replace(/\/+$/, '') + '/api/tags'
+    : base.replace(/\/chat\/completions\/?$/i, '') + '/models';
+  const headers = isOllama ? {} : { Authorization: getOpenAiCompatibleAuthHeader(provider, getProviderApiKey(provider), url) };
+  const myToken = (updateProviderConnectionStatus._token = (updateProviderConnectionStatus._token || 0) + 1);
+  el.textContent = 'Checking connection…'; el.style.color = 'var(--muted, #9ca3af)';
+  fetch(url, { headers }).then((r) => (r.ok ? r.json() : Promise.reject(r.status))).then((d) => {
+    if (myToken !== updateProviderConnectionStatus._token) return; // a newer check superseded this
+    const models = isOllama ? (d.models || []).map((m) => m && m.name) : (d.data || []).map((m) => m && m.id);
+    el.textContent = '● connected' + (models.filter(Boolean).length ? (' · ' + models.filter(Boolean).length + ' model(s)') : '');
+    el.style.color = 'var(--success, #22c55e)';
+  }).catch(() => {
+    if (myToken !== updateProviderConnectionStatus._token) return;
+    el.textContent = '● not reachable — is the provider/adapter running?';
+    el.style.color = 'var(--danger, #ef4444)';
+  });
 }
 
 function syncSettingsProviderUi() {
@@ -6470,9 +6523,48 @@ async function streamAnthropicChatCompletion(prompt, handlers = {}, options = {}
   }
 }
 
+// Native Ollama API (POST {base}/api/chat) — for the Venice Pro adapter and any local
+// Ollama that doesn't expose an OpenAI /v1. No API key.
+async function requestOllamaChatCompletion(provider, prompt, maxTokens, systemPrompt = '') {
+  const base = String(getProviderEndpoint(provider) || '').replace(/\/+$/, '');
+  const model = getProviderModel(provider);
+  if (!base || !model) return null;
+  const messages = systemPrompt
+    ? [{ role: 'system', content: String(systemPrompt) }, { role: 'user', content: String(prompt || '') }]
+    : [{ role: 'user', content: String(prompt || '') }];
+  try {
+    const response = await fetch(`${base}/api/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model, messages, stream: false,
+        options: { num_predict: Math.max(1, Number(maxTokens) || 4096) } }),
+    });
+    if (!response.ok) return { ok: false, output: '', status: response.status };
+    const data = await response.json();
+    const content = (data && data.message && data.message.content) || (data && data.response) || '';
+    return { ok: Boolean(String(content || '').trim()), output: String(content || ''), provider, model };
+  } catch (err) {
+    return { ok: false, output: '', error: String(err && err.message ? err.message : err) };
+  }
+}
+
+// Streaming shim: the adapter is slow/non-streaming, so fetch the full reply and fire
+// onDelta once (keeps the file-gen streaming caller happy).
+async function streamOllamaChatCompletion(provider, prompt, handlers = {}, options = {}) {
+  const result = await requestOllamaChatCompletion(provider, prompt, options.maxTokens, options.systemPrompt || '');
+  if (result && result.ok && typeof handlers.onDelta === 'function' && result.output) {
+    handlers.onDelta(String(result.output));
+  }
+  return result;
+}
+
 async function streamRemoteChatCompletion(provider, prompt, handlers = {}, options = {}) {
   if (provider === 'anthropic') {
     return streamAnthropicChatCompletion(prompt, handlers, options);
+  }
+  const ddef = getInferenceProviderDef(provider);
+  if (ddef && ddef.protocol === 'ollama') {
+    return streamOllamaChatCompletion(provider, prompt, handlers, options);
   }
   return streamOpenAiCompatibleChatCompletion(provider, prompt, handlers, options);
 }
@@ -6642,6 +6734,10 @@ async function requestRemoteTextCompletionForCapability(capability, prompt, maxT
       abortController: options.abortController instanceof AbortController ? options.abortController : undefined,
     });
     return result ? { ...result, workerId: worker.id, provider, model: getProviderModel(provider) } : result;
+  }
+  if (getInferenceProviderDef(provider).protocol === 'ollama') {
+    const result = await requestOllamaChatCompletion(provider, prompt, maxTokens, options && options.systemPrompt ? options.systemPrompt : '');
+    return result ? { ...result, workerId: worker.id } : result;
   }
   if (provider === 'anthropic') {
     const result = await requestAnthropicTextCompletion(prompt, maxTokens);
