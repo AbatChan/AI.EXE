@@ -33,6 +33,39 @@ def _find_balances(obj) -> dict:
     return found
 
 
+def read_provider_health(base_url: str, kind: str) -> dict:
+    """Ping the configured provider so the UI can monitor it. Ollama -> GET /api/tags;
+    OpenAI-compatible -> GET /models. Returns {reachable, kind, base_url, models, detail}.
+    Never raises."""
+    base = (base_url or "").rstrip("/")
+    kind = (kind or "openai").lower()
+    out = {"reachable": False, "kind": kind, "base_url": base, "models": [], "detail": ""}
+    if not base:
+        out["detail"] = "no provider configured"
+        return out
+    url = f"{base}/api/tags" if kind == "ollama" else f"{base}/models"
+    try:
+        resp = httpx.get(url, timeout=8)
+    except httpx.HTTPError as exc:
+        out["detail"] = f"unreachable: {exc}"
+        return out
+    if resp.status_code != 200:
+        out["detail"] = f"HTTP {resp.status_code}"
+        return out
+    try:
+        data = resp.json()
+    except ValueError:
+        out["detail"] = "unparseable response"
+        return out
+    if kind == "ollama":
+        models = [m.get("name", "") for m in data.get("models", []) if isinstance(m, dict)]
+    else:
+        models = [m.get("id", "") for m in data.get("data", []) if isinstance(m, dict)]
+    out["reachable"] = True
+    out["models"] = [m for m in models if m][:50]
+    return out
+
+
 def read_provider_balance(base_url: str, api_key: str) -> dict:
     """Returns {available, source, balances, detail}. Never raises."""
     if not base_url or not api_key:

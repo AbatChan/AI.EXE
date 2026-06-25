@@ -16,22 +16,44 @@ class LLMError(Exception):
         self.status = status
 
 
+def parse_openai_content(data: dict) -> str:
+    return data["choices"][0]["message"]["content"]
+
+
+def parse_ollama_content(data: dict) -> str:
+    # Native Ollama: /api/chat -> {"message": {"content": ...}}; /api/generate -> {"response": ...}
+    if isinstance(data, dict):
+        if isinstance(data.get("message"), dict) and "content" in data["message"]:
+            return data["message"]["content"]
+        if "response" in data:
+            return data["response"]
+    raise LLMError("Unexpected Ollama response shape.")
+
+
 class LLMClient:
-    def __init__(self, base_url: str, model: str, api_key: str, timeout: int = 120):
+    def __init__(self, base_url: str, model: str, api_key: str, timeout: int = 120, kind: str = "openai"):
         self.base_url = (base_url or "").rstrip("/")
         self.model = model
         self.api_key = api_key
         self.timeout = timeout
+        self.kind = str(kind or "openai").lower()  # "openai" | "ollama"
 
     def complete(self, messages, temperature: float = 0.2, max_tokens: int = 8192) -> str:
-        if not self.api_key:
-            raise LLMError("No API key set — POST /api/api-key first.", 401)
         if not self.base_url:
             raise LLMError("No LLM provider configured — set AIEXE_LLM_BASE_URL.", 400)
-        url = f"{self.base_url}/chat/completions"
-        payload = {"model": self.model, "messages": messages,
-                   "temperature": temperature, "max_tokens": max_tokens}
-        headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
+        if self.kind == "ollama":
+            # Native Ollama API (e.g. the Venice Pro browser adapter on :9999). No key.
+            url = f"{self.base_url}/api/chat"
+            payload = {"model": self.model, "messages": messages, "stream": False,
+                       "options": {"temperature": temperature, "num_predict": max_tokens}}
+            headers = {"Content-Type": "application/json"}
+        else:
+            if not self.api_key:
+                raise LLMError("No API key set — POST /api/api-key first.", 401)
+            url = f"{self.base_url}/chat/completions"
+            payload = {"model": self.model, "messages": messages,
+                       "temperature": temperature, "max_tokens": max_tokens}
+            headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
         last_err = None
         for attempt in range(3):
             try:
@@ -52,7 +74,8 @@ class LLMClient:
             if resp.status_code != 200:
                 raise LLMError(f"Provider error ({resp.status_code}): {resp.text[:200]}", resp.status_code)
             try:
-                return resp.json()["choices"][0]["message"]["content"]
+                data = resp.json()
+                return parse_ollama_content(data) if self.kind == "ollama" else parse_openai_content(data)
             except (KeyError, IndexError, TypeError, ValueError):
                 raise LLMError("Unexpected provider response shape.")
         raise last_err or LLMError("Provider call failed after retries.")

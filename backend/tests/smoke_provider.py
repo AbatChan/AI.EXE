@@ -8,6 +8,8 @@ import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from app.provider import ProviderStore, is_local_provider  # noqa: E402
+from app.llm import parse_ollama_content, parse_openai_content  # noqa: E402
+from app.provider_usage import read_provider_health  # noqa: E402
 
 d = tempfile.mkdtemp()
 passed = 0
@@ -44,5 +46,23 @@ assert is_local_provider("http://127.0.0.1:11434/v1")
 assert is_local_provider("http://localhost:3000/v1")
 assert not is_local_provider("https://api.venice.ai/api/v1")
 ok("detects local (Ollama/llama.cpp) vs remote providers")
+
+# Provider kind (openai default / ollama for the Venice Pro adapter).
+sk = ProviderStore(tempfile.mkdtemp(), "", "")
+assert sk.kind() == "openai"
+sk.set("http://127.0.0.1:9999", "llama-3.1-405b-akash-api", "ollama")
+assert sk.kind() == "ollama" and sk.resolve()[0] == "http://127.0.0.1:9999"
+ok("provider kind persists (ollama) for the adapter")
+
+# Response parsers for both protocols.
+assert parse_openai_content({"choices": [{"message": {"content": "hi"}}]}) == "hi"
+assert parse_ollama_content({"message": {"content": "yo"}}) == "yo"      # /api/chat
+assert parse_ollama_content({"response": "gen"}) == "gen"               # /api/generate
+ok("openai + native-ollama response parsers")
+
+# Health monitor degrades gracefully when the adapter isn't running.
+h = read_provider_health("http://127.0.0.1:1", "ollama")
+assert h["reachable"] is False and h["kind"] == "ollama"
+ok("provider-health is graceful when the adapter is unreachable")
 
 print(f"\n{passed} checks passed.")
