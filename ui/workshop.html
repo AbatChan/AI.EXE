@@ -60,12 +60,14 @@
         <input id="providerModel" placeholder="model" style="flex:1" />
         <button class="secondary" style="flex:0 0 auto" onclick="saveProvider()">Save</button>
       </div>
-      <div class="row" style="margin-top:6px">
+      <div class="row" style="margin-top:6px;flex-wrap:wrap">
         <button class="secondary" onclick="preset('local')">Local (Ollama)</button>
         <button class="secondary" onclick="preset('venice')">Venice</button>
         <button class="secondary" onclick="preset('proxy')">Venice E2EE proxy</button>
+        <button class="secondary" onclick="preset('adapter')">Venice Pro adapter</button>
       </div>
       <p class="muted" id="providerState">—</p>
+      <p class="muted" id="providerHealth" style="margin-top:2px"></p>
       <label>Provider API key (stored on the backend; not needed for a Local model)</label>
       <div class="row">
         <input id="apiKey" type="password" placeholder="sk-…" />
@@ -173,7 +175,8 @@
         const k = await api('/api/api-key');
         $('keyState').textContent = k.set ? ('key set: '+k.masked) : 'no key set';
         const p = await api('/api/provider');
-        $('providerState').textContent = p.configured ? ('provider: '+p.base_url+' · '+p.model) : 'no provider set';
+        providerKind = p.kind || 'openai';
+        $('providerState').textContent = p.configured ? ('provider: '+p.base_url+' · '+p.model+' ('+p.kind+')') : 'no provider set';
         if(!$('providerUrl').value && p.base_url) $('providerUrl').value = p.base_url;
         if(!$('providerModel').value && p.model) $('providerModel').value = p.model;
       }catch(e){ $('usageText').textContent = 'usage unavailable ('+e.message+')'; }
@@ -188,21 +191,38 @@
       }catch(e){ $('providerBalance').textContent=''; }
     }
 
+    let providerKind = 'openai';
     function preset(p){
-      const presets = {
-        local: ['http://127.0.0.1:11434/v1', 'qwen2.5:0.5b'],   // Ollama on the laptop (free, no key)
-        venice: ['https://api.venice.ai/api/v1', 'deepseek-v4-pro'],
-        proxy: ['http://localhost:3000/v1', 'e2ee-qwen3-5-122b-a10b'], // Venice E2EE proxy
+      const presets = {                                                  // [url, model, kind]
+        local: ['http://127.0.0.1:11434/v1', 'qwen2.5:0.5b', 'openai'],   // Ollama /v1 (free, no key)
+        venice: ['https://api.venice.ai/api/v1', 'deepseek-v4-pro', 'openai'],
+        proxy: ['http://localhost:3000/v1', 'e2ee-qwen3-5-122b-a10b', 'openai'], // Venice E2EE proxy
+        adapter: ['http://127.0.0.1:9999', 'llama-3.1-405b-akash-api', 'ollama'], // Venice Pro browser adapter (native Ollama)
       };
-      const [url, model] = presets[p] || presets.local;
-      $('providerUrl').value = url; $('providerModel').value = model;
-      $('providerState').textContent = (p==='local') ? 'Local model — no API key needed. Click Save.' : 'Click Save, then set your key.';
+      const [url, model, kind] = presets[p] || presets.local;
+      $('providerUrl').value = url; $('providerModel').value = model; providerKind = kind;
+      $('providerState').textContent = (p==='local'||p==='adapter')
+        ? (kind + ' · no API key needed. Click Save, then check the monitor below.')
+        : 'Click Save, then set your key.';
     }
 
     async function saveProvider(){
-      try{ const p = await api('/api/provider',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({base_url:$('providerUrl').value, model:$('providerModel').value})});
-        $('providerState').textContent = 'provider: '+p.base_url+' · '+p.model;
+      try{ const p = await api('/api/provider',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({base_url:$('providerUrl').value, model:$('providerModel').value, kind: providerKind})});
+        providerKind = p.kind || 'openai';
+        $('providerState').textContent = 'provider: '+p.base_url+' · '+p.model+' ('+p.kind+')';
+        loadProviderHealth();
       }catch(e){ $('providerState').textContent='error: '+e.message; }
+    }
+
+    async function loadProviderHealth(){
+      try{
+        const h = await api('/api/provider-health');
+        if(h.reachable){
+          $('providerHealth').innerHTML = '<span class="dot ok"></span> '+(h.kind==='ollama'?'adapter':'provider')+' reachable · '+(h.models.length)+' model(s)'+(h.models.length?': '+h.models.slice(0,4).join(', '):'');
+        } else {
+          $('providerHealth').innerHTML = '<span class="dot bad"></span> not reachable'+(h.detail?(' ('+h.detail+')'):'');
+        }
+      }catch(e){ $('providerHealth').innerHTML=''; }
     }
 
     async function saveKey(){
@@ -317,7 +337,8 @@
       }catch(e){ $('pdfStatus').textContent='Failed: '+e.message; }
     }
 
-    loadStatus(); loadUsage(); loadModules(); loadProviderUsage(); setInterval(loadStatus, 6000);
+    loadStatus(); loadUsage(); loadModules(); loadProviderUsage(); loadProviderHealth();
+    setInterval(loadStatus, 6000); setInterval(loadProviderHealth, 12000);
   </script>
 </body>
 </html>

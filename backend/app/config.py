@@ -2,7 +2,7 @@
 import os
 import time
 
-BACKEND_VERSION = "0.10.0"
+BACKEND_VERSION = "0.11.0"
 
 
 class Settings:

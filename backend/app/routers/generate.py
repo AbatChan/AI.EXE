@@ -29,7 +29,7 @@ def generate(payload: GenerateRequest) -> GenerateResult:
     if not api_key:
         raise HTTPException(status_code=400, detail="No API key set — POST /api/api-key first.")
 
-    llm = LLMClient(base_url, model, api_key)
+    llm = LLMClient(base_url, model, api_key, kind=provider_store.kind())
     charge = (lambda: None) if local else usage_manager.consume
 
     def sandbox_runner(files, requirements, timeout):

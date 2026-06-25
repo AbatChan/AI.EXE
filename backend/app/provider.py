@@ -27,11 +27,13 @@ class ProviderStore:
         except (OSError, ValueError):
             return {}
 
-    def set(self, base_url: str, model: str) -> None:
+    def set(self, base_url: str, model: str, kind: str = "openai") -> None:
+        k = str(kind or "openai").strip().lower()
         with self._lock:
             _atomic_write(self._path, {
                 "base_url": str(base_url or "").strip().rstrip("/"),
                 "model": str(model or "").strip(),
+                "kind": k if k in ("openai", "ollama") else "openai",
             }, mode=0o600)
 
     def resolve(self) -> Tuple[str, str]:
@@ -39,6 +41,10 @@ class ProviderStore:
         d = self._load()
         return (d.get("base_url") or self._default[0],
                 d.get("model") or self._default[1])
+
+    def kind(self) -> str:
+        """'openai' (default) or 'ollama' (native /api/chat, e.g. the Venice Pro adapter)."""
+        return str(self._load().get("kind") or "openai").lower()
 
     def configured(self) -> bool:
         return bool(self.resolve()[0])

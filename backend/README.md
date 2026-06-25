@@ -34,6 +34,7 @@ Workshop UI: http://127.0.0.1:8765/workshop  (the frontend that drives the whole
 | POST | `/api/provider` | ✅ live (set Venice/OpenAI-compatible base_url + model) |
 | GET | `/api/provider` | ✅ live (current provider + configured?) |
 | GET | `/api/provider-usage` | ✅ live (Venice real balance; graceful if unavailable) |
+| GET | `/api/provider-health` | ✅ live (monitor: is the provider/adapter reachable + its models) |
 | POST | `/api/run-python` | ✅ live (sandboxed run: logs, exit code, retry hint) |
 | POST | `/api/generate` | ✅ live (LLM → code → run → auto-correct, metered) |
 | POST | `/api/projects` | ✅ live (save files to a named output folder) |
@@ -118,6 +119,15 @@ in the sandbox, and saves a project with `BUILD_LOG.md` + `MAPPING.md` (section�
 Returns the mapping, build log, and a download link. Metered per agent call. Known limit:
 cross-agent code coherence is hard — v1 delivers the pipeline + mapping + ready project,
 not a guaranteed unified program (PDF-to-software is the doc's most aspirational item).
+
+## Providers: OpenAI-compatible + native Ollama
+
+`POST /api/provider` takes `{ base_url, model, kind }` where `kind` is `openai` (default,
+`/chat/completions`) or `ollama` (native `/api/chat`, e.g. the **Venice Pro browser adapter**
+on `:9999`, which exposes only native Ollama — no `/v1`). Local providers (localhost / the
+adapter) are keyless and not credit-metered. `GET /api/provider-health` pings the provider
+(`/api/tags` for ollama, `/models` for openai) so the UI can show reachable + model list.
+The Workshop has presets for Local (Ollama), Venice, Venice E2EE proxy, and Venice Pro adapter.
 
 Tests: `python tests/smoke_usage.py` · `smoke_sandbox.py` · `smoke_generate.py` · `smoke_projects.py` · `smoke_packager.py` · `smoke_modules.py` · `smoke_pdf.py`
 

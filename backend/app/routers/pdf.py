@@ -40,7 +40,7 @@ async def pdf_to_software(file: UploadFile = File(...), name: str = Form(None),
     if not sections:
         raise HTTPException(status_code=400, detail="No extractable text in the PDF.")
 
-    llm = LLMClient(base_url, model, api_key)
+    llm = LLMClient(base_url, model, api_key, kind=provider_store.kind())
 
     def sandbox_runner(files, requirements, timeout):
         return run_python(base_dir=settings.data_dir, code=None, files=files, entry="main.py",
