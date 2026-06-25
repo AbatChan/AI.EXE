@@ -6,9 +6,9 @@
 """
 from fastapi import APIRouter
 
-from ..models import (ApiKeySetRequest, ApiKeyStatusResponse, ProviderInfo,
-                      ProviderRequest, ProviderUsageResponse, UsageResponse)
-from ..provider_usage import read_provider_balance
+from ..models import (ApiKeySetRequest, ApiKeyStatusResponse, ProviderHealthResponse,
+                      ProviderInfo, ProviderRequest, ProviderUsageResponse, UsageResponse)
+from ..provider_usage import read_provider_balance, read_provider_health
 from ..services import api_key_store, provider_store, usage_manager
 
 router = APIRouter(tags=["usage"])
@@ -23,17 +23,27 @@ def provider_usage() -> ProviderUsageResponse:
     return ProviderUsageResponse(**read_provider_balance(base, key))
 
 
+@router.get("/provider-health", response_model=ProviderHealthResponse)
+def provider_health() -> ProviderHealthResponse:
+    """Monitor: is the configured provider (incl. the Venice Pro adapter) reachable, and
+    what models does it expose? Network call — poll on demand."""
+    base, _model = provider_store.resolve()
+    return ProviderHealthResponse(**read_provider_health(base, provider_store.kind()))
+
+
 @router.post("/provider", response_model=ProviderInfo)
 def set_provider(payload: ProviderRequest) -> ProviderInfo:
-    provider_store.set(payload.base_url, payload.model)
+    provider_store.set(payload.base_url, payload.model, payload.kind)
     base, model = provider_store.resolve()
-    return ProviderInfo(base_url=base, model=model, configured=provider_store.configured())
+    return ProviderInfo(base_url=base, model=model, kind=provider_store.kind(),
+                        configured=provider_store.configured())
 
 
 @router.get("/provider", response_model=ProviderInfo)
 def get_provider() -> ProviderInfo:
     base, model = provider_store.resolve()
-    return ProviderInfo(base_url=base, model=model, configured=provider_store.configured())
+    return ProviderInfo(base_url=base, model=model, kind=provider_store.kind(),
+                        configured=provider_store.configured())
 
 
 @router.get("/usage", response_model=UsageResponse)

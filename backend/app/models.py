@@ -49,12 +49,22 @@ class ApiKeyStatusResponse(BaseModel):
 class ProviderRequest(BaseModel):
     base_url: str
     model: str
+    kind: str = "openai"  # "openai" | "ollama" (native /api/chat, e.g. Venice Pro adapter)
 
 
 class ProviderInfo(BaseModel):
     base_url: str
     model: str
+    kind: str = "openai"
     configured: bool
+
+
+class ProviderHealthResponse(BaseModel):
+    reachable: bool
+    kind: str = ""
+    base_url: str = ""
+    models: List[str] = []
+    detail: str = ""
 
 
 class ProviderUsageResponse(BaseModel):
