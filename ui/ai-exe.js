@@ -785,6 +785,13 @@ const settingsBackendStatus = document.getElementById('settingsBackendStatus');
 const settingsProviderSelect = document.getElementById('settingsProviderSelect');
 const settingsRemoteFieldsWrap = document.getElementById('settingsRemoteFieldsWrap');
 const settingsApiKeyWrap = document.getElementById('settingsApiKeyWrap');
+const settingsAdapterControls = document.getElementById('settingsAdapterControls');
+const settingsAdapterUser = document.getElementById('settingsAdapterUser');
+const settingsAdapterPass = document.getElementById('settingsAdapterPass');
+const settingsAdapterPassToggle = document.getElementById('settingsAdapterPassToggle');
+const settingsAdapterStartBtn = document.getElementById('settingsAdapterStartBtn');
+const settingsAdapterStopBtn = document.getElementById('settingsAdapterStopBtn');
+const settingsAdapterStatus = document.getElementById('settingsAdapterStatus');
 const settingsApiKeyLabel = document.getElementById('settingsApiKeyLabel');
 const settingsApiKeyInput = document.getElementById('settingsApiKeyInput');
 const settingsApiKeyToggle = document.getElementById('settingsApiKeyToggle');
@@ -5453,6 +5460,16 @@ function populateRemoteProviderFields(provider) {
   // Providers with no key (the native-Ollama Venice Pro adapter) hide the API-key field
   // entirely — credentials live in the adapter program, not in AI.EXE.
   if (settingsApiKeyWrap) settingsApiKeyWrap.style.display = def.keyField ? '' : 'none';
+  // The adapter gets Start/Stop controls (Venice login → launch the local adapter process).
+  if (settingsAdapterControls) {
+    const isAdapter = def.protocol === 'ollama';
+    settingsAdapterControls.style.display = isAdapter ? '' : 'none';
+    if (isAdapter) {
+      if (settingsAdapterUser) settingsAdapterUser.value = String(appSettings.veniceAdapterUsername || '');
+      if (settingsAdapterPass) settingsAdapterPass.value = String(appSettings.veniceAdapterPassword || '');
+      refreshAdapterStatus();
+    }
+  }
   if (settingsApiKeyLabel) settingsApiKeyLabel.textContent = def.keyLabel || 'API Key';
   if (settingsApiKeyInput) {
     settingsApiKeyInput.placeholder = def.keyPlaceholder || 'sk-...';
@@ -11384,6 +11401,88 @@ if (settingsKeepModelChk) {
 }
 if (settingsDebugTraceChk) {
   settingsDebugTraceChk.addEventListener('change', () => saveSettingsFromUi({ toastChange: settingsDebugTraceChk.checked ? 'Debug tracing: on' : 'Debug tracing: off' }));
+}
+
+// --- Venice Pro adapter: Start/Stop the local adapter process via the backend ---
+function adapterTargetPort() {
+  const url = String((settingsApiEndpointInput && settingsApiEndpointInput.value) || appSettings.veniceAdapterEndpoint || 'http://127.0.0.1:9999');
+  const m = url.match(/:(\d{2,5})(?:\/|$)/);
+  return m ? Number(m[1]) : 9999;
+}
+async function refreshAdapterStatus() {
+  if (!settingsAdapterStatus) return;
+  try {
+    const res = await fetch(getAIExeBackendUrl() + '/api/adapter/status');
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const s = await res.json();
+    settingsAdapterStatus.textContent = s.running
+      ? `● adapter running (pid ${s.pid}, port ${s.port})`
+      : (s.installed ? '○ installed · not running' : '○ not installed — Start will download + set it up first');
+    settingsAdapterStatus.style.color = s.running ? 'var(--success, #22c55e)' : '';
+  } catch (_) {
+    settingsAdapterStatus.textContent = 'AI.EXE backend not reachable — start the backend to manage the adapter.';
+    settingsAdapterStatus.style.color = 'var(--danger, #ef4444)';
+  }
+}
+if (settingsAdapterUser) {
+  settingsAdapterUser.addEventListener('input', () => { appSettings.veniceAdapterUsername = settingsAdapterUser.value; saveAppSettings(); });
+}
+if (settingsAdapterPass) {
+  settingsAdapterPass.addEventListener('input', () => { appSettings.veniceAdapterPassword = settingsAdapterPass.value; saveAppSettings(); });
+}
+if (settingsAdapterPassToggle && settingsAdapterPass) {
+  settingsAdapterPassToggle.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>';
+  settingsAdapterPassToggle.addEventListener('click', () => {
+    settingsAdapterPass.type = settingsAdapterPass.type === 'password' ? 'text' : 'password';
+    settingsAdapterPass.focus();
+  });
+}
+if (settingsAdapterStartBtn) {
+  settingsAdapterStartBtn.addEventListener('click', async () => {
+    const user = settingsAdapterUser ? settingsAdapterUser.value.trim() : '';
+    const pass = settingsAdapterPass ? settingsAdapterPass.value : '';
+    if (!user || !pass) {
+      showAppNotification({ title: 'Venice login needed', message: 'Enter your Venice username and password first.', kind: 'warning' });
+      return;
+    }
+    appSettings.veniceAdapterUsername = user; appSettings.veniceAdapterPassword = pass; saveAppSettings();
+    const backend = getAIExeBackendUrl();
+    setButtonLoading(settingsAdapterStartBtn, true);
+    try {
+      const st = await (await fetch(backend + '/api/adapter/status')).json();
+      if (!st.installed) {
+        showAppNotification({ title: 'Installing adapter', message: 'First-time setup (download + dependencies) — this can take a few minutes…', kind: 'info', durationMs: 7000 });
+        const ins = await (await fetch(backend + '/api/adapter/install', { method: 'POST' })).json();
+        if (!ins.ok) { showAppNotification({ title: 'Install failed', message: ins.detail || 'Could not install the adapter.', kind: 'error' }); return; }
+      }
+      const r = await (await fetch(backend + '/api/adapter/start', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: user, password: pass, port: adapterTargetPort(), headless: true }),
+      })).json();
+      showAppNotification(r.ok
+        ? { title: 'Adapter', message: r.detail === 'already running' ? 'Adapter already running.' : 'Adapter started — give it a few seconds to log in.', kind: 'success' }
+        : { title: "Couldn't start", message: r.detail || 'Failed to start.', kind: 'error' });
+    } catch (err) {
+      showAppNotification({ title: 'Adapter', message: 'AI.EXE backend not reachable: ' + String(err && err.message ? err.message : err), kind: 'error' });
+    } finally {
+      setButtonLoading(settingsAdapterStartBtn, false);
+      setTimeout(refreshAdapterStatus, 1500);
+    }
+  });
+}
+if (settingsAdapterStopBtn) {
+  settingsAdapterStopBtn.addEventListener('click', async () => {
+    setButtonLoading(settingsAdapterStopBtn, true);
+    try {
+      const r = await (await fetch(getAIExeBackendUrl() + '/api/adapter/stop', { method: 'POST' })).json();
+      showAppNotification({ title: 'Adapter', message: r.detail === 'stopped' ? 'Adapter stopped.' : (r.detail || 'Stopped.'), kind: 'info' });
+    } catch (err) {
+      showAppNotification({ title: 'Adapter', message: 'AI.EXE backend not reachable: ' + String(err && err.message ? err.message : err), kind: 'error' });
+    } finally {
+      setButtonLoading(settingsAdapterStopBtn, false);
+      refreshAdapterStatus();
+    }
+  });
 }
 if (settingsSaveBtn) {
   settingsSaveBtn.addEventListener('click', async () => {
