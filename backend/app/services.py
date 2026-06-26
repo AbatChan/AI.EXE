@@ -1,6 +1,7 @@
 """Shared singletons (usage manager + API-key store + project store)."""
 import os
 
+from .adapter import AdapterManager
 from .config import settings
 from .modules import ModuleStore
 from .projects import ProjectStore
@@ -23,3 +24,5 @@ provider_store = ProviderStore(settings.data_dir, settings.llm_base_url, setting
 project_store = ProjectStore(base_dir=os.path.join(settings.data_dir, "projects"))
 
 module_store = ModuleStore(base_dir=os.path.join(settings.workshop_dir, "modules"))
+
+adapter_manager = AdapterManager(settings.data_dir)

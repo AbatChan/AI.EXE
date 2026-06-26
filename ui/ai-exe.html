@@ -904,6 +904,20 @@
                 </div>
 
                 <div class="chat-modal-note visible auth-info settings-help-note settings-field-span" id="settingsProviderHelp"></div>
+
+                <div class="settings-field settings-field-span" id="settingsAdapterControls" style="display:none;">
+                  <div class="chat-modal-label">Venice login — used to start the adapter, stays on this machine</div>
+                  <input class="chat-modal-input" id="settingsAdapterUser" type="text" placeholder="Venice username or email" autocomplete="off" spellcheck="false">
+                  <div class="settings-secret-wrap" style="margin-top:8px;">
+                    <input class="chat-modal-input settings-secret-input" id="settingsAdapterPass" type="password" placeholder="Venice password" autocomplete="off">
+                    <button type="button" class="settings-secret-toggle" id="settingsAdapterPassToggle" aria-label="Show password" aria-pressed="false"></button>
+                  </div>
+                  <div style="display:flex;gap:8px;margin-top:10px;">
+                    <button class="modal-btn primary" id="settingsAdapterStartBtn" type="button">Start adapter</button>
+                    <button class="modal-btn" id="settingsAdapterStopBtn" type="button">Stop</button>
+                  </div>
+                  <div class="chat-modal-note visible settings-help-note" id="settingsAdapterStatus" style="margin-top:8px;"></div>
+                </div>
               </div>
 
               <div id="settingsModelUrlWrap" class="settings-field">

@@ -18,6 +18,7 @@ TESTS = [
     "smoke_provider",   # §9 provider config
     "smoke_provider_usage",  # §8 real provider balance
     "smoke_codeparse",  # code extraction + tolerant fallbacks
+    "smoke_adapter",    # Venice Pro adapter process manager
 ]
 
 
