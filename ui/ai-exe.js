@@ -6579,26 +6579,25 @@ async function streamAnthropicChatCompletion(prompt, handlers = {}, options = {}
   }
 }
 
-// Native Ollama API (POST {base}/api/chat) — for the Venice Pro adapter and any local
-// Ollama that doesn't expose an OpenAI /v1. No API key.
+// Native Ollama (the Venice Pro adapter) — routed THROUGH the backend, because the adapter
+// sends no CORS header so the WebView can't call it directly. The backend (always running,
+// configured with the same provider) reaches the adapter server-side. No API key, no credits.
 async function requestOllamaChatCompletion(provider, prompt, maxTokens, systemPrompt = '') {
-  const base = String(getProviderEndpoint(provider) || '').replace(/\/+$/, '');
   const model = getProviderModel(provider);
-  if (!base || !model) return null;
+  if (!model) return null;
   const messages = systemPrompt
     ? [{ role: 'system', content: String(systemPrompt) }, { role: 'user', content: String(prompt || '') }]
     : [{ role: 'user', content: String(prompt || '') }];
   try {
-    const response = await fetch(`${base}/api/chat`, {
+    const response = await fetch(getAIExeBackendUrl() + '/api/provider/complete', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model, messages, stream: false,
-        options: { num_predict: Math.max(1, Number(maxTokens) || 4096) } }),
+      body: JSON.stringify({ messages, max_tokens: Math.max(1, Number(maxTokens) || 4096), temperature: 0.2 }),
     });
     if (!response.ok) return { ok: false, output: '', status: response.status };
     const data = await response.json();
-    const content = (data && data.message && data.message.content) || (data && data.response) || '';
-    return { ok: Boolean(String(content || '').trim()), output: String(content || ''), provider, model };
+    const content = String((data && data.content) || '');
+    return { ok: Boolean(data && data.ok && content.trim()), output: content, error: (data && data.error) || '', provider, model };
   } catch (err) {
     return { ok: false, output: '', error: String(err && err.message ? err.message : err) };
   }
@@ -11443,6 +11442,17 @@ async function refreshAdapterStatus() {
       ? `● adapter running (pid ${s.pid}, port ${s.port})`
       : (s.installed ? '○ installed · not running' : '○ not installed — Start will download + set it up first');
     settingsAdapterStatus.style.color = running ? 'var(--success, #22c55e)' : '';
+    if (!running && s.installed) {
+      // It was set up but isn't running — likely crashed (Chrome/login). Show the reason.
+      fetch(getAIExeBackendUrl() + '/api/adapter/logs').then((r) => r.json()).then((d) => {
+        const lines = String((d && d.log) || '').trim().split('\n').filter(Boolean);
+        const last = lines.slice(-1)[0];
+        if (last) {
+          settingsAdapterStatus.textContent = '○ not running — last log: ' + last.slice(0, 180);
+          settingsAdapterStatus.style.color = 'var(--danger, #ef4444)';
+        }
+      }).catch(() => {});
+    }
   } catch (_) {
     settingsAdapterStatus.textContent = 'AI.EXE backend not reachable — start the backend to manage the adapter.';
     settingsAdapterStatus.style.color = 'var(--danger, #ef4444)';

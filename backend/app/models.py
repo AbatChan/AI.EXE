@@ -67,6 +67,18 @@ class ProviderHealthResponse(BaseModel):
     detail: str = ""
 
 
+class ProviderCompleteRequest(BaseModel):
+    messages: List[Dict[str, str]]
+    max_tokens: int = 4096
+    temperature: float = 0.2
+
+
+class ProviderCompleteResponse(BaseModel):
+    ok: bool
+    content: str = ""
+    error: str = ""
+
+
 class AdapterStartRequest(BaseModel):
     username: str = ""
     password: str = ""
