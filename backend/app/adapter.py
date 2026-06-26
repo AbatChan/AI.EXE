@@ -39,20 +39,31 @@ _PATCHED_ENSURE = '''def ensure_logged_in(driver):
 '''
 _PATCHED_LOGIN = '''def login_to_venice_with_username(username, password):
     global driver, args
+    import time as _t
     print("Logging in to venice with username and password...")
     driver = get_webdriver(headless=args.headless, debug_browser=args.debug_browser, docker=args.docker)
     driver.get("https://venice.ai/sign-in")
-    wait = WebDriverWait(driver, selenium_timeout)
+    _t.sleep(3)
     _submit = "//button[@type='submit' or contains(., 'Continue') or contains(., 'Sign in')]"
+    # Already signed in via the saved Chrome profile? Venice redirects off /sign-in.
+    try:
+        if "/sign-in" not in driver.current_url:
+            print("Already logged in (saved session).")
+            return driver
+    except Exception:
+        pass
+    wait = WebDriverWait(driver, selenium_timeout)
     email_field = wait.until(EC.visibility_of_element_located((By.ID, "identifier-field")))
-    email_field.clear(); email_field.send_keys(username)
+    if not (email_field.get_attribute("value") or "").strip():   # don't double-type autofill
+        email_field.send_keys(username)
     # Password may share the form, or appear only after a "Continue" step.
     try:
         password_input = WebDriverWait(driver, 6).until(EC.visibility_of_element_located((By.ID, "password-field")))
     except Exception:
         driver.find_element(By.XPATH, _submit).click()
         password_input = wait.until(EC.visibility_of_element_located((By.ID, "password-field")))
-    password_input.clear(); password_input.send_keys(password)
+    if not (password_input.get_attribute("value") or "").strip():
+        password_input.send_keys(password)
     wait.until(EC.element_to_be_clickable((By.XPATH, _submit))).click()
     ensure_logged_in(driver)
     print(f"Logged in as {username}")
