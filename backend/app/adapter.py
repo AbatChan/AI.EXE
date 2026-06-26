@@ -23,12 +23,17 @@ _PATCHED_LOGIN = '''def login_to_venice_with_username(username, password):
     driver = get_webdriver(headless=args.headless, debug_browser=args.debug_browser, docker=args.docker)
     driver.get("https://venice.ai/sign-in")
     wait = WebDriverWait(driver, selenium_timeout)
+    _submit = "//button[@type='submit' or contains(., 'Continue') or contains(., 'Sign in')]"
     email_field = wait.until(EC.visibility_of_element_located((By.ID, "identifier-field")))
     email_field.clear(); email_field.send_keys(username)
-    password_input = wait.until(EC.visibility_of_element_located((By.ID, "password-field")))
+    # Password may share the form, or appear only after a "Continue" step.
+    try:
+        password_input = WebDriverWait(driver, 6).until(EC.visibility_of_element_located((By.ID, "password-field")))
+    except Exception:
+        driver.find_element(By.XPATH, _submit).click()
+        password_input = wait.until(EC.visibility_of_element_located((By.ID, "password-field")))
     password_input.clear(); password_input.send_keys(password)
-    button = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[@type='submit' or contains(., 'Continue') or contains(., 'Sign in')]")))
-    button.click()
+    wait.until(EC.element_to_be_clickable((By.XPATH, _submit))).click()
     ensure_logged_in(driver)
     print(f"Logged in as {username}")
     return driver
@@ -142,8 +147,9 @@ class AdapterManager:
             if password:
                 env["VENICE_PASSWORD"] = str(password)
             args = [py, srv, "--port", str(port), "--ensure-pro"]
-            if headless:
-                args.append("--headless")
+            # The adapter's --headless DEFAULTS to True, so visible mode needs --no-headless
+            # explicitly (Cloudflare blocks headless on Venice's sign-in).
+            args.append("--headless" if headless else "--no-headless")
             try:
                 logf = open(self._log, "wb", buffering=0)  # capture why it lives/dies
                 self._proc = subprocess.Popen(
