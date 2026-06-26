@@ -11430,6 +11430,29 @@ function adapterTargetPort() {
   const m = url.match(/:(\d{2,5})(?:\/|$)/);
   return m ? Number(m[1]) : 9999;
 }
+// Turn the adapter's raw Python/Selenium log into a plain-English reason for the UI.
+function friendlyAdapterError(log) {
+  const t = String(log || '');
+  const lower = t.toLowerCase();
+  if (/sign-in page after login|email code|verification code/.test(lower))
+    return 'Login needs a verification code — click Start, then type the code Venice emails you into the browser window. It stays logged in after.';
+  if (/cloudflare|just a moment|verify you are human|captcha|turnstile/.test(lower))
+    return "Venice's bot-check (Cloudflare) blocked the automated login.";
+  if (/incorrect|invalid password|wrong password|authentication failed|invalid credentials/.test(lower))
+    return 'Venice rejected the login — double-check your email and password.';
+  if (/chromedriver|session not created|cannot find chrome|chrome not reachable|devtoolsactiveport|no chrome binary/.test(lower))
+    return "Chrome couldn't start — make sure Google Chrome is installed on this machine.";
+  if (/identifier-field|password-field|no such element|element not (found|interactable|visible)/.test(lower))
+    return "Couldn't find the Venice login fields — Venice may have changed their sign-in page again.";
+  if (/not installed/.test(lower))
+    return 'Not set up yet — click Start to download and install it.';
+  // Fallback: the last real message line, stripped of Python exception noise.
+  const lines = t.trim().split('\n').map((l) => l.trim()).filter(Boolean);
+  const last = lines.reverse().find((l) => !/^(file "|traceback|\^|~|self\.|raise )/i.test(l)) || '';
+  const clean = last.replace(/^[\w.]+(error|exception):\s*(message:\s*)?/i, '').trim();
+  return clean ? ('Adapter stopped: ' + clean.slice(0, 160)) : 'The adapter stopped unexpectedly.';
+}
+
 async function refreshAdapterStatus() {
   if (!settingsAdapterStatus) return;
   let running = false;
@@ -11443,12 +11466,11 @@ async function refreshAdapterStatus() {
       : (s.installed ? '○ installed · not running' : '○ not installed — Start will download + set it up first');
     settingsAdapterStatus.style.color = running ? 'var(--success, #22c55e)' : '';
     if (!running && s.installed) {
-      // It was set up but isn't running — likely crashed (Chrome/login). Show the reason.
+      // It was set up but isn't running — likely crashed (Chrome/login). Show a plain reason.
       fetch(getAIExeBackendUrl() + '/api/adapter/logs').then((r) => r.json()).then((d) => {
-        const lines = String((d && d.log) || '').trim().split('\n').filter(Boolean);
-        const last = lines.slice(-1)[0];
-        if (last) {
-          settingsAdapterStatus.textContent = '○ not running — last log: ' + last.slice(0, 180);
+        const msg = friendlyAdapterError((d && d.log) || '');
+        if (msg) {
+          settingsAdapterStatus.textContent = '○ ' + msg;
           settingsAdapterStatus.style.color = 'var(--danger, #ef4444)';
         }
       }).catch(() => {});
