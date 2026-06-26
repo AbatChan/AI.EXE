@@ -1334,6 +1334,72 @@ std::string BuildStreamEvent(const std::string &id, bool done,
 
 } // namespace
 
+// ── AI.EXE backend (FastAPI Workshop/adapter service) lifecycle ──────────────
+// The app owns the backend: spawn it on launch, kill it on quit, so the user never
+// runs it separately. Best-effort — if no backend dir or Python is found we no-op and
+// the in-app status simply shows it offline.
+static NSTask *g_backendTask = nil;
+
+static void StartBackendServer() {
+  if (getenv("AIEXE_NO_BACKEND")) return;
+  @try {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSMutableArray<NSString *> *candidates = [NSMutableArray array];
+    const char *envDir = getenv("AIEXE_BACKEND_DIR");
+    if (envDir) [candidates addObject:[NSString stringWithUTF8String:envDir]];
+    NSString *bundlePath = [[NSBundle mainBundle] bundlePath];
+    // Bundled (future) and dev-preview (repo/backend, two levels up from the .app) layouts.
+    [candidates addObject:[[bundlePath stringByAppendingPathComponent:@"Contents/Resources"]
+                              stringByAppendingPathComponent:@"backend"]];
+    [candidates addObject:[[[bundlePath stringByDeletingLastPathComponent]
+                              stringByDeletingLastPathComponent]
+                              stringByAppendingPathComponent:@"backend"]];
+    NSString *backendDir = nil;
+    for (NSString *c in candidates) {
+      if ([fm fileExistsAtPath:[c stringByAppendingPathComponent:@"app/main.py"]]) {
+        backendDir = c;
+        break;
+      }
+    }
+    if (!backendDir) return;
+    NSString *venvPy = [backendDir stringByAppendingPathComponent:@".venv/bin/python"];
+    BOOL haveVenv = [fm isExecutableFileAtPath:venvPy];
+    NSTask *task = [[NSTask alloc] init];
+    task.currentDirectoryPath = backendDir;
+    NSMutableDictionary *env = [[[NSProcessInfo processInfo] environment] mutableCopy];
+    env[@"AIEXE_PARENT_WATCH"] = @"1";  // backend self-exits if this app dies
+    task.environment = env;
+    NSArray<NSString *> *uvicorn = @[ @"-m", @"uvicorn", @"app.main:app",
+                                      @"--host", @"127.0.0.1", @"--port", @"8765" ];
+    if (haveVenv) {
+      task.launchPath = venvPy;
+      task.arguments = uvicorn;
+    } else {
+      task.launchPath = @"/usr/bin/env";
+      task.arguments = [@[ @"python3" ] arrayByAddingObjectsFromArray:uvicorn];
+    }
+    task.standardOutput = [NSFileHandle fileHandleWithNullDevice];
+    task.standardError = [NSFileHandle fileHandleWithNullDevice];
+    @try {
+      [task launch];
+      g_backendTask = task;
+    } @catch (NSException *e) {
+      (void)e;  // port already bound by an existing backend, or python missing — fine
+    }
+  } @catch (NSException *e) {
+    (void)e;
+  }
+}
+
+static void StopBackendServer() {
+  @try {
+    if (g_backendTask && [g_backendTask isRunning]) [g_backendTask terminate];
+  } @catch (NSException *e) {
+    (void)e;
+  }
+  g_backendTask = nil;
+}
+
 @interface AppDelegate : NSObject <NSApplicationDelegate, NSWindowDelegate,
                                    WKScriptMessageHandler, WKUIDelegate>
 @end
@@ -1405,6 +1471,11 @@ std::string BuildStreamEvent(const std::string &id, bool done,
     (NSApplication *)sender {
   (void)sender;
   return YES;
+}
+
+- (void)applicationWillTerminate:(NSNotification *)notification {
+  (void)notification;
+  StopBackendServer();
 }
 
 - (void)loadUiHtml {
@@ -2099,6 +2170,7 @@ std::string BuildStreamEvent(const std::string &id, bool done,
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
   (void)notification;
 
+  StartBackendServer();  // app owns the backend — no separate process to run
   [self installMainMenu];
 
   NSRect frame =

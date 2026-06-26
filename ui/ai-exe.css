@@ -2287,16 +2287,16 @@ html.platform-mac .settings-sidebar {
 
 .modal-btn.loading::after {
   content: '';
-  width: 13px;
-  height: 13px;
+  width: 16px;
+  height: 16px;
   border-radius: 50%;
-  border: 2px solid rgba(255, 255, 255, 0.25);
-  border-top-color: var(--accent);
-  animation: spin 0.65s linear infinite;
   position: absolute;
-  left: 50%;
-  top: 50%;
-  transform: translate(-50%, -50%);
+  inset: 0;
+  margin: auto;            /* centered without transform, so rotate() can't shift it */
+  background: conic-gradient(from 0deg, transparent 8%, var(--accent) 92%, var(--accent));
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 2.5px), #000 calc(100% - 2.5px));
+  mask: radial-gradient(farthest-side, transparent calc(100% - 2.5px), #000 calc(100% - 2.5px));
+  animation: spin 0.7s linear infinite;
 }
 
 /* ─── MIDDLE ─── */
