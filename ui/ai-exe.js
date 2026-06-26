@@ -5487,9 +5487,13 @@ function updateProviderConnectionStatus(provider, def) {
   if (!settingsProviderHelp || !settingsProviderHelp.parentNode) return;
   let el = document.getElementById('settingsProviderStatus');
   if (!el) {
-    el = document.createElement('p');
+    el = document.createElement('div');
     el.id = 'settingsProviderStatus';
-    el.style.cssText = 'font-size:12px;margin:6px 0 0;font-weight:600';
+    // Mirror the help text's indent / grid-span / note styling so the line sits directly
+    // under it; only the color is overridden per-state below.
+    el.className = settingsProviderHelp.className;
+    el.style.marginTop = '4px';
+    el.style.fontWeight = '600';
     settingsProviderHelp.parentNode.insertBefore(el, settingsProviderHelp.nextSibling);
   }
   if (!def || provider === 'local') { el.textContent = ''; return; }
