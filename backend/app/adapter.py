@@ -11,6 +11,8 @@ import subprocess
 import sys
 import threading
 
+import httpx
+
 ADAPTER_REPO = "https://github.com/jooray/ollama-like-venice.git"
 
 # Venice changed their sign-in since the (abandoned) adapter was written: the email field is
@@ -170,14 +172,24 @@ class AdapterManager:
         except subprocess.TimeoutExpired:
             return {"ok": False, "detail": "install timed out"}
 
+    def _port_alive(self, port: int = 0) -> bool:
+        try:
+            return httpx.get(f"http://127.0.0.1:{port or self._port}/api/tags", timeout=2).status_code == 200
+        except httpx.HTTPError:
+            return False
+
     def running(self) -> bool:
-        return bool(self._proc and self._proc.poll() is None)
+        # Tracked process alive, OR already serving (survives a backend restart that lost the handle).
+        if self._proc and self._proc.poll() is None:
+            return True
+        return self._port_alive()
 
     def start(self, username: str, password: str, port: int = 9999, headless: bool = True,
               python_exe: str = "", script: str = "") -> dict:
         with self._lock:
             if self.running():
-                return {"ok": True, "detail": "already running", "pid": self._proc.pid, "port": self._port}
+                return {"ok": True, "detail": "already running",
+                        "pid": self._proc.pid if self._proc else None, "port": self._port}
             py = python_exe or self._venv_python()
             srv = script or self._server_script()
             if not os.path.exists(srv):
@@ -225,6 +237,7 @@ class AdapterManager:
             return {"ok": True, "detail": "stopped", "port": self._port}
 
     def status(self) -> dict:
+        proc_alive = bool(self._proc and self._proc.poll() is None)
         return {"installed": self.is_installed(), "running": self.running(),
-                "pid": self._proc.pid if self.running() else None,
+                "pid": self._proc.pid if proc_alive else None,
                 "port": self._port, "install_dir": self._dir}
