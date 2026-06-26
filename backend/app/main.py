@@ -4,12 +4,36 @@ as HTTP endpoints for the desktop UI / future separate frontend.
 Run:  uvicorn app.main:app --host 127.0.0.1 --port 8765
 Docs: http://127.0.0.1:8765/docs
 """
+import os
+import threading
+import time
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .config import settings
 from .routers import (adapter, generate, health, modules, package, pdf, projects, run,
                       status, usage, workshop)
+
+
+def _watch_parent_and_exit() -> None:
+    """When the desktop app launches us (AIEXE_PARENT_WATCH=1), exit as soon as it dies —
+    so the backend never orphans on a crash/force-quit. No-op for standalone runs."""
+    if not os.environ.get("AIEXE_PARENT_WATCH"):
+        return
+    parent = os.getppid()
+
+    def loop():
+        while True:
+            time.sleep(2)
+            try:
+                os.kill(parent, 0)            # parent still alive?
+            except (ProcessLookupError, PermissionError, OSError):
+                os._exit(0)                   # app is gone — stop the backend too
+            if os.getppid() != parent:        # reparented (parent died)
+                os._exit(0)
+
+    threading.Thread(target=loop, daemon=True).start()
 
 app = FastAPI(
     title="AI.EXE Backend",
@@ -40,6 +64,11 @@ app.include_router(adapter.router, prefix="/api")
 
 
 app.include_router(workshop.router)
+
+
+@app.on_event("startup")
+def _on_startup() -> None:
+    _watch_parent_and_exit()
 
 
 @app.get("/")

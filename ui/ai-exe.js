@@ -4807,6 +4807,10 @@ function loadAppSettings() {
     deepseekModel: 'deepseek-chat',
     veniceApiKey: '',
     veniceModel: 'venice-uncensored-1-2',
+    veniceAdapterEndpoint: '',
+    veniceAdapterModel: 'llama-3.1-405b-akash-api',
+    veniceAdapterUsername: '',
+    veniceAdapterPassword: '',
     workMode: 'coding',
     modelUrl: '',
     keepModelOnUpdate: true,
@@ -4856,6 +4860,13 @@ function loadAppSettings() {
     if (typeof parsed.veniceModel === 'string' && parsed.veniceModel.trim()) {
       appSettings.veniceModel = parsed.veniceModel.trim();
     }
+    // Venice Pro adapter: provider fields + the local Venice login (so they survive restarts).
+    if (typeof parsed.veniceAdapterEndpoint === 'string') appSettings.veniceAdapterEndpoint = parsed.veniceAdapterEndpoint.trim();
+    if (typeof parsed.veniceAdapterModel === 'string' && parsed.veniceAdapterModel.trim()) {
+      appSettings.veniceAdapterModel = parsed.veniceAdapterModel.trim();
+    }
+    if (typeof parsed.veniceAdapterUsername === 'string') appSettings.veniceAdapterUsername = parsed.veniceAdapterUsername;
+    if (typeof parsed.veniceAdapterPassword === 'string') appSettings.veniceAdapterPassword = parsed.veniceAdapterPassword;
     if (typeof parsed.modelUrl === 'string') appSettings.modelUrl = parsed.modelUrl.trim();
     if (typeof parsed.keepModelOnUpdate === 'boolean') appSettings.keepModelOnUpdate = parsed.keepModelOnUpdate;
     if (typeof parsed.debugTraceEnabled === 'boolean') appSettings.debugTraceEnabled = parsed.debugTraceEnabled;
