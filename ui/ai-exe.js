@@ -5534,22 +5534,33 @@ function updateProviderConnectionStatus(provider, def) {
   const isOllama = def.protocol === 'ollama';
   const base = String(getProviderEndpoint(provider) || '').trim();
   if (!base) { el.textContent = ''; return; }
-  const url = isOllama
-    ? base.replace(/\/+$/, '') + '/api/tags'
-    : base.replace(/\/chat\/completions\/?$/i, '') + '/models';
-  const headers = isOllama ? {} : { Authorization: getOpenAiCompatibleAuthHeader(provider, getProviderApiKey(provider), url) };
   const myToken = (updateProviderConnectionStatus._token = (updateProviderConnectionStatus._token || 0) + 1);
   el.textContent = 'Checking connection…'; el.style.color = 'var(--muted, #9ca3af)';
-  fetch(url, { headers }).then((r) => (r.ok ? r.json() : Promise.reject(r.status))).then((d) => {
-    if (myToken !== updateProviderConnectionStatus._token) return; // a newer check superseded this
-    const models = isOllama ? (d.models || []).map((m) => m && m.name) : (d.data || []).map((m) => m && m.id);
-    el.textContent = '● connected' + (models.filter(Boolean).length ? (' · ' + models.filter(Boolean).length + ' model(s)') : '');
-    el.style.color = 'var(--success, #22c55e)';
-  }).catch(() => {
+  const onModels = (models) => {
     if (myToken !== updateProviderConnectionStatus._token) return;
-    el.textContent = '● not reachable — is the provider/adapter running?';
+    const n = (models || []).filter(Boolean).length;
+    el.textContent = '● connected' + (n ? (' · ' + n + ' model(s)') : '');
+    el.style.color = 'var(--success, #22c55e)';
+  };
+  const onDown = (extra) => {
+    if (myToken !== updateProviderConnectionStatus._token) return;
+    el.textContent = '● not reachable' + (extra || ' — is the provider/adapter running?');
     el.style.color = 'var(--danger, #ef4444)';
-  });
+  };
+  if (isOllama) {
+    // The adapter sends no CORS header, so the WebView can't read a direct fetch. Ping it
+    // through the backend (server-side) — also how inference will reach it.
+    fetch(getAIExeBackendUrl() + '/api/provider-health')
+      .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
+      .then((h) => (h && h.reachable ? onModels(h.models) : onDown(' — start the adapter (or it is still logging in)')))
+      .catch(() => onDown(' — AI.EXE backend offline'));
+    return;
+  }
+  const url = base.replace(/\/chat\/completions\/?$/i, '') + '/models';
+  fetch(url, { headers: { Authorization: getOpenAiCompatibleAuthHeader(provider, getProviderApiKey(provider), url) } })
+    .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
+    .then((d) => onModels((d.data || []).map((m) => m && m.id)))
+    .catch(() => onDown());
 }
 
 function syncSettingsProviderUi() {
@@ -11422,18 +11433,23 @@ function adapterTargetPort() {
 }
 async function refreshAdapterStatus() {
   if (!settingsAdapterStatus) return;
+  let running = false;
   try {
     const res = await fetch(getAIExeBackendUrl() + '/api/adapter/status');
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const s = await res.json();
-    settingsAdapterStatus.textContent = s.running
+    running = Boolean(s.running);
+    settingsAdapterStatus.textContent = running
       ? `● adapter running (pid ${s.pid}, port ${s.port})`
       : (s.installed ? '○ installed · not running' : '○ not installed — Start will download + set it up first');
-    settingsAdapterStatus.style.color = s.running ? 'var(--success, #22c55e)' : '';
+    settingsAdapterStatus.style.color = running ? 'var(--success, #22c55e)' : '';
   } catch (_) {
     settingsAdapterStatus.textContent = 'AI.EXE backend not reachable — start the backend to manage the adapter.';
     settingsAdapterStatus.style.color = 'var(--danger, #ef4444)';
   }
+  // While running: hide Start, show the red Stop. Otherwise the reverse.
+  if (settingsAdapterStartBtn) settingsAdapterStartBtn.style.display = running ? 'none' : '';
+  if (settingsAdapterStopBtn) settingsAdapterStopBtn.style.display = running ? '' : 'none';
 }
 if (settingsAdapterUser) {
   settingsAdapterUser.addEventListener('input', () => { appSettings.veniceAdapterUsername = settingsAdapterUser.value; saveAppSettings(); });
