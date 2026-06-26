@@ -11088,13 +11088,58 @@ if (accountSettingsBtn) {
   });
 }
 if (accountUsageBtn) {
-  accountUsageBtn.addEventListener('click', () => {
+  accountUsageBtn.addEventListener('click', () => { void showProviderUsageNotification(); });
+}
+
+// Live usage: local/adapter providers are free; Venice exposes the real balance at
+// /api_keys/rate_limits. Replaces the old "offline preview" placeholder.
+const USAGE_BALANCE_KEYS = new Set(['VCU', 'USD', 'DIEM', 'USD_EXTERNAL']);
+function extractVeniceBalances(obj) {
+  const found = {};
+  const walk = (o) => {
+    if (Array.isArray(o)) { o.forEach(walk); return; }
+    if (o && typeof o === 'object') {
+      for (const [k, v] of Object.entries(o)) {
+        if (String(k).toLowerCase() === 'balances' && v && typeof v === 'object') {
+          for (const [bk, bv] of Object.entries(v)) {
+            if (typeof bv === 'number') found[String(bk).toUpperCase()] = bv;
+          }
+        } else if (USAGE_BALANCE_KEYS.has(String(k).toUpperCase()) && typeof v === 'number') {
+          found[String(k).toUpperCase()] = v;
+        } else { walk(v); }
+      }
+    }
+  };
+  walk(obj);
+  return found;
+}
+async function showProviderUsageNotification() {
+  const provider = getSelectedInferenceProvider();
+  const def = getInferenceProviderDef(provider);
+  if (provider === 'local' || (def && def.protocol === 'ollama')) {
+    showAppNotification({ title: 'Usage', message: 'This provider runs locally — no credits or usage limits.', kind: 'info' });
+    return;
+  }
+  const base = String(getProviderEndpoint(provider) || '').replace(/\/chat\/completions\/?$/i, '');
+  const key = String(getProviderApiKey(provider) || '').trim();
+  if (!/venice/i.test(base) || !base || !key) {
+    showAppNotification({ title: 'Usage', message: 'Live usage is only available for Venice and local providers.', kind: 'info' });
+    return;
+  }
+  showAppNotification({ title: 'Usage', message: 'Checking your Venice balance…', kind: 'info' });
+  try {
+    const res = await fetch(base.replace(/\/+$/, '') + '/api_keys/rate_limits', { headers: { Authorization: 'Bearer ' + key } });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const balances = extractVeniceBalances(await res.json());
+    const keys = Object.keys(balances);
     showAppNotification({
-      title: 'Usage',
-      message: 'Usage details are not available in this offline preview.',
+      title: 'Venice usage',
+      message: keys.length ? keys.map((k) => `${balances[k]} ${k}`).join(' · ') : 'Connected, but Venice returned no balance figures.',
       kind: 'info',
     });
-  });
+  } catch (err) {
+    showAppNotification({ title: 'Usage', message: 'Could not read usage: ' + String(err && err.message ? err.message : err), kind: 'info' });
+  }
 }
 if (accountLogoutBtn) {
   accountLogoutBtn.addEventListener('click', () => {
