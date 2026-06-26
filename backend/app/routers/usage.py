@@ -6,12 +6,38 @@
 """
 from fastapi import APIRouter
 
-from ..models import (ApiKeySetRequest, ApiKeyStatusResponse, ProviderHealthResponse,
-                      ProviderInfo, ProviderRequest, ProviderUsageResponse, UsageResponse)
+from fastapi import HTTPException
+
+from ..llm import LLMClient, LLMError
+from ..models import (ApiKeySetRequest, ApiKeyStatusResponse, ProviderCompleteRequest,
+                      ProviderCompleteResponse, ProviderHealthResponse, ProviderInfo,
+                      ProviderRequest, ProviderUsageResponse, UsageResponse)
+from ..provider import is_local_provider
 from ..provider_usage import read_provider_balance, read_provider_health
 from ..services import api_key_store, provider_store, usage_manager
 
 router = APIRouter(tags=["usage"])
+
+
+@router.post("/provider/complete", response_model=ProviderCompleteResponse)
+def provider_complete(payload: ProviderCompleteRequest) -> ProviderCompleteResponse:
+    """Server-side chat passthrough for the desktop agent when it uses a local/Ollama
+    provider (the Venice Pro adapter) — the WebView can't reach the adapter directly
+    (no CORS), but the backend can. Restricted to local/Ollama so remote providers keep
+    going through the metered path."""
+    base, model = provider_store.resolve()
+    kind = provider_store.kind()
+    if not base:
+        raise HTTPException(status_code=400, detail="No provider configured.")
+    if kind != "ollama" and not is_local_provider(base):
+        raise HTTPException(status_code=400, detail="Passthrough is for local/adapter providers only.")
+    api_key = api_key_store.get_for_internal_use() or "local"
+    llm = LLMClient(base, model, api_key, kind=kind)
+    try:
+        content = llm.complete(payload.messages, temperature=payload.temperature, max_tokens=payload.max_tokens)
+        return ProviderCompleteResponse(ok=bool(content.strip()), content=content)
+    except LLMError as exc:
+        return ProviderCompleteResponse(ok=False, error=str(exc))
 
 
 @router.get("/provider-usage", response_model=ProviderUsageResponse)

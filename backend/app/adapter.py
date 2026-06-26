@@ -20,6 +20,14 @@ class AdapterManager:
         self._proc = None
         self._port = 9999
         self._lock = threading.Lock()
+        self._log = os.path.join(data_dir, "adapter.log")
+
+    def read_log(self, tail: int = 4000) -> str:
+        try:
+            with open(self._log, "rb") as fh:
+                return fh.read()[-tail:].decode("utf-8", "replace")
+        except OSError:
+            return ""
 
     @property
     def install_dir(self) -> str:
@@ -86,10 +94,12 @@ class AdapterManager:
             if headless:
                 args.append("--headless")
             try:
+                logf = open(self._log, "wb", buffering=0)  # capture why it lives/dies
                 self._proc = subprocess.Popen(
                     args, cwd=os.path.dirname(srv) or None, env=env,
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    stdout=logf, stderr=subprocess.STDOUT,
                     start_new_session=(os.name != "nt"))
+                logf.close()
             except (OSError, ValueError) as exc:
                 self._proc = None
                 return {"ok": False, "detail": f"could not start: {exc}", "port": port}
