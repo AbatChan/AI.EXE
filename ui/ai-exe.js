@@ -784,6 +784,7 @@ const settingsModelHash = document.getElementById('settingsModelHash');
 const settingsBackendStatus = document.getElementById('settingsBackendStatus');
 const settingsProviderSelect = document.getElementById('settingsProviderSelect');
 const settingsRemoteFieldsWrap = document.getElementById('settingsRemoteFieldsWrap');
+const settingsApiKeyWrap = document.getElementById('settingsApiKeyWrap');
 const settingsApiKeyLabel = document.getElementById('settingsApiKeyLabel');
 const settingsApiKeyInput = document.getElementById('settingsApiKeyInput');
 const settingsApiKeyToggle = document.getElementById('settingsApiKeyToggle');
@@ -4855,11 +4856,13 @@ function loadAppSettings() {
 }
 
 function saveAppSettings() {
+  let ok = true;
   try {
     localStorage.setItem(settingsStorageKey, JSON.stringify(appSettings));
-  } catch (_) { }
+  } catch (_) { ok = false; }
   if (typeof updateTokenRing === 'function') updateTokenRing();
   syncBackendProviderConfig();
+  return ok;
 }
 
 // Push the active OpenAI-compatible provider + key to the local AI.EXE backend so the
@@ -5447,6 +5450,9 @@ function populateRemoteProviderFields(provider) {
   const def = getInferenceProviderDef(provider);
   const currentModel = getProviderModel(provider);
   const currentEndpoint = getProviderEndpoint(provider);
+  // Providers with no key (the native-Ollama Venice Pro adapter) hide the API-key field
+  // entirely — credentials live in the adapter program, not in AI.EXE.
+  if (settingsApiKeyWrap) settingsApiKeyWrap.style.display = def.keyField ? '' : 'none';
   if (settingsApiKeyLabel) settingsApiKeyLabel.textContent = def.keyLabel || 'API Key';
   if (settingsApiKeyInput) {
     settingsApiKeyInput.placeholder = def.keyPlaceholder || 'sk-...';
@@ -5760,7 +5766,7 @@ function saveSettingsFromUi(options = {}) {
   appSettings.modelUrl = settingsModelUrlInput ? settingsModelUrlInput.value.trim() : '';
   appSettings.keepModelOnUpdate = Boolean(settingsKeepModelChk && settingsKeepModelChk.checked);
   appSettings.debugTraceEnabled = Boolean(settingsDebugTraceChk && settingsDebugTraceChk.checked);
-  saveAppSettings();
+  const saved = saveAppSettings();
   updateModelSetupBanner(); // a freshly-added API key should hide the setup banner
   if (options.toast) {
     setSettingsNote(
@@ -5770,13 +5776,20 @@ function saveSettingsFromUi(options = {}) {
       'info'
     );
   }
+  // Per-change toast so an auto-save confirms itself (success or error), individually.
+  if (options.toastChange) {
+    showAppNotification(saved
+      ? { title: 'Saved', message: String(options.toastChange), kind: 'success', durationMs: 2200 }
+      : { title: "Couldn't save", message: `${options.toastChange} — your settings could not be written.`, kind: 'error' });
+  }
+  return saved;
 }
 
-function scheduleSettingsAutosave(delay = 420) {
+function scheduleSettingsAutosave(delay = 420, label = '') {
   if (settingsAutosaveTimer) clearTimeout(settingsAutosaveTimer);
   settingsAutosaveTimer = setTimeout(() => {
     settingsAutosaveTimer = 0;
-    saveSettingsFromUi({ toast: false });
+    saveSettingsFromUi(label ? { toastChange: label } : { toast: false });
   }, delay);
 }
 
@@ -11294,7 +11307,7 @@ if (settingsProviderSelect) {
       ? String(settingsProviderSelect.value || 'local').trim().toLowerCase()
       : 'local';
     syncSettingsProviderUi();
-    saveSettingsFromUi({ toast: false });
+    saveSettingsFromUi({ toastChange: `${getInferenceProviderDef(appSettings.inferenceProvider).label} selected` });
   });
 }
 settingsNavButtons.forEach((btn) => {
@@ -11307,7 +11320,7 @@ if (settingsWorkModeCoding) {
     if (settingsWorkModeCoding.checked) {
       appSettings.workMode = 'coding';
       syncSettingsWorkModeUi();
-      saveSettingsFromUi({ toast: false });
+      saveSettingsFromUi({ toastChange: 'Coding mode on' });
     }
   });
 }
@@ -11316,7 +11329,7 @@ if (settingsWorkModeEveryday) {
     if (settingsWorkModeEveryday.checked) {
       appSettings.workMode = 'everyday';
       syncSettingsWorkModeUi();
-      saveSettingsFromUi({ toast: false });
+      saveSettingsFromUi({ toastChange: 'Everyday mode on' });
     }
   });
 }
@@ -11330,7 +11343,7 @@ if (settingsApiModelPreset) {
       return;
     }
     settingsApiModelInput.value = preset;
-    saveSettingsFromUi({ toast: false });
+    saveSettingsFromUi({ toastChange: `Model set to ${preset}` });
   });
 }
 if (settingsApiModelInput) {
@@ -11338,11 +11351,11 @@ if (settingsApiModelInput) {
     if (!settingsApiModelPreset || !settingsProviderSelect) return;
     const provider = String(settingsProviderSelect.value || 'local').trim().toLowerCase();
     settingsApiModelPreset.value = getProviderPresetValue(provider, settingsApiModelInput.value);
-    scheduleSettingsAutosave();
+    scheduleSettingsAutosave(420, 'Model ID');
   });
 }
 if (settingsApiKeyInput) {
-  settingsApiKeyInput.addEventListener('input', () => scheduleSettingsAutosave());
+  settingsApiKeyInput.addEventListener('input', () => scheduleSettingsAutosave(420, 'API key'));
 }
 if (settingsApiKeyToggle && settingsApiKeyInput) {
   const eyeIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>';
@@ -11361,16 +11374,16 @@ if (settingsApiKeyToggle && settingsApiKeyInput) {
   renderSecretToggle();
 }
 if (settingsApiEndpointInput) {
-  settingsApiEndpointInput.addEventListener('input', () => scheduleSettingsAutosave());
+  settingsApiEndpointInput.addEventListener('input', () => scheduleSettingsAutosave(420, 'Endpoint URL'));
 }
 if (settingsModelUrlInput) {
-  settingsModelUrlInput.addEventListener('input', () => scheduleSettingsAutosave());
+  settingsModelUrlInput.addEventListener('input', () => scheduleSettingsAutosave(420, 'Model download URL'));
 }
 if (settingsKeepModelChk) {
-  settingsKeepModelChk.addEventListener('change', () => saveSettingsFromUi({ toast: false }));
+  settingsKeepModelChk.addEventListener('change', () => saveSettingsFromUi({ toastChange: settingsKeepModelChk.checked ? 'Keep model on update: on' : 'Keep model on update: off' }));
 }
 if (settingsDebugTraceChk) {
-  settingsDebugTraceChk.addEventListener('change', () => saveSettingsFromUi({ toast: false }));
+  settingsDebugTraceChk.addEventListener('change', () => saveSettingsFromUi({ toastChange: settingsDebugTraceChk.checked ? 'Debug tracing: on' : 'Debug tracing: off' }));
 }
 if (settingsSaveBtn) {
   settingsSaveBtn.addEventListener('click', async () => {
