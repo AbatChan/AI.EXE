@@ -36,7 +36,7 @@ fake = os.path.join(d, "fake_server.py")
 with open(fake, "w") as fh:
     fh.write("import time\nwhile True:\n    time.sleep(1)\n")
 
-r = m.start("user", "pass", port=9999, headless=True, python_exe=sys.executable, script=fake)
+r = m.start("user", "pass", port=9788, headless=True, python_exe=sys.executable, script=fake)
 assert r["ok"] is True and r["pid"]
 ok("start spawns the process")
 
