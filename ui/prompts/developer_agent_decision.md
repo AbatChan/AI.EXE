@@ -38,8 +38,8 @@ Rules:
 - If inspection shows no grounded bug, misleading UI behavior, or inaccurate documentation in the available files, finalize with that conclusion instead of inventing a change.
 - For a new app/project that includes README.md, write the app files first and then write README.md from the planned file names. Only inspect existing implementation files for docs-only or existing-code documentation tasks.
 - Before edit_file on an existing file, either the user named the exact file path or that file was already read successfully in TOOL_RESULTS.
-- If a file already exists in this run and needs changes, prefer read_file then edit_file. Do not use write_file as a pseudo-edit.
-- Use write_file to choose the target file path only when creating a new file from scratch.
+- If a file ALREADY EXISTS in the workspace (it was there before this run, or you created/read it earlier this run), changing it means read_file THEN edit_file. NEVER call write_file on a file that already exists — write_file replaces the whole file and erases the work already in it. When the user asks to "make changes"/"add"/"update" an existing project, read the existing files and edit them; do not rebuild them and do not start a new project.
+- Use write_file ONLY to create a brand-new file that does not exist yet.
 - Use concise project and file names from the task's core feature nouns.
 - Never finalize while anything in PENDING_REQUIREMENTS is still missing.
 - DELIVERABLE CHECK: if the user asked you to CREATE, ADD, GENERATE, or WRITE a file (e.g. a sample/data/seed file), you are NOT done until a write_file for that file has actually SUCCEEDED in TOOL_RESULTS. Reading existing files to learn a schema/format is preparation, not the deliverable — after inspecting, actually write the requested file, THEN finalize. Do not answer "Done" or dump the file contents in the message instead of writing the file.
