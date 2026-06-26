@@ -21,7 +21,7 @@ def ok(name):
     print(f"PASS: {name}")
 
 
-m = AdapterManager(d)
+m = AdapterManager(d, port=9788)  # a free port so the probe doesn't hit a real adapter
 
 st = m.status()
 assert st["installed"] is False and st["running"] is False
