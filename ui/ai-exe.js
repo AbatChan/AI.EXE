@@ -11494,7 +11494,9 @@ if (settingsAdapterStartBtn) {
       }
       const r = await (await fetch(backend + '/api/adapter/start', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username: user, password: pass, port: adapterTargetPort(), headless: true }),
+        // Visible browser: Venice's login is behind Cloudflare, which blocks headless. The
+        // window also lets you complete an email verification code once (profile persists).
+        body: JSON.stringify({ username: user, password: pass, port: adapterTargetPort(), headless: false }),
       })).json();
       showAppNotification(r.ok
         ? { title: 'Adapter', message: r.detail === 'already running' ? 'Adapter already running.' : 'Adapter started — give it a few seconds to log in.', kind: 'success' }
