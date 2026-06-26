@@ -49,6 +49,10 @@ _PATCHED_LOGIN = '''def login_to_venice_with_username(username, password):
     try:
         if "/sign-in" not in driver.current_url:
             print("Already logged in (saved session).")
+            try:
+                driver.minimize_window()
+            except Exception:
+                pass
             return driver
     except Exception:
         pass
@@ -66,6 +70,10 @@ _PATCHED_LOGIN = '''def login_to_venice_with_username(username, password):
         password_input.send_keys(password)
     wait.until(EC.element_to_be_clickable((By.XPATH, _submit))).click()
     ensure_logged_in(driver)
+    try:
+        driver.minimize_window()  # out of the way; the adapter keeps using it to serve
+    except Exception:
+        pass
     print(f"Logged in as {username}")
     return driver
 

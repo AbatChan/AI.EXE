@@ -5517,7 +5517,7 @@ function populateRemoteProviderFields(provider) {
 // Settings connection monitor: ping the selected provider (the adapter's /api/tags, or
 // /models for API providers) and show reachable + model count so the user can see, from
 // the frontend, whether the provider (esp. the Venice Pro adapter) is actually up.
-function updateProviderConnectionStatus(provider, def) {
+function updateProviderConnectionStatus(provider, def, quiet) {
   if (!settingsProviderHelp || !settingsProviderHelp.parentNode) return;
   let el = document.getElementById('settingsProviderStatus');
   if (!el) {
@@ -5535,7 +5535,7 @@ function updateProviderConnectionStatus(provider, def) {
   const base = String(getProviderEndpoint(provider) || '').trim();
   if (!base) { el.textContent = ''; return; }
   const myToken = (updateProviderConnectionStatus._token = (updateProviderConnectionStatus._token || 0) + 1);
-  el.textContent = 'Checking connection…'; el.style.color = 'var(--muted, #9ca3af)';
+  if (!quiet) { el.textContent = 'Checking connection…'; el.style.color = 'var(--muted, #9ca3af)'; }
   const onModels = (models) => {
     if (myToken !== updateProviderConnectionStatus._token) return;
     const n = (models || []).filter(Boolean).length;
@@ -11545,6 +11545,15 @@ if (settingsAdapterStopBtn) {
     }
   });
 }
+// Live-refresh the adapter status + monitor while its controls are on screen, so the page
+// updates itself (login finishing, adapter coming up) without reopening Settings.
+setInterval(() => {
+  if (settingsAdapterControls && settingsAdapterControls.style.display !== 'none' && document.visibilityState !== 'hidden') {
+    refreshAdapterStatus();
+    const prov = getSelectedInferenceProvider();
+    updateProviderConnectionStatus(prov, getInferenceProviderDef(prov), true);
+  }
+}, 4000);
 if (settingsSaveBtn) {
   settingsSaveBtn.addEventListener('click', async () => {
     const startedAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
