@@ -83,11 +83,11 @@ _PATCHED_LOGIN = '''def login_to_venice_with_username(username, password):
 
 
 class AdapterManager:
-    def __init__(self, data_dir: str, repo: str = ADAPTER_REPO):
+    def __init__(self, data_dir: str, repo: str = ADAPTER_REPO, port: int = 9999):
         self._dir = os.path.join(data_dir, ".tools", "venice-adapter")
         self._repo = repo
         self._proc = None
-        self._port = 9999
+        self._port = port
         self._lock = threading.Lock()
         self._log = os.path.join(data_dir, "adapter.log")
 
