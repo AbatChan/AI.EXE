@@ -18,11 +18,10 @@ ADAPTER_REPO = "https://github.com/jooray/ollama-like-venice.git"
 # on ONE form. Cloudflare also blocks headless, so we run visible + persist a Chrome profile
 # (login/verification code only needed once). This rewrites the adapter's login on install.
 _PATCHED_ENSURE = '''def ensure_logged_in(driver):
-    import time as _t
-    # Venice changed the post-login UI, so don't hard-require the old "PRO"/"Text Conversation"
-    # elements. Login is done once we leave the sign-in page (if an email code is required,
-    # it is entered in the visible window during this wait).
-    for _ in range(40):
+    import os as _os, time as _t
+    # Venice changed the post-login UI; logged-in = we left /sign-in. Wait up to ~3 min so a
+    # one-time email verification code (or Cloudflare check) can be done in the visible window.
+    for _ in range(180):
         try:
             url = driver.current_url
         except Exception:
@@ -31,7 +30,11 @@ _PATCHED_ENSURE = '''def ensure_logged_in(driver):
             _t.sleep(2)
             return
         _t.sleep(1)
-    raise TimeoutException("Still on the sign-in page after login - you may need to enter an email code in the browser window.")
+    try:
+        driver.save_screenshot(_os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "login_stuck.png"))
+    except Exception:
+        pass
+    raise TimeoutException("Still on /sign-in after login - saved login_stuck.png (code prompt? captcha? wrong password?).")
 
 '''
 _PATCHED_LOGIN = '''def login_to_venice_with_username(username, password):
