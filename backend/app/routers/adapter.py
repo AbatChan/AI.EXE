@@ -31,3 +31,10 @@ def adapter_start(payload: AdapterStartRequest) -> AdapterActionResponse:
 @router.post("/adapter/stop", response_model=AdapterActionResponse)
 def adapter_stop() -> AdapterActionResponse:
     return AdapterActionResponse(**adapter_manager.stop())
+
+
+@router.get("/adapter/logs")
+def adapter_logs() -> dict:
+    """Tail of the adapter's own output — so the fragile browser automation's failures
+    (Chrome missing, login failed, Venice site changed) are visible in the UI."""
+    return {"log": adapter_manager.read_log()}
