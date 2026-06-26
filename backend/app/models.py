@@ -67,6 +67,28 @@ class ProviderHealthResponse(BaseModel):
     detail: str = ""
 
 
+class AdapterStartRequest(BaseModel):
+    username: str = ""
+    password: str = ""
+    port: int = 9999
+    headless: bool = True
+
+
+class AdapterStatusResponse(BaseModel):
+    installed: bool
+    running: bool
+    pid: Optional[int] = None
+    port: int = 9999
+    install_dir: str = ""
+
+
+class AdapterActionResponse(BaseModel):
+    ok: bool
+    detail: str = ""
+    pid: Optional[int] = None
+    port: int = 9999
+
+
 class ProviderUsageResponse(BaseModel):
     available: bool
     source: str = ""
