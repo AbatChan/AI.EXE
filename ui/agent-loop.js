@@ -1866,6 +1866,36 @@
           }
         }
 
+        // Don't recreate an existing file from scratch. If write_file targets a file that
+        // already exists in the workspace and the agent hasn't read it this run, block and
+        // steer to read_file -> edit_file, so "make changes" EDITS the file instead of
+        // overwriting (destroying) the work already there.
+        if (decision.action === 'tool' && String(decision.tool || '').toLowerCase() === 'write_file') {
+          const wPath = deps.normalizeWorkspacePath(decision.path || '');
+          if (wPath) {
+            const ws = (typeof deps.getWorkspaceContext === 'function' ? deps.getWorkspaceContext() : null) || {};
+            const existsInWorkspace = Array.isArray(ws.rootEntries)
+              && ws.rootEntries.some((e) => e && e.kind === 'file' && deps.normalizeWorkspacePath(e.path || '') === wPath);
+            const touchedThisRun = toolEvents.some((e) => e
+              && ['read_file', 'write_file', 'edit_file'].includes(String(e.tool || '').toLowerCase())
+              && deps.normalizeWorkspacePath(e.path || '') === wPath
+              && e.ok !== false);
+            if (existsInWorkspace && !touchedThisRun) {
+              recordDebugTrace('agent_write_over_existing_blocked', {
+                chatId: String(chatId || ''), step: String(step), path: wPath,
+              }, { chatId: String(chatId || ''), step, path: wPath });
+              toolEvents.push({
+                tool: 'write_file',
+                ok: false,
+                _guardBlock: true,
+                path: wPath,
+                observation: `${wPath} already exists in this project — do NOT overwrite it from scratch (write_file would erase the existing work). First read_file ${wPath}, then make ONLY the requested changes with edit_file. Do the same for every other existing file you need to change: read it, then edit it — never rebuild files that are already here.`,
+              });
+              continue;
+            }
+          }
+        }
+
         const targetInfo = deps.describeAgentToolTarget(decision);
         const startLabel = decision.tool === 'write_file' && deps.isLikelyNewAgentFileTarget(toolEvents, targetInfo)
           ? (targetInfo ? `Creating file ${targetInfo}` : 'Creating file')
