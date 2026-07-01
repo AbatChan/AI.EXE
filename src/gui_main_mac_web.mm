@@ -840,6 +840,84 @@ bool RunOfflineDictationOnMac(const std::string &locale_hint, int timeout_ms,
   return FinalizeOfflineDictationSessionOnMac(timeout_ms, transcript, err);
 }
 
+bool IsBackendReachable() {
+  NSURL *url = [NSURL URLWithString:@"http://127.0.0.1:8765/health"];
+  if (!url) {
+    return false;
+  }
+  NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
+  request.HTTPMethod = @"GET";
+  request.timeoutInterval = 0.8;
+  __block BOOL ok = NO;
+  dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+  NSURLSessionDataTask *task = [[NSURLSession sharedSession]
+      dataTaskWithRequest:request
+        completionHandler:^(NSData *_Nullable data, NSURLResponse *_Nullable response,
+                            NSError *_Nullable error) {
+          (void)data;
+          if (!error && [response isKindOfClass:[NSHTTPURLResponse class]]) {
+            NSHTTPURLResponse *http = (NSHTTPURLResponse *)response;
+            ok = http.statusCode >= 200 && http.statusCode < 300;
+          }
+          dispatch_semaphore_signal(sem);
+        }];
+  [task resume];
+  dispatch_semaphore_wait(
+      sem, dispatch_time(DISPATCH_TIME_NOW, 900LL * NSEC_PER_MSEC));
+  if (!ok) {
+    [task cancel];
+  }
+  return ok;
+}
+
+NSTask *StartFastApiBackend(const std::filesystem::path &runtime_root) {
+  if (IsBackendReachable()) {
+    return nil;
+  }
+  const auto backend_dir = runtime_root / "backend";
+  const auto python_path = backend_dir / ".venv" / "bin" / "python";
+  const auto main_path = backend_dir / "app" / "main.py";
+  if (!FileExists(python_path) || !FileExists(main_path)) {
+    return nil;
+  }
+
+  std::error_code ec;
+  const auto data_dir = backend_dir / ".data";
+  std::filesystem::create_directories(data_dir, ec);
+  const auto log_path = data_dir / "backend.log";
+
+  NSTask *task = [[NSTask alloc] init];
+  task.executableURL =
+      [NSURL fileURLWithPath:[NSString stringWithUTF8String:python_path.c_str()]];
+  task.currentDirectoryURL =
+      [NSURL fileURLWithPath:[NSString stringWithUTF8String:backend_dir.c_str()]];
+  task.arguments = @[
+    @"-m", @"uvicorn", @"app.main:app", @"--host", @"127.0.0.1", @"--port",
+    @"8765"
+  ];
+
+  NSMutableDictionary<NSString *, NSString *> *env =
+      [[[NSProcessInfo processInfo] environment] mutableCopy];
+  env[@"AIEXE_PARENT_WATCH"] = @"1";
+  env[@"AIEXE_BACKEND_DATA_DIR"] =
+      [NSString stringWithUTF8String:data_dir.c_str()];
+  task.environment = env;
+
+  NSString *logString = [NSString stringWithUTF8String:log_path.c_str()];
+  [[NSFileManager defaultManager] createFileAtPath:logString contents:nil
+                                        attributes:nil];
+  NSFileHandle *logHandle = [NSFileHandle fileHandleForWritingAtPath:logString];
+  [logHandle seekToEndOfFile];
+  task.standardOutput = logHandle;
+  task.standardError = logHandle;
+
+  NSError *error = nil;
+  if (![task launchAndReturnError:&error]) {
+    return nil;
+  }
+  return task;
+}
+
 std::optional<std::filesystem::path>
 ResolveWorkspacePath(const WebRuntimeBridge &runtime,
                      const std::string &raw_path, std::string *err) {
@@ -1341,6 +1419,7 @@ std::string BuildStreamEvent(const std::string &id, bool done,
 @implementation AppDelegate {
   NSWindow *_window;
   WKWebView *_webView;
+  NSTask *_backendTask;
   std::filesystem::path _loadedHtmlPath;
   WebRuntimeBridge _runtime;
   std::string _runtimeInitError;
@@ -1405,6 +1484,14 @@ std::string BuildStreamEvent(const std::string &id, bool done,
     (NSApplication *)sender {
   (void)sender;
   return YES;
+}
+
+- (void)applicationWillTerminate:(NSNotification *)notification {
+  (void)notification;
+  if (_backendTask && [_backendTask isRunning]) {
+    [_backendTask terminate];
+  }
+  _backendTask = nil;
 }
 
 - (void)loadUiHtml {
@@ -2149,6 +2236,7 @@ std::string BuildStreamEvent(const std::string &id, bool done,
   [_window makeKeyAndOrderFront:nil];
   [_window makeFirstResponder:_webView];
   [self loadUiHtml];
+  _backendTask = StartFastApiBackend(ResolveRuntimeRoot(_loadedHtmlPath));
   [self initializeRuntime];
 }
 

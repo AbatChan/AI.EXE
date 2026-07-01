@@ -38,6 +38,8 @@ data/logs/
 data/memory/
 data/snapshots/
 data/sandbox/
+backend/.data/
+backend/.venv/
 node_modules/
 __pycache__/
 scripts/__pycache__/
