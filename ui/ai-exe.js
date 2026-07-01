@@ -5849,11 +5849,15 @@ function saveSettingsFromUi(options = {}) {
     : 'local';
   appSettings.workMode = settingsWorkModeEveryday && settingsWorkModeEveryday.checked ? 'everyday' : 'coding';
   const providerDef = getInferenceProviderDef(appSettings.inferenceProvider);
-  if (appSettings.inferenceProvider !== 'local' && providerDef.keyField && providerDef.modelField) {
-    appSettings[providerDef.keyField] = settingsApiKeyInput ? settingsApiKeyInput.value.trim() : '';
-    appSettings[providerDef.modelField] = settingsApiModelInput && settingsApiModelInput.value.trim()
-      ? settingsApiModelInput.value.trim()
-      : String(providerDef.defaultModel || '');
+  if (appSettings.inferenceProvider !== 'local' && providerDef) {
+    if (providerDef.keyField) {
+      appSettings[providerDef.keyField] = settingsApiKeyInput ? settingsApiKeyInput.value.trim() : '';
+    }
+    if (providerDef.modelField) {
+      appSettings[providerDef.modelField] = settingsApiModelInput && settingsApiModelInput.value.trim()
+        ? settingsApiModelInput.value.trim()
+        : String(providerDef.defaultModel || '');
+    }
     if (providerDef.endpointField) {
       appSettings[providerDef.endpointField] = settingsApiEndpointInput && settingsApiEndpointInput.value.trim()
         ? settingsApiEndpointInput.value.trim()
@@ -14667,13 +14671,14 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
         workspace: getWorkspaceDebugSnapshot(),
       });
       if (inferenceProvider === 'veniceadapter') {
-        appendErrorMessageToChat(chatId, "The Venice Pro adapter isn't ready — it likely stopped or your Venice session needs a login. Open Settings → Provider to start it (sign in to the Chrome window if it asks), then resend.");
+        appendErrorMessageToChat(chatId, res && res.message
+          ? res.message
+          : "The Venice Pro adapter is running, but Venice did not return a usable response. Check Settings → Provider, then resend.");
         showAppNotification({
-          title: 'Venice adapter not ready',
-          message: 'Click here to start it (~30s) — then resend your message. Or open Settings → Provider.',
+          title: 'Venice adapter request failed',
+          message: 'The adapter is running, but Venice automation returned no text. Open Settings → Provider, then resend.',
           kind: 'warning',
           durationMs: 13000,
-          onClick: () => { void startVeniceAdapterThenResend(); },
         });
       } else {
         appendErrorMessageToChat(chatId, res && res.message ? res.message : `${providerDef.label} inference failed.`);
