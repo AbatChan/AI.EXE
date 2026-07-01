@@ -7,7 +7,7 @@ from webdriver_manager.core.os_manager import ChromeType
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.desired_capabilities import DesiredCapabilities
 from selenium.webdriver.common.keys import Keys
-from selenium.common.exceptions import ElementClickInterceptedException, TimeoutException, WebDriverException, StaleElementReferenceException
+from selenium.common.exceptions import ElementClickInterceptedException, TimeoutException, WebDriverException, StaleElementReferenceException, NoSuchWindowException, InvalidSessionIdException
 from flask import Flask, request, Response
 import json
 import uuid
@@ -586,6 +586,54 @@ def login_to_venice():
         print("No username and password, nor seed provided")
         sys.exit(1)
 
+
+def _aiexe_browser_lost_error(error):
+    if isinstance(error, (NoSuchWindowException, InvalidSessionIdException)):
+        return True
+    msg = str(error).lower()
+    return any(s in msg for s in (
+        "no such window",
+        "target window already closed",
+        "web view not found",
+        "invalid session id",
+        "disconnected",
+    ))
+
+
+def _aiexe_driver_alive(active_driver):
+    try:
+        if not active_driver or isinstance(active_driver, dict):
+            return False
+        active_driver.execute_script("return 1")
+        return True
+    except WebDriverException as error:
+        if _aiexe_browser_lost_error(error):
+            return False
+        raise
+    except Exception:
+        return False
+
+
+def _aiexe_reopen_driver(reason):
+    global driver, AIEXE_MODELS_CACHE
+    print("AIEXE_BROWSER restarting Venice browser: %s" % reason, flush=True)
+    try:
+        old_driver = driver
+        if old_driver and not isinstance(old_driver, dict):
+            old_driver.quit()
+    except Exception:
+        pass
+    driver = login_to_venice()
+    try:
+        scraped = aiexe_scrape_models(driver)
+        if scraped:
+            AIEXE_MODELS_CACHE = scraped
+            print("AIEXE_MODELS scraped after browser restart: %d models" % len(scraped), flush=True)
+    except Exception as error:
+        print("AIEXE_MODELS scrape after browser restart failed: %s" % error, flush=True)
+    return driver
+
+
 def inject_request_interceptor(driver, api_data_json):
     script = f"""
     window.streamComplete = false;
@@ -1055,7 +1103,7 @@ def aiexe_select_model(driver, name):
         _aiexe_close_modal(driver)
 
 
-def generate_selenium_streamed_response(data, driver, response_format=ResponseFormat.CHAT):
+def generate_selenium_streamed_response(data, driver, response_format=ResponseFormat.CHAT, retry_browser_restart=True):
     global timeout
     request_id = str(uuid.uuid4())[:8]
     model_id = data.get('model', 'llama-3.1-405b-akash-api')
@@ -1278,6 +1326,14 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
             yield f"{json.dumps(final_message)}"
     except WebDriverException as e:
         print(f"Error occurred during chat: {e}", flush=True)  # AIEXE_RECOVER
+        if retry_browser_restart and _aiexe_browser_lost_error(e):
+            try:
+                fresh_driver = _aiexe_reopen_driver(str(e).splitlines()[0])
+                yield from generate_selenium_streamed_response(
+                    data, fresh_driver, response_format=response_format, retry_browser_restart=False)
+                return
+            except Exception as restart_error:
+                print("AIEXE_BROWSER restart failed: %s" % restart_error, flush=True)
         try:
             driver.get(VC_CHAT_URL)  # keep the session; no re-login/recursion
         except Exception:
@@ -1311,6 +1367,8 @@ def chat():
         content_type = 'application/json; charset=utf-8'
 
     with selenium_lock:
+        if not _aiexe_driver_alive(driver):
+            driver = _aiexe_reopen_driver("browser session was closed before /api/chat")
         return Response(generate_selenium_streamed_response(request_json, driver, response_format=response_format), content_type=content_type)
 
 @app.route('/api/generate', methods=['POST'])
@@ -1346,11 +1404,16 @@ def generate():
             }
         ]
     with selenium_lock:
+        if not _aiexe_driver_alive(driver):
+            driver = _aiexe_reopen_driver("browser session was closed before /api/generate")
         return Response(generate_selenium_streamed_response(request_json, driver, response_format=ResponseFormat.GENERATE), content_type='application/x-ndjson')
 
 @app.route('/v1/chat/completions', methods=['POST'])
 def openai_like_completion():
+    global driver
     request_json = parse_json_request(request)
+    if not _aiexe_driver_alive(driver):
+        driver = _aiexe_reopen_driver("browser session was closed before /v1/chat/completions")
     completion = ''.join(generate_selenium_streamed_response(request_json, driver, response_format=ResponseFormat.COMPLETION_AS_STRING))
     response_json = {
         "id": "chatcmpl-953",
