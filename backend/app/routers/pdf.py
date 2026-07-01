@@ -18,6 +18,40 @@ from ..usage import CreditExhausted, RateLimited
 router = APIRouter(tags=["pdf"])
 
 
+def _extract_docx(data: bytes) -> str:
+    """Dependency-free .docx text: it's a zip; pull text from word/document.xml."""
+    import io as _io
+    import re as _re
+    import zipfile
+    with zipfile.ZipFile(_io.BytesIO(data)) as z:
+        xml = z.read("word/document.xml").decode("utf-8", "replace")
+    xml = _re.sub(r"</w:p>", "\n", xml)          # paragraph breaks
+    xml = _re.sub(r"<w:tab[^>]*/>", "\t", xml)
+    return _re.sub(r"<[^>]+>", "", xml).strip()  # drop remaining tags
+
+
+@router.post("/extract-text")
+async def extract_text_endpoint(file: UploadFile = File(...)) -> dict:
+    """Real text extraction for attached documents (PDF via pypdf, docx via zip). The desktop
+    attachment flow POSTs docs here — reading a PDF's bytes as text only yields its structure."""
+    data = await file.read()
+    if not data:
+        return {"ok": False, "detail": "empty upload", "text": ""}
+    name = (file.filename or "").lower()
+    try:
+        if name.endswith(".pdf"):
+            text = extract_text(data)
+        elif name.endswith(".docx"):
+            text = _extract_docx(data)
+        else:
+            text = data.decode("utf-8", "replace")
+        text = (text or "").strip()
+        return {"ok": bool(text), "text": text[:200000], "chars": len(text),
+                "detail": "" if text else "no extractable text (scanned/image PDF?)"}
+    except Exception as exc:  # never 500 the attach flow
+        return {"ok": False, "detail": f"extract failed: {exc}", "text": ""}
+
+
 @router.post("/pdf-to-software", response_model=PdfToSoftwareResult)
 async def pdf_to_software(file: UploadFile = File(...), name: str = Form(None),
                           max_sections: int = Form(5)) -> PdfToSoftwareResult:

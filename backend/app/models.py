@@ -84,11 +84,13 @@ class AdapterStartRequest(BaseModel):
     password: str = ""
     port: int = 9999
     headless: bool = True
+    hide_prompt: bool = True   # hide the raw typed prompt in the Venice window (toggle in Settings)
 
 
 class AdapterStatusResponse(BaseModel):
     installed: bool
     running: bool
+    serving: bool = False  # port bound + serving = login done, actually ready (not just launching)
     pid: Optional[int] = None
     port: int = 9999
     install_dir: str = ""
@@ -130,6 +132,7 @@ class RunPythonResult(BaseModel):
     sandbox_dir: str
     install_log: str = ""
     retry_hint: Optional[str] = None
+    isolation: str = "none"  # "seatbelt" (macOS FS jail) | "none" (rlimits+guard only)
 
 
 class GenerateRequest(BaseModel):

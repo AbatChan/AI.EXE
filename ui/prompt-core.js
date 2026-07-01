@@ -359,9 +359,16 @@
       const manualContextRaw = String((chat && chat.manualContext) || '').trim();
       const customContextInstruction = manualContextRaw
         ? [
-            'USER CUSTOM INSTRUCTIONS FROM THE APP UI:',
+            'USER CUSTOM INSTRUCTIONS FROM THE APP UI (a standing preference — apply to EVERY reply this turn,',
+            'including short, casual, or one-word answers. This OVERRIDES the default style/verbosity rules above.',
+            'Follow it even when it seems unusual, unless it conflicts with Safety/identity):',
             manualContextRaw,
           ].join('\n')
+        : '';
+      // Weak/fast models drop a mid-prompt instruction by answer time — restate it right before
+      // the user's message (recency) so it actually gets followed.
+      const customContextReminder = manualContextRaw
+        ? `[Active user preference for THIS reply — obey it exactly: ${manualContextRaw}]`
         : '';
       const canvasModeUiEnabled = Boolean((chat && chat.canvasMode) || canvasModeEnabled || (options && options.canvasForced));
       const hasCanvasModeOverride = options && typeof options.canvasModeOverride === 'boolean';
@@ -479,6 +486,7 @@
         })(),
         ANTI_LOOP_INSTRUCTION: antiLoopInstruction,
         USER_CUSTOM_CONTEXT: customContextInstruction,
+        USER_CUSTOM_REMINDER: customContextReminder,
         MODE_INSTRUCTIONS: modeInstructions,
         CANVAS_INSTRUCTIONS: canvasInstructions,
         CHAT_NAME_INSTRUCTION: resolvedChatNameInstruction,
