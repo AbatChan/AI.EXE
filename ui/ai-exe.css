@@ -5164,6 +5164,29 @@ html.platform-mac .settings-sidebar {
   100% { background-position: -200% 0; }
 }
 
+.msg-attachment-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+.msg-attachment-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 240px;
+  padding: 3px 9px;
+  font-size: 12px;
+  line-height: 1.4;
+  border: 1px solid var(--border2);
+  border-radius: 999px;
+  background: var(--bg2, rgba(255, 255, 255, 0.04));
+  color: var(--text2, inherit);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .msg-artifact-card {
   min-width: 350px;
   width: 100%;

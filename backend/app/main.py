@@ -14,6 +14,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from .config import settings
 from .routers import (adapter, generate, health, modules, package, pdf, projects, run,
                       status, usage, workshop)
+from .services import adapter_manager
+
+
+def _stop_children() -> None:
+    """Stop subprocesses the backend owns (the Venice Pro adapter) so nothing orphans."""
+    try:
+        adapter_manager.stop()
+    except Exception:
+        pass
 
 
 def _watch_parent_and_exit() -> None:
@@ -29,8 +38,10 @@ def _watch_parent_and_exit() -> None:
             try:
                 os.kill(parent, 0)            # parent still alive?
             except (ProcessLookupError, PermissionError, OSError):
-                os._exit(0)                   # app is gone — stop the backend too
+                _stop_children()              # app is gone — take the adapter with us
+                os._exit(0)
             if os.getppid() != parent:        # reparented (parent died)
+                _stop_children()
                 os._exit(0)
 
     threading.Thread(target=loop, daemon=True).start()
@@ -69,6 +80,12 @@ app.include_router(workshop.router)
 @app.on_event("startup")
 def _on_startup() -> None:
     _watch_parent_and_exit()
+
+
+@app.on_event("shutdown")
+def _on_shutdown() -> None:
+    # Graceful stop (app quit -> SIGTERM -> uvicorn shutdown): retire the adapter now.
+    _stop_children()
 
 
 @app.get("/")

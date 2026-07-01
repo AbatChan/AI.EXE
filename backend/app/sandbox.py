@@ -4,14 +4,20 @@ Offline-realistic isolation (Docker/Firecracker conflict with the no-install por
 target, per the requirements doc): each run gets its own temp workdir + a scrubbed
 environment + POSIX resource limits (CPU, memory, file size, process count, no core
 dumps) + a wall-clock timeout that kills the whole process group. A small static guard
-rejects obviously destructive code before it runs. True FS/network isolation needs a
-container — documented as a known limitation.
+rejects obviously destructive code before it runs.
+
+On macOS, the run is additionally wrapped in a sandbox-exec seatbelt jail that confines
+writes to the sandbox dir and denies reads of the user's home (secrets/keys/docs) — so
+generated code can't delete user files or leak them (result.isolation == "seatbelt").
+Windows has no zero-install FS jail yet: there it falls back to rlimits + static guard
+and reports isolation == "none". See _isolate().
 """
 import os
 import re
 import shutil
 import signal
 import subprocess
+import sys
 import time
 import uuid
 from typing import Dict, List, Optional, Tuple
@@ -34,6 +40,50 @@ def static_guard(blob: str) -> Optional[str]:
         if pattern.search(blob):
             return reason
     return None
+
+
+_SANDBOX_EXEC = "/usr/bin/sandbox-exec"
+
+
+def _seatbelt_profile(sandbox_abs: str) -> str:
+    """macOS seatbelt policy: writes confined to the sandbox; reads of the user's home
+    (secrets, keys, documents) denied; system paths readable so Python runs. The sandbox
+    itself is re-allowed in case it lives under $HOME."""
+    home = os.path.realpath(os.path.expanduser("~"))
+    sbx = os.path.realpath(sandbox_abs)
+    return (
+        "(version 1)\n"
+        "(deny default)\n"
+        "(allow process-fork)\n"
+        "(allow process-exec)\n"
+        "(allow signal (target self))\n"
+        "(allow sysctl-read)\n"
+        "(allow mach*)\n"
+        "(allow ipc-posix-shm)\n"
+        "(allow file-read-metadata)\n"
+        "(allow file-read*)\n"
+        f'(deny file-read* (subpath "{home}"))\n'
+        f'(allow file-read* (subpath "{sbx}"))\n'
+        f'(allow file-write* (subpath "{sbx}"))\n'
+        '(allow file-write-data (path "/dev/null") (path "/dev/dtracehelper"))\n'
+    )
+
+
+def _isolate(cmd: List[str], sandbox_abs: str) -> Tuple[List[str], str]:
+    """Wrap `cmd` in an OS filesystem jail. Returns (command, isolation_label).
+
+    macOS: sandbox-exec seatbelt (writes→sandbox only, no user-home reads). Elsewhere
+    (incl. Windows) there's no zero-install FS jail yet — falls back to the POSIX rlimits
+    + static guard and reports isolation="none" so callers don't assume a jail exists."""
+    if sys.platform == "darwin" and os.path.exists(_SANDBOX_EXEC):
+        profile = os.path.join(sandbox_abs, ".sbx_profile.sb")
+        try:
+            with open(profile, "w", encoding="utf-8") as fh:
+                fh.write(_seatbelt_profile(sandbox_abs))
+            return [_SANDBOX_EXEC, "-f", profile, *cmd], "seatbelt"
+        except OSError:
+            return cmd, "none"
+    return cmd, "none"
 
 
 def _safe_join(base: str, rel: str) -> Optional[str]:
@@ -174,19 +224,20 @@ def run_python(base_dir: str, *, code: Optional[str], files: Optional[Dict[str, 
     started = time.time()
     # -E (ignore PYTHON* env) + -s (no user site). NOT -I: on 3.11+ -I implies -P,
     # which drops the script's own dir from sys.path and breaks sibling imports.
+    run_cmd = [python, "-E", "-s", entry, *[str(a) for a in (args or [])]]
+    run_cmd, isolation = _isolate(run_cmd, sandbox)
     code_exit, out, err, timed_out = _run(
-        [python, "-E", "-s", entry, *[str(a) for a in (args or [])]],
-        sandbox, _scrubbed_env(sandbox), timeout, stdin,
+        run_cmd, sandbox, _scrubbed_env(sandbox), timeout, stdin,
     )
     duration = round(time.time() - started, 3)
     ok = (not timed_out) and code_exit == 0
     return _result(ok, code_exit, timed_out, False, None, out, err, duration, sandbox,
-                   install_log=install_log,
+                   install_log=install_log, isolation=isolation,
                    retry_hint=None if ok else _retry_hint(err))
 
 
 def _result(ok, exit_code, timed_out, blocked, block_reason, stdout, stderr,
-            duration, sandbox, install_log="", retry_hint=None) -> dict:
+            duration, sandbox, install_log="", retry_hint=None, isolation="none") -> dict:
     return {
         "ok": ok,
         "exit_code": exit_code,
@@ -199,4 +250,5 @@ def _result(ok, exit_code, timed_out, blocked, block_reason, stdout, stderr,
         "sandbox_dir": sandbox,
         "install_log": install_log,
         "retry_hint": retry_hint,
+        "isolation": isolation,
     }
