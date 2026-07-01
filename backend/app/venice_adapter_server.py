@@ -7,7 +7,7 @@ from webdriver_manager.core.os_manager import ChromeType
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.desired_capabilities import DesiredCapabilities
 from selenium.webdriver.common.keys import Keys
-from selenium.common.exceptions import ElementClickInterceptedException, TimeoutException, WebDriverException
+from selenium.common.exceptions import ElementClickInterceptedException, TimeoutException, WebDriverException, StaleElementReferenceException
 from flask import Flask, request, Response
 import json
 import uuid
@@ -747,6 +747,79 @@ def _aiexe_close_modal(driver):
     _aiexe_dismiss_modal(driver)
 
 
+def _aiexe_wait_composer(driver):
+    """Return a fresh, enabled Venice composer textarea.
+
+    Venice's SPA frequently rerenders the composer after New chat/model-picker actions.
+    Holding an older Selenium element is what causes stale-element failures, so every
+    typing/submitting step should come through this helper.
+    """
+    last_err = None
+    for _ in range(10):
+        try:
+            el = WebDriverWait(driver, selenium_timeout).until(
+                EC.presence_of_element_located((By.XPATH, VC_COMPOSER_XPATH))
+            )
+            if el.is_displayed() and el.is_enabled():
+                driver.execute_script("return arguments[0].tagName;", el)
+                return el
+        except Exception as exc:
+            last_err = exc
+            time.sleep(0.25)
+    if last_err:
+        raise last_err
+    return WebDriverWait(driver, selenium_timeout).until(
+        EC.element_to_be_clickable((By.XPATH, VC_COMPOSER_XPATH))
+    )
+
+
+def _aiexe_set_composer_text(driver, text):
+    """Set composer text via React's value setter, retrying through SPA rerenders."""
+    last_err = None
+    for _ in range(6):
+        try:
+            el = _aiexe_wait_composer(driver)
+            driver.execute_script(
+                "var el=arguments[0], v=arguments[1];"
+                "el.focus();"
+                "var d=Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype,'value');"
+                "(d&&d.set?d.set:function(x){el.value=x;}).call(el, v);"
+                "el.dispatchEvent(new Event('input', {bubbles:true}));"
+                "el.dispatchEvent(new Event('change', {bubbles:true}));", el, text)
+            return True
+        except (StaleElementReferenceException, WebDriverException) as exc:
+            last_err = exc
+            time.sleep(0.25)
+    if last_err:
+        print("AIEXE_SEND set_text failed: %s" % last_err, flush=True)
+    return False
+
+
+def _aiexe_submit_prompt(driver):
+    """Click Venice's send button, with JS and Enter fallbacks."""
+    for _try in range(24):
+        for _xp in VC_SEND_BUTTON_XPATHS:
+            try:
+                btn = driver.find_element(By.XPATH, _xp)
+                if btn.is_displayed() and btn.is_enabled():
+                    try:
+                        btn.click()
+                    except Exception:
+                        driver.execute_script("arguments[0].click();", btn)
+                    print("AIEXE_SEND clicked xpath=%r try=%d" % (_xp, _try), flush=True)
+                    return True
+            except Exception:
+                pass
+        time.sleep(0.25)
+    try:
+        _aiexe_wait_composer(driver).send_keys(Keys.RETURN)
+        print("AIEXE_SEND fallback_enter", flush=True)
+        return True
+    except Exception as exc:
+        print("AIEXE_SEND failed: %s" % exc, flush=True)
+        return False
+
+
 def aiexe_scrape_models(driver):
     """Read Venice's real model list from the picker (title attrs). Best-effort; cached once."""
     import time as _t
@@ -906,12 +979,9 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
 
         if element.tag_name == 'button':
             element.click()
-            element = WebDriverWait(driver, selenium_timeout).until(
-                EC.element_to_be_clickable((By.XPATH, VC_COMPOSER_XPATH))
-            )
-        WebDriverWait(driver, selenium_timeout).until(
-            lambda d: element.is_displayed() and element.is_enabled()
-        )
+            element = _aiexe_wait_composer(driver)
+        else:
+            element = _aiexe_wait_composer(driver)
 
         # NOW the composer (and its model selector) is rendered — pick the requested model.
         # Doing this right after driver.get() failed: the model button wasn't in the DOM yet
@@ -923,12 +993,7 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
         _aiexe_dismiss_modal(driver)  # never let a stray dialog block the composer
         # Venice SPA navigation/model-picker changes can rerender the composer. Never reuse
         # the textarea found before model selection; reacquire it right before typing.
-        element = WebDriverWait(driver, selenium_timeout).until(
-            EC.element_to_be_clickable((By.XPATH, VC_COMPOSER_XPATH))
-        )
-        WebDriverWait(driver, selenium_timeout).until(
-            lambda d: element.is_displayed() and element.is_enabled()
-        )
+        element = _aiexe_wait_composer(driver)
 
         # Type the REAL user prompt into the composer (was a placeholder " " that relied on a
         # network-body swap which no longer lands — Venice was answering the empty space). Use
@@ -941,19 +1006,8 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
                     break
         except Exception:
             _prompt_text = " "
-        try:
-            driver.execute_script(
-                "var el=arguments[0], v=arguments[1];"
-                "el.focus();"
-                "var d=Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype,'value');"
-                "(d&&d.set?d.set:function(x){el.value=x;}).call(el, v);"
-                "el.dispatchEvent(new Event('input', {bubbles:true}));"
-                "el.dispatchEvent(new Event('change', {bubbles:true}));", element, _prompt_text)
-        except Exception:
-            element = WebDriverWait(driver, selenium_timeout).until(
-                EC.element_to_be_clickable((By.XPATH, VC_COMPOSER_XPATH))
-            )
-            element.send_keys(_prompt_text)
+        if not _aiexe_set_composer_text(driver, _prompt_text):
+            _aiexe_wait_composer(driver).send_keys(_prompt_text)
 
         current_url = driver.current_url
 
@@ -963,44 +1017,12 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
                 EC.element_to_be_clickable((By.XPATH, "//button[@type='submit' and @aria-label='submit']"))
             ).click()
             WebDriverWait(driver, selenium_timeout).until(EC.url_changes(current_url))
-            element = WebDriverWait(driver, selenium_timeout).until(
-                EC.element_to_be_clickable((By.XPATH, VC_COMPOSER_XPATH))
-            )
-            WebDriverWait(driver, selenium_timeout).until(
-                lambda d: element.is_displayed() and element.is_enabled()
-            )
-
-            driver.execute_script(
-                "var el=arguments[0];"
-                "el.focus();"
-                "var d=Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype,'value');"
-                "(d&&d.set?d.set:function(x){el.value=x;}).call(el, ' ');"
-                "el.dispatchEvent(new Event('input', {bubbles:true}));"
-                "el.dispatchEvent(new Event('change', {bubbles:true}));", element)
+            _aiexe_set_composer_text(driver, " ")
 
 
         inject_request_interceptor(driver, api_data_json)
 
-        _sent = False  # AIEXE_SUBMIT2
-        for _try in range(20):  # the send button only appears once the composer has text
-            for _xp in VC_SEND_BUTTON_XPATHS:
-                try:
-                    _b = driver.find_element(By.XPATH, _xp)
-                    if _b.is_displayed() and _b.is_enabled():
-                        _b.click(); _sent = True; break
-                except Exception:
-                    pass
-            if _sent:
-                break
-            time.sleep(0.25)
-        if not _sent:
-            try:
-                element = WebDriverWait(driver, selenium_timeout).until(
-                    EC.element_to_be_clickable((By.XPATH, VC_COMPOSER_XPATH))
-                )
-                element.send_keys(Keys.RETURN)
-            except Exception:
-                pass
+        _sent = _aiexe_submit_prompt(driver)
 
         start_time = datetime.now(timezone.utc)
 
