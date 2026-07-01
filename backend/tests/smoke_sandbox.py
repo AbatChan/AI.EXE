@@ -9,6 +9,8 @@ import tempfile
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from app.sandbox import run_python, static_guard  # noqa: E402
 
+_SEATBELT = sys.platform == "darwin" and os.path.exists("/usr/bin/sandbox-exec")
+
 base = tempfile.mkdtemp()
 passed = 0
 
@@ -72,5 +74,37 @@ ok("path traversal in file paths is refused")
 # 9) static_guard unit: clean code is allowed.
 assert static_guard("print('ok')") is None
 ok("static_guard passes clean code")
+
+# 10) macOS seatbelt FS jail: writes outside the sandbox and reads of $HOME are denied,
+#     while the program itself still runs. Skipped where no seatbelt is available.
+if _SEATBELT:
+    home = os.path.expanduser("~")
+    esc = os.path.join(home, "AIEXE_SMOKE_ESCAPE.txt")
+    r = run(code=f"""
+open('inside.txt','w').write('ok')
+try:
+    open({esc!r},'w').write('x'); print('WROTE-OUTSIDE')
+except Exception: print('write-denied')
+""")
+    assert r["isolation"] == "seatbelt", r
+    assert "write-denied" in r["stdout"] and "WROTE-OUTSIDE" not in r["stdout"], r
+    assert not os.path.exists(esc), "seatbelt let a write escape the sandbox"
+    ok("seatbelt confines writes to the sandbox (no escape to $HOME)")
+
+    secret_dir = tempfile.mkdtemp(dir=home)
+    secret = os.path.join(secret_dir, "secret.txt")
+    with open(secret, "w") as fh:
+        fh.write("TOPSECRET")
+    r = run(code=f"""
+try:
+    print('READ:' + open({secret!r}).read())
+except Exception: print('read-denied')
+""")
+    assert "read-denied" in r["stdout"] and "TOPSECRET" not in r["stdout"], r
+    ok("seatbelt denies reading user files under $HOME")
+    import shutil as _sh
+    _sh.rmtree(secret_dir, ignore_errors=True)
+else:
+    ok("seatbelt FS jail not available on this platform (isolation=none) — skipped")
 
 print(f"\n{passed} checks passed.")

@@ -1891,7 +1891,7 @@
       bubble.appendChild(toggle);
     }
 
-    function buildMsgNode(role, text, chatId = '', messageTs = 0, loopDetected = false, thinkingText = '', branchAnchorTs = 0, agentActivities = [], agentMeta = null, displayTs = 0, thinkingMeta = null) {
+    function buildMsgNode(role, text, chatId = '', messageTs = 0, loopDetected = false, thinkingText = '', branchAnchorTs = 0, agentActivities = [], agentMeta = null, displayTs = 0, thinkingMeta = null, attachments = []) {
       const div = document.createElement('div');
       div.className = `msg ${role}`;
       const editingUserMessage = role === 'user' && d.isEditingUserMessage && d.isEditingUserMessage(chatId, messageTs);
@@ -2045,6 +2045,22 @@
         }
       }
 
+      // Attachment capsule(s) — show the files the user attached to this message.
+      if (role === 'user' && Array.isArray(attachments) && attachments.length) {
+        const chips = document.createElement('div');
+        chips.className = 'msg-attachment-chips';
+        attachments.forEach((a) => {
+          const nm = String((a && a.name) || 'attachment');
+          const chip = document.createElement('span');
+          chip.className = 'msg-attachment-chip';
+          chip.title = nm;
+          const icon = (a && a.kind) === 'text' ? '📄' : '📎';
+          chip.textContent = `${icon} ${nm}`;
+          chips.appendChild(chip);
+        });
+        bubble.appendChild(chips);
+      }
+
       stack.appendChild(bubble);
 
       if (role === 'ai' || role === 'user') {
@@ -2196,6 +2212,7 @@
           msg.agentMeta || null,
           Number(msg.displayTs) || 0,
           msg.thinkingMeta || null,
+          Array.isArray(msg.attachments) ? msg.attachments : [],
         ));
       });
       if (forceBottom || (d.getChatAutoScrollPinned && d.getChatAutoScrollPinned())) {

@@ -1350,6 +1350,30 @@ try {
   if (document.readyState === 'complete') startUpdateChecks();
   else window.addEventListener('load', startUpdateChecks);
 })();
+// Boot nudge: if you're on the Venice Pro adapter with a saved login but it isn't running,
+// offer (once) to start it — so the first chat isn't a surprise failure.
+(function () {
+  const nudge = () => setTimeout(() => {
+    try {
+      if (typeof getSelectedInferenceProvider !== 'function' || getSelectedInferenceProvider() !== 'veniceadapter') return;
+      const user = String((appSettings && appSettings.veniceAdapterUsername) || '').trim();
+      const pass = String((appSettings && appSettings.veniceAdapterPassword) || '');
+      if (!user || !pass) return;
+      fetch(getAIExeBackendUrl() + '/api/adapter/status').then((r) => r.json()).then((s) => {
+        if (s && !s.serving && !s.running) {
+          showAppNotification({
+            title: "You're on Venice Pro (local adapter)",
+            message: "It isn't running yet — click here to start it (~30s) so chats are ready.",
+            kind: 'info', durationMs: 12000,
+            onClick: () => { if (typeof startVeniceAdapterThenResend === 'function') void startVeniceAdapterThenResend(); },
+          });
+        }
+      }).catch(() => {});
+    } catch (_) { /* noop */ }
+  }, 3500);
+  if (document.readyState === 'complete') nudge();
+  else window.addEventListener('load', nudge);
+})();
 // Step budget. 16 was too tight for multi-item tasks (e.g. a 3-item checklist):
 // inspection + a couple of failed edit-anchor retries exhausted it before the
 // agent finished every item. The mechanical guards (inspection-budget, read-loop,
@@ -3667,6 +3691,34 @@ async function parseAttachmentFile(file) {
         : 'Document attached as metadata reference (too large for text extraction).',
     };
   }
+  if (isDoc) {
+    // A PDF/DOCX read as raw text yields only its structure (/FlateDecode streams, object
+    // refs) — never the body. Send it to the backend, which extracts real text (pypdf / docx).
+    try {
+      const fd = new FormData();
+      fd.append('file', file, (file && file.name) || 'document');
+      const resp = await fetch(getAIExeBackendUrl() + '/api/extract-text', { method: 'POST', body: fd });
+      if (resp && resp.ok) {
+        const d = await resp.json();
+        const extracted = String((d && d.text) || '').trim();
+        if (extracted && extracted.length >= 20) {
+          return {
+            ...base,
+            kind: 'text',
+            content: extracted.slice(0, maxAttachmentTextChars),
+            note: extracted.length > maxAttachmentTextChars
+              ? 'Extracted document text truncated for prompt context.'
+              : 'Extracted text from document for prompt context.',
+          };
+        }
+      }
+    } catch (_) { /* backend offline — fall through to metadata reference */ }
+    return {
+      ...base,
+      kind: 'file',
+      note: 'Document attached as metadata reference (text extraction unavailable — is the backend running?).',
+    };
+  }
   let content = '';
   try {
     if (file && typeof file.text === 'function') {
@@ -3685,29 +3737,6 @@ async function parseAttachmentFile(file) {
     }
   } catch (_) {
     content = '';
-  }
-  if (isDoc) {
-    const rough = String(content || '')
-      .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim();
-    const snippets = rough.match(/[A-Za-z0-9][A-Za-z0-9 ,.;:'"!?()\-_/]{18,}/g) || [];
-    const extracted = snippets.join('\n').trim();
-    if (!extracted || extracted.length < 80) {
-      return {
-        ...base,
-        kind: 'file',
-        note: 'Document attached as metadata reference (text extraction unavailable for this file).',
-      };
-    }
-    return {
-      ...base,
-      kind: 'text',
-      content: extracted.slice(0, maxAttachmentTextChars),
-      note: extracted.length > maxAttachmentTextChars
-        ? 'Extracted document text truncated for prompt context.'
-        : 'Extracted partial text from document for prompt context.',
-    };
   }
   return {
     ...base,
@@ -3983,9 +4012,12 @@ function stripLeadingLlamaEngineNoise(text, options = {}) {
   const isBannerGlyphLine = (line) => {
     const t = String(line || '').trim();
     if (!t) return false;
+    // Only llama.cpp's box-drawing/block banner art (U+2500–U+25FF). NOT emoji or non-Latin
+    // scripts — those are real answers (e.g. "🙂👍" or a Chinese/Arabic reply) and must survive.
     for (const ch of t) {
       if (/\s/.test(ch)) continue;
-      if (ch.charCodeAt(0) >= 128) continue;
+      const code = ch.codePointAt(0);
+      if (code >= 0x2500 && code <= 0x25FF) continue;
       return false;
     }
     return true;
@@ -4811,6 +4843,7 @@ function loadAppSettings() {
     veniceAdapterModel: 'llama-3.1-405b-akash-api',
     veniceAdapterUsername: '',
     veniceAdapterPassword: '',
+    veniceHidePrompt: true,   // hide the raw typed prompt in the Venice window (adapter)
     workMode: 'coding',
     modelUrl: '',
     keepModelOnUpdate: true,
@@ -5266,8 +5299,12 @@ function syncInferenceProviderOptions() {
 
 function getProviderPresetValue(provider, modelId) {
   const cleanModel = String(modelId || '').trim();
+  // Match against the LIVE (scraped) models too — otherwise a real model like
+  // "DeepSeek V4 Flash:latest" isn't in the static preset list and the dropdown wrongly
+  // falls back to "Custom model ID".
+  const live = Array.isArray(liveProviderModels[provider]) ? liveProviderModels[provider] : [];
   const presets = Array.isArray(inferenceProviderModelPresets[provider]) ? inferenceProviderModelPresets[provider] : [];
-  return presets.includes(cleanModel) ? cleanModel : '__custom__';
+  return (live.includes(cleanModel) || presets.includes(cleanModel)) ? cleanModel : '__custom__';
 }
 
 function getSettingsSectionMeta(section) {
@@ -5478,6 +5515,7 @@ function populateRemoteProviderFields(provider) {
     if (isAdapter) {
       if (settingsAdapterUser) settingsAdapterUser.value = String(appSettings.veniceAdapterUsername || '');
       if (settingsAdapterPass) settingsAdapterPass.value = String(appSettings.veniceAdapterPassword || '');
+      { const hp = document.getElementById('settingsAdapterHidePrompt'); if (hp) hp.checked = appSettings.veniceHidePrompt !== false; }
       refreshAdapterStatus();
     }
   }
@@ -5538,9 +5576,29 @@ function updateProviderConnectionStatus(provider, def, quiet) {
   if (!quiet) { el.textContent = 'Checking connection…'; el.style.color = 'var(--muted, #9ca3af)'; }
   const onModels = (models) => {
     if (myToken !== updateProviderConnectionStatus._token) return;
-    const n = (models || []).filter(Boolean).length;
+    const list = (models || []).filter(Boolean);
+    const n = list.length;
     el.textContent = '● connected' + (n ? (' · ' + n + ' model(s)') : '');
     el.style.color = 'var(--success, #22c55e)';
+    // The adapter has no key+/models path, so its models never reached the Model preset
+    // dropdown (only "Custom model ID" showed). Capture them here and repopulate so they're
+    // selectable.
+    if (isOllama && n) {
+      liveProviderModels[provider] = list;
+      // ONLY replace the old MOCK default (llama-…-akash etc.) with a real model — never a
+      // real user pick. Doing `!list.includes(cur)` reset the user's choice on every poll
+      // (a real model that isn't byte-identical to a live entry got clobbered → "changing
+      // back" + wrong model sent). Match the known mock signatures instead.
+      const def = getInferenceProviderDef(provider);
+      const cur = getProviderModel(provider);
+      const isStaleMock = !cur || /akash|hermes|dolphin|nemotron|^llama-3/i.test(cur);
+      if (def && def.modelField && isStaleMock && list.length) {
+        appSettings[def.modelField] = list[0];
+        saveAppSettings();
+        if (settingsApiModelInput && lastPresetProvider === provider) settingsApiModelInput.value = list[0];
+      }
+      if (lastPresetProvider === provider) populateProviderPresetOptions(provider, getProviderModel(provider));
+    }
   };
   const onDown = (extra) => {
     if (myToken !== updateProviderConnectionStatus._token) return;
@@ -11341,9 +11399,17 @@ if (settingsVerifyBtn) {
 }
 if (settingsProviderSelect) {
   settingsProviderSelect.addEventListener('change', () => {
+    const prevProvider = String(appSettings.inferenceProvider || 'local').trim().toLowerCase();
     appSettings.inferenceProvider = remoteProvidersEnabled && Object.prototype.hasOwnProperty.call(inferenceProviderDefs, settingsProviderSelect.value)
       ? String(settingsProviderSelect.value || 'local').trim().toLowerCase()
       : 'local';
+    // Leaving the Venice Pro adapter: stop it so its Chrome window closes (no orphan browser,
+    // and the profile lock is freed for next time).
+    if (prevProvider === 'veniceadapter' && appSettings.inferenceProvider !== 'veniceadapter') {
+      fetch(getAIExeBackendUrl() + '/api/adapter/stop', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
+        .then(() => { if (typeof refreshAdapterStatus === 'function') refreshAdapterStatus(); })
+        .catch(() => {});
+    }
     syncSettingsProviderUi();
     saveSettingsFromUi({ toastChange: `${getInferenceProviderDef(appSettings.inferenceProvider).label} selected` });
   });
@@ -11430,10 +11496,29 @@ function adapterTargetPort() {
   const m = url.match(/:(\d{2,5})(?:\/|$)/);
   return m ? Number(m[1]) : 9999;
 }
+// Noise that isn't an error: HTTP access-log lines ("GET /api/tags HTTP/1.1" 200 ...),
+// server startup banners, and clean-shutdown notices.
+function isAdapterLogNoise(line) {
+  return (
+    /"\s*(GET|POST|PUT|DELETE|HEAD|OPTIONS|PATCH)\b.*HTTP\/\d/i.test(line) ||  // access log
+    /^\S+ - - \[/.test(line) ||                                               // werkzeug/common log
+    /running on http|serving|press ctrl\+c|listening on|started server|application startup/i.test(line) ||
+    /keyboard ?interrupt|shutting down|received signal|sigterm|sigint|stopped by user/i.test(line) ||
+    /^(file "|traceback|\^|~|self\.|raise )/i.test(line) ||                   // python trace scaffolding
+    /SyntaxWarning|DeprecationWarning|invalid escape sequence/i.test(line) || // python import warnings
+    /^\S+\.py:\d+:/.test(line) ||                                             // "…server.py:335:" source echo
+    /reject\(new Error|Unsupported web3|new Error\(|\$\{|`/.test(line)        // the web3-provider JS source lines
+  );
+}
+
 // Turn the adapter's raw Python/Selenium log into a plain-English reason for the UI.
+// Returns '' when the log shows no actual error (a normal stop) so the caller keeps
+// the neutral "not running" status instead of a scary red line.
 function friendlyAdapterError(log) {
   const t = String(log || '');
   const lower = t.toLowerCase();
+  if (/could not auto-fill|please sign in manually|sign in - venice|still on \/sign-in/.test(lower))
+    return 'Your Venice session expired — sign in to Venice in the Chrome window that opened. It starts serving once you\'re in.';
   if (/sign-in page after login|email code|verification code/.test(lower))
     return 'Login needs a verification code — click Start, then type the code Venice emails you into the browser window. It stays logged in after.';
   if (/cloudflare|just a moment|verify you are human|captcha|turnstile/.test(lower))
@@ -11446,42 +11531,83 @@ function friendlyAdapterError(log) {
     return "Couldn't find the Venice login fields — Venice may have changed their sign-in page again.";
   if (/not installed/.test(lower))
     return 'Not set up yet — click Start to download and install it.';
-  // Fallback: the last real message line, stripped of Python exception noise.
+  // Fallback: only surface a reason if the log actually contains an error. Skip access-log
+  // lines and normal-shutdown noise so a successful "GET /api/tags 200" is never shown as a
+  // crash reason.
   const lines = t.trim().split('\n').map((l) => l.trim()).filter(Boolean);
-  const last = lines.reverse().find((l) => !/^(file "|traceback|\^|~|self\.|raise )/i.test(l)) || '';
-  const clean = last.replace(/^[\w.]+(error|exception):\s*(message:\s*)?/i, '').trim();
-  return clean ? ('Adapter stopped: ' + clean.slice(0, 160)) : 'The adapter stopped unexpectedly.';
+  const hasRealError = lines.some((l) => !isAdapterLogNoise(l) && /\b(error|exception|failed|timeout|refused|traceback)\b/i.test(l));
+  if (!hasRealError) return '';  // normal stop — no error to report
+  const last = lines.reverse().find((l) => !isAdapterLogNoise(l) && /\b(error|exception|failed|timeout|refused)\b/i.test(l)) || '';
+  const clean = last.replace(/^[\w.]+(error|exception):\s*(message:\s*)?/i, '').replace(/^\S+ - - \[.*?\]\s*/, '').trim();
+  return clean ? ('Adapter stopped: ' + clean.slice(0, 160)) : '';
 }
 
 async function refreshAdapterStatus() {
   if (!settingsAdapterStatus) return;
-  let running = false;
+  // Only touch the DOM when the message actually changes — otherwise the 2.5s re-poll and the
+  // async log fetches make the line visibly flash.
+  const setStatus = (text, color) => {
+    if (settingsAdapterStatus._lastText === text && settingsAdapterStatus._lastColor === color) return;
+    settingsAdapterStatus._lastText = text;
+    settingsAdapterStatus._lastColor = color;
+    settingsAdapterStatus.textContent = text;
+    settingsAdapterStatus.style.color = color;
+  };
+  let procAlive = false;   // adapter process is up (may still be opening Chrome / logging in)
   try {
     const res = await fetch(getAIExeBackendUrl() + '/api/adapter/status');
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const s = await res.json();
-    running = Boolean(s.running);
-    settingsAdapterStatus.textContent = running
-      ? `● adapter running (pid ${s.pid}, port ${s.port})`
-      : (s.installed ? '○ installed · not running' : '○ not installed — Start will download + set it up first');
-    settingsAdapterStatus.style.color = running ? 'var(--success, #22c55e)' : '';
-    if (!running && s.installed) {
-      // It was set up but isn't running — likely crashed (Chrome/login). Show a plain reason.
+    procAlive = Boolean(s.running);
+    const serving = Boolean(s.serving);
+    if (serving) {
+      refreshAdapterStatus._loginWaiting = false;
+      setStatus(`● Adapter running on port ${s.port} — Venice Pro is ready`, 'var(--success, #22c55e)');
+    } else if (procAlive) {
+      // Set the text from CACHED login-waiting state so it's decided synchronously (no per-cycle
+      // async override → no flash). The log fetch below only updates the cache for next cycle.
+      setStatus(
+        refreshAdapterStatus._loginWaiting
+          ? "◐ Waiting for you to sign in to Venice in the Chrome window (session expired). It serves once you're in."
+          : '◐ Starting adapter — a Chrome window is opening (~30s). Sign in if prompted; it stays logged in after.',
+        'var(--warning, #f59e0b)');
       fetch(getAIExeBackendUrl() + '/api/adapter/logs').then((r) => r.json()).then((d) => {
-        const msg = friendlyAdapterError((d && d.log) || '');
-        if (msg) {
-          settingsAdapterStatus.textContent = '○ ' + msg;
-          settingsAdapterStatus.style.color = 'var(--danger, #ef4444)';
-        }
+        refreshAdapterStatus._loginWaiting = /sign in manually|Sign in - Venice|still on \/sign-in|verification code|email code/i.test(String((d && d.log) || ''));
       }).catch(() => {});
+      clearTimeout(refreshAdapterStatus._pollT);
+      refreshAdapterStatus._pollT = setTimeout(refreshAdapterStatus, 2500);
+    } else {
+      refreshAdapterStatus._loginWaiting = false;
+      setStatus(s.installed ? '○ Adapter not running — click Start' : '○ Not set up yet — click Start to download and install it', '');
+      if (s.installed) {
+        // Stopped after being set up — likely crashed (Chrome/login). Show a plain reason if any.
+        fetch(getAIExeBackendUrl() + '/api/adapter/logs').then((r) => r.json()).then((d) => {
+          const msg = friendlyAdapterError((d && d.log) || '');
+          if (msg) setStatus('○ ' + msg, 'var(--danger, #ef4444)');
+        }).catch(() => {});
+      }
     }
   } catch (_) {
-    settingsAdapterStatus.textContent = 'AI.EXE backend not reachable — start the backend to manage the adapter.';
-    settingsAdapterStatus.style.color = 'var(--danger, #ef4444)';
+    setStatus('AI.EXE backend not reachable — start the backend to manage the adapter.', 'var(--danger, #ef4444)');
   }
-  // While running: hide Start, show the red Stop. Otherwise the reverse.
-  if (settingsAdapterStartBtn) settingsAdapterStartBtn.style.display = running ? 'none' : '';
-  if (settingsAdapterStopBtn) settingsAdapterStopBtn.style.display = running ? '' : 'none';
+  // Show the red Stop as soon as the process is up (so a stuck login can be cancelled).
+  if (settingsAdapterStartBtn) settingsAdapterStartBtn.style.display = procAlive ? 'none' : '';
+  if (settingsAdapterStopBtn) settingsAdapterStopBtn.style.display = procAlive ? '' : 'none';
+}
+const settingsAdapterHidePrompt = document.getElementById('settingsAdapterHidePrompt');
+if (settingsAdapterHidePrompt) {
+  settingsAdapterHidePrompt.checked = appSettings.veniceHidePrompt !== false;
+  settingsAdapterHidePrompt.addEventListener('change', () => {
+    appSettings.veniceHidePrompt = settingsAdapterHidePrompt.checked;
+    saveAppSettings();
+    const running = settingsAdapterStopBtn && settingsAdapterStopBtn.style.display !== 'none';
+    showAppNotification({
+      title: 'Saved',
+      message: running ? 'Restart the adapter (Stop then Start) for this to take effect.'
+                       : 'It will apply when you start the adapter.',
+      kind: 'info', durationMs: 4000,
+    });
+  });
 }
 if (settingsAdapterUser) {
   settingsAdapterUser.addEventListener('input', () => { appSettings.veniceAdapterUsername = settingsAdapterUser.value; saveAppSettings(); });
@@ -11507,6 +11633,11 @@ if (settingsAdapterStartBtn) {
     appSettings.veniceAdapterUsername = user; appSettings.veniceAdapterPassword = pass; saveAppSettings();
     const backend = getAIExeBackendUrl();
     setButtonLoading(settingsAdapterStartBtn, true);
+    // Immediate honest feedback — the adapter takes ~30s to open Chrome + log in before it's ready.
+    if (settingsAdapterStatus) {
+      settingsAdapterStatus.textContent = '◐ Starting adapter — a Chrome window is opening (~30s). Sign in if prompted; it stays logged in after.';
+      settingsAdapterStatus.style.color = 'var(--warning, #f59e0b)';
+    }
     try {
       const st = await (await fetch(backend + '/api/adapter/status')).json();
       if (!st.installed) {
@@ -11518,7 +11649,7 @@ if (settingsAdapterStartBtn) {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         // Visible browser: Venice's login is behind Cloudflare, which blocks headless. The
         // window also lets you complete an email verification code once (profile persists).
-        body: JSON.stringify({ username: user, password: pass, port: adapterTargetPort(), headless: false }),
+        body: JSON.stringify({ username: user, password: pass, port: adapterTargetPort(), headless: false, hide_prompt: appSettings.veniceHidePrompt !== false }),
       })).json();
       showAppNotification(r.ok
         ? { title: 'Adapter', message: r.detail === 'already running' ? 'Adapter already running.' : 'Adapter started — give it a few seconds to log in.', kind: 'success' }
@@ -12436,6 +12567,14 @@ function appendMessageToChat(chatId, role, text, forcedTs = 0, options = {}) {
 
   const ts = Number(forcedTs) || nowTs();
   const message = { role, text: cleaned, ts };
+  if (Array.isArray(options.attachments) && options.attachments.length) {
+    message.attachments = options.attachments.slice(0, 12).map((a) => ({
+      name: String((a && a.name) || 'attachment').slice(0, 200),
+      kind: (a && a.kind) === 'text' ? 'text' : 'file',
+      mime: String((a && a.mime) || '').slice(0, 120),
+      size: Math.max(0, Number(a && a.size) || 0),
+    }));
+  }
   let shouldScheduleSmartRename = false;
   if (role === 'ai' && typeof options.thinking === 'string' && options.thinking.trim()) {
     message.thinking = options.thinking.trim();
@@ -13058,7 +13197,80 @@ function dispatchNextQueuedSend() {
   }
 }
 
-function sendMessage() {
+// Venice Pro adapter: if the user chats while it isn't serving, ASK them to start it (don't
+// auto-start). Returns true only when it's already serving; otherwise shows a click-to-start
+// prompt and returns false. The clicked prompt starts it, waits, then resends the message.
+let _adapterStartingForSend = false;
+async function ensureVeniceAdapterReady() {
+  const backend = getAIExeBackendUrl();
+  let status = null;
+  try {
+    status = await (await fetch(backend + '/api/adapter/status')).json();
+  } catch (_) {
+    showAppNotification({ title: 'Backend offline', message: "AI.EXE's backend isn't reachable — reopen the app and try again.", kind: 'error' });
+    return false;
+  }
+  if (status && status.serving) return true;
+  if (_adapterStartingForSend) {
+    showComposerNotice('Venice adapter is still starting — one moment…');
+    return false;
+  }
+  const user = String(appSettings.veniceAdapterUsername || '').trim();
+  const pass = String(appSettings.veniceAdapterPassword || '');
+  if (!user || !pass) {
+    showAppNotification({ title: 'Venice adapter not set up', message: 'Add your Venice login in Settings → Provider first, then start the adapter.', kind: 'warning', durationMs: 8000 });
+    return false;
+  }
+  // Prompt — the user decides. Clicking the toast starts it and then sends the message.
+  showAppNotification({
+    title: "You're on Venice Pro (local adapter)",
+    message: "It isn't running yet. Click here to start it (~30s) — then I'll send your message.",
+    kind: 'warning',
+    durationMs: 14000,
+    onClick: () => { void startVeniceAdapterThenResend(); },
+  });
+  return false;
+}
+
+async function startVeniceAdapterThenResend() {
+  if (_adapterStartingForSend) return;
+  const backend = getAIExeBackendUrl();
+  const user = String(appSettings.veniceAdapterUsername || '').trim();
+  const pass = String(appSettings.veniceAdapterPassword || '');
+  if (!user || !pass) return;
+  _adapterStartingForSend = true;
+  showAppNotification({ title: 'Starting Venice adapter', message: 'Opening Chrome and logging in (~30s) — sign in if the window asks.', kind: 'info', durationMs: 9000 });
+  try {
+    let st = null;
+    try { st = await (await fetch(backend + '/api/adapter/status')).json(); } catch (_) {}
+    if (st && !st.installed) { await fetch(backend + '/api/adapter/install', { method: 'POST' }); }
+    await fetch(backend + '/api/adapter/start', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: user, password: pass, port: adapterTargetPort(), headless: false, hide_prompt: appSettings.veniceHidePrompt !== false }),
+    });
+    for (let i = 0; i < 90; i++) {                    // up to ~135s (manual login/captcha)
+      await new Promise((r) => setTimeout(r, 1500));
+      try {
+        const s = await (await fetch(backend + '/api/adapter/status')).json();
+        if (s && s.serving) {
+          _adapterStartingForSend = false;
+          if (typeof refreshAdapterStatus === 'function') refreshAdapterStatus();
+          const hasPending = mainInput && String(mainInput.value || '').trim();
+          showAppNotification({ title: 'Adapter ready', message: hasPending ? 'Sending your message…' : 'Venice Pro is ready — send your message.', kind: 'success' });
+          if (hasPending && typeof sendMessage === 'function') void sendMessage();  // resends the text still in the box
+          return;
+        }
+      } catch (_) { /* keep polling */ }
+    }
+    _adapterStartingForSend = false;
+    showAppNotification({ title: "Adapter didn't start", message: 'Check Settings → Provider (Chrome installed? login/captcha?). Then resend.', kind: 'error', durationMs: 8000 });
+  } catch (err) {
+    _adapterStartingForSend = false;
+    showAppNotification({ title: "Couldn't start adapter", message: String((err && err.message) || err), kind: 'error' });
+  }
+}
+
+async function sendMessage() {
   const operationRunning = pendingInferenceCount > 0;
   if (operationRunning && isCurrentViewInferenceChat()) {
     showComposerNotice('Still responding in this chat — press stop to interrupt, or wait.');
@@ -13082,14 +13294,23 @@ function sendMessage() {
   const userText = String(thinkControl.userText || rawVal).trim();
   if (!userText) return;
   if (!ensureSignedIn()) return;
+  // On the Venice Pro adapter: make sure it's actually serving before we send (auto-start +
+  // wait if needed). Runs before we clear the input, so the message is never lost.
+  if (getSelectedInferenceProvider() === 'veniceadapter') {
+    const ready = await ensureVeniceAdapterReady();
+    if (!ready) return;
+  }
   enterChatView();
   const modelPrompt = buildPromptWithInputAugments(thinkControl.modelText || userText);
   clearInputBox();
+  // Capture the attached files' display info BEFORE clearing, so we can show a capsule on the
+  // sent user message (the content is already folded into the prompt by buildPromptWithInputAugments).
+  const sentAttachments = (pendingAttachments || []).map((a) => ({ name: a.name, kind: a.kind, mime: a.mime, size: a.size }));
   clearPendingAttachments();
   const chat = (inNewChatMode || !getActiveChat()) ? createChat(userText) : getActiveChat();
   if (!chat) return;
   chatAutoScrollPinned = true;
-  appendMessageToChat(chat.id, 'user', userText);
+  appendMessageToChat(chat.id, 'user', userText, 0, sentAttachments.length ? { attachments: sentAttachments } : {});
   if (operationRunning) {
     queuedSends.push({
       chatId: chat.id,
@@ -14452,7 +14673,18 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
         model: String(getProviderModel(inferenceProvider) || ''),
         workspace: getWorkspaceDebugSnapshot(),
       });
-      appendErrorMessageToChat(chatId, res && res.message ? res.message : `${providerDef.label} inference failed.`);
+      if (inferenceProvider === 'veniceadapter') {
+        appendErrorMessageToChat(chatId, "The Venice Pro adapter isn't ready — it likely stopped or your Venice session needs a login. Open Settings → Provider to start it (sign in to the Chrome window if it asks), then resend.");
+        showAppNotification({
+          title: 'Venice adapter not ready',
+          message: 'Click here to start it (~30s) — then resend your message. Or open Settings → Provider.',
+          kind: 'warning',
+          durationMs: 13000,
+          onClick: () => { void startVeniceAdapterThenResend(); },
+        });
+      } else {
+        appendErrorMessageToChat(chatId, res && res.message ? res.message : `${providerDef.label} inference failed.`);
+      }
       return;
     }
 
