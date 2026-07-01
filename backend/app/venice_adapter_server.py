@@ -87,18 +87,9 @@ def capture_and_redirect_browser_logs(driver):
         print(f"Browser log: {entry['level']} - {entry['message']}", file=sys.stderr)
 
 
-def _aiexe_prepare_driver(driver):
-    try:
-        driver.set_window_size(1480, 1100)
-    except Exception:
-        pass
-    return driver
-
-
 def get_webdriver(headless=True, debug_browser=False, docker=False):
     chrome_options = webdriver.ChromeOptions()
     chrome_options.add_argument("--user-data-dir=" + os.path.join(os.path.dirname(os.path.abspath(__file__)), ".chrome-profile"))
-    chrome_options.add_argument("--window-size=1480,1100")
     try:
         chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
         chrome_options.add_argument("--disable-blink-features=AutomationControlled")
@@ -125,7 +116,7 @@ def get_webdriver(headless=True, debug_browser=False, docker=False):
         # Try to use Chromium first
         try:
             chrome_options.binary_location = "/usr/bin/chromium"
-            driver = _aiexe_prepare_driver(webdriver.Chrome(service=service, options=chrome_options))
+            driver = webdriver.Chrome(service=service, options=chrome_options)
             print("Using Chromium")
             return driver
         except WebDriverException as e:
@@ -134,7 +125,7 @@ def get_webdriver(headless=True, debug_browser=False, docker=False):
         # If Chromium fails, try Chrome
         try:
             chrome_options.binary_location = ""
-            driver = _aiexe_prepare_driver(webdriver.Chrome(service=service, options=chrome_options))
+            driver = webdriver.Chrome(service=service, options=chrome_options)
             print("Using Google Chrome")
             return driver
         except WebDriverException as e:
@@ -143,14 +134,14 @@ def get_webdriver(headless=True, debug_browser=False, docker=False):
         # Use ChromeDriverManager to install
 
         try:
-            driver = _aiexe_prepare_driver(webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options))
+            driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
             return driver
         except WebDriverException as e:
             print(f"Chrome not found ({e}), trying Chromium")
 
 
         try:
-            driver = _aiexe_prepare_driver(webdriver.Chrome(service=Service(ChromeDriverManager(chrome_type=ChromeType.CHROMIUM).install()), options=chrome_options))
+            driver = webdriver.Chrome(service=Service(ChromeDriverManager(chrome_type=ChromeType.CHROMIUM).install()), options=chrome_options)
             return driver
         except WebDriverException as e:
             print(f"Chromium error occurred: {e}")
