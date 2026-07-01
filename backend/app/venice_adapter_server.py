@@ -19,6 +19,7 @@ import argparse
 import os
 import sys
 import hashlib
+import re
 from enum import Enum
 import array
 
@@ -86,9 +87,18 @@ def capture_and_redirect_browser_logs(driver):
         print(f"Browser log: {entry['level']} - {entry['message']}", file=sys.stderr)
 
 
+def _aiexe_prepare_driver(driver):
+    try:
+        driver.set_window_size(1480, 1100)
+    except Exception:
+        pass
+    return driver
+
+
 def get_webdriver(headless=True, debug_browser=False, docker=False):
     chrome_options = webdriver.ChromeOptions()
     chrome_options.add_argument("--user-data-dir=" + os.path.join(os.path.dirname(os.path.abspath(__file__)), ".chrome-profile"))
+    chrome_options.add_argument("--window-size=1480,1100")
     try:
         chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
         chrome_options.add_argument("--disable-blink-features=AutomationControlled")
@@ -115,7 +125,7 @@ def get_webdriver(headless=True, debug_browser=False, docker=False):
         # Try to use Chromium first
         try:
             chrome_options.binary_location = "/usr/bin/chromium"
-            driver = webdriver.Chrome(service=service, options=chrome_options)
+            driver = _aiexe_prepare_driver(webdriver.Chrome(service=service, options=chrome_options))
             print("Using Chromium")
             return driver
         except WebDriverException as e:
@@ -124,7 +134,7 @@ def get_webdriver(headless=True, debug_browser=False, docker=False):
         # If Chromium fails, try Chrome
         try:
             chrome_options.binary_location = ""
-            driver = webdriver.Chrome(service=service, options=chrome_options)
+            driver = _aiexe_prepare_driver(webdriver.Chrome(service=service, options=chrome_options))
             print("Using Google Chrome")
             return driver
         except WebDriverException as e:
@@ -133,14 +143,14 @@ def get_webdriver(headless=True, debug_browser=False, docker=False):
         # Use ChromeDriverManager to install
 
         try:
-            driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
+            driver = _aiexe_prepare_driver(webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options))
             return driver
         except WebDriverException as e:
             print(f"Chrome not found ({e}), trying Chromium")
 
 
         try:
-            driver = webdriver.Chrome(service=Service(ChromeDriverManager(chrome_type=ChromeType.CHROMIUM).install()), options=chrome_options)
+            driver = _aiexe_prepare_driver(webdriver.Chrome(service=Service(ChromeDriverManager(chrome_type=ChromeType.CHROMIUM).install()), options=chrome_options))
             return driver
         except WebDriverException as e:
             print(f"Chromium error occurred: {e}")
@@ -662,9 +672,37 @@ def presence_of_either_element_located(locators):
     return _predicate
 
 AIEXE_MODELS_CACHE = []
-AIEXE_FALLBACK_MODELS = _vcfg('FALLBACK_MODELS', ["DeepSeek V4 Flash", "DeepSeek V3.2",
-    "Qwen 3.7 Max", "Claude Fable 5", "Claude Opus 4.8", "Claude Sonnet 4.6", "GLM 4.6",
-    "GLM 4.7 Flash Heretic", "GLM 5.2", "Google Gemma 4 31B Instr", "Venice Uncensored 1.2"])
+AIEXE_TEXT_MODEL_CATALOG = [
+    "Claude Sonnet 5", "GLM 5.2", "Kimi K2.7 Code", "MiniMax M3 Preview", "MiMo-V2.5",
+    "Claude Fable 5", "NVIDIA Nemotron 3 Ultra", "Qwen 3.7 Plus", "Claude Opus 4.8",
+    "Claude Opus 4.8 Fast", "Gemma 4 26B A4B Uncensored", "Qwen3.6 35B A3B Uncensored",
+    "Qwen 3.7 Max", "Gemini 3.5 Flash", "Grok Build 0.1", "Qwen 3.6 35B A3B FP8",
+    "Gemma 4 31B Instruct", "Claude Opus 4.7 Fast", "Qwen 3.6 27B", "DeepSeek V4 Pro",
+    "DeepSeek V4 Flash", "GPT-5.5 Pro", "GLM 5.1", "GPT-5.5", "Kimi K2.6", "Grok 4.3",
+    "Claude Opus 4.7", "Gemma 4 Uncensored", "Qwen 3.6 Plus Uncensored",
+    "Google Gemma 4 31B Instruct", "Google Gemma 4 26B A4B Instruct", "GLM 5V Turbo",
+    "Venice Uncensored 1.2", "GPT-5.4 Mini", "Aion 2.0", "Nemotron Cascade 2 30B A3B",
+    "MiniMax M2.7", "Venice Uncensored 1.1", "Gemma 3 27B", "GLM 4.7", "GPT OSS 20B",
+    "GPT OSS 120B", "Qwen 2.5 7B", "Qwen3 30B A3B", "Qwen3 VL 30B A3B",
+    "Mistral Small 4", "GLM 5 Turbo", "Grok 4.20", "Grok 4.20 Multi-Agent",
+    "Qwen 3.5 9B", "GPT-5.4", "GPT-5.4 Pro", "GPT-4o", "GPT-4o Mini",
+    "Qwen 3.5 35B A3B", "GPT-5.3 Codex", "Venice Role Play Uncensored", "Mercury 2",
+    "Gemini 3.1 Pro Preview", "Claude Sonnet 4.6", "Qwen 3.5 397B", "MiniMax M2.5",
+    "GLM 5", "Claude Opus 4.6", "GLM 4.7 Flash Heretic", "GLM 4.7 Flash", "Kimi K2.5",
+    "Qwen 3 Coder 480B Turbo", "NVIDIA Nemotron 3 Nano 30B", "Qwen3 VL 235B",
+    "GLM 4.7 Reasoning", "Gemini 3 Flash Preview", "GPT-5.2", "Claude Opus 4.5",
+    "DeepSeek V3.2", "Claude Sonnet 4.5", "GPT-5.2 Codex", "GLM 4.6",
+]
+AIEXE_FALLBACK_MODELS = _vcfg('FALLBACK_MODELS', AIEXE_TEXT_MODEL_CATALOG)
+
+
+def _aiexe_model_catalog():
+    names = []
+    for source in (AIEXE_MODELS_CACHE, AIEXE_FALLBACK_MODELS):
+        for name in source or []:
+            if name and name not in names:
+                names.append(name)
+    return names
 
 
 def _aiexe_model_button(driver):
@@ -677,7 +715,7 @@ def _aiexe_model_button(driver):
                 return b
         except Exception:
             pass
-    known = [m.lower() for m in (AIEXE_MODELS_CACHE or AIEXE_FALLBACK_MODELS)]
+    known = [m.lower() for m in _aiexe_model_catalog()]
     try:
         for b in driver.find_elements(By.TAG_NAME, "button"):
             try:
@@ -745,6 +783,117 @@ def _aiexe_dismiss_modal(driver):
 
 def _aiexe_close_modal(driver):
     _aiexe_dismiss_modal(driver)
+
+
+def _aiexe_model_titles(driver):
+    names = []
+    for p in driver.find_elements(By.CSS_SELECTOR, VC_MODEL_ROW_TITLE_CSS):
+        try:
+            t = (p.get_attribute("title") or "").strip()
+        except Exception:
+            t = ""
+        if t and t not in names:
+            names.append(t)
+    return names
+
+
+def _aiexe_text_model_count(driver):
+    try:
+        texts = driver.execute_script("""
+          return Array.from(document.querySelectorAll('button,p,div,span'))
+            .map(e => String(e.textContent || '').trim())
+            .filter(Boolean)
+            .slice(0, 2000);
+        """) or []
+        for txt in texts:
+            m = re.search(r"\bText\s*[\u2022\u00b7]\s*(\d+)\b", str(txt))
+            if m:
+                return int(m.group(1))
+    except Exception:
+        pass
+    return 0
+
+
+def _aiexe_model_scroll_container(driver):
+    try:
+        el = driver.execute_script("""
+          const preferred = document.querySelector('.model-switcher-scroll-container,[class*="model-switcher-scroll-container"]');
+          if (preferred) return preferred;
+          const candidates = Array.from(document.querySelectorAll('div'))
+            .filter(e => {
+              const cs = getComputedStyle(e);
+              return e.offsetParent !== null
+                && e.scrollHeight > e.clientHeight + 80
+                && /(auto|scroll)/.test(cs.overflowY + cs.overflow);
+            })
+            .sort((a,b) => (b.scrollHeight - b.clientHeight) - (a.scrollHeight - a.clientHeight));
+          return candidates[0] || null;
+        """)
+        if el is not None:
+            return el
+    except Exception:
+        pass
+    return None
+
+
+def _aiexe_collect_models_from_modal(driver):
+    """Collect model titles from Venice's virtualized model modal.
+
+    The modal says "Text <count>", but only the visible rows exist in the DOM at once.
+    Scrolling the modal is required to discover the full text-model list.
+    """
+    import time as _t
+    expected = _aiexe_text_model_count(driver)
+    names = []
+    seen = set()
+
+    def add_visible():
+        for t in _aiexe_model_titles(driver):
+            if t not in seen:
+                seen.add(t)
+                names.append(t)
+
+    add_visible()
+    scroller = _aiexe_model_scroll_container(driver)
+    if scroller is not None:
+        try:
+            dims = driver.execute_script(
+                "return {className:String(arguments[0].className||''), scrollTop:arguments[0].scrollTop, scrollHeight:arguments[0].scrollHeight, clientHeight:arguments[0].clientHeight};",
+                scroller)
+            print("AIEXE_MODELS scroller=%r" % dims, flush=True)
+        except Exception:
+            pass
+        try:
+            driver.execute_script("arguments[0].scrollTop = 0;", scroller)
+            _t.sleep(0.25)
+            add_visible()
+        except Exception:
+            pass
+        stagnant = 0
+        last_count = len(names)
+        for _ in range(90):
+            if expected and len(names) >= expected:
+                break
+            try:
+                at_bottom = bool(driver.execute_script(
+                    "var e=arguments[0];"
+                    "e.scrollTop = Math.min(e.scrollHeight, e.scrollTop + Math.max(320, e.clientHeight * 0.85));"
+                    "return e.scrollTop + e.clientHeight >= e.scrollHeight - 4;", scroller))
+            except Exception:
+                at_bottom = True
+            _t.sleep(0.18)
+            add_visible()
+            if len(names) == last_count:
+                stagnant += 1
+            else:
+                stagnant = 0
+                last_count = len(names)
+            if at_bottom and stagnant >= 3:
+                break
+    else:
+        print("AIEXE_MODELS no scroll container found", flush=True)
+    print("AIEXE_MODELS modal count expected=%s collected=%d" % (expected or "?", len(names)), flush=True)
+    return names
 
 
 def _aiexe_wait_composer(driver):
@@ -835,11 +984,7 @@ def aiexe_scrape_models(driver):
         if not _aiexe_open_model_modal(driver):
             return []
         _t.sleep(1)
-        names = []
-        for p in driver.find_elements(By.CSS_SELECTOR, VC_MODEL_ROW_TITLE_CSS):
-            t = (p.get_attribute("title") or "").strip()
-            if t and t not in names:
-                names.append(t)
+        names = _aiexe_collect_models_from_modal(driver)
         _aiexe_close_modal(driver)
         return names
     except Exception:
@@ -856,7 +1001,7 @@ def aiexe_select_model(driver, name):
     # Only drive the picker for a REAL Venice model. Legacy/mock IDs (llama-...-akash, hermes,
     # dolphin, nemotron, etc.) aren't in Venice's list — opening the modal for them finds
     # nothing and can leave a dialog over the composer, which breaks the chat. Skip them.
-    known = [m.lower() for m in (AIEXE_MODELS_CACHE or AIEXE_FALLBACK_MODELS)]
+    known = [m.lower() for m in _aiexe_model_catalog()]
     nl = name.lower()
     if not any(nl == k or nl in k or k in nl for k in known):
         print("AIEXE_MODEL skip (not a known model): %r" % name, flush=True)
@@ -875,23 +1020,27 @@ def aiexe_select_model(driver, name):
         if not _aiexe_open_model_modal(driver):
             return
         _t.sleep(0.8)
-        try:
-            box = driver.find_element(By.CSS_SELECTOR, VC_MODEL_SEARCH_CSS)
-            box.clear()
-            box.send_keys(name.split()[0])
-            _t.sleep(0.9)
-        except Exception as _e:
-            print("AIEXE_MODEL search box not found (%s)" % _e, flush=True)
-        rows = driver.find_elements(By.CSS_SELECTOR, VC_MODEL_ROW_TITLE_CSS)
-        print("AIEXE_MODEL rows=%d titles=%r" % (len(rows), [(r.get_attribute("title") or "")[:24] for r in rows[:10]]), flush=True)
-        target = None
-        for p in rows:
-            if (p.get_attribute("title") or "").strip().lower() == nl:
-                target = p; break
-        if target is None:
+        def _find_target():
+            rows = driver.find_elements(By.CSS_SELECTOR, VC_MODEL_ROW_TITLE_CSS)
+            print("AIEXE_MODEL rows=%d titles=%r" % (len(rows), [(r.get_attribute("title") or "")[:24] for r in rows[:10]]), flush=True)
+            for p in rows:
+                if (p.get_attribute("title") or "").strip().lower() == nl:
+                    return p
             for p in rows:
                 if nl in (p.get_attribute("title") or "").strip().lower():
-                    target = p; break
+                    return p
+            return None
+
+        target = _find_target()
+        if target is None:
+            try:
+                box = driver.find_element(By.CSS_SELECTOR, VC_MODEL_SEARCH_CSS)
+                box.clear()
+                box.send_keys(name)
+                _t.sleep(0.9)
+                target = _find_target()
+            except Exception as _e:
+                print("AIEXE_MODEL search box not found (%s)" % _e, flush=True)
         if target is not None:
             try:
                 row = target.find_element(By.XPATH, "./ancestor::*[@role='group' or @role='menuitem' or @role='menuitemradio'][1]")
@@ -1261,7 +1410,7 @@ def get_mock_model(name, parameter_size):
 def tags():
     # Advertise Venice's REAL models (scraped once at startup, else the curated fallback) so
     # AI.EXE's model dropdown matches what the picker can actually select.
-    names = AIEXE_MODELS_CACHE or AIEXE_FALLBACK_MODELS
+    names = _aiexe_model_catalog()
     tags_response = {"models": [get_mock_model(n + ":latest", "") for n in names]}
     return Response(json.dumps(tags_response), content_type='application/json')
 
