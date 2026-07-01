@@ -583,7 +583,7 @@
               </path>
             </svg>
           </button>
-          <button class="exp-icon-btn" id="expRunAppBtn" type="button" title="Run the project — web apps open in the browser over http://localhost; Python projects run in a console"
+          <button class="exp-icon-btn" id="expRunAppBtn" type="button" title="Run the project"
             onclick="runWorkspaceApp()">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round">
               <path d="M7 5l12 7-12 7z"></path>
@@ -873,11 +873,12 @@
                   <option value="gemini">Gemini API</option>
                   <option value="deepseek">DeepSeek API</option>
                   <option value="venice">Venice API</option>
+                  <option value="veniceadapter">Venice Pro (local adapter)</option>
                 </select>
               </div>
 
               <div id="settingsRemoteFieldsWrap" class="settings-remote-grid" style="display:none;">
-                <div class="settings-field settings-field-span">
+                <div class="settings-field settings-field-span" id="settingsApiKeyWrap">
                   <div class="chat-modal-label" id="settingsApiKeyLabel">API Key</div>
                   <div class="settings-secret-wrap">
                     <input class="chat-modal-input settings-secret-input" id="settingsApiKeyInput" type="password" placeholder="sk-...">
@@ -903,6 +904,24 @@
                 </div>
 
                 <div class="chat-modal-note visible auth-info settings-help-note settings-field-span" id="settingsProviderHelp"></div>
+
+                <div class="settings-field settings-field-span" id="settingsAdapterControls" style="display:none;">
+                  <div class="chat-modal-label">Venice login — used to start the adapter, stays on this machine</div>
+                  <input class="chat-modal-input" id="settingsAdapterUser" type="text" placeholder="Venice username or email" autocomplete="off" spellcheck="false">
+                  <div class="settings-secret-wrap" style="margin-top:8px;">
+                    <input class="chat-modal-input settings-secret-input" id="settingsAdapterPass" type="password" placeholder="Venice password" autocomplete="off">
+                    <button type="button" class="settings-secret-toggle" id="settingsAdapterPassToggle" aria-label="Show password" aria-pressed="false"></button>
+                  </div>
+                  <label style="display:flex;align-items:center;gap:8px;margin-top:10px;cursor:pointer;">
+                    <input type="checkbox" id="settingsAdapterHidePrompt" checked>
+                    <span class="chat-modal-label" style="margin:0;">Hide the prompt text in the Venice window (takes effect next Start)</span>
+                  </label>
+                  <div style="display:flex;gap:8px;margin-top:10px;">
+                    <button class="modal-btn primary" id="settingsAdapterStartBtn" type="button">Start adapter</button>
+                    <button class="modal-btn danger" id="settingsAdapterStopBtn" type="button" style="display:none;">Stop</button>
+                  </div>
+                  <div class="chat-modal-note visible auth-info settings-help-note settings-field-span" id="settingsAdapterStatus" style="margin:8px 0 0;"></div>
+                </div>
               </div>
 
               <div id="settingsModelUrlWrap" class="settings-field">

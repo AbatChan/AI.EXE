@@ -784,6 +784,14 @@ const settingsModelHash = document.getElementById('settingsModelHash');
 const settingsBackendStatus = document.getElementById('settingsBackendStatus');
 const settingsProviderSelect = document.getElementById('settingsProviderSelect');
 const settingsRemoteFieldsWrap = document.getElementById('settingsRemoteFieldsWrap');
+const settingsApiKeyWrap = document.getElementById('settingsApiKeyWrap');
+const settingsAdapterControls = document.getElementById('settingsAdapterControls');
+const settingsAdapterUser = document.getElementById('settingsAdapterUser');
+const settingsAdapterPass = document.getElementById('settingsAdapterPass');
+const settingsAdapterPassToggle = document.getElementById('settingsAdapterPassToggle');
+const settingsAdapterStartBtn = document.getElementById('settingsAdapterStartBtn');
+const settingsAdapterStopBtn = document.getElementById('settingsAdapterStopBtn');
+const settingsAdapterStatus = document.getElementById('settingsAdapterStatus');
 const settingsApiKeyLabel = document.getElementById('settingsApiKeyLabel');
 const settingsApiKeyInput = document.getElementById('settingsApiKeyInput');
 const settingsApiKeyToggle = document.getElementById('settingsApiKeyToggle');
@@ -1027,6 +1035,12 @@ let authMode = 'login';
 let pendingInferenceCount = 0;
 let activeInferenceRequest = null;
 let inferenceIdleResolvers = [];
+// In-flight agent inference fetches, so cancel/abort can actually stop them.
+const inFlightInferenceControllers = new Set();
+function abortAllInFlightInferenceControllers(reason = 'cancelled') {
+  inFlightInferenceControllers.forEach((c) => { try { c.abort(reason); } catch (_) { /* noop */ } });
+  inFlightInferenceControllers.clear();
+}
 const thinkingStartedByChatId = new Map();
 const pendingPreflightConfirmations = new Map();
 const smartTitleRenamePending = new Set();
@@ -1156,6 +1170,19 @@ const inferenceProviderDefs = {
     endpointUrl: 'https://api.venice.ai/api/v1/chat/completions',
     protocol: 'openai',
     supportsToolCalling: true,
+  },
+  veniceadapter: {
+    label: 'Venice Pro (local adapter)',
+    modelField: 'veniceAdapterModel',
+    endpointField: 'veniceAdapterEndpoint',
+    endpointLabel: 'Adapter URL',
+    endpointPlaceholder: 'http://127.0.0.1:9999',
+    modelPlaceholder: 'llama-3.1-405b-akash-api',
+    defaultModel: 'llama-3.1-405b-akash-api',
+    defaultEndpoint: 'http://127.0.0.1:9999',
+    endpointUrl: 'http://127.0.0.1:9999',
+    helpText: 'Native-Ollama adapter for your Venice Pro subscription — no API key, no credits. Temporary/testing only: it drives the Venice website via browser automation, so it is fragile and can break when Venice changes their site.',
+    protocol: 'ollama',
   },
 };
 const inferenceProviderModelPresets = {
@@ -1323,6 +1350,30 @@ try {
   if (document.readyState === 'complete') startUpdateChecks();
   else window.addEventListener('load', startUpdateChecks);
 })();
+// Boot nudge: if you're on the Venice Pro adapter with a saved login but it isn't running,
+// offer (once) to start it — so the first chat isn't a surprise failure.
+(function () {
+  const nudge = () => setTimeout(() => {
+    try {
+      if (typeof getSelectedInferenceProvider !== 'function' || getSelectedInferenceProvider() !== 'veniceadapter') return;
+      const user = String((appSettings && appSettings.veniceAdapterUsername) || '').trim();
+      const pass = String((appSettings && appSettings.veniceAdapterPassword) || '');
+      if (!user || !pass) return;
+      fetch(getAIExeBackendUrl() + '/api/adapter/status').then((r) => r.json()).then((s) => {
+        if (s && !s.serving && !s.running) {
+          showAppNotification({
+            title: "You're on Venice Pro (local adapter)",
+            message: "It isn't running yet — click here to start it (~30s) so chats are ready.",
+            kind: 'info', durationMs: 12000,
+            onClick: () => { if (typeof startVeniceAdapterThenResend === 'function') void startVeniceAdapterThenResend(); },
+          });
+        }
+      }).catch(() => {});
+    } catch (_) { /* noop */ }
+  }, 3500);
+  if (document.readyState === 'complete') nudge();
+  else window.addEventListener('load', nudge);
+})();
 // Step budget. 16 was too tight for multi-item tasks (e.g. a 3-item checklist):
 // inspection + a couple of failed edit-anchor retries exhausted it before the
 // agent finished every item. The mechanical guards (inspection-budget, read-loop,
@@ -1352,6 +1403,16 @@ function markAgentToolProgress() { lastAgentToolProgressAt = Date.now(); }
 function getLastAgentToolProgressAt() { return lastAgentToolProgressAt; }
 // Live file-write streaming: hold the partial content of the file being generated
 // so the work panel can render it filling in. Committed by write_file separately.
+// The model often wraps streamed file content in a ```lang fence; the committed
+// file is de-fenced by sanitizeAgentGeneratedFileContent, but the LIVE stream
+// showed the raw fence. Strip a leading wrapper fence (and its closer) for display
+// only — and only when a leading fence is present, so genuine markdown is untouched.
+function stripStreamDisplayFences(text) {
+  const s = String(text || '');
+  const lead = s.match(/^﻿?\s*```[a-z0-9]*[^\n]*\n/i);
+  if (!lead) return s;
+  return s.slice(lead[0].length).replace(/\n?```\s*$/i, '');
+}
 function updateAgentStreamingFile(path, content) {
   if (!activeAgentStreamState) return;
   const prev = activeAgentStreamState.streamingFile;
@@ -1361,7 +1422,7 @@ function updateAgentStreamingFile(path, content) {
       path: String(path || ''),
     });
   }
-  activeAgentStreamState.streamingFile = { path: String(path || ''), content: String(content || '') };
+  activeAgentStreamState.streamingFile = { path: String(path || ''), content: stripStreamDisplayFences(content) };
   scheduleLiveStreamRender();
 }
 function clearAgentStreamingFile() {
@@ -2444,7 +2505,10 @@ function saveEditedUserMessage(chatId, messageTs, nextText) {
 
   beginInferenceRequest();
   chatAutoScrollPinned = true;
-  void requestAssistantReply(chat.id, buildPromptWithInputAugments(cleaned), true);
+  // Edit-and-resend in this chat — keep its current project, don't re-ask new-vs-current.
+  void requestAssistantReply(chat.id, buildPromptWithInputAugments(cleaned), true, {
+    forceCurrentWorkspace: true,
+  });
 }
 
 function isRetryableAssistantMessage(chatId, messageTs) {
@@ -2548,7 +2612,10 @@ function retryAssistantMessage(chatId, messageTs) {
 
   beginInferenceRequest();
   chatAutoScrollPinned = true;
-  void requestAssistantReply(chat.id, buildPromptWithInputAugments(userMessage), true);
+  // Retry of an existing turn — keep using the chat's current project, don't re-ask new-vs-current.
+  void requestAssistantReply(chat.id, buildPromptWithInputAugments(userMessage), true, {
+    forceCurrentWorkspace: true,
+  });
 }
 
 function makeChatId() {
@@ -3624,6 +3691,34 @@ async function parseAttachmentFile(file) {
         : 'Document attached as metadata reference (too large for text extraction).',
     };
   }
+  if (isDoc) {
+    // A PDF/DOCX read as raw text yields only its structure (/FlateDecode streams, object
+    // refs) — never the body. Send it to the backend, which extracts real text (pypdf / docx).
+    try {
+      const fd = new FormData();
+      fd.append('file', file, (file && file.name) || 'document');
+      const resp = await fetch(getAIExeBackendUrl() + '/api/extract-text', { method: 'POST', body: fd });
+      if (resp && resp.ok) {
+        const d = await resp.json();
+        const extracted = String((d && d.text) || '').trim();
+        if (extracted && extracted.length >= 20) {
+          return {
+            ...base,
+            kind: 'text',
+            content: extracted.slice(0, maxAttachmentTextChars),
+            note: extracted.length > maxAttachmentTextChars
+              ? 'Extracted document text truncated for prompt context.'
+              : 'Extracted text from document for prompt context.',
+          };
+        }
+      }
+    } catch (_) { /* backend offline — fall through to metadata reference */ }
+    return {
+      ...base,
+      kind: 'file',
+      note: 'Document attached as metadata reference (text extraction unavailable — is the backend running?).',
+    };
+  }
   let content = '';
   try {
     if (file && typeof file.text === 'function') {
@@ -3642,29 +3737,6 @@ async function parseAttachmentFile(file) {
     }
   } catch (_) {
     content = '';
-  }
-  if (isDoc) {
-    const rough = String(content || '')
-      .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim();
-    const snippets = rough.match(/[A-Za-z0-9][A-Za-z0-9 ,.;:'"!?()\-_/]{18,}/g) || [];
-    const extracted = snippets.join('\n').trim();
-    if (!extracted || extracted.length < 80) {
-      return {
-        ...base,
-        kind: 'file',
-        note: 'Document attached as metadata reference (text extraction unavailable for this file).',
-      };
-    }
-    return {
-      ...base,
-      kind: 'text',
-      content: extracted.slice(0, maxAttachmentTextChars),
-      note: extracted.length > maxAttachmentTextChars
-        ? 'Extracted document text truncated for prompt context.'
-        : 'Extracted partial text from document for prompt context.',
-    };
   }
   return {
     ...base,
@@ -3940,9 +4012,12 @@ function stripLeadingLlamaEngineNoise(text, options = {}) {
   const isBannerGlyphLine = (line) => {
     const t = String(line || '').trim();
     if (!t) return false;
+    // Only llama.cpp's box-drawing/block banner art (U+2500–U+25FF). NOT emoji or non-Latin
+    // scripts — those are real answers (e.g. "🙂👍" or a Chinese/Arabic reply) and must survive.
     for (const ch of t) {
       if (/\s/.test(ch)) continue;
-      if (ch.charCodeAt(0) >= 128) continue;
+      const code = ch.codePointAt(0);
+      if (code >= 0x2500 && code <= 0x25FF) continue;
       return false;
     }
     return true;
@@ -4176,8 +4251,7 @@ function applyAgentProjectChatName(chatId, planSpec = null) {
     : 0;
   if (aiCount > 0 || userCount !== 1) return false;
   // The project name IS the chat title for a project task. kebab-case slug ->
-  // spaced Title Case (e.g. "factory-logistics-simulator" -> "Factory Logistics
-  // Simulator"). Only fall back to a name derived from the user's message when
+  // spaced Title Case. Only fall back to a name derived from the user's message when
   // there is somehow no usable project name (the user asked for this priority).
   const prettyName = normalizeChatName(toAutoTitleCase(sourceName.replace(/[-_]+/g, ' ')) || sourceName);
   const userDerivedName = deriveFallbackChatNameFromUser(chat, prettyName);
@@ -4765,6 +4839,11 @@ function loadAppSettings() {
     deepseekModel: 'deepseek-chat',
     veniceApiKey: '',
     veniceModel: 'venice-uncensored-1-2',
+    veniceAdapterEndpoint: '',
+    veniceAdapterModel: 'llama-3.1-405b-akash-api',
+    veniceAdapterUsername: '',
+    veniceAdapterPassword: '',
+    veniceHidePrompt: true,   // hide the raw typed prompt in the Venice window (adapter)
     workMode: 'coding',
     modelUrl: '',
     keepModelOnUpdate: true,
@@ -4814,6 +4893,13 @@ function loadAppSettings() {
     if (typeof parsed.veniceModel === 'string' && parsed.veniceModel.trim()) {
       appSettings.veniceModel = parsed.veniceModel.trim();
     }
+    // Venice Pro adapter: provider fields + the local Venice login (so they survive restarts).
+    if (typeof parsed.veniceAdapterEndpoint === 'string') appSettings.veniceAdapterEndpoint = parsed.veniceAdapterEndpoint.trim();
+    if (typeof parsed.veniceAdapterModel === 'string' && parsed.veniceAdapterModel.trim()) {
+      appSettings.veniceAdapterModel = parsed.veniceAdapterModel.trim();
+    }
+    if (typeof parsed.veniceAdapterUsername === 'string') appSettings.veniceAdapterUsername = parsed.veniceAdapterUsername;
+    if (typeof parsed.veniceAdapterPassword === 'string') appSettings.veniceAdapterPassword = parsed.veniceAdapterPassword;
     if (typeof parsed.modelUrl === 'string') appSettings.modelUrl = parsed.modelUrl.trim();
     if (typeof parsed.keepModelOnUpdate === 'boolean') appSettings.keepModelOnUpdate = parsed.keepModelOnUpdate;
     if (typeof parsed.debugTraceEnabled === 'boolean') appSettings.debugTraceEnabled = parsed.debugTraceEnabled;
@@ -4821,10 +4907,58 @@ function loadAppSettings() {
 }
 
 function saveAppSettings() {
+  let ok = true;
   try {
     localStorage.setItem(settingsStorageKey, JSON.stringify(appSettings));
-  } catch (_) { }
+  } catch (_) { ok = false; }
   if (typeof updateTokenRing === 'function') updateTokenRing();
+  syncBackendProviderConfig();
+  return ok;
+}
+
+// Push the active OpenAI-compatible provider + key to the local AI.EXE backend so the
+// Workshop pipeline (generate / package / pdf-to-software) uses the SAME Venice config
+// entered here — and the key lives server-side (req §8), not only in localStorage.
+// Best-effort + deduped: a silent no-op when the backend isn't running.
+let lastBackendProviderSync = '';
+function getAIExeBackendUrl() {
+  const u = (appSettings && appSettings.backendUrl) ? String(appSettings.backendUrl).trim() : '';
+  return (u || 'http://127.0.0.1:8765').replace(/\/+$/, '');
+}
+function syncBackendProviderConfig() {
+  try {
+    const provider = getSelectedInferenceProvider();
+    if (provider === 'local') return;
+    const def = getInferenceProviderDef(provider);
+    if (def && def.protocol === 'anthropic') return; // backend is OpenAI-compatible only
+    const isOllama = Boolean(def && def.protocol === 'ollama');
+    const apiKey = String(getProviderApiKey(provider) || '').trim();
+    const model = String(getProviderModel(provider) || '').trim();
+    const baseUrl = String(getProviderEndpoint(provider) || '').trim().replace(/\/chat\/completions\/?$/i, '');
+    if (!baseUrl || (!isOllama && !apiKey)) return;  // ollama (adapter) needs no key
+    const sig = `${provider}|${baseUrl}|${model}|${apiKey.length}|${isOllama}`;
+    if (sig === lastBackendProviderSync) return;
+    const base = getAIExeBackendUrl();
+    const post = (path, body) => fetch(base + path, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    // Mark synced ONLY after the POSTs succeed, so a failed push (backend not running
+    // yet) retries on the next tick instead of being lost.
+    const posts = [post('/api/provider', { base_url: baseUrl, model, kind: isOllama ? 'ollama' : 'openai' })];
+    if (!isOllama) posts.push(post('/api/api-key', { api_key: apiKey }));
+    Promise.all(posts).then((rs) => { if (rs.every((r) => r && r.ok)) lastBackendProviderSync = sig; }).catch(() => {});
+  } catch (_) { /* best-effort */ }
+}
+
+// Keep trying to push the active provider/key to the backend until it lands once (then
+// deduped) — so you set Venice ONCE in Settings and it reaches the backend whenever the
+// backend is running, without re-saving each time.
+let backendSyncStarted = false;
+function startBackendProviderSync() {
+  if (backendSyncStarted) return;
+  backendSyncStarted = true;
+  syncBackendProviderConfig();
+  setInterval(syncBackendProviderConfig, 20000);
 }
 
 function getSelectedInferenceProvider() {
@@ -4911,7 +5045,10 @@ function getConfiguredInferenceWorkers() {
     const apiKey = getProviderApiKey(provider);
     const model = getProviderModel(provider);
     const endpoint = getProviderEndpoint(provider);
-    const hasConfig = Boolean(apiKey && model && (def.protocol === 'anthropic' || endpoint));
+    // Native-Ollama providers (the Venice Pro adapter) need NO key — just a model + URL.
+    const hasConfig = def.protocol === 'ollama'
+      ? Boolean(model && endpoint)
+      : Boolean(apiKey && model && (def.protocol === 'anthropic' || endpoint));
     workers.push({
       id: `provider-${provider}`,
       type: 'hosted-provider',
@@ -5007,7 +5144,9 @@ function getProviderEndpoint(provider) {
   if (def.endpointField) {
     const value = String(appSettings && appSettings[def.endpointField] ? appSettings[def.endpointField] : '').trim();
     const endpoint = value || String(def.defaultEndpoint || def.endpointUrl || '').trim();
-    return normalizeOpenAiCompatibleEndpoint(endpoint);
+    // Native Ollama wants the raw base (we append /api/chat ourselves) — don't coerce it
+    // to an OpenAI /chat/completions URL.
+    return def.protocol === 'ollama' ? endpoint.replace(/\/+$/, '') : normalizeOpenAiCompatibleEndpoint(endpoint);
   }
   return normalizeOpenAiCompatibleEndpoint(String(def.endpointUrl || '').trim());
 }
@@ -5160,8 +5299,12 @@ function syncInferenceProviderOptions() {
 
 function getProviderPresetValue(provider, modelId) {
   const cleanModel = String(modelId || '').trim();
+  // Match against the LIVE (scraped) models too — otherwise a real model like
+  // "DeepSeek V4 Flash:latest" isn't in the static preset list and the dropdown wrongly
+  // falls back to "Custom model ID".
+  const live = Array.isArray(liveProviderModels[provider]) ? liveProviderModels[provider] : [];
   const presets = Array.isArray(inferenceProviderModelPresets[provider]) ? inferenceProviderModelPresets[provider] : [];
-  return presets.includes(cleanModel) ? cleanModel : '__custom__';
+  return (live.includes(cleanModel) || presets.includes(cleanModel)) ? cleanModel : '__custom__';
 }
 
 function getSettingsSectionMeta(section) {
@@ -5362,6 +5505,20 @@ function populateRemoteProviderFields(provider) {
   const def = getInferenceProviderDef(provider);
   const currentModel = getProviderModel(provider);
   const currentEndpoint = getProviderEndpoint(provider);
+  // Providers with no key (the native-Ollama Venice Pro adapter) hide the API-key field
+  // entirely — credentials live in the adapter program, not in AI.EXE.
+  if (settingsApiKeyWrap) settingsApiKeyWrap.style.display = def.keyField ? '' : 'none';
+  // The adapter gets Start/Stop controls (Venice login → launch the local adapter process).
+  if (settingsAdapterControls) {
+    const isAdapter = def.protocol === 'ollama';
+    settingsAdapterControls.style.display = isAdapter ? '' : 'none';
+    if (isAdapter) {
+      if (settingsAdapterUser) settingsAdapterUser.value = String(appSettings.veniceAdapterUsername || '');
+      if (settingsAdapterPass) settingsAdapterPass.value = String(appSettings.veniceAdapterPassword || '');
+      { const hp = document.getElementById('settingsAdapterHidePrompt'); if (hp) hp.checked = appSettings.veniceHidePrompt !== false; }
+      refreshAdapterStatus();
+    }
+  }
   if (settingsApiKeyLabel) settingsApiKeyLabel.textContent = def.keyLabel || 'API Key';
   if (settingsApiKeyInput) {
     settingsApiKeyInput.placeholder = def.keyPlaceholder || 'sk-...';
@@ -5392,6 +5549,76 @@ function populateRemoteProviderFields(provider) {
   if (settingsProviderHelp) {
     settingsProviderHelp.textContent = def.helpText || '';
   }
+  updateProviderConnectionStatus(provider, def);
+}
+
+// Settings connection monitor: ping the selected provider (the adapter's /api/tags, or
+// /models for API providers) and show reachable + model count so the user can see, from
+// the frontend, whether the provider (esp. the Venice Pro adapter) is actually up.
+function updateProviderConnectionStatus(provider, def, quiet) {
+  if (!settingsProviderHelp || !settingsProviderHelp.parentNode) return;
+  let el = document.getElementById('settingsProviderStatus');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'settingsProviderStatus';
+    // Mirror the help text's indent / grid-span / note styling so the line sits directly
+    // under it; only the color is overridden per-state below.
+    el.className = settingsProviderHelp.className;
+    el.style.marginTop = '4px';
+    el.style.fontWeight = '600';
+    settingsProviderHelp.parentNode.insertBefore(el, settingsProviderHelp.nextSibling);
+  }
+  if (!def || provider === 'local') { el.textContent = ''; return; }
+  const isOllama = def.protocol === 'ollama';
+  const base = String(getProviderEndpoint(provider) || '').trim();
+  if (!base) { el.textContent = ''; return; }
+  const myToken = (updateProviderConnectionStatus._token = (updateProviderConnectionStatus._token || 0) + 1);
+  if (!quiet) { el.textContent = 'Checking connection…'; el.style.color = 'var(--muted, #9ca3af)'; }
+  const onModels = (models) => {
+    if (myToken !== updateProviderConnectionStatus._token) return;
+    const list = (models || []).filter(Boolean);
+    const n = list.length;
+    el.textContent = '● connected' + (n ? (' · ' + n + ' model(s)') : '');
+    el.style.color = 'var(--success, #22c55e)';
+    // The adapter has no key+/models path, so its models never reached the Model preset
+    // dropdown (only "Custom model ID" showed). Capture them here and repopulate so they're
+    // selectable.
+    if (isOllama && n) {
+      liveProviderModels[provider] = list;
+      // ONLY replace the old MOCK default (llama-…-akash etc.) with a real model — never a
+      // real user pick. Doing `!list.includes(cur)` reset the user's choice on every poll
+      // (a real model that isn't byte-identical to a live entry got clobbered → "changing
+      // back" + wrong model sent). Match the known mock signatures instead.
+      const def = getInferenceProviderDef(provider);
+      const cur = getProviderModel(provider);
+      const isStaleMock = !cur || /akash|hermes|dolphin|nemotron|^llama-3/i.test(cur);
+      if (def && def.modelField && isStaleMock && list.length) {
+        appSettings[def.modelField] = list[0];
+        saveAppSettings();
+        if (settingsApiModelInput && lastPresetProvider === provider) settingsApiModelInput.value = list[0];
+      }
+      if (lastPresetProvider === provider) populateProviderPresetOptions(provider, getProviderModel(provider));
+    }
+  };
+  const onDown = (extra) => {
+    if (myToken !== updateProviderConnectionStatus._token) return;
+    el.textContent = '● not reachable' + (extra || ' — is the provider/adapter running?');
+    el.style.color = 'var(--danger, #ef4444)';
+  };
+  if (isOllama) {
+    // The adapter sends no CORS header, so the WebView can't read a direct fetch. Ping it
+    // through the backend (server-side) — also how inference will reach it.
+    fetch(getAIExeBackendUrl() + '/api/provider-health')
+      .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
+      .then((h) => (h && h.reachable ? onModels(h.models) : onDown(' — start the adapter (or it is still logging in)')))
+      .catch(() => onDown(' — AI.EXE backend offline'));
+    return;
+  }
+  const url = base.replace(/\/chat\/completions\/?$/i, '') + '/models';
+  fetch(url, { headers: { Authorization: getOpenAiCompatibleAuthHeader(provider, getProviderApiKey(provider), url) } })
+    .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
+    .then((d) => onModels((d.data || []).map((m) => m && m.id)))
+    .catch(() => onDown());
 }
 
 function syncSettingsProviderUi() {
@@ -5636,7 +5863,7 @@ function saveSettingsFromUi(options = {}) {
   appSettings.modelUrl = settingsModelUrlInput ? settingsModelUrlInput.value.trim() : '';
   appSettings.keepModelOnUpdate = Boolean(settingsKeepModelChk && settingsKeepModelChk.checked);
   appSettings.debugTraceEnabled = Boolean(settingsDebugTraceChk && settingsDebugTraceChk.checked);
-  saveAppSettings();
+  const saved = saveAppSettings();
   updateModelSetupBanner(); // a freshly-added API key should hide the setup banner
   if (options.toast) {
     setSettingsNote(
@@ -5646,13 +5873,20 @@ function saveSettingsFromUi(options = {}) {
       'info'
     );
   }
+  // Per-change toast so an auto-save confirms itself (success or error), individually.
+  if (options.toastChange) {
+    showAppNotification(saved
+      ? { title: 'Saved', message: String(options.toastChange), kind: 'success', durationMs: 2200 }
+      : { title: "Couldn't save", message: `${options.toastChange} — your settings could not be written.`, kind: 'error' });
+  }
+  return saved;
 }
 
-function scheduleSettingsAutosave(delay = 420) {
+function scheduleSettingsAutosave(delay = 420, label = '') {
   if (settingsAutosaveTimer) clearTimeout(settingsAutosaveTimer);
   settingsAutosaveTimer = setTimeout(() => {
     settingsAutosaveTimer = 0;
-    saveSettingsFromUi({ toast: false });
+    saveSettingsFromUi(label ? { toastChange: label } : { toast: false });
   }, delay);
 }
 
@@ -5868,6 +6102,7 @@ function abortInFlightInference(reason = 'abandoned') {
   if (token.abortController) {
     try { token.abortController.abort(); } catch (_) { }
   }
+  abortAllInFlightInferenceControllers(reason);
   pushDebugTrace('inference_aborted', {
     chatId: String(token.chatId || ''),
     streamId: String(token.streamId || ''),
@@ -5917,6 +6152,7 @@ function cancelActiveInference() {
       token.abortController.abort();
     } catch (_) { }
   }
+  abortAllInFlightInferenceControllers('user_cancelled');
   clearTypingIndicator();
   const activeAgentState = activeAgentStreamState && String(activeAgentStreamState.chatId || '') === String(token.chatId || '')
     ? {
@@ -5947,6 +6183,8 @@ function cancelActiveInference() {
   resolveChatNamingFallback(String(token.chatId || ''), 'New Chat');
   setThinkingStatus('Cancelled');
   completeInferenceRequest(token);
+  // Refresh the tree so a cancel doesn't leave the explorer on its loading skeleton.
+  try { void refreshWorkspaceTree(true); } catch (_) { /* best-effort */ }
   setTimeout(() => {
     if (pendingInferenceCount === 0) {
       setThinkingStatus('');
@@ -6399,9 +6637,47 @@ async function streamAnthropicChatCompletion(prompt, handlers = {}, options = {}
   }
 }
 
+// Native Ollama (the Venice Pro adapter) — routed THROUGH the backend, because the adapter
+// sends no CORS header so the WebView can't call it directly. The backend (always running,
+// configured with the same provider) reaches the adapter server-side. No API key, no credits.
+async function requestOllamaChatCompletion(provider, prompt, maxTokens, systemPrompt = '') {
+  const model = getProviderModel(provider);
+  if (!model) return null;
+  const messages = systemPrompt
+    ? [{ role: 'system', content: String(systemPrompt) }, { role: 'user', content: String(prompt || '') }]
+    : [{ role: 'user', content: String(prompt || '') }];
+  try {
+    const response = await fetch(getAIExeBackendUrl() + '/api/provider/complete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages, max_tokens: Math.max(1, Number(maxTokens) || 4096), temperature: 0.2 }),
+    });
+    if (!response.ok) return { ok: false, output: '', status: response.status };
+    const data = await response.json();
+    const content = String((data && data.content) || '');
+    return { ok: Boolean(data && data.ok && content.trim()), output: content, error: (data && data.error) || '', provider, model };
+  } catch (err) {
+    return { ok: false, output: '', error: String(err && err.message ? err.message : err) };
+  }
+}
+
+// Streaming shim: the adapter is slow/non-streaming, so fetch the full reply and fire
+// onDelta once (keeps the file-gen streaming caller happy).
+async function streamOllamaChatCompletion(provider, prompt, handlers = {}, options = {}) {
+  const result = await requestOllamaChatCompletion(provider, prompt, options.maxTokens, options.systemPrompt || '');
+  if (result && result.ok && typeof handlers.onDelta === 'function' && result.output) {
+    handlers.onDelta(String(result.output));
+  }
+  return result;
+}
+
 async function streamRemoteChatCompletion(provider, prompt, handlers = {}, options = {}) {
   if (provider === 'anthropic') {
     return streamAnthropicChatCompletion(prompt, handlers, options);
+  }
+  const ddef = getInferenceProviderDef(provider);
+  if (ddef && ddef.protocol === 'ollama') {
+    return streamOllamaChatCompletion(provider, prompt, handlers, options);
   }
   return streamOpenAiCompatibleChatCompletion(provider, prompt, handlers, options);
 }
@@ -6434,7 +6710,7 @@ const agentStepFunctionSchema = {
   },
 };
 
-async function requestOpenAiCompatibleTextCompletion(provider, prompt, maxTokens, systemPrompt = '') {
+async function requestOpenAiCompatibleTextCompletion(provider, prompt, maxTokens, systemPrompt = '', signal = null) {
   if (!remoteProvidersEnabled) return null;
   const def = getInferenceProviderDef(provider);
   const apiKey = getProviderApiKey(provider);
@@ -6449,6 +6725,7 @@ async function requestOpenAiCompatibleTextCompletion(provider, prompt, maxTokens
   try {
     const response = await fetch(endpointUrl, {
       method: 'POST',
+      ...(signal ? { signal } : {}),
       headers: {
         Authorization: getOpenAiCompatibleAuthHeader(provider, apiKey, endpointUrl),
         'Content-Type': 'application/json',
@@ -6524,11 +6801,20 @@ async function requestAnthropicTextCompletion(prompt, maxTokens) {
 }
 
 async function requestSelectedRemoteTextCompletion(prompt, maxTokens, systemPrompt = '', extra = {}) {
+  // Don't start/retry an agent inference once the run was cancelled.
+  if (activeInferenceRequest && activeInferenceRequest.cancelled) {
+    return { ok: false, cancelled: true, message: 'Cancelled.' };
+  }
+  const controller = (extra && extra.abortController instanceof AbortController)
+    ? extra.abortController
+    : new AbortController();
+  inFlightInferenceControllers.add(controller);
   noteAgentInferenceStart(String(prompt || '').length + String(systemPrompt || '').length);
   let result = null;
   try {
-    result = await requestRemoteTextCompletionForCapability('agent.writeFile', prompt, maxTokens, { systemPrompt, ...extra });
+    result = await requestRemoteTextCompletionForCapability('agent.writeFile', prompt, maxTokens, { systemPrompt, ...extra, abortController: controller });
   } finally {
+    inFlightInferenceControllers.delete(controller);
     noteAgentInferenceEnd(result && result.ok ? String(result.output || '').length : 0);
   }
   return result;
@@ -6556,14 +6842,22 @@ async function requestRemoteTextCompletionForCapability(capability, prompt, maxT
       onDelta: typeof options.onDelta === 'function' ? options.onDelta : undefined,
     }, {
       maxTokens: Math.max(1, Number(maxTokens) || 64),
+      // Wire the registered abortController into the actual stream so a timeout / new run
+      // can cancel it (was dropped here, leaving file-gen streams un-killable = ghosts).
+      abortController: options.abortController instanceof AbortController ? options.abortController : undefined,
     });
     return result ? { ...result, workerId: worker.id, provider, model: getProviderModel(provider) } : result;
+  }
+  if (getInferenceProviderDef(provider).protocol === 'ollama') {
+    const result = await requestOllamaChatCompletion(provider, prompt, maxTokens, options && options.systemPrompt ? options.systemPrompt : '');
+    return result ? { ...result, workerId: worker.id } : result;
   }
   if (provider === 'anthropic') {
     const result = await requestAnthropicTextCompletion(prompt, maxTokens);
     return result ? { ...result, workerId: worker.id, provider, model: getProviderModel(provider) } : result;
   }
-  const result = await requestOpenAiCompatibleTextCompletion(provider, prompt, maxTokens, options && options.systemPrompt ? options.systemPrompt : '');
+  const abortSignal = options && options.abortController instanceof AbortController ? options.abortController.signal : null;
+  const result = await requestOpenAiCompatibleTextCompletion(provider, prompt, maxTokens, options && options.systemPrompt ? options.systemPrompt : '', abortSignal);
   return result ? { ...result, workerId: worker.id, provider, model: getProviderModel(provider) } : result;
 }
 
@@ -6879,7 +7173,8 @@ async function requestPreflightRouteDecision(chatId, latestUserMessage, options 
   // the existing workspace to be rewritten into a different app, and don't suppress
   // the confirm as a "follow-up". (modify_existing_workspace IS a follow-up; this isn't.)
   if (agentEnabled && sameChatWorkspaceFollowup && decision.route === 'agent'
-    && buildIntent === 'create_or_build_deliverable') {
+    && buildIntent === 'create_or_build_deliverable'
+    && !(options && options.forceCurrentWorkspace)) {
     decision.route = 'confirm';
     decision.shouldAskUser = true;
     decision.shouldCreateProject = true;
@@ -7429,12 +7724,36 @@ function isBareAgentResumeRequest(text) {
   return /^(?:(?:ok(?:ay)?|yes|yeah|yep|sure|please|pls|now|just|then|so|and|can you|could you)\s+)*(?:retry|retry it|try again|try it again|try once more|once more|redo|redo it|do it again|again|continue|continue building|keep going|carry on|go on|go ahead|proceed|resume|finish|finish it|finish up|finish the project|finish building|complete it|complete the project)$/.test(t);
 }
 
+function isNaturalAgentResumeRequest(text) {
+  const t = String(text || '').trim().toLowerCase().replace(/\s+/g, ' ');
+  if (!t) return false;
+  if (isBareAgentResumeRequest(t)) return true;
+  if (/^(?:why|what|how|when|where|who)\b/.test(t)) return false;
+  return /^(?:(?:ok(?:ay)?|yes|yeah|yep|sure|please|pls|now|just|then|so|and|bro|yo|can you|could you|you can|let'?s|go ahead and)\s+)*(?:(?:retry|try again|continue|continue building|keep going|carry on|go on|go ahead|proceed|resume)\b|(?:finish(?:\s+up)?|complete|wrap up)\b.{0,80}\b(?:it|this|task|build|project|phase|current)\b|(?:move to|start|do)\s+(?:the\s+)?next phase\b)/.test(t);
+}
+
+function chatHasUnfinishedPhaseTracker(chat) {
+  const tracker = chat && chat.phaseTracker;
+  const phases = tracker && Array.isArray(tracker.phases) ? tracker.phases : [];
+  return phases.length > 1 && phases.some((phase) => !phaseIsDone(phase));
+}
+
+function shouldTreatAsAgentResumeRequest(chatId, text) {
+  if (isBareAgentResumeRequest(text)) return true;
+  if (!isNaturalAgentResumeRequest(text)) return false;
+  const chat = findChatById(chatId);
+  return Boolean(chatHasUnfinishedPhaseTracker(chat) || lastAssistantLooksIncompleteAgentRun(chat));
+}
+
 function lastAssistantLooksIncompleteAgentRun(chat) {
   if (chat && chat.needsContinue) return true;
+  // Deterministic marker survives intermediate messages, so Continue resumes even if you
+  // asked other things in between.
+  if (chat && chat.pendingAgentResume && chat.pendingAgentResume.task) return true;
   const msg = findLastAssistantMessage(chat);
   const text = String(msg && msg.text ? msg.text : '');
   if (!text) return false;
-  return /did not pass the project quality check|continue or retry without losing|left in its current state|hit an error before finishing|timed out before finishing|returned an invalid planning step|could not complete all tool steps|continue from the current (?:project|workspace) state/i.test(text);
+  return /did not pass the project quality check|continue or retry without losing|left in its current state|hit an error before finishing|timed out before finishing|returned an invalid planning step|could not complete all tool steps|continue from the current (?:project|workspace) state|to build phase \d|took too long, so i stopped|i kept the files (?:that are )?already (?:done|written)|i'?ll continue from here/i.test(text);
 }
 
 // When the user just says "retry"/"continue" after an interrupted agent build,
@@ -7444,6 +7763,8 @@ function resolveAgentResumeTaskText(chatId, promptText) {
   const raw = String(promptText || '');
   if (!isBareAgentResumeRequest(raw)) return raw;
   const chat = findChatById(chatId);
+  // Prefer the deterministic marker (the real task), so it survives intermediate messages.
+  if (chat && chat.pendingAgentResume && chat.pendingAgentResume.task) return chat.pendingAgentResume.task;
   if (!chat || !Array.isArray(chat.messages) || !lastAssistantLooksIncompleteAgentRun(chat)) return raw;
   for (let i = chat.messages.length - 1; i >= 0; i -= 1) {
     const msg = chat.messages[i];
@@ -9475,6 +9796,7 @@ const {
   isExistingProjectMutationRequest,
   normalizeAgentPlanSpec,
   buildFallbackAgentPlanSpec,
+  harvestFoundationVocabulary,
 } = agentCore || {};
 
 async function requestNativeAgentPlannerInference(prompt, maxTokens, grammar = '') {
@@ -9522,6 +9844,7 @@ async function requestAgentPlannerInferenceInner(prompt, maxTokens, grammar = ''
     let remote = await requestSelectedRemoteTextCompletion(prompt, maxTokens, systemPrompt);
     // Only retry for transient failures (rate limit / network). Skip retry for auth/credits errors.
     const hardFail = remote && !remote.ok && remote.httpStatus && (remote.httpStatus === 401 || remote.httpStatus === 402 || remote.httpStatus === 403);
+    if (remote && remote.cancelled) return { ok: false, cancelled: true, message: 'Cancelled.' };
     if ((!remote || !remote.ok) && !hardFail) {
       await new Promise((resolve) => setTimeout(resolve, 2500));
       remote = await requestSelectedRemoteTextCompletion(prompt, maxTokens, systemPrompt);
@@ -9534,7 +9857,8 @@ async function requestAgentPlannerInferenceInner(prompt, maxTokens, grammar = ''
       };
     }
     const remoteMsg = (remote && remote.message) || `${remoteProvider} API unavailable — check your connection.`;
-    return { ok: false, message: remoteMsg };
+    // Propagate hard failures (credits/key) so the caller can stop, not degrade.
+    return { ok: false, message: remoteMsg, httpStatus: (remote && remote.httpStatus) || 0, hardFail: Boolean(hardFail) };
   }
   return requestNativeAgentPlannerInference(prompt, maxTokens, grammar);
 }
@@ -9740,6 +10064,9 @@ const agentLoop = window.AIExeAgentLoop && typeof window.AIExeAgentLoop.createAg
     computeAgentChecklistProgress,
     renderAgentChecklist,
     buildAgentPlanMarkdown,
+    parseAgentPlanMarkdown,
+    firstUnfinishedPhaseIndex,
+    harvestFoundationVocabulary,
     setAgentPhaseTracker,
     clearAgentPhaseTracker,
     setThinkingStatus: (text) => {
@@ -9858,6 +10185,10 @@ function getExperimentalAgentTaskText(promptText = '') {
 }
 
 async function requestSelectedDeveloperAgentReply(requestToken, chatId, rawPromptText) {
+  // Mark Continue/Retry/resume so a phased build resumes from plan.md even if the
+  // re-planner drops phases this turn. Natural phrasing like "finish phase 1 then
+  // ..." also resumes, but only when this chat already has an unfinished build.
+  if (requestToken) requestToken.isAgentResume = shouldTreatAsAgentResumeRequest(chatId, rawPromptText);
   const promptText = resolveAgentResumeTaskText(chatId, rawPromptText);
   // Keep a live elapsed counter below the input for the whole agent run, and make
   // sure it is always torn down when the run ends (success, stop, or throw).
@@ -9879,6 +10210,23 @@ async function requestSelectedDeveloperAgentReply(requestToken, chatId, rawPromp
     return await requestDeveloperAgentReply(requestToken, chatId, devTaskText);
   } finally {
     stopAgentElapsedTimer();
+    // Deterministic resume marker — survives intermediate messages (unlike needsContinue,
+    // which an in-between reply clears). Set when the build stops with more to do; cleared
+    // only when a RESUME run actually finishes it. Intermediate chat/edit runs (not a
+    // resume) leave it untouched, so "ask something, then Continue later" still resumes.
+    try {
+      const chat = findChatById(chatId);
+      if (chat) {
+        const task = String(promptText || '').trim();
+        if (chat.needsContinue && task) {
+          chat.pendingAgentResume = { task, at: Date.now() };
+          saveChats();
+        } else if (chat.pendingAgentResume && requestToken && requestToken.isAgentResume && !chat.needsContinue) {
+          delete chat.pendingAgentResume;
+          saveChats();
+        }
+      }
+    } catch (_) { /* best-effort */ }
   }
 }
 
@@ -10683,6 +11031,18 @@ function loadStoredChats() {
         pendingAttachments: normalizePendingAttachmentList(chat.pendingAttachments),
         manualContext: typeof chat.manualContext === 'string' ? chat.manualContext.slice(0, 4000) : '',
         pendingPreflightConfirmation: normalizeStoredPendingPreflightConfirmation(chat.pendingPreflightConfirmation),
+        phaseTracker: (chat.phaseTracker && typeof chat.phaseTracker === 'object'
+          && Array.isArray(chat.phaseTracker.phases) && chat.phaseTracker.phases.length > 1)
+          ? {
+            projectName: String(chat.phaseTracker.projectName || ''),
+            phases: chat.phaseTracker.phases,
+            activeIndex: Number(chat.phaseTracker.activeIndex) || 0,
+          }
+          : null,
+        pendingAgentResume: (chat.pendingAgentResume && typeof chat.pendingAgentResume === 'object'
+          && chat.pendingAgentResume.task)
+          ? { task: String(chat.pendingAgentResume.task).slice(0, 8000), at: Number(chat.pendingAgentResume.at) || 0 }
+          : null,
         branchLinks: normalizeBranchLinks(activeThread.branchLinks),
         pendingBranchLink: activeThread.pendingBranchLink ? { ...activeThread.pendingBranchLink } : null,
         threads,
@@ -10837,13 +11197,58 @@ if (accountSettingsBtn) {
   });
 }
 if (accountUsageBtn) {
-  accountUsageBtn.addEventListener('click', () => {
+  accountUsageBtn.addEventListener('click', () => { void showProviderUsageNotification(); });
+}
+
+// Live usage: local/adapter providers are free; Venice exposes the real balance at
+// /api_keys/rate_limits. Replaces the old "offline preview" placeholder.
+const USAGE_BALANCE_KEYS = new Set(['VCU', 'USD', 'DIEM', 'USD_EXTERNAL']);
+function extractVeniceBalances(obj) {
+  const found = {};
+  const walk = (o) => {
+    if (Array.isArray(o)) { o.forEach(walk); return; }
+    if (o && typeof o === 'object') {
+      for (const [k, v] of Object.entries(o)) {
+        if (String(k).toLowerCase() === 'balances' && v && typeof v === 'object') {
+          for (const [bk, bv] of Object.entries(v)) {
+            if (typeof bv === 'number') found[String(bk).toUpperCase()] = bv;
+          }
+        } else if (USAGE_BALANCE_KEYS.has(String(k).toUpperCase()) && typeof v === 'number') {
+          found[String(k).toUpperCase()] = v;
+        } else { walk(v); }
+      }
+    }
+  };
+  walk(obj);
+  return found;
+}
+async function showProviderUsageNotification() {
+  const provider = getSelectedInferenceProvider();
+  const def = getInferenceProviderDef(provider);
+  if (provider === 'local' || (def && def.protocol === 'ollama')) {
+    showAppNotification({ title: 'Usage', message: 'This provider runs locally — no credits or usage limits.', kind: 'info' });
+    return;
+  }
+  const base = String(getProviderEndpoint(provider) || '').replace(/\/chat\/completions\/?$/i, '');
+  const key = String(getProviderApiKey(provider) || '').trim();
+  if (!/venice/i.test(base) || !base || !key) {
+    showAppNotification({ title: 'Usage', message: 'Live usage is only available for Venice and local providers.', kind: 'info' });
+    return;
+  }
+  showAppNotification({ title: 'Usage', message: 'Checking your Venice balance…', kind: 'info' });
+  try {
+    const res = await fetch(base.replace(/\/+$/, '') + '/api_keys/rate_limits', { headers: { Authorization: 'Bearer ' + key } });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const balances = extractVeniceBalances(await res.json());
+    const keys = Object.keys(balances);
     showAppNotification({
-      title: 'Usage',
-      message: 'Usage details are not available in this offline preview.',
+      title: 'Venice usage',
+      message: keys.length ? keys.map((k) => `${balances[k]} ${k}`).join(' · ') : 'Connected, but Venice returned no balance figures.',
       kind: 'info',
     });
-  });
+  } catch (err) {
+    showAppNotification({ title: 'Usage', message: 'Could not read usage: ' + String(err && err.message ? err.message : err), kind: 'info' });
+  }
 }
 if (accountLogoutBtn) {
   accountLogoutBtn.addEventListener('click', () => {
@@ -10994,11 +11399,19 @@ if (settingsVerifyBtn) {
 }
 if (settingsProviderSelect) {
   settingsProviderSelect.addEventListener('change', () => {
+    const prevProvider = String(appSettings.inferenceProvider || 'local').trim().toLowerCase();
     appSettings.inferenceProvider = remoteProvidersEnabled && Object.prototype.hasOwnProperty.call(inferenceProviderDefs, settingsProviderSelect.value)
       ? String(settingsProviderSelect.value || 'local').trim().toLowerCase()
       : 'local';
+    // Leaving the Venice Pro adapter: stop it so its Chrome window closes (no orphan browser,
+    // and the profile lock is freed for next time).
+    if (prevProvider === 'veniceadapter' && appSettings.inferenceProvider !== 'veniceadapter') {
+      fetch(getAIExeBackendUrl() + '/api/adapter/stop', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
+        .then(() => { if (typeof refreshAdapterStatus === 'function') refreshAdapterStatus(); })
+        .catch(() => {});
+    }
     syncSettingsProviderUi();
-    saveSettingsFromUi({ toast: false });
+    saveSettingsFromUi({ toastChange: `${getInferenceProviderDef(appSettings.inferenceProvider).label} selected` });
   });
 }
 settingsNavButtons.forEach((btn) => {
@@ -11011,7 +11424,7 @@ if (settingsWorkModeCoding) {
     if (settingsWorkModeCoding.checked) {
       appSettings.workMode = 'coding';
       syncSettingsWorkModeUi();
-      saveSettingsFromUi({ toast: false });
+      saveSettingsFromUi({ toastChange: 'Coding mode on' });
     }
   });
 }
@@ -11020,7 +11433,7 @@ if (settingsWorkModeEveryday) {
     if (settingsWorkModeEveryday.checked) {
       appSettings.workMode = 'everyday';
       syncSettingsWorkModeUi();
-      saveSettingsFromUi({ toast: false });
+      saveSettingsFromUi({ toastChange: 'Everyday mode on' });
     }
   });
 }
@@ -11034,7 +11447,7 @@ if (settingsApiModelPreset) {
       return;
     }
     settingsApiModelInput.value = preset;
-    saveSettingsFromUi({ toast: false });
+    saveSettingsFromUi({ toastChange: `Model set to ${preset}` });
   });
 }
 if (settingsApiModelInput) {
@@ -11042,11 +11455,11 @@ if (settingsApiModelInput) {
     if (!settingsApiModelPreset || !settingsProviderSelect) return;
     const provider = String(settingsProviderSelect.value || 'local').trim().toLowerCase();
     settingsApiModelPreset.value = getProviderPresetValue(provider, settingsApiModelInput.value);
-    scheduleSettingsAutosave();
+    scheduleSettingsAutosave(420, 'Model ID');
   });
 }
 if (settingsApiKeyInput) {
-  settingsApiKeyInput.addEventListener('input', () => scheduleSettingsAutosave());
+  settingsApiKeyInput.addEventListener('input', () => scheduleSettingsAutosave(420, 'API key'));
 }
 if (settingsApiKeyToggle && settingsApiKeyInput) {
   const eyeIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>';
@@ -11065,17 +11478,209 @@ if (settingsApiKeyToggle && settingsApiKeyInput) {
   renderSecretToggle();
 }
 if (settingsApiEndpointInput) {
-  settingsApiEndpointInput.addEventListener('input', () => scheduleSettingsAutosave());
+  settingsApiEndpointInput.addEventListener('input', () => scheduleSettingsAutosave(420, 'Endpoint URL'));
 }
 if (settingsModelUrlInput) {
-  settingsModelUrlInput.addEventListener('input', () => scheduleSettingsAutosave());
+  settingsModelUrlInput.addEventListener('input', () => scheduleSettingsAutosave(420, 'Model download URL'));
 }
 if (settingsKeepModelChk) {
-  settingsKeepModelChk.addEventListener('change', () => saveSettingsFromUi({ toast: false }));
+  settingsKeepModelChk.addEventListener('change', () => saveSettingsFromUi({ toastChange: settingsKeepModelChk.checked ? 'Keep model on update: on' : 'Keep model on update: off' }));
 }
 if (settingsDebugTraceChk) {
-  settingsDebugTraceChk.addEventListener('change', () => saveSettingsFromUi({ toast: false }));
+  settingsDebugTraceChk.addEventListener('change', () => saveSettingsFromUi({ toastChange: settingsDebugTraceChk.checked ? 'Debug tracing: on' : 'Debug tracing: off' }));
 }
+
+// --- Venice Pro adapter: Start/Stop the local adapter process via the backend ---
+function adapterTargetPort() {
+  const url = String((settingsApiEndpointInput && settingsApiEndpointInput.value) || appSettings.veniceAdapterEndpoint || 'http://127.0.0.1:9999');
+  const m = url.match(/:(\d{2,5})(?:\/|$)/);
+  return m ? Number(m[1]) : 9999;
+}
+// Noise that isn't an error: HTTP access-log lines ("GET /api/tags HTTP/1.1" 200 ...),
+// server startup banners, and clean-shutdown notices.
+function isAdapterLogNoise(line) {
+  return (
+    /"\s*(GET|POST|PUT|DELETE|HEAD|OPTIONS|PATCH)\b.*HTTP\/\d/i.test(line) ||  // access log
+    /^\S+ - - \[/.test(line) ||                                               // werkzeug/common log
+    /running on http|serving|press ctrl\+c|listening on|started server|application startup/i.test(line) ||
+    /keyboard ?interrupt|shutting down|received signal|sigterm|sigint|stopped by user/i.test(line) ||
+    /^(file "|traceback|\^|~|self\.|raise )/i.test(line) ||                   // python trace scaffolding
+    /SyntaxWarning|DeprecationWarning|invalid escape sequence/i.test(line) || // python import warnings
+    /^\S+\.py:\d+:/.test(line) ||                                             // "…server.py:335:" source echo
+    /reject\(new Error|Unsupported web3|new Error\(|\$\{|`/.test(line)        // the web3-provider JS source lines
+  );
+}
+
+// Turn the adapter's raw Python/Selenium log into a plain-English reason for the UI.
+// Returns '' when the log shows no actual error (a normal stop) so the caller keeps
+// the neutral "not running" status instead of a scary red line.
+function friendlyAdapterError(log) {
+  const t = String(log || '');
+  const lower = t.toLowerCase();
+  if (/could not auto-fill|please sign in manually|sign in - venice|still on \/sign-in/.test(lower))
+    return 'Your Venice session expired — sign in to Venice in the Chrome window that opened. It starts serving once you\'re in.';
+  if (/sign-in page after login|email code|verification code/.test(lower))
+    return 'Login needs a verification code — click Start, then type the code Venice emails you into the browser window. It stays logged in after.';
+  if (/cloudflare|just a moment|verify you are human|captcha|turnstile/.test(lower))
+    return "Venice's bot-check (Cloudflare) blocked the automated login.";
+  if (/incorrect|invalid password|wrong password|authentication failed|invalid credentials/.test(lower))
+    return 'Venice rejected the login — double-check your email and password.';
+  if (/chromedriver|session not created|cannot find chrome|chrome not reachable|devtoolsactiveport|no chrome binary/.test(lower))
+    return "Chrome couldn't start — make sure Google Chrome is installed on this machine.";
+  if (/identifier-field|password-field|no such element|element not (found|interactable|visible)/.test(lower))
+    return "Couldn't find the Venice login fields — Venice may have changed their sign-in page again.";
+  if (/not installed/.test(lower))
+    return 'Not set up yet — click Start to download and install it.';
+  // Fallback: only surface a reason if the log actually contains an error. Skip access-log
+  // lines and normal-shutdown noise so a successful "GET /api/tags 200" is never shown as a
+  // crash reason.
+  const lines = t.trim().split('\n').map((l) => l.trim()).filter(Boolean);
+  const hasRealError = lines.some((l) => !isAdapterLogNoise(l) && /\b(error|exception|failed|timeout|refused|traceback)\b/i.test(l));
+  if (!hasRealError) return '';  // normal stop — no error to report
+  const last = lines.reverse().find((l) => !isAdapterLogNoise(l) && /\b(error|exception|failed|timeout|refused)\b/i.test(l)) || '';
+  const clean = last.replace(/^[\w.]+(error|exception):\s*(message:\s*)?/i, '').replace(/^\S+ - - \[.*?\]\s*/, '').trim();
+  return clean ? ('Adapter stopped: ' + clean.slice(0, 160)) : '';
+}
+
+async function refreshAdapterStatus() {
+  if (!settingsAdapterStatus) return;
+  // Only touch the DOM when the message actually changes — otherwise the 2.5s re-poll and the
+  // async log fetches make the line visibly flash.
+  const setStatus = (text, color) => {
+    if (settingsAdapterStatus._lastText === text && settingsAdapterStatus._lastColor === color) return;
+    settingsAdapterStatus._lastText = text;
+    settingsAdapterStatus._lastColor = color;
+    settingsAdapterStatus.textContent = text;
+    settingsAdapterStatus.style.color = color;
+  };
+  let procAlive = false;   // adapter process is up (may still be opening Chrome / logging in)
+  try {
+    const res = await fetch(getAIExeBackendUrl() + '/api/adapter/status');
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const s = await res.json();
+    procAlive = Boolean(s.running);
+    const serving = Boolean(s.serving);
+    if (serving) {
+      refreshAdapterStatus._loginWaiting = false;
+      setStatus(`● Adapter running on port ${s.port} — Venice Pro is ready`, 'var(--success, #22c55e)');
+    } else if (procAlive) {
+      // Set the text from CACHED login-waiting state so it's decided synchronously (no per-cycle
+      // async override → no flash). The log fetch below only updates the cache for next cycle.
+      setStatus(
+        refreshAdapterStatus._loginWaiting
+          ? "◐ Waiting for you to sign in to Venice in the Chrome window (session expired). It serves once you're in."
+          : '◐ Starting adapter — a Chrome window is opening (~30s). Sign in if prompted; it stays logged in after.',
+        'var(--warning, #f59e0b)');
+      fetch(getAIExeBackendUrl() + '/api/adapter/logs').then((r) => r.json()).then((d) => {
+        refreshAdapterStatus._loginWaiting = /sign in manually|Sign in - Venice|still on \/sign-in|verification code|email code/i.test(String((d && d.log) || ''));
+      }).catch(() => {});
+      clearTimeout(refreshAdapterStatus._pollT);
+      refreshAdapterStatus._pollT = setTimeout(refreshAdapterStatus, 2500);
+    } else {
+      refreshAdapterStatus._loginWaiting = false;
+      setStatus(s.installed ? '○ Adapter not running — click Start' : '○ Not set up yet — click Start to download and install it', '');
+      if (s.installed) {
+        // Stopped after being set up — likely crashed (Chrome/login). Show a plain reason if any.
+        fetch(getAIExeBackendUrl() + '/api/adapter/logs').then((r) => r.json()).then((d) => {
+          const msg = friendlyAdapterError((d && d.log) || '');
+          if (msg) setStatus('○ ' + msg, 'var(--danger, #ef4444)');
+        }).catch(() => {});
+      }
+    }
+  } catch (_) {
+    setStatus('AI.EXE backend not reachable — start the backend to manage the adapter.', 'var(--danger, #ef4444)');
+  }
+  // Show the red Stop as soon as the process is up (so a stuck login can be cancelled).
+  if (settingsAdapterStartBtn) settingsAdapterStartBtn.style.display = procAlive ? 'none' : '';
+  if (settingsAdapterStopBtn) settingsAdapterStopBtn.style.display = procAlive ? '' : 'none';
+}
+const settingsAdapterHidePrompt = document.getElementById('settingsAdapterHidePrompt');
+if (settingsAdapterHidePrompt) {
+  settingsAdapterHidePrompt.checked = appSettings.veniceHidePrompt !== false;
+  settingsAdapterHidePrompt.addEventListener('change', () => {
+    appSettings.veniceHidePrompt = settingsAdapterHidePrompt.checked;
+    saveAppSettings();
+    const running = settingsAdapterStopBtn && settingsAdapterStopBtn.style.display !== 'none';
+    showAppNotification({
+      title: 'Saved',
+      message: running ? 'Restart the adapter (Stop then Start) for this to take effect.'
+                       : 'It will apply when you start the adapter.',
+      kind: 'info', durationMs: 4000,
+    });
+  });
+}
+if (settingsAdapterUser) {
+  settingsAdapterUser.addEventListener('input', () => { appSettings.veniceAdapterUsername = settingsAdapterUser.value; saveAppSettings(); });
+}
+if (settingsAdapterPass) {
+  settingsAdapterPass.addEventListener('input', () => { appSettings.veniceAdapterPassword = settingsAdapterPass.value; saveAppSettings(); });
+}
+if (settingsAdapterPassToggle && settingsAdapterPass) {
+  settingsAdapterPassToggle.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>';
+  settingsAdapterPassToggle.addEventListener('click', () => {
+    settingsAdapterPass.type = settingsAdapterPass.type === 'password' ? 'text' : 'password';
+    settingsAdapterPass.focus();
+  });
+}
+if (settingsAdapterStartBtn) {
+  settingsAdapterStartBtn.addEventListener('click', async () => {
+    const user = settingsAdapterUser ? settingsAdapterUser.value.trim() : '';
+    const pass = settingsAdapterPass ? settingsAdapterPass.value : '';
+    appSettings.veniceAdapterUsername = user; appSettings.veniceAdapterPassword = pass; saveAppSettings();
+    const backend = getAIExeBackendUrl();
+    setButtonLoading(settingsAdapterStartBtn, true);
+    // Immediate honest feedback — the adapter takes ~30s to open Chrome + log in before it's ready.
+    if (settingsAdapterStatus) {
+      settingsAdapterStatus.textContent = '◐ Starting adapter — a Chrome window is opening (~30s). Sign in if prompted; it stays logged in after.';
+      settingsAdapterStatus.style.color = 'var(--warning, #f59e0b)';
+    }
+    try {
+      const st = await (await fetch(backend + '/api/adapter/status')).json();
+      if (!st.installed) {
+        showAppNotification({ title: 'Installing adapter', message: 'First-time setup (download + dependencies) — this can take a few minutes…', kind: 'info', durationMs: 7000 });
+        const ins = await (await fetch(backend + '/api/adapter/install', { method: 'POST' })).json();
+        if (!ins.ok) { showAppNotification({ title: 'Install failed', message: ins.detail || 'Could not install the adapter.', kind: 'error' }); return; }
+      }
+      const r = await (await fetch(backend + '/api/adapter/start', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        // Visible browser: Venice's login is behind Cloudflare, which blocks headless. The
+        // window also lets you complete an email verification code once (profile persists).
+        body: JSON.stringify({ username: user, password: pass, port: adapterTargetPort(), headless: false, hide_prompt: appSettings.veniceHidePrompt !== false }),
+      })).json();
+      showAppNotification(r.ok
+        ? { title: 'Adapter', message: r.detail === 'already running' ? 'Adapter already running.' : (user && pass ? 'Adapter started — give it a few seconds to log in.' : 'Adapter started — using the saved Venice browser session if it is still valid.'), kind: 'success' }
+        : { title: "Couldn't start", message: r.detail || 'Failed to start.', kind: 'error' });
+    } catch (err) {
+      showAppNotification({ title: 'Adapter', message: 'AI.EXE backend not reachable: ' + String(err && err.message ? err.message : err), kind: 'error' });
+    } finally {
+      setButtonLoading(settingsAdapterStartBtn, false);
+      setTimeout(refreshAdapterStatus, 1500);
+    }
+  });
+}
+if (settingsAdapterStopBtn) {
+  settingsAdapterStopBtn.addEventListener('click', async () => {
+    setButtonLoading(settingsAdapterStopBtn, true);
+    try {
+      const r = await (await fetch(getAIExeBackendUrl() + '/api/adapter/stop', { method: 'POST' })).json();
+      showAppNotification({ title: 'Adapter', message: r.detail === 'stopped' ? 'Adapter stopped.' : (r.detail || 'Stopped.'), kind: 'info' });
+    } catch (err) {
+      showAppNotification({ title: 'Adapter', message: 'AI.EXE backend not reachable: ' + String(err && err.message ? err.message : err), kind: 'error' });
+    } finally {
+      setButtonLoading(settingsAdapterStopBtn, false);
+      refreshAdapterStatus();
+    }
+  });
+}
+// Live-refresh the adapter status + monitor while its controls are on screen, so the page
+// updates itself (login finishing, adapter coming up) without reopening Settings.
+setInterval(() => {
+  if (settingsAdapterControls && settingsAdapterControls.style.display !== 'none' && document.visibilityState !== 'hidden') {
+    refreshAdapterStatus();
+    const prov = getSelectedInferenceProvider();
+    updateProviderConnectionStatus(prov, getInferenceProviderDef(prov), true);
+  }
+}, 4000);
 if (settingsSaveBtn) {
   settingsSaveBtn.addEventListener('click', async () => {
     const startedAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
@@ -11535,16 +12140,52 @@ function sanitizeHref(rawHref) {
 // as its own card above the input for the owning chat. (.aiexe/plan.md = truth.)
 let activePhaseTracker = null;
 let phaseTrackerCollapsed = false;
+// Accordion: which phase rows are expanded (re-seeded to the active phase when it
+// advances; the user can open/close any phase in between).
+const phaseTrackerExpanded = new Set();
+let phaseTrackerExpandedFor = -1;
+const phaseTrackerLiveSeen = new Set();
+const phaseTrackerLiveHighlight = new Set();
 const AGENT_PLAN_FILE = '/.aiexe/plan.md';
+
+// A phase is done when it has tasks and they're all ticked (or a task-less phase
+// is explicitly flagged done) — derived from plan.md state, not position.
+function phaseIsDone(phase) {
+  if (!phase) return false;
+  const tasks = Array.isArray(phase.tasks) ? phase.tasks : [];
+  return tasks.length ? tasks.every((t) => t && t.done) : Boolean(phase.done);
+}
+
+// Snapshot the tracker on the owning chat so it survives reload (cleared when done).
+function persistPhaseTrackerToChat(state) {
+  try {
+    const cid = state && state.chatId;
+    if (!cid) return;
+    const chat = findChatById(cid);
+    if (!chat) return;
+    chat.phaseTracker = (state.allDone || !Array.isArray(state.phases) || state.phases.length < 2)
+      ? null
+      : { projectName: String(state.projectName || ''), phases: state.phases, activeIndex: Number(state.activeIndex) || 0 };
+    saveChats();
+  } catch (_) { /* best-effort */ }
+}
 
 function setAgentPhaseTracker(state) {
   activePhaseTracker = state && typeof state === 'object' ? state : null;
+  if (activePhaseTracker) persistPhaseTrackerToChat(activePhaseTracker);
   renderPhaseTracker();
 }
 
 function clearAgentPhaseTracker(chatId) {
   if (activePhaseTracker && chatId && activePhaseTracker.chatId !== chatId) return;
+  const ownerId = (activePhaseTracker && activePhaseTracker.chatId) || chatId;
   activePhaseTracker = null;
+  phaseTrackerLiveSeen.clear();
+  phaseTrackerLiveHighlight.clear();
+  try {
+    const chat = ownerId ? findChatById(ownerId) : null;
+    if (chat && chat.phaseTracker) { chat.phaseTracker = null; saveChats(); }
+  } catch (_) { /* best-effort */ }
   renderPhaseTracker();
 }
 
@@ -11556,6 +12197,18 @@ async function openAgentPlanFile() {
 
 function renderPhaseTracker() {
   if (!phaseTracker) return;
+  // Rehydrate from the active chat's snapshot after reload / chat switch.
+  const activeChatForTracker = typeof getActiveChat === 'function' ? getActiveChat() : null;
+  if (activeChatForTracker && activeChatForTracker.phaseTracker
+    && (!activePhaseTracker || activePhaseTracker.chatId !== activeChatForTracker.id)) {
+    activePhaseTracker = {
+      chatId: activeChatForTracker.id,
+      projectName: String(activeChatForTracker.phaseTracker.projectName || ''),
+      phases: Array.isArray(activeChatForTracker.phaseTracker.phases) ? activeChatForTracker.phaseTracker.phases : [],
+      activeIndex: Number(activeChatForTracker.phaseTracker.activeIndex) || 0,
+      allDone: false,
+    };
+  }
   const state = activePhaseTracker;
   const phases = state && Array.isArray(state.phases) ? state.phases.filter((p) => p && p.title) : [];
   const visible = Boolean(state && phases.length > 1 && state.chatId === activeChatId && !state.allDone);
@@ -11567,22 +12220,53 @@ function renderPhaseTracker() {
     return;
   }
   const activeIndex = Math.max(0, Math.min(phases.length - 1, Number(state.activeIndex) || 0));
+  // Re-seed the open accordion to the active phase whenever it advances.
+  if (phaseTrackerExpandedFor !== activeIndex) {
+    phaseTrackerExpandedFor = activeIndex;
+    phaseTrackerExpanded.clear();
+    phaseTrackerExpanded.add(activeIndex);
+  }
   const name = String(state.projectName || '').trim();
-  const headLabel = `${name ? `Building ${escapeHtml(name)}` : 'Building'} · Phase ${activeIndex + 1} of ${phases.length}`;
+  const doneTotal = phases.filter((p) => phaseIsDone(p)).length;
+  const allTasks = phases.flatMap((p) => (Array.isArray(p && p.tasks) ? p.tasks : []));
+  const allDoneCount = allTasks.filter((t) => t && (t.done || t.liveDone)).length;
+  const headLabel = `${name ? `Building ${escapeHtml(name)}` : 'Building'} · Phase ${activeIndex + 1}/${phases.length}`;
+  const progressLabel = allTasks.length
+    ? `${allDoneCount}/${allTasks.length} tasks`
+    : `${doneTotal}/${phases.length} phases`;
+  const chevron = '<svg class="phase-row-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>';
   const rows = phases.map((phase, i) => {
-    const status = i < activeIndex ? 'done' : (i === activeIndex ? 'active' : 'pending');
-    const mark = status === 'done' ? '✓' : (status === 'active' ? '●' : '○');
+    const done = phaseIsDone(phase);
+    const status = done ? 'done' : (i === activeIndex ? 'active' : 'pending');
     const tasks = Array.isArray(phase.tasks) ? phase.tasks : [];
-    const doneCount = status === 'done' ? tasks.length : tasks.filter((t) => t && t.done).length;
+    const doneCount = tasks.filter((t) => t && (t.done || t.liveDone)).length;
     const count = tasks.length ? `<span class="phase-row-count">${doneCount}/${tasks.length}</span>` : '';
+    const expanded = phaseTrackerExpanded.has(i);
+    const check = `<span class="phase-row-check ${status}">${done ? '✓' : ''}</span>`;
     let tasksHtml = '';
-    if (status === 'active' && tasks.length) {
+    if (expanded && tasks.length) {
       tasksHtml = `<div class="phase-row-tasks">${tasks.map((t) => {
-        const tdone = Boolean(t && t.done);
-        return `<div class="phase-task${tdone ? ' done' : ''}"><span class="phase-task-box">${tdone ? '✓' : ''}</span><span class="phase-task-label">${escapeHtml(String((t && t.text) || ''))}</span></div>`;
+        const tdone = Boolean(t && (t.done || t.liveDone));
+        const key = `${state.chatId || ''}:${i}:${String((t && t.text) || '')}`;
+        let liveNew = false;
+        if (t && t.liveDone && !t.done && !phaseTrackerLiveSeen.has(key)) {
+          phaseTrackerLiveSeen.add(key);
+          phaseTrackerLiveHighlight.add(key);
+          liveNew = true;
+          window.setTimeout(() => {
+            phaseTrackerLiveHighlight.delete(key);
+            renderPhaseTracker();
+          }, 1400);
+        } else {
+          liveNew = phaseTrackerLiveHighlight.has(key);
+        }
+        return `<div class="phase-task${tdone ? ' done' : ''}${liveNew ? ' live-new' : ''}"><span class="phase-task-box">${tdone ? '✓' : ''}</span><span class="phase-task-label">${escapeHtml(String((t && t.text) || ''))}</span></div>`;
       }).join('')}</div>`;
     }
-    return `<div class="phase-row ${status}"><div class="phase-row-main"><span class="phase-row-mark">${mark}</span><span class="phase-row-title">${escapeHtml(String(phase.title || ''))}</span>${count}</div>${tasksHtml}</div>`;
+    return `<div class="phase-row ${status}${expanded ? ' expanded' : ''}">`
+      + `<button class="phase-row-main" type="button" data-phase-toggle="${i}" aria-expanded="${expanded ? 'true' : 'false'}"${tasks.length ? '' : ' disabled'}>`
+      + `${check}<span class="phase-row-title">Phase ${i + 1} · ${escapeHtml(String(phase.title || ''))}</span>${count}${tasks.length ? chevron : ''}`
+      + `</button>${tasksHtml}</div>`;
   }).join('');
   phaseTracker.innerHTML = `
     <div class="phase-tracker-head">
@@ -11590,6 +12274,7 @@ function renderPhaseTracker() {
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>
       </button>
       <span class="phase-tracker-title">${headLabel}</span>
+      <span class="phase-tracker-progress">${progressLabel}</span>
       <button class="phase-tracker-viewplan" type="button" id="phaseTrackerViewPlan">View plan</button>
     </div>
     <div class="phase-tracker-phases">${rows}</div>`;
@@ -11606,6 +12291,14 @@ function renderPhaseTracker() {
       renderPhaseTracker();
     });
   }
+  phaseTracker.querySelectorAll('[data-phase-toggle]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const idx = Number(btn.getAttribute('data-phase-toggle'));
+      if (phaseTrackerExpanded.has(idx)) phaseTrackerExpanded.delete(idx);
+      else phaseTrackerExpanded.add(idx);
+      renderPhaseTracker();
+    });
+  });
 }
 
 function renderInlineMarkdown(text) {
@@ -11870,6 +12563,14 @@ function appendMessageToChat(chatId, role, text, forcedTs = 0, options = {}) {
 
   const ts = Number(forcedTs) || nowTs();
   const message = { role, text: cleaned, ts };
+  if (Array.isArray(options.attachments) && options.attachments.length) {
+    message.attachments = options.attachments.slice(0, 12).map((a) => ({
+      name: String((a && a.name) || 'attachment').slice(0, 200),
+      kind: (a && a.kind) === 'text' ? 'text' : 'file',
+      mime: String((a && a.mime) || '').slice(0, 120),
+      size: Math.max(0, Number(a && a.size) || 0),
+    }));
+  }
   let shouldScheduleSmartRename = false;
   if (role === 'ai' && typeof options.thinking === 'string' && options.thinking.trim()) {
     message.thinking = options.thinking.trim();
@@ -12492,7 +13193,77 @@ function dispatchNextQueuedSend() {
   }
 }
 
-function sendMessage() {
+// Venice Pro adapter: if the user chats while it isn't serving, ASK them to start it (don't
+// auto-start). Returns true only when it's already serving; otherwise shows a click-to-start
+// prompt and returns false. The clicked prompt starts it, waits, then resends the message.
+let _adapterStartingForSend = false;
+async function ensureVeniceAdapterReady() {
+  const backend = getAIExeBackendUrl();
+  let status = null;
+  try {
+    status = await (await fetch(backend + '/api/adapter/status')).json();
+  } catch (_) {
+    showAppNotification({ title: 'Backend offline', message: "AI.EXE's backend isn't reachable — reopen the app and try again.", kind: 'error' });
+    return false;
+  }
+  if (status && status.serving) return true;
+  if (_adapterStartingForSend) {
+    showComposerNotice('Venice adapter is still starting — one moment…');
+    return false;
+  }
+  const user = String(appSettings.veniceAdapterUsername || '').trim();
+  const pass = String(appSettings.veniceAdapterPassword || '');
+  // Prompt — the user decides. Clicking the toast starts it and then sends the message.
+  showAppNotification({
+    title: "You're on Venice Pro (local adapter)",
+    message: user && pass
+      ? "It isn't running yet. Click here to start it (~30s) — then I'll send your message."
+      : "It isn't running yet. Click here to start it with your saved Venice browser session.",
+    kind: 'warning',
+    durationMs: 14000,
+    onClick: () => { void startVeniceAdapterThenResend(); },
+  });
+  return false;
+}
+
+async function startVeniceAdapterThenResend() {
+  if (_adapterStartingForSend) return;
+  const backend = getAIExeBackendUrl();
+  const user = String(appSettings.veniceAdapterUsername || '').trim();
+  const pass = String(appSettings.veniceAdapterPassword || '');
+  _adapterStartingForSend = true;
+  showAppNotification({ title: 'Starting Venice adapter', message: user && pass ? 'Opening Chrome and logging in (~30s) — sign in if the window asks.' : 'Opening Chrome with the saved Venice session — sign in only if it asks.', kind: 'info', durationMs: 9000 });
+  try {
+    let st = null;
+    try { st = await (await fetch(backend + '/api/adapter/status')).json(); } catch (_) {}
+    if (st && !st.installed) { await fetch(backend + '/api/adapter/install', { method: 'POST' }); }
+    await fetch(backend + '/api/adapter/start', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: user, password: pass, port: adapterTargetPort(), headless: false, hide_prompt: appSettings.veniceHidePrompt !== false }),
+    });
+    for (let i = 0; i < 90; i++) {                    // up to ~135s (manual login/captcha)
+      await new Promise((r) => setTimeout(r, 1500));
+      try {
+        const s = await (await fetch(backend + '/api/adapter/status')).json();
+        if (s && s.serving) {
+          _adapterStartingForSend = false;
+          if (typeof refreshAdapterStatus === 'function') refreshAdapterStatus();
+          const hasPending = mainInput && String(mainInput.value || '').trim();
+          showAppNotification({ title: 'Adapter ready', message: hasPending ? 'Sending your message…' : 'Venice Pro is ready — send your message.', kind: 'success' });
+          if (hasPending && typeof sendMessage === 'function') void sendMessage();  // resends the text still in the box
+          return;
+        }
+      } catch (_) { /* keep polling */ }
+    }
+    _adapterStartingForSend = false;
+    showAppNotification({ title: "Adapter didn't start", message: 'Check Settings → Provider (Chrome installed? login/captcha?). Then resend.', kind: 'error', durationMs: 8000 });
+  } catch (err) {
+    _adapterStartingForSend = false;
+    showAppNotification({ title: "Couldn't start adapter", message: String((err && err.message) || err), kind: 'error' });
+  }
+}
+
+async function sendMessage() {
   const operationRunning = pendingInferenceCount > 0;
   if (operationRunning && isCurrentViewInferenceChat()) {
     showComposerNotice('Still responding in this chat — press stop to interrupt, or wait.');
@@ -12516,14 +13287,23 @@ function sendMessage() {
   const userText = String(thinkControl.userText || rawVal).trim();
   if (!userText) return;
   if (!ensureSignedIn()) return;
+  // On the Venice Pro adapter: make sure it's actually serving before we send (auto-start +
+  // wait if needed). Runs before we clear the input, so the message is never lost.
+  if (getSelectedInferenceProvider() === 'veniceadapter') {
+    const ready = await ensureVeniceAdapterReady();
+    if (!ready) return;
+  }
   enterChatView();
   const modelPrompt = buildPromptWithInputAugments(thinkControl.modelText || userText);
   clearInputBox();
+  // Capture the attached files' display info BEFORE clearing, so we can show a capsule on the
+  // sent user message (the content is already folded into the prompt by buildPromptWithInputAugments).
+  const sentAttachments = (pendingAttachments || []).map((a) => ({ name: a.name, kind: a.kind, mime: a.mime, size: a.size }));
   clearPendingAttachments();
   const chat = (inNewChatMode || !getActiveChat()) ? createChat(userText) : getActiveChat();
   if (!chat) return;
   chatAutoScrollPinned = true;
-  appendMessageToChat(chat.id, 'user', userText);
+  appendMessageToChat(chat.id, 'user', userText, 0, sentAttachments.length ? { attachments: sentAttachments } : {});
   if (operationRunning) {
     queuedSends.push({
       chatId: chat.id,
@@ -13149,6 +13929,16 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
     skipNewProjectConfirmation: Boolean(options && options.skipNewProjectConfirmation),
     forceCurrentWorkspace: Boolean(options && options.forceCurrentWorkspace),
   };
+  // A new run must NEVER overlap a still-live one. Kill any orphaned in-flight streams
+  // FIRST — e.g. a timed-out file-generation stream still running in the background. The
+  // timed-out run already returned and nulled activeInferenceRequest, so the conditional
+  // check below misses it; abort-all reaches the orphan's still-registered controllers.
+  try { abortAllInFlightInferenceControllers('superseded_by_new_run'); } catch (_) { /* noop */ }
+  if (activeInferenceRequest && activeInferenceRequest !== requestToken && !activeInferenceRequest.done) {
+    try { activeInferenceRequest.cancelled = true; } catch (_) { /* noop */ }
+    try { abortInFlightInference('superseded_by_new_run'); } catch (_) { /* noop */ }
+    activeInferenceRequest = null;
+  }
   activeInferenceRequest = requestToken;
   thinkingStartedByChatId.set(String(chatId || ''), Number(requestToken.startedAt || Date.now()));
   showTypingIndicator(chatId, requestToken.startedAt);
@@ -13210,20 +14000,20 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
       const workspaceStateComparison = getWorkspaceStateComparison();
       const workspaceStatusSnapshot = await requestWorkspaceStatusSnapshot();
       const continuationChat = findChatById(chatId);
-      // Treat short "continue"/"retry"/"redo"/"finish it" replies as a resume.
-      // This only gates INTO agent resume below when the assistant actually
-      // stopped mid-build (lastAssistantAskedContinue) or needsContinue is set,
-      // so a loose match here is safe — it never hijacks an unrelated request.
-      const continuationOnly = isBareAgentResumeRequest(promptText);
+      // Treat bare continuation and natural phased phrasing as a resume. The
+      // phase-tracker check keeps "finish phase 1 then ..." attached to plan.md
+      // instead of being handled as a fresh edit that clears the tracker.
+      const continuationOnly = shouldTreatAsAgentResumeRequest(chatId, promptText);
       const lastAssistantForContinuation = findLastAssistantMessage(continuationChat);
       const lastAssistantAskedContinue = /ask me to continue|continue from the current (?:project|workspace) state|did not pass the project quality check|continue or retry without losing/i.test(
         String(lastAssistantForContinuation && lastAssistantForContinuation.text ? lastAssistantForContinuation.text : ''),
       );
+      const unfinishedPhaseTracker = chatHasUnfinishedPhaseTracker(continuationChat);
       if (
         developerAgentEnabled
         && continuationOnly
         && continuationChat
-        && (continuationChat.needsContinue || lastAssistantAskedContinue)
+        && (continuationChat.needsContinue || lastAssistantAskedContinue || unfinishedPhaseTracker)
       ) {
         requestToken.operationKind = 'agent';
         setThinkingStatus('Continuing changes...');
@@ -13283,6 +14073,7 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
         const preflightDecision = await requestPreflightRouteDecision(chatId, promptText, {
           agentEnabled: developerAgentEnabled,
           canvasEnabled: canvasModeUiEnabled,
+          forceCurrentWorkspace: Boolean(requestToken.forceCurrentWorkspace),
         });
         const preflightDebug = preflightDecision && preflightDecision._debug ? preflightDecision._debug : null;
         const workspaceDebug = getWorkspaceDebugSnapshot();
@@ -13875,7 +14666,18 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
         model: String(getProviderModel(inferenceProvider) || ''),
         workspace: getWorkspaceDebugSnapshot(),
       });
-      appendErrorMessageToChat(chatId, res && res.message ? res.message : `${providerDef.label} inference failed.`);
+      if (inferenceProvider === 'veniceadapter') {
+        appendErrorMessageToChat(chatId, "The Venice Pro adapter isn't ready — it likely stopped or your Venice session needs a login. Open Settings → Provider to start it (sign in to the Chrome window if it asks), then resend.");
+        showAppNotification({
+          title: 'Venice adapter not ready',
+          message: 'Click here to start it (~30s) — then resend your message. Or open Settings → Provider.',
+          kind: 'warning',
+          durationMs: 13000,
+          onClick: () => { void startVeniceAdapterThenResend(); },
+        });
+      } else {
+        appendErrorMessageToChat(chatId, res && res.message ? res.message : `${providerDef.label} inference failed.`);
+      }
       return;
     }
 
@@ -14307,6 +15109,7 @@ async function resolveTypingFallback(chatId) {
 loadAuthStore();
 updateLoginUi();
 loadAppSettings();
+startBackendProviderSync();  // push the saved provider/key to the backend on startup + retry
 moveGlobalControlsIntoSidebar();
 setupMacTopbarNativeDrag();
 hydrateCustomTooltips(document);
