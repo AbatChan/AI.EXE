@@ -68,12 +68,6 @@ NEW_CHAT_XPATH = "//button[@aria-label='New chat']"   # SPA new-chat (no full pa
 INFERENCE_ENDPOINT = "/api/inference/chat"
 
 # --- Models -----------------------------------------------------------------
-# Shown in AI.EXE's model dropdown ONLY when the live scrape fails. These are the REAL Venice
-# model names (verified from the live picker 2026-07-01); "DeepSeek V4 Pro" was a wrong guess —
-# Venice has V4 Flash / V3.2, no "V4 Pro". Keep this list matching the live titles.
-FALLBACK_MODELS = [
-    "DeepSeek V4 Flash", "DeepSeek V3.2", "Qwen 3.7 Max",
-    "Claude Fable 5", "Claude Opus 4.8", "Claude Sonnet 4.6",
-    "GLM 4.6", "GLM 4.7 Flash Heretic", "GLM 5.2",
-    "Google Gemma 4 31B Instr", "Venice Uncensored 1.2",
-]
+# Shown in AI.EXE's model dropdown when live scraping only sees Venice's compact/recent
+# subset. None means "use the expanded text-model catalog embedded in the adapter server".
+FALLBACK_MODELS = None

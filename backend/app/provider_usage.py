@@ -62,7 +62,7 @@ def read_provider_health(base_url: str, kind: str) -> dict:
     else:
         models = [m.get("id", "") for m in data.get("data", []) if isinstance(m, dict)]
     out["reachable"] = True
-    out["models"] = [m for m in models if m][:50]
+    out["models"] = [m for m in models if m]
     return out
 
 
