@@ -1277,6 +1277,21 @@ body.resizing-panels .panel-resizer {
   color: #d6b45f;
 }
 
+/* Checking state: coin icon swaps to a spin ring while the balance is fetched */
+.account-popover-credit.loading .account-credit-icon svg {
+  display: none;
+}
+.account-popover-credit.loading .account-credit-icon::after {
+  content: '';
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: conic-gradient(from 0deg, transparent 8%, var(--accent) 92%, var(--accent));
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 2px));
+  mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 2px));
+  animation: spin 0.7s linear infinite;
+}
+
 .account-popover-credit span:last-child {
   min-width: 0;
   overflow: hidden;

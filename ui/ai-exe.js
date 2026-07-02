@@ -5435,11 +5435,15 @@ function rememberProviderHealthMeta(provider, health) {
   }
 }
 
-function setAccountCreditLine(text, visible = true) {
+function setAccountCreditLine(text, visible = true, loading = false) {
   if (!accountCreditRow || !accountCreditText) return;
+  // Credit line is Venice-Pro-adapter-only: any other provider never shows it.
+  const def = getInferenceProviderDef(getSelectedInferenceProvider());
+  const show = Boolean(visible && def && def.protocol === 'ollama');
   const clean = String(text || '').trim();
   accountCreditText.textContent = clean || 'Credits unavailable';
-  accountCreditRow.hidden = !visible;
+  accountCreditRow.hidden = !show;
+  accountCreditRow.classList.toggle('loading', Boolean(loading && show));
 }
 
 function updateAccountUsageSubline(text) {
@@ -5448,7 +5452,7 @@ function updateAccountUsageSubline(text) {
     const clean = text.trim() || 'Check balance';
     accountUsageSub.textContent = clean;
     if (/credit/i.test(clean) || /checking/i.test(clean) || /unavailable/i.test(clean)) {
-      setAccountCreditLine(clean, true);
+      setAccountCreditLine(clean, true, /checking/i.test(clean));
     }
     return;
   }
@@ -5468,7 +5472,7 @@ function updateAccountUsageSubline(text) {
     setAccountCreditLine('', false);
   } else if (provider === 'venice') {
     accountUsageSub.textContent = 'Check Venice API balance';
-    setAccountCreditLine('Check Venice API balance', true);
+    setAccountCreditLine('', false);
   } else {
     accountUsageSub.textContent = 'Provider usage';
     setAccountCreditLine('', false);
@@ -11465,14 +11469,13 @@ function extractVeniceBalances(obj) {
   return found;
 }
 
-async function isVeniceAdapterServing() {
+async function getVeniceAdapterStatus() {
   try {
     const res = await fetch(getAIExeBackendUrl() + '/api/adapter/status');
-    if (!res.ok) return false;
-    const st = await res.json();
-    return Boolean(st && st.serving);
+    if (!res.ok) return null;
+    return await res.json();
   } catch (_) {
-    return false;
+    return null;
   }
 }
 
@@ -11485,10 +11488,22 @@ async function refreshAccountUsageInline() {
     return '';
   }
   if (def && def.protocol === 'ollama') {
-    if (!(await isVeniceAdapterServing())) {
+    const st = await getVeniceAdapterStatus();
+    if (!st || (!st.running && !st.serving)) {
       // Adapter off: no credit check, no "Checking credits…" — just say why.
       updateAccountUsageSubline('Adapter not running');
       setAccountCreditLine('', false);
+      return '';
+    }
+    if (!st.serving) {
+      // Starting up (Chrome opening / scraping models+credits): loader, no fetch yet.
+      accountUsageSub.textContent = 'Adapter starting…';
+      setAccountCreditLine('Adapter starting…', true, true);
+      // Re-check while the popover stays open so it flips to the balance when ready.
+      clearTimeout(refreshAccountUsageInline._startingT);
+      refreshAccountUsageInline._startingT = setTimeout(() => {
+        if (accountPopover && accountPopover.classList.contains('open')) void refreshAccountUsageInline();
+      }, 2500);
       return '';
     }
     updateAccountUsageSubline('Checking credits…');
@@ -11534,12 +11549,21 @@ async function showProviderUsageNotification() {
     return;
   }
   if (def && def.protocol === 'ollama') {
-    if (!(await isVeniceAdapterServing())) {
-      updateAccountUsageSubline('Adapter not running');
-      setAccountCreditLine('', false);
+    const st = await getVeniceAdapterStatus();
+    if (!st || !st.serving) {
+      const starting = Boolean(st && st.running && !st.serving);
+      if (starting) {
+        accountUsageSub.textContent = 'Adapter starting…';
+        setAccountCreditLine('Adapter starting…', true, true);
+      } else {
+        updateAccountUsageSubline('Adapter not running');
+        setAccountCreditLine('', false);
+      }
       showAppNotification({
         title: 'Usage',
-        message: 'The Venice Pro adapter is not running — start it in Settings → Provider to see credits.',
+        message: starting
+          ? 'The Venice Pro adapter is still starting — credits will show once it is ready.'
+          : 'The Venice Pro adapter is not running — start it in Settings → Provider to see credits.',
         kind: 'info',
       });
       return;
