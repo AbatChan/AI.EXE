@@ -1390,7 +1390,13 @@ const agentMaxSteps = 24;
 // never saw the rest. Files larger than this still paginate (and the range-aware
 // guard allows that), but the common case now needs no paging at all.
 const agentMaxToolOutputChars = 26000;
-const agentStepTimeoutMs = 45000;
+// Browser-automation providers (Venice adapter) legitimately take far longer per decision
+// than an API call — typing + streaming through a real page. 45s was timing agent runs out.
+function currentAgentStepTimeoutMs() {
+  try {
+    return getSelectedInferenceProvider() === 'veniceadapter' ? 120000 : 45000;
+  } catch (_) { return 45000; }
+}
 // Tool execution can run its own (slow) content-generation inference; bound it so a
 // stalled write/edit can't hang the agent loop. This is now an IDLE limit, not a
 // flat wall-clock: a large file is generated in several sequential inference passes,
@@ -6665,11 +6671,17 @@ async function requestOllamaChatCompletion(provider, prompt, maxTokens, systemPr
   const messages = systemPrompt
     ? [{ role: 'system', content: String(systemPrompt) }, { role: 'user', content: String(prompt || '') }]
     : [{ role: 'user', content: String(prompt || '') }];
+  // The owning chat's id — the adapter maps each AI.EXE chat to ONE Venice conversation
+  // (chat turns + agent planner/decision calls share it; no per-request chat churn).
+  // Best-effort: switching chats mid-run maps cosmetically wrong, never incorrectly
+  // (full context rides in every prompt).
+  let chatId = '';
+  try { const c = getActiveChat(); chatId = (c && c.id) || ''; } catch (_) { /* noop */ }
   try {
     const response = await fetch(getAIExeBackendUrl() + '/api/provider/complete', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ messages, max_tokens: Math.max(1, Number(maxTokens) || 4096), temperature: 0.2 }),
+      body: JSON.stringify({ messages, max_tokens: Math.max(1, Number(maxTokens) || 4096), temperature: 0.2, chat_id: chatId }),
     });
     if (!response.ok) return { ok: false, output: '', status: response.status };
     const data = await response.json();
@@ -9910,7 +9922,7 @@ const agentPlanner = window.AIExeAgentPlanner && typeof window.AIExeAgentPlanner
     getAgentExpandedReadChars,
     agentDecisionMaxTokens,
     agentPlanGrammar,
-    agentStepTimeoutMs,
+    agentStepTimeoutMs: currentAgentStepTimeoutMs(),
     isLikelyCompletePythonGameSource,
     normalizeAgentPlanSpec,
   })
@@ -10054,7 +10066,7 @@ const agentLoop = window.AIExeAgentLoop && typeof window.AIExeAgentLoop.createAg
     agentMaxSteps,
     agentDecisionMaxTokens,
     agentDecisionGrammar,
-    agentStepTimeoutMs,
+    agentStepTimeoutMs: currentAgentStepTimeoutMs(),
     agentMaxToolOutputChars,
     mergeAgentActivityIntoList,
     pushActiveAgentStreamActivity,

@@ -72,6 +72,7 @@ class ProviderCompleteRequest(BaseModel):
     messages: List[Dict[str, str]]
     max_tokens: int = 4096
     temperature: float = 0.2
+    chat_id: str = ""   # AI.EXE chat id — the adapter maps it to one Venice conversation
 
 
 class ProviderCompleteResponse(BaseModel):
