@@ -1527,33 +1527,84 @@ def aiexe_scrape_models(driver):
             return []
         _t.sleep(1)
         names = _aiexe_collect_models_from_modal(driver)
-        _aiexe_collect_priced_models_by_search(driver, names)
+        # Venice's catalog rarely changes: same model list as last boot -> reuse the cached
+        # priced set and skip the whole per-model search sweep (it's the slow, fragile part).
+        cache = _aiexe_load_model_cache()
+        if names and set(names) == set(cache.get("models") or []) and cache.get("priced"):
+            AIEXE_PRICED_MODELS = set(cache["priced"])
+            AIEXE_PRICED_CHECKED_MODELS = set(names)
+            print("AIEXE_PRICED reused cached set (%d) — catalog unchanged" % len(AIEXE_PRICED_MODELS), flush=True)
+        else:
+            _aiexe_collect_priced_models_by_search(driver, names)
         _aiexe_close_modal(driver)
         return names
     except Exception:
         return []
 
 
-def aiexe_scrape_models_with_restore(driver):
-    """Scrape; if empty (a minimized Chrome can still throttle paint despite the flags,
-    leaving Venice's virtualized picker rowless), restore the window, retry once, re-minimize."""
-    names = aiexe_scrape_models(driver)
-    if names:
-        return names
-    print("AIEXE_MODELS scrape empty while minimized — restoring window for one retry", flush=True)
+def _aiexe_restore_unobtrusive(driver):
+    """Un-minimize for reliable interaction WITHOUT popping a window in the user's face:
+    restore into a small window parked at the far bottom-right screen corner."""
     try:
-        driver.maximize_window()
-        time.sleep(1.0)
+        dims = driver.execute_script("return [screen.width || 1440, screen.height || 900];") or [1440, 900]
+        driver.set_window_rect(x=int(dims[0]) - 80, y=int(dims[1]) - 60, width=880, height=680)
+        return True
+    except Exception:
+        try:
+            driver.maximize_window()
+            return True
+        except Exception:
+            return False
+
+
+AIEXE_MODEL_CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "aiexe_model_cache.json")
+
+
+def _aiexe_load_model_cache():
+    try:
+        with open(AIEXE_MODEL_CACHE_FILE) as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def _aiexe_save_model_cache(models):
+    try:
+        with open(AIEXE_MODEL_CACHE_FILE, "w") as f:
+            json.dump({"models": list(models), "priced": sorted(AIEXE_PRICED_MODELS), "ts": time.time()}, f)
     except Exception:
         pass
-    try:
-        names = aiexe_scrape_models(driver)
-    finally:
+
+
+def aiexe_scrape_models_with_restore(driver):
+    """Scrape; if empty (a minimized Chrome can still throttle paint despite the flags,
+    leaving Venice's virtualized picker rowless), restore unobtrusively, retry once,
+    re-minimize. Still empty after that -> the last GOOD catalog persisted on disk."""
+    global AIEXE_PRICED_MODELS, AIEXE_PRICED_CHECKED_MODELS
+    names = aiexe_scrape_models(driver)
+    if not names:
+        print("AIEXE_MODELS scrape empty while minimized — restoring window for one retry", flush=True)
+        _aiexe_restore_unobtrusive(driver)
+        time.sleep(1.0)
         try:
-            driver.minimize_window()
-        except Exception:
-            pass
-    return names
+            names = aiexe_scrape_models(driver)
+        finally:
+            try:
+                driver.minimize_window()
+            except Exception:
+                pass
+    if names:
+        _aiexe_save_model_cache(names)
+        return names
+    cache = _aiexe_load_model_cache()
+    if cache.get("models"):
+        AIEXE_PRICED_MODELS = set(cache.get("priced") or [])
+        AIEXE_PRICED_CHECKED_MODELS = set(cache["models"])
+        print("AIEXE_MODELS using cached catalog (%d models, %d priced) — live scrape failed"
+              % (len(cache["models"]), len(AIEXE_PRICED_MODELS)), flush=True)
+        return list(cache["models"])
+    return []
 
 
 def aiexe_select_model(driver, name):
@@ -1759,15 +1810,12 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
         _restored_for_ui = False
         try:
             if not aiexe_select_model(driver, request_model_id):
-                # Minimized Chrome can starve the picker's virtualized rows — restore the
-                # window, retry once, and keep it restored for the settings dialog below.
+                # Minimized Chrome can starve the picker's virtualized rows — restore a
+                # small corner window (not a face-popping maximize), retry once, and keep
+                # it restored for the settings dialog below; re-minimized after.
                 print("AIEXE_MODEL retrying with window restored", flush=True)
-                try:
-                    driver.maximize_window()
-                    _restored_for_ui = True
-                    time.sleep(0.8)
-                except Exception:
-                    pass
+                _restored_for_ui = _aiexe_restore_unobtrusive(driver)
+                time.sleep(0.8)
                 aiexe_select_model(driver, request_model_id)
         except Exception:
             pass

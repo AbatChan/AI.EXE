@@ -59,3 +59,6 @@ scripts/__pycache__/
 docs/AI_EXE_Requirements*
 docs/AI_EXE_Revised*
 docs/PROJECT_MEMORY.md
+backend/app/aiexe_model_cache.json
+backend/app/aiexe_chat_map.json
+backend/app/.chrome-profile/
