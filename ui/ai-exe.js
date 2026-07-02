@@ -1046,6 +1046,16 @@ const pendingPreflightConfirmations = new Map();
 const smartTitleRenamePending = new Set();
 let notificationContainer = null;
 let urlContextMode = 'chat';
+// ONE switch for the Venice-window prompt-hide default: flip this and the setting's
+// default flips everywhere (checkbox, start payloads, adapter env). A user's explicit
+// toggle in Settings still overrides it (stored value wins once set).
+const VENICE_HIDE_PROMPT_DEFAULT = false;
+
+function veniceHidePromptOn() {
+  const v = appSettings ? appSettings.veniceHidePrompt : undefined;
+  return (v === undefined || v === null) ? VENICE_HIDE_PROMPT_DEFAULT : v === true;
+}
+
 let pendingAttachments = [];
 let pendingNewChatAttachments = [];
 let pendingManualContext = '';
@@ -4855,7 +4865,7 @@ function loadAppSettings() {
     veniceAdapterModel: 'llama-3.1-405b-akash-api',
     veniceAdapterUsername: '',
     veniceAdapterPassword: '',
-    veniceHidePrompt: true,   // hide the raw typed prompt in the Venice window (adapter)
+    veniceHidePrompt: VENICE_HIDE_PROMPT_DEFAULT,  // hide the raw typed prompt in the Venice window
     workMode: 'coding',
     modelUrl: '',
     keepModelOnUpdate: true,
@@ -5534,7 +5544,7 @@ function populateRemoteProviderFields(provider) {
     if (isAdapter) {
       if (settingsAdapterUser) settingsAdapterUser.value = String(appSettings.veniceAdapterUsername || '');
       if (settingsAdapterPass) settingsAdapterPass.value = String(appSettings.veniceAdapterPassword || '');
-      { const hp = document.getElementById('settingsAdapterHidePrompt'); if (hp) hp.checked = appSettings.veniceHidePrompt !== false; }
+      { const hp = document.getElementById('settingsAdapterHidePrompt'); if (hp) hp.checked = veniceHidePromptOn(); }
       refreshAdapterStatus();
     }
   }
@@ -11847,7 +11857,7 @@ setTimeout(recalcComposerChipOverflow, 900);
 
 const settingsAdapterHidePrompt = document.getElementById('settingsAdapterHidePrompt');
 if (settingsAdapterHidePrompt) {
-  settingsAdapterHidePrompt.checked = appSettings.veniceHidePrompt !== false;
+  settingsAdapterHidePrompt.checked = veniceHidePromptOn();
   settingsAdapterHidePrompt.addEventListener('change', () => {
     appSettings.veniceHidePrompt = settingsAdapterHidePrompt.checked;
     saveAppSettings();
@@ -11896,7 +11906,7 @@ if (settingsAdapterStartBtn) {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         // Visible browser: Venice's login is behind Cloudflare, which blocks headless. The
         // window also lets you complete an email verification code once (profile persists).
-        body: JSON.stringify({ username: user, password: pass, port: adapterTargetPort(), headless: false, hide_prompt: appSettings.veniceHidePrompt !== false }),
+        body: JSON.stringify({ username: user, password: pass, port: adapterTargetPort(), headless: false, hide_prompt: veniceHidePromptOn() }),
       })).json();
       showAppNotification(r.ok
         ? { title: 'Adapter', message: r.detail === 'already running' ? 'Adapter already running.' : (user && pass ? 'Adapter started — give it a few seconds to log in.' : 'Adapter started — using the saved Venice browser session if it is still valid.'), kind: 'success' }
@@ -13490,7 +13500,7 @@ async function startVeniceAdapterThenResend() {
     if (st && !st.installed) { await fetch(backend + '/api/adapter/install', { method: 'POST' }); }
     await fetch(backend + '/api/adapter/start', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username: user, password: pass, port: adapterTargetPort(), headless: false, hide_prompt: appSettings.veniceHidePrompt !== false }),
+      body: JSON.stringify({ username: user, password: pass, port: adapterTargetPort(), headless: false, hide_prompt: veniceHidePromptOn() }),
     });
     for (let i = 0; i < 90; i++) {                    // up to ~135s (manual login/captcha)
       await new Promise((r) => setTimeout(r, 1500));

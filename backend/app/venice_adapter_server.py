@@ -1321,9 +1321,9 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
                 driver.get(VC_CHAT_URL)
         # else: already on a fresh composer page — just use it
         # Hide the raw typed prompt in the (minimized) Venice window — model still receives it.
-        # Toggle from AI.EXE Settings (passed as AIEXE_HIDE_PROMPT env on start; default on).
+        # Toggle from AI.EXE Settings (passed as AIEXE_HIDE_PROMPT env on start; default OFF).
         try:
-            if os.getenv('AIEXE_HIDE_PROMPT', '1') != '0':
+            if os.getenv('AIEXE_HIDE_PROMPT', '0') != '0':
                 driver.execute_script("var s=document.getElementById('aiexe-hide')||document.createElement('style');s.id='aiexe-hide';s.textContent='[data-testid=\"user-message\"],[data-message-content]{visibility:hidden!important}';document.head.appendChild(s);")
             else:
                 driver.execute_script("var s=document.getElementById('aiexe-hide'); if(s) s.remove();")
