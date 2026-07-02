@@ -1056,14 +1056,17 @@ def _aiexe_note_priced_model(driver, title_el, name):
         pass
 
 
-def _aiexe_read_credits(driver):
+def _aiexe_read_credits(driver, allow_ui=True):
     """Best-effort read of the account's credit balance ('10,279 Credits' in the sidebar).
-    Cached in AIEXE_CREDITS so /api/aiexe/state stays selenium-free."""
+    Cached in AIEXE_CREDITS so /api/aiexe/state stays selenium-free.
+    allow_ui=False = passive only: read what's already on screen, never click the
+    sidebar/account menu open (used post-reply on non-metered models)."""
     global AIEXE_CREDITS
-    try:
-        _aiexe_dismiss_modal(driver)
-    except Exception:
-        pass
+    if allow_ui:
+        try:
+            _aiexe_dismiss_modal(driver)
+        except Exception:
+            pass
 
     def _capture_visible_credit_text():
         try:
@@ -1079,6 +1082,22 @@ def _aiexe_read_credits(driver):
         return False
 
     if _capture_visible_credit_text():
+        return
+    if not allow_ui:
+        # Passive fallback: scan the page text without opening anything.
+        try:
+            txt = driver.execute_script("""
+              const root = document.body || document.documentElement;
+              const text = String((root && (root.innerText || root.textContent)) || '');
+              const m = text.match(/(?:^|\\b)(\\d[\\d,\\.\\s]{0,18})\\s+Credits?\\b/i);
+              return m ? `${m[1].replace(/\\s+/g, '')} Credits` : '';
+            """)
+            txt = (txt or "").strip()
+            if txt and any(ch.isdigit() for ch in txt) and AIEXE_CREDITS != txt:
+                AIEXE_CREDITS = txt
+                print("AIEXE_CREDITS %s" % txt, flush=True)
+        except Exception:
+            pass
         return
 
     try:
@@ -1539,11 +1558,12 @@ def aiexe_scrape_models_with_restore(driver):
 
 def aiexe_select_model(driver, name):
     """Pick `name` in Venice's model modal before sending. Fully guarded — a failure just
-    leaves the current model selected, never breaks the chat."""
+    leaves the current model selected, never breaks the chat. Returns False only when the
+    switch was NEEDED and didn't land (so the caller can retry with the window restored)."""
     import time as _t
     name = (name or "").strip()
     if not name:
-        return
+        return True
     # Only drive the picker for a REAL Venice model. Legacy/mock IDs (llama-...-akash, hermes,
     # dolphin, nemotron, etc.) aren't in Venice's list — opening the modal for them finds
     # nothing and can leave a dialog over the composer, which breaks the chat. Skip them.
@@ -1551,7 +1571,7 @@ def aiexe_select_model(driver, name):
     nl = name.lower()
     if not any(nl == k or nl in k or k in nl for k in known):
         print("AIEXE_MODEL skip (not a known model): %r" % name, flush=True)
-        return
+        return True
     try:
         # The model button may still be rendering right after the composer appears — wait briefly.
         for _w in range(12):
@@ -1564,10 +1584,10 @@ def aiexe_select_model(driver, name):
             AIEXE_CURRENT_MODEL = cur
         if cur and cur.lower() == nl:
             print("AIEXE_MODEL already on %r" % name, flush=True)
-            return
+            return True
         print("AIEXE_MODEL want=%r current=%r — opening picker" % (name, cur), flush=True)
         if not _aiexe_open_model_modal(driver):
-            return
+            return False
         _t.sleep(0.8)
         def _find_target():
             rows = driver.find_elements(By.CSS_SELECTOR, VC_MODEL_ROW_TITLE_CSS)
@@ -1637,12 +1657,14 @@ def aiexe_select_model(driver, name):
             _t.sleep(0.5)
             AIEXE_CURRENT_MODEL = name
             print("AIEXE_MODEL clicked %r" % name, flush=True)
-        else:
-            print("AIEXE_MODEL target row NOT found for %r" % name, flush=True)
-            _aiexe_close_modal(driver)
+            return True
+        print("AIEXE_MODEL target row NOT found for %r" % name, flush=True)
+        _aiexe_close_modal(driver)
+        return False
     except Exception as _e:
         print("AIEXE_MODEL error: %s" % _e, flush=True)
         _aiexe_close_modal(driver)
+        return False
 
 
 def generate_selenium_streamed_response(data, driver, response_format=ResponseFormat.CHAT, retry_browser_restart=True):
@@ -1734,8 +1756,19 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
         # NOW the composer (and its model selector) is rendered — pick the requested model.
         # Doing this right after driver.get() failed: the model button wasn't in the DOM yet
         # (textarea displayed=False). Guarded — a failure just keeps the current model.
+        _restored_for_ui = False
         try:
-            aiexe_select_model(driver, request_model_id)
+            if not aiexe_select_model(driver, request_model_id):
+                # Minimized Chrome can starve the picker's virtualized rows — restore the
+                # window, retry once, and keep it restored for the settings dialog below.
+                print("AIEXE_MODEL retrying with window restored", flush=True)
+                try:
+                    driver.maximize_window()
+                    _restored_for_ui = True
+                    time.sleep(0.8)
+                except Exception:
+                    pass
+                aiexe_select_model(driver, request_model_id)
         except Exception:
             pass
         _aiexe_dismiss_modal(driver)  # never let a stray dialog block the composer
@@ -1750,6 +1783,11 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
                 AIEXE_SETTINGS_DONE.discard("%s|%s" % (_chat_key, 'on' if _think == 'off' else 'off'))
         except Exception:
             pass
+        if _restored_for_ui:
+            try:
+                driver.minimize_window()
+            except Exception:
+                pass
         # Venice SPA navigation/model-picker changes can rerender the composer. Never reuse
         # the textarea found before model selection; reacquire it right before typing.
         element = _aiexe_wait_composer(driver)
@@ -1896,7 +1934,15 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
                 if _m: yield _m
             _reasoning_open = False
 
-        _aiexe_read_credits(driver)  # refresh the balance after each reply (cheap, cached)
+        # Refresh the balance after the reply — but only OPEN the sidebar/account menu when
+        # the model that just answered is credit-metered (the balance can't change otherwise;
+        # non-metered models get a passive read of whatever is already on screen).
+        try:
+            _cur_l = (AIEXE_CURRENT_MODEL or "").strip().lower()
+            _metered = bool(_cur_l) and any(_cur_l == m.lower() for m in AIEXE_PRICED_MODELS)
+        except Exception:
+            _metered = False
+        _aiexe_read_credits(driver, allow_ui=_metered)
         # Diagnostic: the field names of Venice's REAL request body (captured pre-swap by the
         # interceptor) — reveals whether a reasoning/web flag exists to set per-request.
         try:

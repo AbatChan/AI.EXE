@@ -9674,6 +9674,9 @@ const promptCore = window.AIExePromptCore && typeof window.AIExePromptCore.creat
     isCanvasModeEnabled: () => canvasModeEnabled,
     isThinkModeEnabled: () => thinkModeEnabled,
     isAgentModeEnabled: () => developerAgentEnabled,
+    // Venice adapter flips Venice's own Reasoning switch — reasoning is captured from the
+    // native channel, so the prompt must NOT also ask for a <thinking> block (doubles it).
+    providerHandlesThinkNatively: () => isVeniceAdapterSelected(),
     getUncensoredEscalationInstruction,
     shouldInlineNameChatResponse,
   })

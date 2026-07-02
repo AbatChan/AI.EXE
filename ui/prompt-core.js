@@ -375,6 +375,11 @@
       const canvasModeActive = hasCanvasModeOverride
         ? Boolean(options.canvasModeOverride)
         : canvasModeUiEnabled;
+      // Venice adapter: the model's NATIVE reasoning channel is captured automatically.
+      // Prompting a <thinking> block there DOUBLES the thoughts (native Thought Process +
+      // a literal <thinking> block in the visible answer) — so tell it NOT to write one.
+      const nativeThink = thinkModeActive
+        && Boolean(deps.providerHandlesThinkNatively && deps.providerHandlesThinkNatively());
       const modeInstructions = [
         canvasModeUiEnabled && canvasModeActive ? 'UI MODE: Canvas mode is enabled by the user in the app UI for this turn.' : '',
         canvasModeUiEnabled && !canvasModeActive ? 'UI MODE: Canvas mode is enabled by the user in the app UI, but this turn has been routed to normal chat because the current request is better answered conversationally.' : '',
@@ -386,7 +391,9 @@
         canvasModeActive && thinkModeActive
           ? [
               'CRITICAL FORMATTING ORDER FOR COMBINED UI MODES:',
-              '1. Output exactly one hidden <thinking>...</thinking> block first.',
+              nativeThink
+                ? '1. Reason in your native reasoning channel only — no <thinking> block in the visible output.'
+                : '1. Output exactly one hidden <thinking>...</thinking> block first.',
               '2. Then output one short natural intro sentence outside the canvas tag.',
               '3. Then output one non-empty <AIcanvas title="..." type="text|code">...</AIcanvas> block.',
               '4. Then one short friendly closing line outside the tag; nothing else outside the canvas.',
@@ -439,7 +446,15 @@
           'Do not explain the tag. Do not skip the tag.',
         ].join('\n')
         : '';
-      const thinkInstruction = thinkModeActive
+      const thinkInstruction = thinkModeActive && nativeThink
+        ? [
+          'THINK_MODE: ON (handled natively by the platform).',
+          'Your reasoning channel is captured automatically — reason as deeply as you need there.',
+          'Do NOT write <thinking>...</thinking>, <think>...</think>, or any other scratchpad block in the visible answer.',
+          'The visible output must be ONLY the final answer.',
+          'Never mention Think mode, reasoning, or output-format requirements in the visible answer.',
+        ].join('\n')
+        : thinkModeActive
         ? [
           'THINK_MODE: ON. This mode was enabled by the user in the app UI for this turn.',
           'This is a hidden output-format requirement, not a topic for the visible answer.',
@@ -462,7 +477,7 @@
           'Final answer should be direct and high-confidence, and concise only when that still fully answers the request.',
         ].join('\n')
         : '';
-      const resolvedChatNameInstruction = inlineChatNameInstruction && thinkModeActive
+      const resolvedChatNameInstruction = inlineChatNameInstruction && thinkModeActive && !nativeThink
         ? [
           'CHAT NAME PREFIX FOR THIS RESPONSE:',
           'After closing the <thinking> block, write exactly one chat-name line: [[CHAT_NAME: 2-6 word title]]',
