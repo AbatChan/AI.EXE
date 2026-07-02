@@ -9213,6 +9213,7 @@ function showAppNotification(options = {}) {
           : 'Notice'
   )).trim();
   const duration = Number.isFinite(Number(options.durationMs)) ? Math.max(1200, Number(options.durationMs)) : 4600;
+  const sticky = Boolean(options.sticky);   // no auto-close; lives until closed by code or the × button
   const toast = document.createElement('div');
   toast.className = `app-toast ${kind}`;
   toast.setAttribute('role', kind === 'error' ? 'alert' : 'status');
@@ -9267,19 +9268,19 @@ function showAppNotification(options = {}) {
       closeTimer = 0;
     }
   });
-  toast.addEventListener('mouseleave', () => scheduleClose(2200));
+  toast.addEventListener('mouseleave', () => { if (!sticky) scheduleClose(2200); });
   toast.addEventListener('focusin', () => {
     if (closeTimer) {
       clearTimeout(closeTimer);
       closeTimer = 0;
     }
   });
-  toast.addEventListener('focusout', () => scheduleClose(2200));
+  toast.addEventListener('focusout', () => { if (!sticky) scheduleClose(2200); });
   stack.appendChild(toast);
   requestAnimationFrame(() => {
     toast.classList.add('open');
   });
-  scheduleClose();
+  if (!sticky) scheduleClose();
   return toast;
 }
 
@@ -12320,9 +12321,13 @@ if (settingsAdapterStartBtn) {
         // window also lets you complete an email verification code once (profile persists).
         body: JSON.stringify({ username: user, password: pass, port: adapterTargetPort(), headless: false, hide_prompt: veniceHidePromptOn() }),
       })).json();
-      showAppNotification(r.ok
-        ? { title: 'Adapter', message: r.detail === 'already running' ? 'Adapter already running.' : (user && pass ? 'Adapter started — give it a few seconds to log in.' : 'Adapter started — using the saved Venice browser session if it is still valid.'), kind: 'success' }
-        : { title: "Couldn't start", message: r.detail || 'Failed to start.', kind: 'error' });
+      if (r.ok && r.detail === 'already running') {
+        showAppNotification({ title: 'Adapter', message: 'Adapter already running.', kind: 'success' });
+      } else if (r.ok) {
+        beginAdapterStartupProgress();   // sticky progress toast → "✓ Adapter ready"
+      } else {
+        showAppNotification({ title: "Couldn't start", message: r.detail || 'Failed to start.', kind: 'error' });
+      }
     } catch (err) {
       showAppNotification({ title: 'Adapter', message: 'AI.EXE backend not reachable: ' + String(err && err.message ? err.message : err), kind: 'error' });
     } finally {
@@ -13899,13 +13904,96 @@ async function ensureVeniceAdapterReady() {
   return false;
 }
 
+// Guided startup: ONE sticky toast that follows the adapter from launch to serving
+// (Chrome opening → login → reading models/credits → ready), polled from status+logs —
+// the user is carried along without ever looking at the Chrome window.
+let _adapterProgressActive = false;
+function beginAdapterStartupProgress(opts = {}) {
+  if (_adapterProgressActive) return;
+  const announceReady = opts.announceReady !== false;
+  const toast = showAppNotification({
+    title: 'Starting Venice adapter',
+    message: 'Opening Chrome (~30s)…',
+    kind: 'info',
+    sticky: true,
+  });
+  if (!toast) return;
+  _adapterProgressActive = true;
+  toast.classList.add('progress');
+  const icon = toast.querySelector('.app-toast-icon');
+  if (icon) icon.textContent = '';   // CSS draws the spin ring
+  const body = toast.querySelector('.app-toast-body');
+  const setMsg = (m) => { if (body && body.textContent !== m) body.textContent = m; };
+  const closeToast = () => {
+    const btn = toast.querySelector('.app-toast-close');
+    if (btn) btn.click(); else toast.remove();
+  };
+  const backend = getAIExeBackendUrl();
+  const fetchLog = async () => {
+    try { return String((await (await fetch(backend + '/api/adapter/logs')).json()).log || ''); }
+    catch (_) { return ''; }
+  };
+  (async () => {
+    let sawRunning = false;
+    let deadPolls = 0;
+    try {
+      for (let i = 0; i < 160; i++) {              // ~4 min ceiling (manual sign-in allowed)
+        await new Promise((r) => setTimeout(r, 1500));
+        if (!toast.isConnected) return;            // user dismissed it — stop narrating
+        let st = null;
+        try { st = await (await fetch(backend + '/api/adapter/status')).json(); } catch (_) {}
+        if (st && st.serving) {
+          closeToast();
+          if (typeof refreshAdapterStatus === 'function') refreshAdapterStatus();
+          if (typeof refreshComposerModelsFromProvider === 'function') void refreshComposerModelsFromProvider();
+          if (announceReady) {
+            showAppNotification({ title: 'Adapter ready', message: 'Venice Pro is ready — send your message.', kind: 'success' });
+          }
+          return;
+        }
+        if (st && st.running) {
+          sawRunning = true;
+          deadPolls = 0;
+          const log = await fetchLog();
+          if (/sign in manually|Sign in - Venice|still on \/sign-in|verification code|email code/i.test(log)) {
+            setMsg('Waiting for you to sign in to Venice in the Chrome window…');
+          } else if (/AIEXE_MODELS|AIEXE_PRICED|AIEXE_CREDITS/i.test(log)) {
+            setMsg('Reading models & credits from Venice…');
+          } else if (/Already logged in|Logging in to venice/i.test(log)) {
+            setMsg('Logging in to Venice…');
+          } else {
+            setMsg('Opening Chrome (~30s)…');
+          }
+        } else if (sawRunning) {
+          deadPolls += 1;
+          if (deadPolls >= 3) {                    // was up, now gone: it crashed
+            const why = (typeof friendlyAdapterError === 'function' && friendlyAdapterError(await fetchLog()))
+              || 'It stopped during startup — check Settings → Provider.';
+            closeToast();
+            showAppNotification({ title: "Adapter didn't start", message: why, kind: 'error', durationMs: 9000 });
+            return;
+          }
+        } else if (i >= 20) {                      // never launched at all (~30s)
+          closeToast();
+          showAppNotification({ title: "Adapter didn't start", message: 'The adapter process is not running — check Settings → Provider.', kind: 'error', durationMs: 9000 });
+          return;
+        }
+      }
+      closeToast();
+      showAppNotification({ title: 'Adapter is taking long', message: 'Still not serving — check the Chrome window (sign-in/captcha?) or Settings → Provider.', kind: 'warning', durationMs: 9000 });
+    } finally {
+      _adapterProgressActive = false;
+    }
+  })();
+}
+
 async function startVeniceAdapterThenResend() {
   if (_adapterStartingForSend) return;
   const backend = getAIExeBackendUrl();
   const user = String(appSettings.veniceAdapterUsername || '').trim();
   const pass = String(appSettings.veniceAdapterPassword || '');
   _adapterStartingForSend = true;
-  showAppNotification({ title: 'Starting Venice adapter', message: user && pass ? 'Opening Chrome and logging in (~30s) — sign in if the window asks.' : 'Opening Chrome with the saved Venice session — sign in only if it asks.', kind: 'info', durationMs: 9000 });
+  beginAdapterStartupProgress({ announceReady: false });   // this flow announces ready itself (with the resend)
   try {
     let st = null;
     try { st = await (await fetch(backend + '/api/adapter/status')).json(); } catch (_) {}

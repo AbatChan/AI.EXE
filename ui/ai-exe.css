@@ -887,6 +887,18 @@ body.resizing-panels .panel-resizer {
   cursor: pointer;
 }
 
+/* Sticky progress toast (adapter startup): icon glyph swaps to a spin ring */
+.app-toast.progress .app-toast-icon::after {
+  content: '';
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: conic-gradient(from 0deg, transparent 8%, var(--accent) 92%, var(--accent));
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 2px));
+  mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 2px));
+  animation: spin 0.7s linear infinite;
+}
+
 .app-toast-icon {
   width: 30px;
   height: 30px;
