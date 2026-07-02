@@ -4,9 +4,11 @@
   POST /api/api-key    -> store provider key server-side (never echoed back raw)
   GET  /api/api-key    -> whether a key is set + masked form
 """
-from fastapi import APIRouter
+import json
 
-from fastapi import HTTPException
+import httpx
+from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
 
 from ..config import settings
 from ..llm import LLMClient, LLMError
@@ -44,6 +46,43 @@ def provider_complete(payload: ProviderCompleteRequest) -> ProviderCompleteRespo
         return ProviderCompleteResponse(ok=bool(content.strip()), content=content)
     except LLMError as exc:
         return ProviderCompleteResponse(ok=False, error=str(exc))
+
+
+@router.post("/provider/stream")
+def provider_stream(payload: ProviderCompleteRequest) -> StreamingResponse:
+    """Real-time streaming passthrough for the Venice Pro adapter: re-streams the adapter's
+    NDJSON chat chunks so the UI renders text/thinking/file-gen live instead of waiting for
+    the whole reply. Same guards as /provider/complete (local/Ollama only)."""
+    base, model = provider_store.resolve()
+    kind = provider_store.kind()
+    if not base:
+        raise HTTPException(status_code=400, detail="No provider configured.")
+    if kind != "ollama" and not is_local_provider(base):
+        raise HTTPException(status_code=400, detail="Streaming passthrough is for local/adapter providers only.")
+    body = {"model": model, "messages": payload.messages, "stream": True,
+            "options": {"temperature": payload.temperature, "num_predict": payload.max_tokens}}
+    if payload.chat_id:
+        body["aiexe_chat_id"] = payload.chat_id
+    if payload.think in ("on", "off"):
+        body["aiexe_think"] = payload.think
+    url = base.rstrip("/") + "/api/chat"
+    read_budget = float(settings.adapter_http_timeout)
+
+    def gen():
+        try:
+            with httpx.stream("POST", url, json=body,
+                              timeout=httpx.Timeout(connect=10.0, read=read_budget,
+                                                    write=30.0, pool=10.0)) as resp:
+                if resp.status_code != 200:
+                    yield json.dumps({"error": f"adapter HTTP {resp.status_code}"}) + "\n"
+                    return
+                for line in resp.iter_lines():
+                    if line:
+                        yield line + "\n"
+        except httpx.HTTPError as exc:
+            yield json.dumps({"error": f"adapter stream error: {exc}"}) + "\n"
+
+    return StreamingResponse(gen(), media_type="application/x-ndjson")
 
 
 @router.get("/provider-usage", response_model=ProviderUsageResponse)
