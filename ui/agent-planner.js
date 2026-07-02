@@ -201,7 +201,9 @@
         });
       }
 
-      if (isSoftwareProject && plan.needsRunInstructions) {
+      // Only when a README is actually planned — without one, run instructions are
+      // delivered in the final message (never demand a file the plan didn't include).
+      if (isSoftwareProject && plan.needsReadme && plan.needsRunInstructions) {
         requirements.push({
           id: 'readme_run_instructions',
           label: 'add run instructions to /README.md',

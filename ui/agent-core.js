@@ -1884,7 +1884,9 @@
         String(parsed && parsed.needs_run_instructions || '').toLowerCase() === 'yes'
         || requestedReadme
       ) && !simpleSingleFileProject;
-      const needsReadme = requestedReadme || requestedRunInstructions;
+      // Run instructions do NOT force a README: the completion message already tells the
+      // user how to run it. README only when the plan (or user) actually asked for one.
+      const needsReadme = requestedReadme;
       const needsRunInstructions = requestedRunInstructions;
       const finalRequiresRealFiles = !docsOnlyTask && taskKind === 'project' && (
         String(parsed && parsed.final_requires_real_files || '').toLowerCase() === 'yes'
