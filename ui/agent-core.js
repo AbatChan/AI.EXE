@@ -9,6 +9,9 @@
     const looksLikePlaceholderImplementation = typeof deps.looksLikePlaceholderImplementation === 'function'
       ? deps.looksLikePlaceholderImplementation
       : ((content) => /\b(todo:|coming soon|implement this|placeholder code|placeholder content)\b/i.test(String(content || '')));
+    const isLocalInferenceProvider = typeof deps.isLocalInferenceProvider === 'function'
+      ? deps.isLocalInferenceProvider
+      : () => true;
     const WEB_TASK_HINT_REGEX = /\b(html|css|javascript|website|web|site|landing page|page|frontend|browser|ui)\b/i;
 
     function sanitizeProjectSlug(candidate, projectKind = '') {
@@ -157,6 +160,10 @@
       const hints = [];
       const lower = String(taskText || '').toLowerCase();
       const selfContained = !!(options && options.selfContained);
+      const frameworkWeb = !!(options && options.frameworkWeb);
+      const localOffline = options && typeof options.localOffline === 'boolean'
+        ? Boolean(options.localOffline)
+        : Boolean(isLocalInferenceProvider());
       if (normalized === '/README.md') {
         hints.push('Describe what the project does.');
         hints.push('Include setup and run instructions.');
@@ -186,15 +193,23 @@
           hints.push('Never load local data with fetch() or XMLHttpRequest — under file:// the browser blocks them and the app silently fails. Embed any data (levels, config, JSON, CSV rows, save state) directly as a JavaScript const/object in the script.');
           hints.push('Keep markup semantic and compact. Use reusable classes and stable IDs that the CSS and JS share. IDs must be unique — never leave two copies of a section.');
           hints.push('Guideline: for UI control icons, prefer clean inline SVG over emoji (emoji render inconsistently and look less polished). Not a hard rule — any consistent icon approach is fine.');
+        } else if (frameworkWeb) {
+          hints.push('Return only HTML markup for this file.');
+          hints.push('For framework web apps, keep index.html as the app shell: include a root mount element and the framework entry script (for example <script type="module" src="/src/main.tsx"></script> for Vite/React).');
+          hints.push('Do not inline the full app UI, CSS, or JavaScript into index.html; component/view code belongs in the planned source files.');
         } else {
           hints.push('Return only HTML markup for this file.');
           hints.push('Do not output CSS rules as the main body of this file.');
           hints.push('Do not output JavaScript as the main body of this file.');
           hints.push('SHARED STYLES: this is a multi-file project with a shared stylesheet (e.g. css/style.css — see PROJECT_STATE for the real paths). EVERY page MUST `<link rel="stylesheet" href="...">` that shared stylesheet in <head> and rely on it for the design system (tokens, layout, header/footer, components). Do NOT paste a big inline <style> block re-declaring the whole design system in each page — that duplicates CSS, bloats every page, and makes pages drift out of sync. Only a TINY inline <style> for genuinely page-unique tweaks is acceptable; shared/repeated styling belongs in the shared stylesheet. Use the SAME header/footer/nav markup and the same class names across all pages so the shared CSS styles them identically.');
           hints.push('SHARED COMPONENTS: for multi-page sites, repeated header/nav/logo/footer/CTA markup should come from one classic shared script such as js/components.js. Pages should contain small hooks like <div data-site-header></div> / <div data-site-footer></div>, load the shared component script, and pass the active page via body data-page or location. Do NOT rebuild a different nav/footer/theme inline on each page.');
-          hints.push('Pages are opened directly from disk (file://). Inter-page and asset links must be RELATIVE (menu.html, ./style.css, ../style.css from a subfolder) — root-relative paths like /menu.html resolve to the filesystem root and break.');
-          hints.push('OFFLINE: load JS as classic scripts — <script src="js/app.js"></script> in dependency order. Do NOT use <script type="module"> or import/export anywhere; ES modules do not load from file:// and silently break the whole page. Share code via globals on window.');
-          hints.push('Never load local data with fetch() or XMLHttpRequest — under file:// the browser blocks them and the app silently fails. Embed any data (levels, config, JSON, CSV rows, save state) directly in the script instead.');
+          if (localOffline) {
+            hints.push('Pages are opened directly from disk (file://). Inter-page and asset links must be RELATIVE (menu.html, ./style.css, ../style.css from a subfolder) — root-relative paths like /menu.html resolve to the filesystem root and break.');
+            hints.push('OFFLINE: load JS as classic scripts — <script src="js/app.js"></script> in dependency order. Do NOT use <script type="module"> or import/export anywhere; ES modules do not load from file:// and silently break the whole page. Share code via globals on window.');
+            hints.push('Never load local data with fetch() or XMLHttpRequest — under file:// the browser blocks them and the app silently fails. Embed any data (levels, config, JSON, CSV rows, save state) directly in the script instead.');
+          } else {
+            hints.push('Use the script/style loading pattern implied by the planned files. Framework entries may use type="module"; static multi-page sites should use ordinary linked CSS/JS.');
+          }
           hints.push('Keep markup semantic and compact. Use reusable classes and stable IDs that CSS and JS can share. IDs must be unique — never leave two copies of a section.');
           hints.push('If a change replaces an existing structure (e.g. moving inline sections into separate pages), remove the superseded markup and links in the same pass — never leave two competing implementations.');
           hints.push('Guideline: for UI control icons, prefer clean inline SVG over emoji (emoji render inconsistently and look less polished). Not a hard rule — any consistent icon approach is fine.');
@@ -213,8 +228,13 @@
       if (/\.(js|ts|jsx|tsx)$/i.test(normalized)) {
         hints.push('Return only JavaScript or TypeScript source for this file.');
         hints.push('Do not output HTML, <script> tags, or CSS rules.');
-        hints.push('OFFLINE: the page opens directly from disk (file://), where ES modules do NOT load. Do NOT use import/export or <script type="module">. Use plain classic scripts loaded via <script src="..."> in dependency order, and share code by exposing it on window (e.g. window.AppStore = ...). import/export will silently break the whole app offline.');
-        hints.push('Never fetch() or XMLHttpRequest local project files (JSON/CSV/text) — under file:// the browser blocks these requests and they silently fail. Embed the data as a JavaScript const/object in the source instead.');
+        if (frameworkWeb || !localOffline) {
+          hints.push('Framework/source files may use normal ES module import/export, JSX/TSX, and component composition when the planned stack calls for it.');
+          hints.push('Keep mock data local to source files or localStorage unless the user explicitly requested external APIs.');
+        } else {
+          hints.push('OFFLINE: the page opens directly from disk (file://), where ES modules do NOT load. Do NOT use import/export or <script type="module">. Use plain classic scripts loaded via <script src="..."> in dependency order, and share code by exposing it on window (e.g. window.AppStore = ...). import/export will silently break the whole app offline.');
+          hints.push('Never fetch() or XMLHttpRequest local project files (JSON/CSV/text) — under file:// the browser blocks these requests and they silently fail. Embed the data as a JavaScript const/object in the source instead.');
+        }
         hints.push('Keep script focused on core behavior and DOM interactions. Avoid large decorative systems unless required.');
         hints.push('Keep one source of truth per setting: a script default must match the corresponding HTML control\'s min/max/value and the unit the code applies (0–1 vs 0–100, px vs unitless), and must not conflict with a CSS variable default. Drive effects through ONE mechanism (either CSS variables or inline styles), and give interactive effects visible non-zero defaults so the result shows before any control is touched.');
       }
@@ -1605,12 +1625,25 @@
       if (String(taskKind || '').toLowerCase() !== 'project') return '';
       const { files, htmlFiles, htmlFile, cssFiles, cssFile, scriptFile } = getPlannedFileRoles(expectedFiles);
       const lower = String(taskText || '').toLowerCase();
+      const frameworkWeb = files.some((path) => (
+        /(?:^|\/)package\.json$/i.test(path)
+        || /(?:^|\/)(?:vite|next|nuxt|astro|svelte|tsconfig|tailwind\.config|postcss\.config)[^/]*\.(?:js|mjs|cjs|ts|json)$/i.test(path)
+        || /\/src\/.+\.(?:tsx|jsx)$/i.test(path)
+      ));
       const lines = [];
       lines.push(`Planned files: ${files.join(', ') || '(none)'}`);
       lines.push('Quality contract:');
       lines.push('- Build the complete, working feature the request describes. Match the quality and depth you would produce answering this in a normal chat — do not ship a reduced stub or "first pass".');
       lines.push('- Reuse shared classes, helpers, and patterns so each file stays coherent and finishes cleanly.');
-      if (String(primaryStack || '').toLowerCase() === 'web' || htmlFile) {
+      if (frameworkWeb) {
+        lines.push('Framework web project contract:');
+        lines.push('- Keep the requested framework architecture: package/config files define the local build/dev setup, source files contain components/state/views, and mock data stays local unless the user asks for APIs.');
+        if (files.includes('/package.json')) lines.push('- /package.json: include realistic scripts and dependencies for the planned framework stack.');
+        if (htmlFile) lines.push(`- ${htmlFile}: app shell only, with a root mount element and the correct framework entry script.`);
+        const sourceFiles = files.filter((path) => /\/src\/.+\.(?:js|jsx|ts|tsx|css|scss|sass|less)$/i.test(path));
+        if (sourceFiles.length) lines.push(`- Source files (${sourceFiles.join(', ')}): implement the actual UI, reusable components, state, routing/views, and interactions.`);
+        lines.push('- Framework source files may use normal import/export and JSX/TSX when that is the planned stack.');
+      } else if (String(primaryStack || '').toLowerCase() === 'web' || htmlFile) {
         lines.push('Web project contract:');
         if (htmlFile && !cssFile && !scriptFile) {
           lines.push(`- ${htmlFile} is the entire web app: include CSS in a <style> block and JavaScript in a <script> block.`);

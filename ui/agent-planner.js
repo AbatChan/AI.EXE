@@ -20,6 +20,13 @@
     const buildAgentHistoryTranscript = deps.buildAgentHistoryTranscript;
     const requestAgentPlannerInference = deps.requestAgentPlannerInference;
     const getWorkspaceContext = deps.getWorkspaceContext;
+    const getAgentEnvironmentContext = typeof deps.getAgentEnvironmentContext === 'function'
+      ? deps.getAgentEnvironmentContext
+      : () => [
+        'AGENT_ENVIRONMENT:',
+        '- Selected inference provider: local model (offline/local runtime).',
+        '- Prefer self-contained local projects that run without hosted services. If a requested framework/build step is unavailable locally, plan the closest static/local equivalent and say so honestly.',
+      ].join('\n');
     const deriveProjectNameFromTask = deps.deriveProjectNameFromTask;
     const agentMaxSteps = Number(deps.agentMaxSteps) || 16;
     const agentMaxToolOutputChars = Number(deps.agentMaxToolOutputChars) || 8000;
@@ -634,10 +641,15 @@
       const normalizedPath = normalizeWorkspacePath(path || '');
       // Single planned HTML, no separate css/js → inline everything.
       const planFiles = Array.isArray(planSpec && planSpec.expectedFiles) ? planSpec.expectedFiles.map((p) => String(p || '')) : [];
+      const frameworkWeb = planFiles.some((p) => (
+        /(?:^|\/)package\.json$/i.test(p)
+        || /(?:^|\/)(?:vite|next|nuxt|astro|svelte|tsconfig|tailwind\.config|postcss\.config)[^/]*\.(?:js|mjs|cjs|ts|json)$/i.test(p)
+        || /\/src\/.+\.(?:tsx|jsx)$/i.test(p)
+      ));
       const selfContained = /\.html?$/i.test(normalizedPath)
         && planFiles.some((p) => /\.html?$/i.test(p))
         && !planFiles.some((p) => /\.(css|scss|sass|less|js|mjs|cjs|ts|jsx|tsx)$/i.test(p));
-      const generationHints = buildAgentFileGenerationHints(taskText, normalizedPath, { selfContained });
+      const generationHints = buildAgentFileGenerationHints(taskText, normalizedPath, { selfContained, frameworkWeb });
       // New page in a site with shared CSS: consume it + reuse the shared header/footer
       // (consistent from first write, not generate-then-repair). Mirrors the edit path.
       const sharedSourceHints = (() => {
@@ -724,7 +736,13 @@
       }).join('\n\n');
       const normalizedPath = normalizeWorkspacePath(path || '');
       const projectState = buildAgentProjectStateContext(toolEvents, planSpec, normalizedPath);
-      const baseEditHints = buildAgentFileGenerationHints(taskText, normalizedPath);
+      const planFiles = Array.isArray(planSpec && planSpec.expectedFiles) ? planSpec.expectedFiles.map((p) => String(p || '')) : [];
+      const frameworkWeb = planFiles.some((p) => (
+        /(?:^|\/)package\.json$/i.test(p)
+        || /(?:^|\/)(?:vite|next|nuxt|astro|svelte|tsconfig|tailwind\.config|postcss\.config)[^/]*\.(?:js|mjs|cjs|ts|json)$/i.test(p)
+        || /\/src\/.+\.(?:tsx|jsx)$/i.test(p)
+      ));
+      const baseEditHints = buildAgentFileGenerationHints(taskText, normalizedPath, { frameworkWeb });
       // When an HTML page links an external stylesheet, styling belongs in that .css
       // file. A weak model otherwise injects a fresh inline <style> block, inline
       // style="..." attributes, or !important overrides into the HTML — fighting the
@@ -788,7 +806,13 @@
       }).join('\n\n');
       const normalizedPath = normalizeWorkspacePath(path || '');
       const projectState = buildAgentProjectStateContext(toolEvents, planSpec, normalizedPath);
-      const rewriteHints = buildAgentFileGenerationHints(taskText, normalizedPath);
+      const planFiles = Array.isArray(planSpec && planSpec.expectedFiles) ? planSpec.expectedFiles.map((p) => String(p || '')) : [];
+      const frameworkWeb = planFiles.some((p) => (
+        /(?:^|\/)package\.json$/i.test(p)
+        || /(?:^|\/)(?:vite|next|nuxt|astro|svelte|tsconfig|tailwind\.config|postcss\.config)[^/]*\.(?:js|mjs|cjs|ts|json)$/i.test(p)
+        || /\/src\/.+\.(?:tsx|jsx)$/i.test(p)
+      ));
+      const rewriteHints = buildAgentFileGenerationHints(taskText, normalizedPath, { frameworkWeb });
       const designFoundation = await loadDesignFoundationFor(normalizedPath);
       const template = await loadPromptTemplate('developer_agent_rewrite_file');
       if (template) {
@@ -832,6 +856,7 @@
       const workspace = typeof getWorkspaceContext === 'function' ? getWorkspaceContext() : {};
       const template = await loadPromptTemplate('developer_agent_plan');
       return renderPromptTemplate(template, {
+        AGENT_ENVIRONMENT: getAgentEnvironmentContext('plan'),
         CHAT_HISTORY: transcript || '(none)',
         CURRENT_WORKSPACE_ROOT: workspace.workspaceRootName ? `/${workspace.workspaceRootName}` : '(none)',
         CURRENT_SELECTION: normalizeWorkspacePath(workspace.currentPath || '/'),
@@ -1115,7 +1140,15 @@
           const path = normalizeWorkspacePath(expandedReadEvent.path || '');
           const content = String(expandedReadEvent.content || '');
           const clipped = content.length > expandedReadCap
-            ? `${content.slice(0, expandedReadCap)}\n...[expanded read clipped at ${expandedReadCap} chars of ${content.length}]`
+            ? (() => {
+              const headChars = Math.max(800, Math.floor(expandedReadCap * 0.7));
+              const tailChars = Math.max(400, expandedReadCap - headChars);
+              return [
+                content.slice(0, headChars),
+                `\n...[middle clipped: showing head and tail, NOT proof of truncation; full file is ${content.length} chars]...\n`,
+                content.slice(-tailChars),
+              ].join('');
+            })()
             : content;
           return `EXPANDED CURRENT READ CONTENT (use this instead of re-reading ${path}):\nFile: ${path}\n${clipped}\n\n`;
         })()
@@ -1182,7 +1215,7 @@
             ? `Remaining sub-tasks for THIS phase:\n${activePhase.tasks.map((t) => `  - ${t}`).join('\n')}`
             : '',
           activePhase.number === 1
-            ? 'Phase 1 must be a COMPLETE, RUNNABLE minimal version of the project (it runs on its own). Keep it SMALL — build only the sub-tasks listed above; do NOT build later phases\' pages/screens/features now. The workspace was just created and is empty — start writing files immediately; do NOT read_file or list_dir the root or the project name.'
+            ? 'Phase 1 must be a COMPLETE, RUNNABLE vertical slice with real user-visible behavior, not an empty shell. Keep it focused on the sub-tasks listed above; do NOT build later phases\' pages/screens/features now. The workspace was just created and is empty — start writing files immediately; do NOT read_file or list_dir the root or the project name.'
             : 'Build only this phase\'s named deliverables. If a sub-task names a new file/page from Expected files, create it with write_file. If a new page needs styles, tokens, scripts, header/nav/footer markup, or repeated sections that are not already in the shared source-of-truth files, edit the existing shared CSS/JS/component files as support work in this same phase; do NOT solve it with inline CSS or a redesigned page-local shell. If a sub-task is shared styling, components, behavior, README, or design/brand/strategy guidance, update that existing source-of-truth file instead of inventing a new public HTML page. ' + laterPhaseReuseLine + ' Later HTML pages must link the existing shared CSS and shared components/scripts; do NOT paste a new inline theme, nav, logo, footer, or button system into each page. Public HTML pages must stay within the planned page count/scope unless the user explicitly asked for additional navigable documentation pages.',
           `STRICT SCOPE: build ONLY the files needed for the ${activePhase.tasks && activePhase.tasks.length ? activePhase.tasks.length : 'few'} sub-task(s) above (roughly that many files) — NOT the whole project. Do not create pages or screens that belong to later phases.`,
           activePhase.number < activePhase.total
@@ -1195,6 +1228,7 @@
 
       const template = await loadPromptTemplate('developer_agent_decision');
       const vars = {
+        AGENT_ENVIRONMENT: getAgentEnvironmentContext('decision'),
         AGENT_STEP: Number(stepIndex),
         AGENT_MAX_STEPS: agentMaxSteps,
         CURRENT_WORKSPACE_ROOT: currentWorkspaceRoot,

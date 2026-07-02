@@ -262,6 +262,80 @@
         return 'file';
       };
       const baseName = (path) => String(path || '').split('/').filter(Boolean).pop() || 'file';
+      let plannedParentDirsCreated = false;
+      const plannedParentDirs = () => {
+        const dirs = new Set();
+        const addParents = (rawPath) => {
+          const normalized = deps.normalizeWorkspacePath(rawPath || '');
+          if (!normalized || normalized === '/' || !normalized.includes('/')) return;
+          const parts = normalized.split('/').filter(Boolean);
+          parts.pop();
+          let acc = '';
+          parts.forEach((part) => {
+            acc += `/${part}`;
+            if (acc && acc !== '/' && acc !== '/.aiexe') dirs.add(acc);
+          });
+        };
+        const files = Array.isArray(planSpec && planSpec.expectedFiles) ? planSpec.expectedFiles : [];
+        files.forEach(addParents);
+        return Array.from(dirs);
+      };
+      const precreatePlannedParentDirs = async (reason) => {
+        if (plannedParentDirsCreated) return;
+        plannedParentDirsCreated = true;
+        const dirs = plannedParentDirs();
+        if (!dirs.length) return;
+        recordDebugTrace('agent_parallel_mkdir_start', {
+          chatId: String(chatId || ''),
+          reason: String(reason || ''),
+          dirs: dirs.join(' | '),
+        }, { chatId: String(chatId || ''), reason, dirs });
+        const results = await Promise.all(dirs.map(async (dir) => {
+          try {
+            const response = await deps.invokeWorkspaceAction('workspaceMkdir', { path: dir });
+            return { dir, ok: Boolean(response && response.ok), message: String(response && response.message ? response.message : '') };
+          } catch (err) {
+            return { dir, ok: false, message: String(err && err.message ? err.message : err) };
+          }
+        }));
+        results.forEach((result) => {
+          if (!result || !result.ok) return;
+          const dir = deps.normalizeWorkspacePath(result.dir || '');
+          if (!dir || dir === '/') return;
+          const event = {
+            tool: 'mkdir',
+            ok: true,
+            path: dir,
+            srcPath: '',
+            dstPath: '',
+            validationPassed: false,
+            validationIssues: [],
+            content: '',
+            originalContent: undefined,
+            createdNewFile: false,
+            runErrorCount: 0,
+            startLine: 0,
+            endLine: 0,
+            offset: 0,
+            searchQuery: '',
+            observation: `mkdir ok: ${dir}`,
+          };
+          toolEvents.push(event);
+          appendAgentActivity(deps.buildAgentActivityFromToolResult(
+            { action: 'tool', tool: 'mkdir', path: dir, content: '', srcPath: '', dstPath: '' },
+            { ok: true, mutated: true, observation: event.observation },
+            toolEvents
+          ));
+        });
+        recordDebugTrace('agent_parallel_mkdir_done', {
+          chatId: String(chatId || ''),
+          ok: String(results.filter((r) => r && r.ok).length),
+          failed: String(results.filter((r) => r && !r.ok).length),
+        }, { chatId: String(chatId || ''), results });
+        if (results.some((r) => r && r.ok) && typeof deps.scheduleWorkspaceExplorerBackgroundRefresh === 'function') {
+          deps.scheduleWorkspaceExplorerBackgroundRefresh();
+        }
+      };
       const synthesizeToolNarration = (decision) => {
         const tool = String(decision && decision.tool || '').toLowerCase();
         const path = String(decision && decision.path || '').trim();
@@ -1952,6 +2026,15 @@
           const watchdog = new Promise((resolve) => {
             const iv = setInterval(() => {
               if (toolSettled) { clearInterval(iv); resolve(null); return; }
+              if (!deps.isInferenceActive(requestToken)) {
+                clearInterval(iv);
+                resolve({
+                  ok: false,
+                  _toolCancelled: true,
+                  observation: `${decision.tool} was cancelled.`,
+                });
+                return;
+              }
               const lastProgress = typeof deps.getLastAgentToolProgressAt === 'function'
                 ? Number(deps.getLastAgentToolProgressAt()) || toolStartedAt
                 : toolStartedAt;
@@ -1987,6 +2070,18 @@
             ok: false,
             observation: `${decision.tool} failed with an error: ${String(toolErr && toolErr.message ? toolErr.message : toolErr)}`,
           };
+        }
+        if (toolResult && toolResult._toolCancelled) {
+          if (typeof deps.abortInFlightInference === 'function') {
+            deps.abortInFlightInference('tool_cancelled');
+          }
+          recordDebugTrace('agent_tool_cancelled', {
+            chatId: String(chatId || ''),
+            step: String(step),
+            tool: String(decision.tool || ''),
+            path: deps.normalizeWorkspacePath(decision.path || decision.srcPath || '/'),
+          }, { chatId: String(chatId || ''), step, decision });
+          return true;
         }
         if (toolResult && toolResult.requiresDeleteConfirmation) {
           // Human-in-the-loop approval for a destructive op. Surface what's being
@@ -2241,6 +2336,9 @@
           });
         }
         appendAgentActivity(deps.buildAgentActivityFromToolResult(decision, toolResult, toolEvents));
+        if (toolResult && toolResult.ok && String(decision.tool || '').toLowerCase() === 'new_project') {
+          await precreatePlannedParentDirs('after_new_project');
+        }
         // Flag a path whose content returned to a prior state (oscillation).
         if (toolResult && toolResult.ok && toolResult.mutated
           && ['write_file', 'edit_file'].includes(String(decision.tool || '').toLowerCase())

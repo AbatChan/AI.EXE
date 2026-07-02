@@ -1399,8 +1399,16 @@
       // Structured flag set by the validate activity builder — the old detail-text
       // regex matched the word "issues" inside "no obvious issues found".
       const validateHasIssues = phase === 'validate' && items.some((a) => a && (a.hasIssues === true || a.status === 'error'));
+      const setupLabel = (() => {
+        const projects = items.filter((a) => a && a.kind === 'project').length;
+        const folders = items.filter((a) => a && a.kind === 'mkdir').length;
+        if (projects && folders) return folders === 1 ? 'Created project structure' : `Created project + ${folders} folders`;
+        if (projects) return projects === 1 ? 'Created project' : `Created ${projects} projects`;
+        if (folders) return folders === 1 ? 'Created folder' : `Created ${folders} folders`;
+        return 'Prepared workspace';
+      })();
       const labelsByPhase = {
-        setup: { running: 'Preparing workspace', done: 'Created workspace' },
+        setup: { running: 'Preparing workspace', done: setupLabel },
         create: { running: 'Generating files', done: `Generated ${count} file${count !== 1 ? 's' : ''}` },
         explore: {
           running: 'Inspecting files',

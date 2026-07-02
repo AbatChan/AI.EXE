@@ -1195,9 +1195,11 @@
         const chunk = isTruncated ? slice.slice(0, cap) : slice;
         if (isTruncated) {
           const nextOffset = charOffset + chunk.length;
-          continuationHint = `\n...[file continues — call read_file with offset:${nextOffset} (total ${body.length} chars)]`;
+          continuationHint = `\n\n[PARTIAL PREVIEW ONLY: ${path} continues after this point. This is NOT end-of-file and does NOT mean the file is truncated. The full file has ${body.length} chars. If you need more, call read_file with offset:${nextOffset}.]`;
         }
-        const clipped = focusedRead || (chunk + continuationHint);
+        const clipped = focusedRead
+          ? `${focusedRead}\n\n[FOCUSED EXCERPT ONLY: this is not the whole file. Do not infer truncation from this excerpt.]`
+          : (chunk + continuationHint);
         deps.syncFileTabFromWorkspaceWrite(path, body, deps.workspaceBaseName(path));
         observation = `read_file ${path}${rangeNote}\n${clipped || '(empty file)'}`;
         return { ok: true, mutated, observation, readPath: path, readContent: body };
@@ -1437,25 +1439,17 @@
             ? deps.isLikelyCompletePythonGameSource(content)
             : deps.isLikelyCompletePrimarySource(path, content, taskText);
           if (!isValidPrimaryContent) {
-            const generated = await deps.generateAgentWriteFileContent(taskText, toolEvents, path, content, planSpec);
-            if (generated) content = generated;
-            await repairStructuralIssueOnce('primary completeness repair');
-          }
-          const afterFirstRepair = shouldUsePythonGameGate
-            ? deps.isLikelyCompletePythonGameSource(content)
-            : deps.isLikelyCompletePrimarySource(path, content, taskText);
-          if (!afterFirstRepair && !getStructuralIssueForPath(path, content)) {
-            const strengthened = await deps.generateAgentWriteFileContent(taskText, toolEvents, path, content, planSpec);
-            if (strengthened) content = strengthened;
-            await repairStructuralIssueOnce('primary strengthening repair');
-          }
-          const validAfterExpansion = shouldUsePythonGameGate
-            ? deps.isLikelyCompletePythonGameSource(content)
-            : deps.isLikelyCompletePrimarySource(path, content, taskText);
-          // Advisory, not a veto: heuristics misjudge valid minimal files, so we
-          // write the content and flag it instead of blocking. The model can
-          // choose to expand it based on this note or its own judgment.
-          if (!validAfterExpansion) {
+            // Advisory only: do not launch another full-file generation here.
+            // Large JS files were being generated, judged "thin", regenerated from
+            // scratch, judged again, then regenerated a third time inside one
+            // write_file call. That made the visible stream look like it kept
+            // restarting and could burn the whole tool timeout before saving.
+            if (typeof deps.recordDebugTrace === 'function') {
+              deps.recordDebugTrace('agent_primary_completeness_advisory', {
+                path,
+                chars: String(String(content || '').length),
+              }, { path, taskText, contentPreview: String(content || '').slice(0, 1200) });
+            }
             primaryQualityNote = shouldUsePythonGameGate
               ? ' Note: this still looks small for a runnable game; expand it (loop, controls, rendering, state) if the request needs more.'
               : ' Note: this looks thin for a usable project file; expand it into a real MVP if the request needs more than a stub.';

@@ -5048,6 +5048,30 @@ function isRemoteInferenceProviderEnabled() {
   return remoteProvidersEnabled && getSelectedInferenceProvider() !== 'local';
 }
 
+function getAgentEnvironmentContext() {
+  const provider = getSelectedInferenceProvider();
+  const def = getInferenceProviderDef(provider);
+  const label = String((def && def.label) || provider || 'Local Model');
+  const model = String(getProviderModel(provider) || '').trim();
+  const isLocal = provider === 'local';
+  if (isLocal) {
+    return [
+      'AGENT_ENVIRONMENT:',
+      '- Selected inference provider: local model (offline/local runtime).',
+      '- Prefer self-contained local projects that run without hosted services, cloud databases, external APIs, or internet-only assets.',
+      '- If the user asks for React/Tailwind/TypeScript/Next/Vue and the local environment cannot reliably run a build step, downgrade to a rich static/local implementation and explain the limitation in the final response.',
+      '- For static web output opened with file://, links must be relative (about.html, css/style.css), never root-relative (/x).',
+    ].join('\n');
+  }
+  return [
+    'AGENT_ENVIRONMENT:',
+    `- Selected inference provider: ${label}${model ? ` (${model})` : ''}; this is not the local/offline model.`,
+    '- Do NOT downgrade framework requests just because a local/offline fallback exists. If the user asks for React, Tailwind CSS, TypeScript, Next, Vue, or a component architecture, plan and build the corresponding local project files.',
+    '- You may plan normal local development files such as package.json, src/App.tsx, src/main.tsx, tsconfig.json, vite.config.ts, and local mock data/state when they fit the request.',
+    '- Honor the user\'s product constraints: do not add hosted databases, payment processors, authentication providers, or external APIs unless the user asks for them.',
+  ].join('\n');
+}
+
 const workerCapabilityLabels = {
   'chat.reply': 'Chat',
   'agent.plan': 'Plan',
@@ -10036,6 +10060,7 @@ const agentCore = window.AIExeAgentCore && typeof window.AIExeAgentCore.createAg
     getWorkspaceContext,
     getActiveChatId: () => activeChatId,
     chatHasPriorAgentWorkspaceWork,
+    isLocalInferenceProvider: () => getSelectedInferenceProvider() === 'local',
     looksLikePlaceholderImplementation: (content) => /\b(todo:|coming soon|implement this|placeholder code|placeholder content)\b/i.test(String(content || '')),
   })
   : null;
@@ -10156,6 +10181,7 @@ const agentPlanner = window.AIExeAgentPlanner && typeof window.AIExeAgentPlanner
     },
     requestAgentPlannerInference,
     getWorkspaceContext,
+    getAgentEnvironmentContext,
     deriveProjectNameFromTask,
     agentMaxSteps,
     agentMaxToolOutputChars,

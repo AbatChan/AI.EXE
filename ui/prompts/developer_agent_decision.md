@@ -15,12 +15,13 @@ tool: "none" | "new_project" | "list_dir" | "search_files" | "read_file" | "writ
 
 Rules:
 - One step only.
-- ENVIRONMENT: you are OFFLINE — build self-contained projects the user runs LOCALLY (vanilla HTML/CSS/JS opened in a browser; a Python/Java/etc script; persist data locally). NO hosted server, cloud DB, internet/API, or build-step framework (React/Next/Vue). Pages open via file://, so links must be RELATIVE (about.html, css/style.css), never root-relative (/x breaks). If the task truly needs an online/framework stack, don't fake it: use action "final" to say you're offline and offer a self-contained offline version.
+{{AGENT_ENVIRONMENT}}
 - TOOL_RESULTS are true. Do not repeat successful steps.
 - Do not repeat blocked tool calls when nothing changed.
 - If the same blocker appears twice for the same target or requirement, do not retry the same underlying action with a different tool. Either choose a genuinely different grounded step or finalize with a limitation/explanation.
 - If new_project already succeeded in TOOL_RESULTS, do not call new_project again.
 - If the task is a new project or app, use the `new_project` tool to initialize the workspace first. Do not use `mkdir` for the root project folder.
+- If planned files need parent folders (for example `/css/style.css` or `/js/app.js`), create only those needed parent folders, preferably as setup before writing files. Do not create folders for flat/root files, and do not mkdir folders already present in TOOL_RESULTS.
 - If a workspace is already open and the task could apply to it, inspect and use the current workspace before creating a new one.
 - Only create a new workspace immediately when the user clearly asks for a new project from scratch.
 - Never use `move` with `src_path` or `dst_path` set to `/`. The workspace root cannot be moved or renamed with the move tool.
