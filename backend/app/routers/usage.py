@@ -32,10 +32,13 @@ def provider_complete(payload: ProviderCompleteRequest) -> ProviderCompleteRespo
     if kind != "ollama" and not is_local_provider(base):
         raise HTTPException(status_code=400, detail="Passthrough is for local/adapter providers only.")
     api_key = api_key_store.get_for_internal_use() or "local"
-    llm = LLMClient(base, model, api_key, kind=kind)
+    # The adapter drives a real browser; reasoning models can think for minutes before the
+    # answer — give it a far bigger budget than an API provider.
+    llm = LLMClient(base, model, api_key, kind=kind, timeout=300 if kind == "ollama" else 120)
     try:
         content = llm.complete(payload.messages, temperature=payload.temperature,
-                               max_tokens=payload.max_tokens, chat_id=payload.chat_id)
+                               max_tokens=payload.max_tokens, chat_id=payload.chat_id,
+                               think=payload.think)
         return ProviderCompleteResponse(ok=bool(content.strip()), content=content)
     except LLMError as exc:
         return ProviderCompleteResponse(ok=False, error=str(exc))
