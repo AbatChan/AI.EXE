@@ -42,6 +42,19 @@
     return inspections;
   }
 
+  function shouldSuppressAgentNarration(text, lastNarrationDetail = '', toolEvents = []) {
+    const detail = String(text || '').trim();
+    if (!detail || detail.length < 8) return true;
+    if (/<\s*(?:tool_call|function=agent_step|parameter\s*=)|<\/parameter>/i.test(detail)) return true;
+    if (detail === String(lastNarrationDetail || '').trim()) return true;
+    const hasFileMutation = (Array.isArray(toolEvents) ? toolEvents : []).some((event) => event && event.ok
+      && ['write_file', 'edit_file'].includes(String(event.tool || '').toLowerCase()));
+    if (hasFileMutation && /^(?:i(?:'|’)ll|i will|i(?:'|’)m going to|i am going to|let me|i(?:'|’)m|i am)\s+(?:start|begin|create|build|set up|write|make|add|work on)\b/i.test(detail)) {
+      return true;
+    }
+    return false;
+  }
+
   // Range/truncation-aware read-loop guard: blocks exact re-reads, re-reads of a
   // fully-seen file, and a hard cap — but allows paging forward while truncated.
   function summarizeReadRange(ev) {
@@ -88,6 +101,87 @@
     return null;
   }
 
+  function extractFileLikeTaskPaths(text, normalizeWorkspacePath) {
+    const norm = typeof normalizeWorkspacePath === 'function' ? normalizeWorkspacePath : (p) => String(p || '');
+    const out = [];
+    const raw = String(text || '');
+    const rx = /(^|[\s"'`(])((?:\/|\.\/)?[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*\.(?:html?|css|js|mjs|cjs|ts|tsx|jsx|json|md|txt|py|php|java|c|cpp|h|hpp|cs|go|rs|rb|swift|kt|sql|xml|svg|csv|yml|yaml))(?![A-Za-z0-9_.-])/g;
+    let m;
+    while ((m = rx.exec(raw))) {
+      const p = norm(String(m[2] || '').replace(/^\.\//, '/'));
+      if (p && !out.includes(p)) out.push(p);
+    }
+    return out;
+  }
+
+  function markPhaseTaskLiveProgressForPath(phaseState, rawPath, normalizeWorkspacePath) {
+    if (!phaseState || !Array.isArray(phaseState.phases)) return 0;
+    const norm = typeof normalizeWorkspacePath === 'function' ? normalizeWorkspacePath : (p) => String(p || '');
+    const path = norm(rawPath || '');
+    if (!path) return 0;
+    const activeIndex = Math.max(0, Math.min(phaseState.phases.length - 1, Number(phaseState.activeIndex) || 0));
+    const phase = phaseState.phases[activeIndex];
+    const tasks = Array.isArray(phase && phase.tasks) ? phase.tasks : [];
+    let changed = 0;
+    tasks.forEach((task) => {
+      if (!task || task.done || task.liveDone) return;
+      const matches = extractFileLikeTaskPaths(task.text || task, norm);
+      if (matches.includes(path)) {
+        task.liveDone = true;
+        changed += 1;
+      }
+    });
+    return changed;
+  }
+
+  function getActivePhaseFileTaskGaps(phaseState, normalizeWorkspacePath) {
+    if (!phaseState || !Array.isArray(phaseState.phases)) return [];
+    const norm = typeof normalizeWorkspacePath === 'function' ? normalizeWorkspacePath : (p) => String(p || '');
+    const activeIndex = Math.max(0, Math.min(phaseState.phases.length - 1, Number(phaseState.activeIndex) || 0));
+    const phase = phaseState.phases[activeIndex];
+    const tasks = Array.isArray(phase && phase.tasks) ? phase.tasks : [];
+    const gaps = [];
+    tasks.forEach((task) => {
+      if (!task || task.done || task.liveDone) return;
+      const paths = extractFileLikeTaskPaths(task.text || task, norm);
+      if (paths.length) gaps.push({ text: String(task.text || task || '').trim(), path: paths[0], paths });
+    });
+    return gaps;
+  }
+
+  function activePhaseFilePaths(phaseState, normalizeWorkspacePath) {
+    if (!phaseState || !Array.isArray(phaseState.phases)) return [];
+    const norm = typeof normalizeWorkspacePath === 'function' ? normalizeWorkspacePath : (p) => String(p || '');
+    const activeIndex = Math.max(0, Math.min(phaseState.phases.length - 1, Number(phaseState.activeIndex) || 0));
+    const phase = phaseState.phases[activeIndex];
+    const tasks = Array.isArray(phase && phase.tasks) ? phase.tasks : [];
+    const paths = [];
+    tasks.forEach((task) => {
+      extractFileLikeTaskPaths(task && (task.text || task), norm).forEach((p) => {
+        if (p && !paths.includes(p)) paths.push(p);
+      });
+    });
+    return paths;
+  }
+
+  // Durable whole-project file list (every phase's files) from plan.md-backed phases.
+  // The re-planner shrinks planSpec.expectedFiles on a Continue, so the foundation
+  // css/js drops out of validation scope — use this instead so cross-page checks fire.
+  function allPhaseFilePaths(phaseState, normalizeWorkspacePath) {
+    if (!phaseState || !Array.isArray(phaseState.phases)) return [];
+    const norm = typeof normalizeWorkspacePath === 'function' ? normalizeWorkspacePath : (p) => String(p || '');
+    const paths = [];
+    phaseState.phases.forEach((phase) => {
+      const tasks = Array.isArray(phase && phase.tasks) ? phase.tasks : [];
+      tasks.forEach((task) => {
+        extractFileLikeTaskPaths(task && (task.text || task), norm).forEach((p) => {
+          if (p && !paths.includes(p)) paths.push(p);
+        });
+      });
+    });
+    return paths;
+  }
+
   function createAgentLoop(deps) {
     const recordDebugTrace = typeof deps.recordDebugTrace === 'function'
       ? deps.recordDebugTrace
@@ -114,6 +208,8 @@
       // finish with planned items still unmet, then trust its judgment.
       let finalNudges = 0;
       let runAppFinishNudges = 0;
+      // Block completing a phase when the model wrote nothing that run.
+      let phaseEmptyFinalNudges = 0;
       // The latest run_app since the last write, IF it still reports errors — used to
       // refuse a clean finish over an unrepaired runtime failure (ok:true+runErrorCount
       // >0 is a failure; ok:false = page wouldn't load).
@@ -136,6 +232,9 @@
       const startedAt = Date.now();
       const deadlineAt = startedAt + deps.agentTotalTimeoutMs;
       let planSpec = null;
+      // Phased state (out here so the finally can keep the tracker pinned).
+      let phaseState = null;
+      let keepPhaseTrackerPinned = false;
       // Guaranteed finalizer (see the matching finally at the end): the run must
       // never exit — via early return, stop, or a thrown error — while the chat
       // still shows an in-progress "...". loader. The send-button state is always
@@ -290,6 +389,17 @@
       const buildStoppedWithWorkText = async (blockerNote) => {
         const hasMutations = toolEvents.some((event) => event && event.ok && isMutationTool(event.tool));
         if (!hasMutations) return blockerNote;
+        if (phaseState) {
+          const changed = [...new Set(toolEvents
+            .filter((event) => event && event.ok && ['write_file', 'edit_file'].includes(String(event.tool || '').toLowerCase()))
+            .map((event) => deps.normalizeWorkspacePath(event.path || ''))
+            .filter(Boolean))];
+          const gaps = getActivePhaseFileTaskGaps(phaseState, deps.normalizeWorkspacePath);
+          const activeP = phaseState.phases[phaseState.activeIndex] || {};
+          const changedText = changed.length ? `Changed: ${changed.slice(0, 6).join(', ')}.` : 'No phase files were changed.';
+          const remainingText = gaps.length ? `Still to do in Phase ${phaseState.activeIndex + 1}: ${gaps.map((g) => g.text || g.path).join('; ')}.` : `Phase ${phaseState.activeIndex + 1} still needs validation or review.`;
+          return `Phase ${phaseState.activeIndex + 1}${activeP.title ? ` (${activeP.title})` : ''} is not complete yet. ${changedText} ${remainingText}\n\n${blockerNote}`;
+        }
         const workspaceLabel = deps.getWorkspaceRootName() || deps.deriveProjectNameFromTask(taskText) || 'project';
         const base = String(await deps.generateAgentCompletionText(taskText, toolEvents, workspaceLabel, planSpec) || '').trim();
         return base ? `${base}\n\n${blockerNote}` : blockerNote;
@@ -300,8 +410,17 @@
       const appendAgentNarration = (text) => {
         const cleaned = deps.sanitizeAssistantText ? deps.sanitizeAssistantText(text) : text;
         const detail = String(cleaned || '').trim();
-        if (!detail || detail.length < 8) return;
-        if (detail === lastNarrationDetail) return;
+        if (shouldSuppressAgentNarration(detail, lastNarrationDetail, toolEvents)) return;
+        // Skip a near-duplicate of the previous line (models often restate the same
+        // thought on consecutive steps): drop it if it shares most significant words.
+        if (lastNarrationDetail) {
+          const sig = (s) => new Set(String(s || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter((w) => w.length > 3));
+          const a = sig(detail); const b = sig(lastNarrationDetail);
+          if (a.size >= 4) {
+            let inter = 0; a.forEach((w) => { if (b.has(w)) inter += 1; });
+            if (inter / a.size >= 0.65) return;
+          }
+        }
         appendAgentActivity({
           kind: 'thought',
           title: '',
@@ -551,6 +670,29 @@
       // "empty project is done" plan that finalized after new_project with no files.)
       const approvedNewProject = Boolean(requestToken && requestToken.approvedNewProject);
       planSpec = await deps.buildAgentPlanSpec(chatId, taskText, { forceProjectScope: approvedNewProject });
+      // Hard provider failure while planning (credits/key) — stop, tell the user.
+      if (planSpec && planSpec._planHardError) {
+        deps.setThinkingStatus('');
+        setAgentProgress('Stopped.');
+        appendAgentActivity({
+          kind: 'error',
+          title: 'Inference unavailable',
+          detail: String(planSpec._planHardError),
+          status: 'error',
+        });
+        deps.consumeLiveAssistantText();
+        const msg = `I couldn't plan this build — ${String(planSpec._planHardError)}`;
+        deps.commitAssistantMessage(chatId, msg, msg, {
+          agentActivities,
+          agentMeta: agentMetaWithRevert({ startedAt, completedAt: Date.now(), collapsed: false }),
+          forceNeedsContinue: true,
+        });
+        recordDebugTrace('agent_plan_hard_error', {
+          chatId: String(chatId || ''),
+          reason: deps.debugPreview(String(planSpec._planHardError), 240),
+        }, { chatId: String(chatId || ''), planSpec });
+        return true;
+      }
       // Safety net: if a planner ever returns a non-project plan despite the flag,
       // rebuild a coherent project plan rather than leaving derived fields stale.
       if (approvedNewProject && planSpec && String(planSpec.taskKind || '').toLowerCase() !== 'project'
@@ -579,6 +721,9 @@
         chatId: String(chatId || ''),
         taskPreview: deps.debugPreview(taskText, 300),
         planKind: String(planSpec && planSpec.taskKind || ''),
+        planSource: String(planSpec && planSpec._planSource || 'model'),
+        planRaw: deps.debugPreview(String(planSpec && planSpec._planRaw || ''), 300),
+        planPhases: String(planSpec && Array.isArray(planSpec.phases) ? planSpec.phases.length : 0),
         planProject: deps.debugPreview(String(planSpec && planSpec.projectName || ''), 80),
         planFiles: deps.debugPreview((planSpec && Array.isArray(planSpec.expectedFiles) ? planSpec.expectedFiles.join(' | ') : ''), 220),
       }, {
@@ -590,27 +735,112 @@
         workspaceStatusSnapshot,
       });
       deps.resetActiveAgentStreamState();
-      const planActivity = deps.buildAgentPlanActivity(planSpec);
-      appendAgentActivity(planActivity);
-      if (!planActivity && planSpec && planSpec.summary) {
-        appendAgentNarration(planSpec.summary);
+      // .aiexe/plan.md is the cross-run source of truth; resume at first unfinished phase.
+      const projectDisplayName = String(planSpec && planSpec.projectName || '');
+      const readAgentPlanFilePhases = async () => {
+        if (typeof deps.parseAgentPlanMarkdown !== 'function') return null;
+        try {
+          const res = await deps.invokeWorkspaceAction('workspaceReadFile', { path: '/.aiexe/plan.md' });
+          if (!res || !res.ok) return null;
+          const parsed = deps.parseAgentPlanMarkdown(String(res.output || ''));
+          return parsed && Array.isArray(parsed.phases) && parsed.phases.length ? parsed.phases : null;
+        } catch (_) { return null; }
+      };
+      // Decide phased from plan.md (authoritative on a Continue/resume, even if the
+      // re-planner dropped phases this turn) OR from the fresh plan (first run). On a
+      // fresh non-resume request we ignore plan.md so an unrelated edit doesn't
+      // resurrect the phase tracker.
+      const planPhases = Array.isArray(planSpec && planSpec.phases)
+        ? planSpec.phases.filter((p) => p && p.title) : [];
+      const isResume = Boolean(requestToken && requestToken.isAgentResume);
+      const filePhases = await readAgentPlanFilePhases();
+      const fileHasUnfinished = filePhases && filePhases.length >= 2
+        && typeof deps.firstUnfinishedPhaseIndex === 'function'
+        && deps.firstUnfinishedPhaseIndex(filePhases) >= 0;
+      const phasesSource = (isResume && fileHasUnfinished) ? filePhases : planPhases;
+      const phasedProjectRun = phasesSource.length >= 2;
+      if (!phasedProjectRun) {
+        // A non-phased run (e.g. a follow-up edit) must not show a stale phase tracker.
+        if (typeof deps.clearAgentPhaseTracker === 'function') deps.clearAgentPhaseTracker(chatId);
+        const planActivity = deps.buildAgentPlanActivity(planSpec);
+        appendAgentActivity(planActivity);
+        if (!planActivity && planSpec && planSpec.summary) {
+          appendAgentNarration(planSpec.summary);
+        }
       }
-      // Surface a multi-phase build plan so the user knows it's staged and can
-      // Continue between phases (phase 1 is a runnable core; later phases extend it).
-      const agentPhases = Array.isArray(planSpec && planSpec.phases)
-        ? planSpec.phases.filter((p) => p && p.title)
-        : [];
-      if (agentPhases.length > 1) {
-        appendAgentNarration(`Building in ${agentPhases.length} phases — phase 1 is a runnable version, then press Continue for each next phase:\n${agentPhases.map((p, i) => `  ${i + 1}. ${p.title}`).join('\n')}`);
+      if (phasedProjectRun) {
+        // plan.md (with ticks) wins over freshly re-planned phases on resume.
+        const phases = (isResume && fileHasUnfinished) ? filePhases : ((filePhases && filePhases.length) ? filePhases : planPhases);
+        planSpec.phases = phases;
+        let activeIndex = typeof deps.firstUnfinishedPhaseIndex === 'function'
+          ? deps.firstUnfinishedPhaseIndex(phases) : 0;
+        if (activeIndex < 0) activeIndex = phases.length - 1;
+        phaseState = { phases, activeIndex };
+        keepPhaseTrackerPinned = true;
+        planSpec.taskKind = 'project'; // re-planner reclassifies Continue as 'edit'; force back
+        const active = phases[activeIndex] || {};
+        planSpec._activePhase = {
+          number: activeIndex + 1,
+          total: phases.length,
+          title: String(active.title || ''),
+          tasks: (Array.isArray(active.tasks) ? active.tasks : []).filter((t) => t && !t.done).map((t) => t.text),
+        };
+        // Harvest foundation vocab from earlier phases so this phase's pages reuse real
+        // tokens/classes/components. Empty on phase 1 (nothing built yet). Best-effort.
+        if (typeof deps.harvestFoundationVocabulary === 'function' && activeIndex > 0) {
+          try {
+            const allFiles = Array.isArray(planSpec.expectedFiles)
+              ? planSpec.expectedFiles.map((p) => deps.normalizeWorkspacePath(p || '')).filter(Boolean) : [];
+            const foundationPaths = allFiles.filter((p) => /\.(css|scss|sass|less)$/i.test(p)
+              || /(?:^|\/)(?:components?|layout|shared|shell)\.[cm]?js$/i.test(p));
+            const firstHtml = allFiles.find((p) => /\.html?$/i.test(p));
+            if (firstHtml) foundationPaths.push(firstHtml);
+            const foundationFiles = {};
+            for (const fp of Array.from(new Set(foundationPaths)).slice(0, 8)) {
+              const res = await deps.invokeWorkspaceAction('workspaceReadFile', { path: fp });
+              if (res && res.ok && String(res.output || '').trim()) foundationFiles[fp] = String(res.output || '');
+            }
+            const vocab = deps.harvestFoundationVocabulary(foundationFiles);
+            if (vocab) planSpec._foundationVocab = vocab;
+          } catch (_) { /* best-effort; v5.2.0 prompt rules still steer reuse */ }
+        }
+        // No narration — the phase tracker UI shows the plan.
         if (typeof deps.setAgentPhaseTracker === 'function') {
           deps.setAgentPhaseTracker({
             chatId,
-            projectName: String(planSpec && planSpec.projectName || ''),
-            phases: agentPhases,
-            activeIndex: 0,
+            projectName: projectDisplayName,
+            phases,
+            activeIndex,
             allDone: false,
           });
         }
+        // Model-generated, phase-aware opening line (not hardcoded). Replaces the
+        // generic summary so the user hears what THIS phase will do.
+        try {
+          const pendingTasks = (Array.isArray(active.tasks) ? active.tasks : [])
+            .filter((t) => t && !t.done).map((t) => t.text);
+          const ackPrompt = [
+            'Write ONE short, natural, first-person sentence telling the user what you will do in this build phase.',
+            'Output ONLY the sentence — no preamble, no quotes, no markdown, no labels.',
+            activeIndex === 0
+              ? 'This is the FIRST of several phases — say you are starting with this phase and will build the rest in later phases the user continues.'
+              : `This is phase ${activeIndex + 1} of ${phases.length} — say you are continuing the build and what this phase adds.`,
+            activeIndex > 0
+              ? 'Reassure the user that you will REUSE the shared CSS and components already built (link them, no new per-page styles) so the design stays consistent.'
+              : '',
+            `Overall goal: ${String((planSpec && planSpec.summary) || taskText || '').trim()}`,
+            `Phase ${activeIndex + 1} of ${phases.length}: ${String(active.title || '').trim()}`,
+            pendingTasks.length ? `This phase covers: ${pendingTasks.join('; ')}` : '',
+            'Sentence:',
+          ].filter(Boolean).join('\n');
+          const ackRes = await deps.requestAgentPlannerInference(ackPrompt, 160, '');
+          if (ackRes && ackRes.ok) {
+            let ack = String(deps.sanitizeAssistantText(String(ackRes.output || '')) || '')
+              .split('\n').map((s) => s.trim()).filter(Boolean)[0] || '';
+            ack = ack.replace(/^["'`]+|["'`]+$/g, '').trim();
+            if (ack && !/^[{<[]/.test(ack)) appendAgentNarration(ack);
+          }
+        } catch (_) { /* best-effort; the tracker still shows the phases */ }
       }
 
       // Harness-driven checklist from planSpec.doneCriteria (marked done mechanically).
@@ -630,6 +860,8 @@
           reviewNarrated = true;
           appendAgentNarration('All files are in place — reviewing the plan to confirm every item is met.');
         }
+        // Phased: tracker is the plan view; skip the duplicate flat "Plan N/N" card.
+        if (phaseState) return { progress, doneCount, total: progress.length, remaining: progress.filter((p) => p && !p.done).map((p) => p.text), allDone };
         if (signature !== lastChecklistSignature) {
           lastChecklistSignature = signature;
           appendAgentActivity({
@@ -656,7 +888,7 @@
       // workspace is created mid-run by the first create step.
       let planFileWritten = false;
       const ensureAgentPlanFile = async () => {
-        if (planFileWritten || agentPhases.length < 2) return;
+        if (planFileWritten || !phaseState) return;
         if (typeof deps.buildAgentPlanMarkdown !== 'function') return;
         const ws = typeof deps.getWorkspaceContext === 'function' ? deps.getWorkspaceContext() || {} : {};
         const rootReady = Boolean(ws.rootLoaded || String(ws.workspaceRootName || '').trim() || Number(ws.rootEntryCount) > 0);
@@ -672,6 +904,97 @@
           planFileWritten = false; // retry next step
         }
       };
+      // Force-rewrite plan.md from planSpec.phases (tick boxes on phase completion).
+      const persistAgentPlanFile = async () => {
+        if (typeof deps.buildAgentPlanMarkdown !== 'function') return;
+        try {
+          await deps.invokeWorkspaceAction('workspaceMkdir', { path: '/.aiexe' });
+          await deps.invokeWorkspaceAction('workspaceWriteFile', {
+            path: '/.aiexe/plan.md',
+            content: deps.buildAgentPlanMarkdown(planSpec),
+          });
+          planFileWritten = true;
+        } catch (_) { /* best-effort */ }
+      };
+      // Tick the active phase done in plan.md, advance; returns next index (-1 = done).
+      const completeActivePhase = async () => {
+        if (!phaseState) return null;
+        const idx = phaseState.activeIndex;
+        const donePhase = phaseState.phases[idx] || { tasks: [] };
+        const doneTasks = Array.isArray(donePhase.tasks) ? donePhase.tasks : [];
+        doneTasks.forEach((t) => { if (t) t.done = true; });
+        if (!doneTasks.length) donePhase.done = true;
+        planSpec.phases = phaseState.phases;
+        await persistAgentPlanFile();
+        const nextIdx = deps.firstUnfinishedPhaseIndex(phaseState.phases);
+        if (typeof deps.setAgentPhaseTracker === 'function') {
+          deps.setAgentPhaseTracker({
+            chatId,
+            projectName: projectDisplayName,
+            phases: phaseState.phases,
+            activeIndex: nextIdx >= 0 ? nextIdx : phaseState.phases.length - 1,
+            allDone: nextIdx < 0,
+          });
+        }
+        if (nextIdx < 0) keepPhaseTrackerPinned = false;
+        return { idx, donePhase, nextIdx };
+      };
+      const refreshPhaseLiveProgress = (rawPath) => {
+        if (!phaseState || typeof deps.setAgentPhaseTracker !== 'function') return 0;
+        const changed = markPhaseTaskLiveProgressForPath(phaseState, rawPath, deps.normalizeWorkspacePath);
+        if (!changed) return 0;
+        deps.setAgentPhaseTracker({
+          chatId,
+          projectName: projectDisplayName,
+          phases: phaseState.phases,
+          activeIndex: phaseState.activeIndex,
+          allDone: false,
+        });
+        return changed;
+      };
+      const hasValidationPassedSinceLatestMutation = () => {
+        let latestMutation = -1;
+        let latestValidation = null;
+        let latestValidationIndex = -1;
+        for (let i = 0; i < toolEvents.length; i += 1) {
+          const event = toolEvents[i];
+          if (!event) continue;
+          const tool = String(event.tool || '').toLowerCase();
+          if (event.ok && ['write_file', 'edit_file'].includes(tool)) latestMutation = i;
+          if (tool === 'validate_files') {
+            latestValidation = event;
+            latestValidationIndex = i;
+          }
+        }
+        return Boolean(latestValidation && latestValidationIndex > latestMutation && latestValidation.validationPassed === true);
+      };
+      const latestValidationFailureSinceLatestMutation = () => {
+        let latestMutation = -1;
+        let latestValidation = null;
+        let latestValidationIndex = -1;
+        for (let i = 0; i < toolEvents.length; i += 1) {
+          const event = toolEvents[i];
+          if (!event) continue;
+          const tool = String(event.tool || '').toLowerCase();
+          if (event.ok && ['write_file', 'edit_file'].includes(tool)) latestMutation = i;
+          if (tool === 'validate_files') {
+            latestValidation = event;
+            latestValidationIndex = i;
+          }
+        }
+        if (latestValidation && latestValidationIndex > latestMutation && latestValidation.validationPassed === false) return latestValidation;
+        return null;
+      };
+      // Per-run mutation budget (sized to the phase's sub-tasks) so one run can't
+      // build everything and time out.
+      const phaseMutationBudget = () => {
+        if (!phaseState) return Infinity;
+        const tasks = Array.isArray(phaseState.phases[phaseState.activeIndex] && phaseState.phases[phaseState.activeIndex].tasks)
+          ? phaseState.phases[phaseState.activeIndex].tasks : [];
+        return Math.max(3, tasks.length);
+      };
+      const countRunMutations = () => toolEvents.filter((e) => e && e.ok
+        && ['write_file', 'edit_file'].includes(String(e.tool || '').toLowerCase())).length;
 
       const sameFailureLimit = 3;
       const failureStreak = { key: '', count: 0 };
@@ -942,12 +1265,35 @@
         decision.srcPath = normalizeDecisionPath(decision.srcPath || '');
         decision.dstPath = normalizeDecisionPath(decision.dstPath || '');
 
+        if (phaseState && decision.action === 'tool' && String(decision.tool || '').toLowerCase() === 'validate_files') {
+          const missingPhaseFiles = getActivePhaseFileTaskGaps(phaseState, deps.normalizeWorkspacePath);
+          if (missingPhaseFiles.length) {
+            const missing = missingPhaseFiles[0];
+            decision = {
+              action: 'tool',
+              tool: 'write_file',
+              path: missing.path,
+              content: '',
+              command: '',
+              srcPath: '',
+              dstPath: '',
+              message: `Create ${missing.path} before validating Phase ${phaseState.activeIndex + 1}.`,
+              thought: `Phase ${phaseState.activeIndex + 1} is missing ${missing.path}; write it before validation.`,
+              raw: '[phase-missing-file-before-validate]',
+              _deterministic: true,
+            };
+            recordDebugTrace('agent_phase_validate_redirected_to_missing_file', {
+              chatId: String(chatId || ''),
+              step: String(step),
+              path: missing.path,
+            }, { chatId: String(chatId || ''), step, missingPhaseFiles });
+          }
+        }
+
         if (!decision._deterministic) {
           const isFinal = decision.action === 'final' || String(decision.tool || '').toLowerCase() === 'none';
-          const isExplore = ['read_file', 'search_files', 'list_dir'].includes(String(decision.tool || '').toLowerCase());
-          // Don't pre-narrate a FINAL message — a rejected finish would otherwise
-          // leave a stray conclusion in the feed; an accepted one shows when committed.
-          const narration = isFinal ? '' : (decision.thought || decision.message || (isExplore ? '' : synthesizeToolNarration(decision)));
+          // Narrate only the model's own thought; synthesized "Writing X" leaked on blocked writes.
+          const narration = isFinal ? '' : (decision.thought || decision.message || '');
           if (narration) appendAgentNarration(narration);
         } else if (!deterministicBatchNarrated) {
           const batchThought = decision.thought;
@@ -1164,7 +1510,11 @@
             setAgentProgress('Reviewing...');
             continue;
           }
-          const finalCheck = deps.validateAgentFinalDecision(taskText, toolEvents, planSpec);
+          // Whole-project completion advisories are scoped to the FULL build — they
+          // wrongly flag a phased run's early phase as "incomplete" and push the
+          // model to build everything at once. Skip them for phased builds (the
+          // phase scope governs completion); the runtime-error nudge above still runs.
+          const finalCheck = phaseState ? { ok: true, missing: [] } : deps.validateAgentFinalDecision(taskText, toolEvents, planSpec);
           // Advisory gate (not a veto): on the first finish attempt with planned
           // items still unmet, surface them as a tool observation and let the
           // model decide. We never override its decision or hard-stop on this.
@@ -1189,10 +1539,119 @@
             setAgentProgress('Reviewing...');
             continue;
           }
-          const unmetCriteria = await getUnmetCriteriaNudge();
+          const unmetCriteria = phaseState ? null : await getUnmetCriteriaNudge();
           if (unmetCriteria) {
             pushCriteriaNudgeObservation(unmetCriteria);
             continue;
+          }
+          // Phased: a model FINAL ends the current phase, not the project.
+          if (phaseState && typeof deps.firstUnfinishedPhaseIndex === 'function') {
+            const missingPhaseFiles = getActivePhaseFileTaskGaps(phaseState, deps.normalizeWorkspacePath);
+            if (missingPhaseFiles.length) {
+              const missing = missingPhaseFiles[0];
+              toolEvents.push({
+                tool: 'final_check',
+                ok: false,
+                observation: `Do not finish Phase ${phaseState.activeIndex + 1} yet. This phase still needs ${missingPhaseFiles.map((g) => g.text || g.path).join('; ')}. Create the next missing file now with write_file: ${missing.path}.`,
+              });
+              recordDebugTrace('agent_phase_final_missing_files_blocked', {
+                chatId: String(chatId || ''), step: String(step),
+                phase: String(phaseState.activeIndex + 1),
+                nextPath: missing.path,
+              }, { chatId: String(chatId || ''), step, missingPhaseFiles, phaseState });
+              setAgentProgress('Building this phase...');
+              continue;
+            }
+            const validationFailure = latestValidationFailureSinceLatestMutation();
+            if (validationFailure) {
+              const issue = Array.isArray(validationFailure.validationIssues) && validationFailure.validationIssues.length
+                ? String(validationFailure.validationIssues[0] || '')
+                : String(validationFailure.observation || '').slice(0, 240);
+              toolEvents.push({
+                tool: 'final_check',
+                ok: false,
+                observation: `Do not finish Phase ${phaseState.activeIndex + 1} yet. The latest validate_files check still failed${issue ? `: ${issue}` : ''}. Fix the specific issue with edit_file, then validate again.`,
+              });
+              recordDebugTrace('agent_phase_final_failed_validation_blocked', {
+                chatId: String(chatId || ''), step: String(step),
+                phase: String(phaseState.activeIndex + 1),
+                issue: deps.debugPreview(issue, 260),
+              }, { chatId: String(chatId || ''), step, validationFailure, phaseState });
+              setAgentProgress('Repairing...');
+              continue;
+            }
+            if (!hasValidationPassedSinceLatestMutation()) {
+              toolEvents.push({
+                tool: 'final_check',
+                ok: false,
+                observation: `Do not finish Phase ${phaseState.activeIndex + 1} yet. Run validate_files once after the phase files are written, then finish only if it passes.`,
+              });
+              recordDebugTrace('agent_phase_final_needs_validation', {
+                chatId: String(chatId || ''), step: String(step),
+                phase: String(phaseState.activeIndex + 1),
+              }, { chatId: String(chatId || ''), step, phaseState, toolEvents });
+              setAgentProgress('Checking files...');
+              continue;
+            }
+            // No files written this run → don't complete the phase; push to build.
+            if (countRunMutations() === 0 && phaseEmptyFinalNudges < 2) {
+              phaseEmptyFinalNudges += 1;
+              const activeP = phaseState.phases[phaseState.activeIndex] || {};
+              const pendingTasks = (Array.isArray(activeP.tasks) ? activeP.tasks : [])
+                .filter((t) => t && !t.done).map((t) => t.text);
+              toolEvents.push({
+                tool: 'final_check',
+                ok: false,
+                observation: `You are on Phase ${phaseState.activeIndex + 1} (${activeP.title}) but have NOT created any files this run — reading existing pages is not enough. This phase's deliverables are NEW pages/files that DO NOT EXIST yet: ${pendingTasks.join('; ') || activeP.title}. Create each one now with write_file (build the real page, matching the existing site's design/header/footer), then finish. Do NOT respond that the project is already complete or offer a written plan — earlier phases only built part of the site.`,
+              });
+              recordDebugTrace('agent_phase_empty_final_nudge', {
+                chatId: String(chatId || ''), step: String(step),
+                phase: String(phaseState.activeIndex + 1), attempt: String(phaseEmptyFinalNudges),
+              }, { chatId: String(chatId || ''), step, pendingTasks });
+              setAgentProgress('Building this phase...');
+              continue;
+            }
+            // Still nothing after nudges — stop for Continue-retry, don't false-complete.
+            if (countRunMutations() === 0) {
+              const activeP = phaseState.phases[phaseState.activeIndex] || {};
+              setAgentProgress('Stopped.');
+              deps.consumeLiveAssistantText();
+              const msg = `This phase didn't get built — Phase ${phaseState.activeIndex + 1}${activeP.title ? ` (${activeP.title})` : ''} still needs its pages. Press **Continue** to build Phase ${phaseState.activeIndex + 1} again.`;
+              deps.commitAssistantMessage(chatId, msg, msg, {
+                agentActivities,
+                agentMeta: agentMetaWithRevert({ startedAt, completedAt: Date.now(), collapsed: true }),
+                forceNeedsContinue: true,
+              });
+              recordDebugTrace('agent_phase_no_work', {
+                chatId: String(chatId || ''), step: String(step), phase: String(phaseState.activeIndex + 1),
+              }, { chatId: String(chatId || ''), step, phaseState });
+              return true;
+            }
+            const res = await completeActivePhase();
+            if (res && res.nextIdx >= 0) {
+              const nextPhase = phaseState.phases[res.nextIdx] || {};
+              setAgentProgress('Phase complete.');
+              let phaseMsg = deps.sanitizeAssistantText(decision.message || '') || '';
+              const handoff = `Phase ${res.idx + 1}${res.donePhase.title ? ` (${res.donePhase.title})` : ''} is done — press Continue to build Phase ${res.nextIdx + 1}${nextPhase.title ? ` — ${nextPhase.title}` : ''}.`;
+              phaseMsg = phaseMsg ? `${phaseMsg}\n\n${handoff}` : handoff;
+              if (agentHasWorkspaceMutations()) {
+                await deps.refreshWorkspaceTree(true);
+              }
+              deps.consumeLiveAssistantText();
+              deps.commitAssistantMessage(chatId, phaseMsg, phaseMsg, {
+                agentActivities,
+                agentMeta: agentMetaWithRevert({ startedAt, completedAt: Date.now(), collapsed: true }),
+                forceNeedsContinue: true,
+              });
+              recordDebugTrace('agent_phase_complete', {
+                chatId: String(chatId || ''),
+                step: String(step),
+                phase: String(res.idx + 1),
+                next: String(res.nextIdx + 1),
+              }, { chatId: String(chatId || ''), step, phaseState, toolEvents });
+              return true;
+            }
+            // Last phase done — tracker faded by completeActivePhase; fall through.
           }
           // Honor the model's final decision: requirements met, or it reaffirmed
           // finishing after the single advisory nudge.
@@ -1407,6 +1866,36 @@
           }
         }
 
+        // Don't recreate an existing file from scratch. If write_file targets a file that
+        // already exists in the workspace and the agent hasn't read it this run, block and
+        // steer to read_file -> edit_file, so "make changes" EDITS the file instead of
+        // overwriting (destroying) the work already there.
+        if (decision.action === 'tool' && String(decision.tool || '').toLowerCase() === 'write_file') {
+          const wPath = deps.normalizeWorkspacePath(decision.path || '');
+          if (wPath) {
+            const ws = (typeof deps.getWorkspaceContext === 'function' ? deps.getWorkspaceContext() : null) || {};
+            const existsInWorkspace = Array.isArray(ws.rootEntries)
+              && ws.rootEntries.some((e) => e && e.kind === 'file' && deps.normalizeWorkspacePath(e.path || '') === wPath);
+            const touchedThisRun = toolEvents.some((e) => e
+              && ['read_file', 'write_file', 'edit_file'].includes(String(e.tool || '').toLowerCase())
+              && deps.normalizeWorkspacePath(e.path || '') === wPath
+              && e.ok !== false);
+            if (existsInWorkspace && !touchedThisRun) {
+              recordDebugTrace('agent_write_over_existing_blocked', {
+                chatId: String(chatId || ''), step: String(step), path: wPath,
+              }, { chatId: String(chatId || ''), step, path: wPath });
+              toolEvents.push({
+                tool: 'write_file',
+                ok: false,
+                _guardBlock: true,
+                path: wPath,
+                observation: `${wPath} already exists in this project — do NOT overwrite it from scratch (write_file would erase the existing work). First read_file ${wPath}, then make ONLY the requested changes with edit_file. Do the same for every other existing file you need to change: read it, then edit it — never rebuild files that are already here.`,
+              });
+              continue;
+            }
+          }
+        }
+
         const targetInfo = deps.describeAgentToolTarget(decision);
         const startLabel = decision.tool === 'write_file' && deps.isLikelyNewAgentFileTarget(toolEvents, targetInfo)
           ? (targetInfo ? `Creating file ${targetInfo}` : 'Creating file')
@@ -1431,8 +1920,18 @@
         let toolResult;
         try {
           if (typeof deps.markAgentToolProgress === 'function') deps.markAgentToolProgress();
+          const toolPlanSpec = phaseState && String(decision.tool || '').toLowerCase() === 'validate_files'
+            ? {
+              ...planSpec,
+              _allExpectedFiles: Array.from(new Set([
+                ...allPhaseFilePaths(phaseState, deps.normalizeWorkspacePath),
+                ...(Array.isArray(planSpec && planSpec.expectedFiles) ? planSpec.expectedFiles : []),
+              ])),
+              expectedFiles: activePhaseFilePaths(phaseState, deps.normalizeWorkspacePath),
+            }
+            : planSpec;
           // Capture + swallow so a late abort of an abandoned tool can't throw unhandled.
-          const toolPromise = deps.executeDeveloperToolCall(chatId, decision, taskText, toolEvents, planSpec, {
+          const toolPromise = deps.executeDeveloperToolCall(chatId, decision, taskText, toolEvents, toolPlanSpec, {
             approvedNewProject: Boolean(requestToken && requestToken.approvedNewProject),
             skipNewProjectConfirmation: Boolean(requestToken && requestToken.skipNewProjectConfirmation),
             forceCurrentWorkspace: Boolean(requestToken && requestToken.forceCurrentWorkspace),
@@ -1757,11 +2256,51 @@
         if (toolResult && toolResult.ok
           && (toolResult.mutated || String(decision.tool || '').toLowerCase() === 'validate_files')) {
           const cl = refreshChecklist();
+          if (toolResult.mutated) {
+            refreshPhaseLiveProgress(toolResult.writtenPath || decision.path || '');
+          }
           if (cl && cl.total) {
             setAgentProgress(cl.allDone
               ? `All ${cl.total} planned items addressed — finalizing...`
               : `Progress ${cl.doneCount}/${cl.total} — continuing...`);
           }
+        }
+        // Backstop: bound the run at the phase's mutation budget so it can't time out.
+        if (phaseState && toolResult && toolResult.ok && toolResult.mutated
+          && countRunMutations() >= phaseMutationBudget()) {
+          const isLastPhase = phaseState.activeIndex >= phaseState.phases.length - 1;
+          if (agentHasWorkspaceMutations()) {
+            await deps.refreshWorkspaceTree(true);
+          }
+          deps.consumeLiveAssistantText();
+          if (!isLastPhase) {
+            // Earlier phase: tick it and hand off to the next.
+            const res = await completeActivePhase();
+            const nextPhase = phaseState.phases[res.nextIdx] || {};
+            setAgentProgress('Phase complete.');
+            const phaseMsg = `Phase ${res.idx + 1}${res.donePhase.title ? ` (${res.donePhase.title})` : ''} is done — press Continue to build Phase ${res.nextIdx + 1}${nextPhase.title ? ` — ${nextPhase.title}` : ''}.`;
+            deps.commitAssistantMessage(chatId, phaseMsg, phaseMsg, {
+              agentActivities,
+              agentMeta: agentMetaWithRevert({ startedAt, completedAt: Date.now(), collapsed: true }),
+              forceNeedsContinue: true,
+            });
+          } else {
+            // Last phase: don't falsely mark it done — bound the run and resume it.
+            setAgentProgress('Paused.');
+            const cur = phaseState.phases[phaseState.activeIndex] || {};
+            const pausedMsg = `I've built a chunk of the final phase. Press **Continue** to build Phase ${phaseState.activeIndex + 1}${cur.title ? ` — ${cur.title}` : ''}'s remaining files.`;
+            deps.commitAssistantMessage(chatId, pausedMsg, pausedMsg, {
+              agentActivities,
+              agentMeta: agentMetaWithRevert({ startedAt, completedAt: Date.now(), collapsed: true }),
+              forceNeedsContinue: true,
+            });
+          }
+          recordDebugTrace('agent_phase_budget_stop', {
+            chatId: String(chatId || ''), step: String(step),
+            phase: String(phaseState.activeIndex + 1), lastPhase: String(isLastPhase),
+            mutations: String(countRunMutations()),
+          }, { chatId: String(chatId || ''), step, phaseState, toolEvents });
+          return true;
         }
         // A tool that hit the execution timeout will NOT recover on retry — the local
         // model is simply too slow for this operation. Abandon immediately with a clean
@@ -2032,6 +2571,9 @@
               chatId: String(chatId || ''),
               step: String(step),
               autoFinalized: 'true',
+              planSource: String(planSpec && planSpec._planSource || 'model'),
+              planRaw: deps.debugPreview(String(planSpec && planSpec._planRaw || ''), 280),
+              planFiles: deps.debugPreview((planSpec && Array.isArray(planSpec.expectedFiles) ? planSpec.expectedFiles.join(' | ') : ''), 160),
               finalPreview: deps.debugPreview(finalText, 260),
             }, {
               chatId: String(chatId || ''),
@@ -2102,21 +2644,29 @@
         }
       }
       let fallback = '';
-      if (cl && cl.allDone) {
-        // Work is done — let the model write the wrap-up naturally rather than a template.
-        const workspaceLabel = deps.getWorkspaceRootName() || deps.deriveProjectNameFromTask(taskText) || 'project';
-        fallback = String(await deps.generateAgentCompletionText(taskText, toolEvents, workspaceLabel, planSpec) || '').trim();
+      const workspaceLabel = deps.getWorkspaceRootName() || deps.deriveProjectNameFromTask(taskText) || 'project';
+      // Let the model write the wrap-up naturally (grounded in the real diffs)
+      // whenever there was progress — done OR out-of-steps — instead of a robotic
+      // "N of M planned items / Still to do: ..." dump.
+      if ((cl && cl.allDone) || fallbackChanged.length || (cl && cl.doneCount > 0)) {
+        if (phaseState) {
+          const gaps = getActivePhaseFileTaskGaps(phaseState, deps.normalizeWorkspacePath);
+          const activeP = phaseState.phases[phaseState.activeIndex] || {};
+          fallback = `Phase ${phaseState.activeIndex + 1}${activeP.title ? ` (${activeP.title})` : ''} is not complete yet.`;
+          if (fallbackChanged.length) fallback += ` Changed: ${fallbackChanged.slice(0, 6).join(', ')}.`;
+          if (gaps.length) fallback += ` Still to do: ${gaps.map((g) => g.text || g.path).join('; ')}.`;
+          fallback += " Press Continue and I'll keep going from this phase.";
+        } else {
+          fallback = String(await deps.generateAgentCompletionText(taskText, toolEvents, workspaceLabel, planSpec) || '').trim();
+        }
+      }
+      if (fallback && !phaseState && !(cl && cl.allDone)) {
+        fallback += " I didn't get to finish everything — press Continue and I'll keep going.";
       }
       if (!fallback) {
-        if (cl && cl.total && !cl.allDone) {
-          fallback = `I ran out of steps with ${cl.doneCount} of ${cl.total} planned items done.${changedClause}${remainingClause} Press Continue to finish the rest, or leave it here.`;
-        } else if (cl && cl.allDone) {
-          fallback = `Done — I made the planned changes.${changedClause}`;
-        } else if (fallbackChanged.length) {
-          fallback = `I ran out of steps before fully wrapping up.${changedClause} Press Continue to keep going, or tell me what to adjust.`;
-        } else {
-          fallback = 'I could not finish in time. Press Continue to keep going, or tell me the exact change you want.';
-        }
+        fallback = fallbackChanged.length
+          ? "I made some changes but didn't fully wrap up — press Continue to keep going, or tell me what to adjust."
+          : "I couldn't finish in time — press Continue to keep going, or tell me the exact change you want.";
       }
       if (unresolvedValidationClause) fallback += unresolvedValidationClause;
       deps.setThinkingStatus('');
@@ -2156,10 +2706,12 @@
         });
         throw err;
       } finally {
-        // Phase tracker is run-scoped — fade it out when the run ends. Step 3 will
-        // keep it pinned with a Continue chip between phases instead.
+        // Keep the tracker pinned between phases (a phased run that ended with more
+        // phases to go); only clear it when no phased run is in flight.
         try {
-          if (typeof deps.clearAgentPhaseTracker === 'function') deps.clearAgentPhaseTracker(chatId);
+          if (!keepPhaseTrackerPinned && typeof deps.clearAgentPhaseTracker === 'function') {
+            deps.clearAgentPhaseTracker(chatId);
+          }
         } catch (_) { /* best-effort */ }
         // If we reach here with the live assistant stream still connected, no exit
         // path committed it — finalize so the loader can't get stuck and the work so
@@ -2196,6 +2748,11 @@
     createAgentLoop,
     deriveAgentFailureSignature,
     countInspectionsSinceMutation,
+    shouldSuppressAgentNarration,
     evaluateRepeatedRead,
+    extractFileLikeTaskPaths,
+    markPhaseTaskLiveProgressForPath,
+    getActivePhaseFileTaskGaps,
+    activePhaseFilePaths,
   };
 })(window);

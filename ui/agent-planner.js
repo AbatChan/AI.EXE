@@ -611,6 +611,16 @@
       return sections.join('\n\n').trim();
     }
 
+    // Condensed design brief injected into HTML/CSS generation (full design_guide.md
+    // kept as reference; the brief is ~1/4 the tokens to avoid per-file bloat).
+    async function loadDesignFoundationFor(normalizedPath) {
+      if (!/\.(html?|css)$/i.test(String(normalizedPath || ''))) return '';
+      const guide = await loadPromptTemplate('design_guide_brief');
+      return guide
+        ? `\n\n=== DESIGN FOUNDATION (apply these defaults) ===\n${guide}\n===\n`
+        : '';
+    }
+
     async function buildAgentWriteFileContentPrompt(taskText, toolEvents, path, priorAttempt = '', planSpec = null) {
       const toolLog = (toolEvents || []).slice(-6).map((event, index) => {
         const observation = String(event && event.observation ? event.observation : '').slice(0, agentMaxToolOutputChars);
@@ -623,7 +633,48 @@
         && planFiles.some((p) => /\.html?$/i.test(p))
         && !planFiles.some((p) => /\.(css|scss|sass|less|js|mjs|cjs|ts|jsx|tsx)$/i.test(p));
       const generationHints = buildAgentFileGenerationHints(taskText, normalizedPath, { selfContained });
+      // New page in a site with shared CSS: consume it + reuse the shared header/footer
+      // (consistent from first write, not generate-then-repair). Mirrors the edit path.
+      const sharedSourceHints = (() => {
+        if (!/\.html?$/i.test(normalizedPath) || selfContained) return [];
+        const allFiles = Array.from(new Set([
+          ...planFiles,
+          ...(Array.isArray(planSpec && planSpec._allExpectedFiles) ? planSpec._allExpectedFiles.map((p) => String(p || '')) : []),
+        ].map((p) => normalizeWorkspacePath(p || '')).filter(Boolean)));
+        const cssFiles = allFiles.filter((p) => /\.(css|scss|sass|less)$/i.test(p));
+        if (!cssFiles.length) return [];
+        const htmlCount = allFiles.filter((p) => /\.html?$/i.test(p)).length;
+        const componentScripts = allFiles.filter((p) => /(?:^|\/)(?:components?|layout|shared|shell)\.[cm]?js$/i.test(p));
+        const hints = [
+          `This page is part of a multi-page site. Link the shared stylesheet(s) in <head>: ${cssFiles.join(', ')}. They are the single SOURCE OF TRUTH for all colors, fonts, spacing, and layout.`,
+          'Do NOT add a <style> block or inline style="..." attributes. If a style you need is missing, add it to the shared stylesheet instead of restyling this page locally.',
+          'Reuse the existing CSS classes and design tokens from the shared stylesheet — do not invent new colors, fonts, or a different look for this page.',
+        ];
+        if (htmlCount >= 2) {
+          if (componentScripts.length) {
+            hints.push(`The header, nav, and footer are shared across every page via ${componentScripts.join(', ')}: render them with the existing component placeholders (e.g. <div data-site-header></div> / <div data-site-footer></div>) and load that script. Do NOT hand-write a different header or footer.`);
+          } else {
+            hints.push('Copy the EXACT header, nav, and footer markup used by the other pages (shown in PROJECT_STATE) so every page is identical — same structure, classes, and links. Do not redesign them for this page.');
+          }
+        }
+        return hints;
+      })();
+      if (sharedSourceHints.length) generationHints.push(...sharedSourceHints);
+      // Structure-first: a stylesheet is written AFTER the HTML, so style the real markup.
+      if (/\.(css|scss|sass|less)$/i.test(normalizedPath)) {
+        const htmlSiblings = planFiles.filter((p) => /\.html?$/i.test(p));
+        if (htmlSiblings.length) {
+          generationHints.push('Style every class/id the sibling HTML actually uses (shown in PROJECT_STATE) — leave no section unstyled, and do not add selectors no page uses. This is the single source of truth for the whole site.');
+        }
+      }
       const projectState = buildAgentProjectStateContext(toolEvents, planSpec, normalizedPath);
+      const designFoundation = await loadDesignFoundationFor(normalizedPath);
+      // Harvested foundation vocab (real tokens/classes/components) so the page reuses
+      // existing names instead of inventing a new look.
+      const foundationVocab = String(planSpec && planSpec._foundationVocab || '').trim();
+      const foundationBlock = foundationVocab
+        ? `\n\n=== FOUNDATION VOCABULARY (already built in an earlier phase — REUSE these EXACT names; never invent alternatives or redefine them) ===\n${foundationVocab}\n===\n`
+        : '';
       const template = await loadPromptTemplate('developer_agent_write_file');
       if (template) {
         return renderPromptTemplate(template, {
@@ -634,7 +685,7 @@
           TASK: String(taskText || '').trim(),
           RECENT_TOOL_RESULTS: toolLog || '(none yet)',
           PREVIOUS_ATTEMPT_TO_IMPROVE: priorAttempt ? String(priorAttempt).slice(0, 1800) : '',
-        });
+        }) + designFoundation + foundationBlock;
       }
       return [
         'Write the complete final contents for one project file.',
@@ -655,6 +706,8 @@
         priorAttempt
           ? `PREVIOUS_ATTEMPT_TO_IMPROVE:\nThe previous generation was rejected because it was either too short or contained placeholders (e.g. "todo", "coming soon"). Expand this code into a fully working implementation:\n${String(priorAttempt).slice(0, 1800)}`
           : '',
+        designFoundation || '',
+        foundationBlock || '',
         'FILE_CONTENT:',
       ].filter(Boolean).join('\n');
     }
@@ -731,6 +784,7 @@
       const normalizedPath = normalizeWorkspacePath(path || '');
       const projectState = buildAgentProjectStateContext(toolEvents, planSpec, normalizedPath);
       const rewriteHints = buildAgentFileGenerationHints(taskText, normalizedPath);
+      const designFoundation = await loadDesignFoundationFor(normalizedPath);
       const template = await loadPromptTemplate('developer_agent_rewrite_file');
       if (template) {
         return renderPromptTemplate(template, {
@@ -742,7 +796,7 @@
           RECENT_TOOL_RESULTS: toolLog || '(none yet)',
           PREVIOUS_ATTEMPT_TO_IMPROVE: priorAttempt ? String(priorAttempt).slice(0, 1800) : '',
           CURRENT_FILE: String(currentContent || '').slice(0, 22000),
-        });
+        }) + designFoundation;
       }
       return [
         'Rewrite the complete final contents for one existing file after applying the requested edits.',
@@ -763,6 +817,7 @@
           : '',
         'CURRENT_FILE:',
         String(currentContent || '').slice(0, 22000),
+        designFoundation || '',
         'FILE_CONTENT:',
       ].filter(Boolean).join('\n');
     }
@@ -795,26 +850,54 @@
         }), agentStepTimeoutMs)),
       ]);
       if (!res || !res.ok) {
-        return buildFallbackAgentPlanSpec(taskText, { chatId, forceProjectScope });
+        const fb = buildFallbackAgentPlanSpec(taskText, { chatId, forceProjectScope });
+        if (fb && typeof fb === 'object') {
+          fb._planSource = res && res.timedOut ? 'fallback:timeout' : 'fallback:infer_fail';
+          fb._planRaw = String((res && res.message) || '').slice(0, 300);
+          // Hard provider failure (credits/key/forbidden) — flag so the loop stops.
+          if (res && (res.hardFail || [401, 402, 403].includes(Number(res.httpStatus)))) {
+            fb._planHardError = String(res.message || '').trim() || 'The inference provider rejected the request.';
+          }
+        }
+        return fb;
       }
       let parsed = null;
       try {
         parsed = JSON.parse(String(res.output || '').trim());
       } catch (_) {
         const raw = String(res.output || '');
-        const start = raw.indexOf('{');
-        const end = raw.lastIndexOf('}');
-        if (start >= 0 && end > start) {
-          try {
-            parsed = JSON.parse(raw.slice(start, end + 1));
-          } catch (_) {
-            parsed = null;
+        // Balanced-brace scan from each '{' — robust to prose/fences around the JSON.
+        const tryBalancedFrom = (s, from) => {
+          let depth = 0; let inStr = false; let esc = false;
+          for (let i = from; i < s.length; i += 1) {
+            const c = s[i];
+            if (inStr) {
+              if (esc) esc = false; else if (c === '\\') esc = true; else if (c === '"') inStr = false;
+              continue;
+            }
+            if (c === '"') inStr = true;
+            else if (c === '{') depth += 1;
+            else if (c === '}') { depth -= 1; if (depth === 0) return s.slice(from, i + 1); }
           }
+          return '';
+        };
+        for (let idx = raw.indexOf('{'); idx >= 0 && !parsed; idx = raw.indexOf('{', idx + 1)) {
+          const candidate = tryBalancedFrom(raw, idx);
+          if (!candidate) break;
+          try { parsed = JSON.parse(candidate); } catch (_) { parsed = null; }
         }
       }
-      return parsed
-        ? deps.normalizeAgentPlanSpec(parsed, taskText, { chatId, forceProjectScope })
-        : buildFallbackAgentPlanSpec(taskText, { chatId, forceProjectScope });
+      if (parsed) {
+        const spec = deps.normalizeAgentPlanSpec(parsed, taskText, { chatId, forceProjectScope });
+        if (spec && typeof spec === 'object') spec._planSource = 'model';
+        return spec;
+      }
+      const fb = buildFallbackAgentPlanSpec(taskText, { chatId, forceProjectScope });
+      if (fb && typeof fb === 'object') {
+        fb._planSource = 'fallback:parse';
+        fb._planRaw = String(res.output || '').slice(0, 300);
+      }
+      return fb;
     }
 
     // Relevance-ranked context: the per-turn window is recency-first, but a pure
@@ -1038,9 +1121,19 @@
           return `EarlierResult ${index + 1}: ${String(event && event.tool ? event.tool : 'unknown')} ${String(event && event.path ? event.path : '')}\n${observation}`;
         }).join('\n\n')}\n\n`
         : '';
+      // Keep only the last few tool results in full; compact older large read/list
+      // dumps to a pointer (re-read on demand) so the prompt doesn't balloon with
+      // stale file contents — the main driver of context bloat / degradation.
+      const FULL_TOOL_TAIL = 3;
       const toolLog = diagnosticsLog + expandedReadLog + relevantOlderLog + inspectedNote + recentEvents.map((event, index) => {
-        const observation = String(event && event.observation ? event.observation : '').slice(0, agentMaxToolOutputChars);
-        return `ToolResult ${index + 1}: ${String(event && event.tool ? event.tool : 'unknown')}\n${observation}`;
+        const tool = String(event && event.tool ? event.tool : 'unknown');
+        const obs = String(event && event.observation ? event.observation : '');
+        const isTail = index >= recentEvents.length - FULL_TOOL_TAIL;
+        if (!isTail && obs.length > 1200 && ['read_file', 'list_dir', 'search_files'].includes(tool.toLowerCase())) {
+          const p = String(event && event.path ? event.path : '');
+          return `ToolResult ${index + 1}: ${tool} ${p} — ${obs.length} chars (omitted to save context; read_file again if you need it)`;
+        }
+        return `ToolResult ${index + 1}: ${tool}\n${obs.slice(0, agentMaxToolOutputChars)}`;
       }).join('\n\n');
       const planSummary = planSpec
         ? [
@@ -1068,6 +1161,33 @@
         ].filter(Boolean).join('\n')
         : '(none)';
 
+      // Scope this run to the current phase only.
+      const activePhase = planSpec && planSpec._activePhase;
+      // Later phases already have the shared design as FOUNDATION VOCABULARY (cross-phase
+      // memory) — re-reading index.html/the stylesheet just burns this run's steps.
+      const laterPhaseReuseLine = (planSpec && planSpec._foundationVocab)
+        ? 'Do NOT re-read index.html or the shared stylesheet to "match the design" — the FOUNDATION VOCABULARY below already lists the shared classes, tokens, and components built in earlier phases (it is your memory of them). Go straight to writing the new page(s): link the shared CSS/JS, reuse those exact names, and use <div data-site-header></div>/<div data-site-footer></div>. Re-reading existing files just wastes this run\'s limited steps.'
+        : 'You may read ONE existing page first to match its design/header/footer/source-of-truth files, but reading is not the work.';
+      const phaseScope = activePhase && activePhase.title
+        ? [
+          '',
+          '=== PHASED BUILD — THIS RUN BUILDS ONE PHASE ONLY ===',
+          `You are on Phase ${activePhase.number} of ${activePhase.total}: ${activePhase.title}`,
+          activePhase.tasks && activePhase.tasks.length
+            ? `Remaining sub-tasks for THIS phase:\n${activePhase.tasks.map((t) => `  - ${t}`).join('\n')}`
+            : '',
+          activePhase.number === 1
+            ? 'Phase 1 must be a COMPLETE, RUNNABLE minimal version of the project (it runs on its own). Keep it SMALL — build only the sub-tasks listed above; do NOT build later phases\' pages/screens/features now. The workspace was just created and is empty — start writing files immediately; do NOT read_file or list_dir the root or the project name.'
+            : 'Build only this phase\'s named deliverables. If a sub-task names a new file/page from Expected files, create it with write_file. If a new page needs styles, tokens, scripts, header/nav/footer markup, or repeated sections that are not already in the shared source-of-truth files, edit the existing shared CSS/JS/component files as support work in this same phase; do NOT solve it with inline CSS or a redesigned page-local shell. If a sub-task is shared styling, components, behavior, README, or design/brand/strategy guidance, update that existing source-of-truth file instead of inventing a new public HTML page. ' + laterPhaseReuseLine + ' Later HTML pages must link the existing shared CSS and shared components/scripts; do NOT paste a new inline theme, nav, logo, footer, or button system into each page. Public HTML pages must stay within the planned page count/scope unless the user explicitly asked for additional navigable documentation pages.',
+          `STRICT SCOPE: build ONLY the files needed for the ${activePhase.tasks && activePhase.tasks.length ? activePhase.tasks.length : 'few'} sub-task(s) above (roughly that many files) — NOT the whole project. Do not create pages or screens that belong to later phases.`,
+          activePhase.number < activePhase.total
+            ? 'Do NOT write README.md or other documentation in this phase — docs come in the FINAL phase only. Build the actual app/page files for this phase first.'
+            : '',
+          'When this phase\'s sub-tasks are built and it runs, validate_files (and run_app if runnable) then return {"action":"final"} — do NOT continue into the next phase. The user presses Continue to advance; the next run picks up the next phase.',
+          '===',
+        ].filter(Boolean).join('\n')
+        : '';
+
       const template = await loadPromptTemplate('developer_agent_decision');
       const vars = {
         AGENT_STEP: Number(stepIndex),
@@ -1079,7 +1199,7 @@
         PENDING_REQUIREMENTS: summarizeAgentPendingRequirements(taskText, toolEvents, planSpec),
         TOOL_RESULTS: toolLog || '(none yet)',
         TASK: String(taskText || '').trim(),
-        PLAN_SUMMARY: planSummary,
+        PLAN_SUMMARY: phaseScope ? `${planSummary}\n${phaseScope}` : planSummary,
       };
       const prompt = renderPromptTemplate(template, vars);
       // Split at the dynamic section so remote APIs receive proper system/user roles.

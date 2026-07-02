@@ -192,6 +192,28 @@
       ].join('\n');
     }
 
+    function normalizePlanFileList(items) {
+      const normalize = typeof deps.normalizeWorkspacePath === 'function'
+        ? deps.normalizeWorkspacePath
+        : (path) => {
+          const clean = String(path || '').replace(/\\/g, '/').trim();
+          if (!clean || clean === '/') return '/';
+          return `/${clean.split('/').filter((part) => part && part !== '.' && part !== '..').join('/')}`;
+        };
+      return Array.from(new Set((Array.isArray(items) ? items : [])
+        .map((path) => normalize(path || ''))
+        .filter((path) => path && path !== '/' && path !== '/src')));
+    }
+
+    function getActivePlannedFiles(planSpec) {
+      return normalizePlanFileList(planSpec && planSpec.expectedFiles);
+    }
+
+    function getAllPlannedFiles(planSpec) {
+      const all = normalizePlanFileList(planSpec && planSpec._allExpectedFiles);
+      return all.length ? all : getActivePlannedFiles(planSpec);
+    }
+
     async function collectSearchableWorkspaceFiles(rootPath, maxFiles = 80) {
       const queue = [deps.normalizeWorkspacePath(rootPath || '/') || '/'];
       const files = [];
@@ -237,7 +259,7 @@
       const normalized = deps.normalizeWorkspacePath(path || '');
       const text = String(content || '');
       const issues = [];
-      const expectedFiles = Array.isArray(planSpec && planSpec.expectedFiles) ? planSpec.expectedFiles : [];
+      const expectedFiles = getAllPlannedFiles(planSpec);
       const htmlFile = expectedFiles.find((candidate) => /\.html?$/i.test(String(candidate || ''))) || '';
       const cssFile = expectedFiles.find((candidate) => /\.(css|scss|sass|less)$/i.test(String(candidate || ''))) || '';
       const scriptFile = expectedFiles.find((candidate) => /\.(js|mjs|cjs|ts|jsx|tsx)$/i.test(String(candidate || ''))) || '';
@@ -246,10 +268,14 @@
       }
       if (/\.html?$/i.test(normalized)) {
         if (cssFile && /<style[\s>]/i.test(text)) {
-          issues.push(`contains inline <style> content even though ${cssFile} exists`);
+          issues.push(`contains a page-local <style> block even though shared CSS is planned (${cssFile}); move those rules into the shared stylesheet and keep this HTML semantic`);
         }
-        if (scriptFile && /<script(?![^>]*\bsrc=)[\s>]/i.test(text)) {
-          issues.push(`contains inline <script> content even though ${scriptFile} exists`);
+        // Page-specific inline <script> (filters, accordions, form logic) is fine — it
+        // is NOT shared-code duplication, so it must not block. Only flag the genuine
+        // anti-pattern: an inline script re-rendering the shared shell (header/footer/nav).
+        if (scriptFile && /<script(?![^>]*\bsrc=)[\s>]/i.test(text)
+          && /\b(?:data-site-(?:header|footer)|renderHeader|renderFooter|injectShell|innerHTML\s*=\s*[`'"][^`'"]*<(?:header|footer|nav)\b)/i.test(text)) {
+          issues.push(`inline <script> appears to re-render the shared header/footer/nav even though ${scriptFile} provides them; remove the duplicate and load ${scriptFile} instead. Page-specific behavior can stay inline.`);
         }
         const htmlStructureIssue = getHtmlStructureIssue(text);
         if (htmlStructureIssue) issues.push(htmlStructureIssue);
@@ -703,42 +729,58 @@
 
     function validateWebProjectConsistency(fileContents, planSpec, advisoryOut = null) {
       const issues = [];
-      const expectedFiles = Array.isArray(planSpec && planSpec.expectedFiles) ? planSpec.expectedFiles : [];
-      const htmlFiles = expectedFiles.filter((path) => /\.html?$/i.test(String(path || '')));
-      const htmlFile = htmlFiles[0] || '';
-      const cssFile = expectedFiles.find((path) => /\.(css|scss|sass|less)$/i.test(String(path || ''))) || '';
-      const scriptFile = expectedFiles.find((path) => /\.(js|mjs|cjs|ts|jsx|tsx)$/i.test(String(path || ''))) || '';
-      if (!htmlFile || (!cssFile && !scriptFile)) return issues;
+      const activeExpectedFiles = getActivePlannedFiles(planSpec);
+      const allExpectedFiles = getAllPlannedFiles(planSpec);
+      const plannedHtmlFiles = allExpectedFiles.filter((path) => /\.html?$/i.test(String(path || '')));
+      const activeHtmlFiles = (activeExpectedFiles.some((path) => /\.html?$/i.test(path)) ? activeExpectedFiles : plannedHtmlFiles)
+        .filter((path) => /\.html?$/i.test(path) && String(fileContents[path] || '').trim());
+      const cssFiles = allExpectedFiles.filter((path) => /\.(css|scss|sass|less)$/i.test(String(path || '')));
+      const scriptFiles = allExpectedFiles.filter((path) => /\.(js|mjs|cjs|ts|jsx|tsx)$/i.test(String(path || '')));
+      const cssFile = cssFiles[0] || '';
+      const scriptFile = scriptFiles[0] || '';
+      const sharedComponentScripts = scriptFiles.filter((path) => /(?:^|\/)(?:components?|layout|shared|shell)\.[cm]?js$/i.test(path));
+      const requiredPageScripts = sharedComponentScripts.length ? sharedComponentScripts : (scriptFile ? [scriptFile] : []);
+      if (!activeHtmlFiles.length || (!cssFiles.length && !scriptFiles.length)) return issues;
+      const htmlFile = activeHtmlFiles[0] || '';
       const html = String(fileContents[htmlFile] || '');
       const css = cssFile ? String(fileContents[cssFile] || '') : '';
       const js = scriptFile ? String(fileContents[scriptFile] || '') : '';
-      if (!html) return issues;
 
-      if (cssFile) {
-        const cssHref = cssFile.replace(/^\//, '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        if (!new RegExp(`href=["'][^"']*${cssHref}["']`, 'i').test(html)) {
-          issues.push(`${htmlFile}: does not link ${cssFile}`);
+      activeHtmlFiles.forEach((pagePath) => {
+        const pageHtml = String(fileContents[pagePath] || '');
+        if (!pageHtml) return;
+        cssFiles.forEach((plannedCssFile) => {
+          const cssHref = plannedCssFile.replace(/^\//, '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          if (!new RegExp(`href=["'][^"']*${cssHref}["']`, 'i').test(pageHtml)) {
+            issues.push(`${pagePath}: does not link shared stylesheet ${plannedCssFile}; pages must use the global CSS source of truth instead of redefining styles locally`);
+          }
+        });
+        if (cssFiles.length && /<style[\s>]/i.test(pageHtml)) {
+          issues.push(`${pagePath}: contains a page-local <style> block even though shared CSS is planned (${cssFiles.join(', ')}); move page-specific rules into ${cssFile || 'the shared stylesheet'} and keep the HTML semantic`);
         }
-      }
-      if (scriptFile) {
-        const scriptSrc = scriptFile.replace(/^\//, '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        if (!new RegExp(`src=["'][^"']*${scriptSrc}["']`, 'i').test(html)) {
-          issues.push(`${htmlFile}: does not load ${scriptFile}`);
-        }
-      }
+        requiredPageScripts.forEach((plannedScriptFile) => {
+          const scriptSrc = plannedScriptFile.replace(/^\//, '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          if (!new RegExp(`src=["'][^"']*${scriptSrc}["']`, 'i').test(pageHtml)) {
+            const sharedLabel = sharedComponentScripts.includes(plannedScriptFile)
+              ? '; repeated header/nav/footer should come from the shared component source of truth'
+              : '';
+            issues.push(`${pagePath}: does not load ${plannedScriptFile}${sharedLabel}`);
+          }
+        });
+      });
 
       // Multi-page: check JS refs against the union of all pages' ids/classes.
       const htmlIds = new Set();
       const htmlDataActions = new Set();
       const htmlClasses = new Set();
-      for (const page of htmlFiles) {
+      for (const page of plannedHtmlFiles) {
         const pageHtml = String(fileContents[page] || '');
         if (!pageHtml) continue;
         extractHtmlIds(pageHtml).forEach((id) => htmlIds.add(id));
         extractHtmlDataActions(pageHtml).forEach((action) => htmlDataActions.add(action));
         extractHtmlClasses(pageHtml).forEach((className) => htmlClasses.add(className));
       }
-      const htmlLabel = htmlFiles.length > 1 ? htmlFiles.join(', ') : htmlFile;
+      const htmlLabel = plannedHtmlFiles.length > 1 ? plannedHtmlFiles.join(', ') : htmlFile;
       const cssClasses = new Set(extractCssClassSelectors(css));
       const cssIds = new Set(extractCssIdSelectors(css));
       const jsExpectations = extractJsHtmlExpectations(js);
@@ -802,12 +844,32 @@
       return issues;
     }
 
+    // Safety net: some models (qwen Hermes/double-escaped output) hand back file
+    // content still JSON-escaped — literal \n and \" with no real newlines — which
+    // writes the whole file onto one line. Decode it when clearly escaped.
+    const decodeEscapedFileContent = (s) => {
+      const text = String(s || '');
+      const literalEscapes = (text.match(/\\[nt"]/g) || []).length;
+      const realNewlines = (text.match(/\n/g) || []).length;
+      if (literalEscapes < 3 || realNewlines > 1) return text;
+      try {
+        const decoded = JSON.parse(`"${text.replace(/\r?\n/g, '\\n')}"`);
+        if (decoded && /\n/.test(decoded)) return decoded;
+      } catch (_) { /* fall through */ }
+      return text
+        .replace(/\\\\/g, ' ')
+        .replace(/\\n/g, '\n').replace(/\\r/g, '\r').replace(/\\t/g, '\t')
+        .replace(/\\"/g, '"').replace(/\\'/g, "'")
+        .replace(/ /g, '\\');
+    };
     async function executeDeveloperToolCall(chatId, decision, taskText, toolEvents = [], planSpec = null, runOptions = {}) {
       const tool = String(decision && decision.tool ? decision.tool : '').toLowerCase();
       const taskLower = String(taskText || '').toLowerCase();
       const mustExplicitlyDelete = /\b(delete|remove|trash)\b/.test(taskLower);
       const planExpectedFiles = Array.isArray(planSpec && planSpec.expectedFiles) ? planSpec.expectedFiles : [];
       const projectTask = String(planSpec && planSpec.taskKind || '').toLowerCase() === 'project';
+      const phasedProject = Array.isArray(planSpec && planSpec.phases)
+        && planSpec.phases.filter((p) => p && p.title).length >= 2;
       const workspaceContext = typeof deps.getWorkspaceContext === 'function' ? deps.getWorkspaceContext() : null;
       const workspaceStatusSnapshot = typeof deps.requestWorkspaceStatusSnapshot === 'function'
         ? await deps.requestWorkspaceStatusSnapshot()
@@ -845,6 +907,7 @@
         const normalized = deps.normalizeWorkspacePath(candidatePath || '');
         if (!normalized || normalized === '/') return true;
         if (!projectTask) return true;
+        if (phasedProject) return true; // model drives file creation per phase
         if (!planExpectedFiles.length) return true;
         if (normalized === '/README.md') return Boolean(planSpec && planSpec.needsReadme);
         // requirements.txt is a standard Python deliverable — the Run button
@@ -902,7 +965,7 @@
         const chatOwnsOpenWorkspace = typeof deps.chatHasPriorAgentWorkspaceWork === 'function'
           && deps.chatHasPriorAgentWorkspaceWork(chatId);
         const approvedNewProjectRun = Boolean(runOptions.approvedNewProject || runOptions.skipNewProjectConfirmation);
-        if (hasOpenWorkspace && canonicalWorkspaceRootName && openWorkspaceEntryCount > 0 && !explicitSeparateWorkspaceIntent && chatOwnsOpenWorkspace && !approvedNewProjectRun) {
+        if (hasOpenWorkspace && canonicalWorkspaceRootName && openWorkspaceEntryCount > 0 && !explicitSeparateWorkspaceIntent && (chatOwnsOpenWorkspace || runOptions.forceCurrentWorkspace) && !approvedNewProjectRun) {
           return {
             ok: false,
             mutated,
@@ -1152,7 +1215,7 @@
         const skipped = [];
         for (const f of (Array.isArray(files) ? files : [])) {
           const fpath = deps.normalizeWorkspacePath(f && f.path || '');
-          const fcontent = String(f && f.content || '');
+          const fcontent = decodeEscapedFileContent(String(f && f.content || ''));
           if (!fpath || fpath === '/' || !fcontent.trim()) continue;
           if (!planAllowsPath(fpath)) { skipped.push(`${fpath} (outside plan)`); continue; }
           const parent = deps.parentWorkspacePath(fpath);
@@ -1272,7 +1335,7 @@
           if (currentRead && currentRead.ok) originalContent = String(currentRead.output || '');
         }
         deps.setActiveAgentStreamStatus(chatId, `${creatingNewFile ? 'Writing' : 'Editing'} ${path}...`);
-        let content = String(decision.content || '');
+        let content = decodeEscapedFileContent(String(decision.content || ''));
         const shouldAutoGenerate = deps.isAgentGeneratedContentTarget(path, taskText);
         const initialInlineContent = content;
         const inlineStructureIssue = String(content).trim() ? getStructuralIssueForPath(path, content) : '';
@@ -1788,7 +1851,8 @@
       }
 
       if (tool === 'validate_files') {
-        const expectedFiles = Array.isArray(planSpec && planSpec.expectedFiles) ? planSpec.expectedFiles : [];
+        const expectedFiles = getActivePlannedFiles(planSpec);
+        const allExpectedFiles = getAllPlannedFiles(planSpec);
         let targets = expectedFiles.filter((path) => path && path !== '/README.md' && path !== '/src');
         if (!targets.length) {
           const mutatedPaths = Array.isArray(toolEvents) ? toolEvents
@@ -1803,12 +1867,13 @@
         const issues = [];
         const fileContents = {};
         const completenessAdvisory = [];
+        let readableCount = 0;
         for (const path of targets) {
           const response = await deps.invokeWorkspaceAction('workspaceReadFile', { path });
           if (!response || !response.ok) {
-            issues.push(`${path}: could not be read for validation`);
-            continue;
+            continue; // missing planned file (e.g. a later phase) — skip, not a failure
           }
+          readableCount += 1;
           const content = String(response.output || '');
           fileContents[path] = content;
           const fileIssues = validateGeneratedFile(path, content, taskText, planSpec);
@@ -1817,6 +1882,17 @@
             && !deps.isLikelyCompletePrimarySource(path, content, taskText)) {
             completenessAdvisory.push(`${path}: may be thinner than the requested feature set — expand it only if something is actually missing`);
           }
+        }
+        const contextTargets = allExpectedFiles
+          .filter((path) => path && !fileContents[path] && /\.(html?|css|scss|sass|less|js|mjs|cjs|ts|jsx|tsx)$/i.test(path))
+          .slice(0, 24);
+        for (const path of contextTargets) {
+          const response = await deps.invokeWorkspaceAction('workspaceReadFile', { path });
+          if (response && response.ok) fileContents[path] = String(response.output || '');
+        }
+        if (readableCount === 0) {
+          // Nothing exists yet — non-passing but no validationIssues (so no repair).
+          return { ok: false, mutated, observation: 'validate_files: none of the planned files exist yet — write the files first, then validate.' };
         }
         const mechanicalAdvisory = completenessAdvisory;
         const webConsistencyIssues = validateWebProjectConsistency(fileContents, planSpec, mechanicalAdvisory);
@@ -1985,7 +2061,22 @@
         if (name === 'delete') return withTarget('Deleting');
         return withTarget(`Running ${name || 'tool'}`);
       }
-      if (phase === 'done') return withTarget('Completed');
+      if (phase === 'done') {
+        if (name === 'new_project') return 'Created project workspace';
+        if (name === 'generate_project') return 'Generated project files';
+        if (name === 'list_dir') return withTarget('Scanned');
+        if (name === 'search_files') return withTarget('Searched');
+        if (name === 'read_file') return withTarget('Read');
+        if (name === 'write_file') return withTarget('Wrote');
+        if (name === 'edit_file') return withTarget('Edited');
+        if (name === 'validate_files') return 'Checked files';
+        if (name === 'check_code') return 'Checked syntax';
+        if (name === 'run_app') return 'Ran the app';
+        if (name === 'mkdir') return withTarget('Created folder');
+        if (name === 'move') return withTarget('Moved');
+        if (name === 'delete') return withTarget('Deleted');
+        return withTarget('Done');
+      }
       return withTarget('Failed');
     }
 

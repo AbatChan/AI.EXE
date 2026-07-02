@@ -14,6 +14,8 @@ Rules:
 - For CSS specifically, every opened block, string, and comment must be closed before the response ends.
 - Follow PROJECT_CONTRACT exactly when present. It is the shared plan for all project files.
 - Use PROJECT_STATE as the source of truth for files already written. Do not guess class names, IDs, selectors, or interaction state that conflict with PROJECT_STATE.
+- For multi-page web projects with shared CSS/JS in PROJECT_STATE, an HTML page must link those shared files and reuse the same header/nav/footer/component hooks/classes. Do not include a full <style> block, a different inline design system, or a redesigned nav/footer in each page. Shared visual rules belong in the planned CSS files; repeated markup belongs in the planned components script.
+- Do not turn brand strategy, visual identity, typography, design system, motion, CRO, SEO, or implementation-guide requirements into standalone public HTML pages unless FILE_PATH is explicitly one of those requested pages. For ordinary site builds, put those decisions into shared tokens/CSS/components and README/docs.
 - If this is a main source file, include the core functionality requested by the task.
 - If this is README.md or another guide file, ground it in the real project files and commands from RECENT_TOOL_RESULTS.
 - Never invent a different stack, entrypoint, main file name, framework, or run command than what the existing files imply.
