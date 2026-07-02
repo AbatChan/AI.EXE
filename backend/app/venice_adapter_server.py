@@ -813,6 +813,7 @@ def _aiexe_model_catalog():
 
 
 AIEXE_SETTINGS_DONE = set()   # chat keys whose Venice per-chat settings were already normalized
+AIEXE_SEEN_CHUNK_SHAPES = set()   # textless chunk shapes already logged (dedup)
 
 
 def _aiexe_set_switch(driver, label, want_on):
@@ -1446,6 +1447,18 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
                             json_data = json.loads(line)
                             _kind = str(json_data.get('kind') or '')
                             _c = json_data.get('content', '')
+                            if not _c:
+                                # Reasoning chunks carry their text in a different field —
+                                # they were silently dropped (empty `content` hit no branch),
+                                # so Think mode showed nothing in the Thoughts UI.
+                                for _f in ('reasoning', 'reasoningContent', 'reasoning_content',
+                                           'thinking', 'thought', 'text'):
+                                    _v = json_data.get(_f)
+                                    if isinstance(_v, str) and _v:
+                                        _c = _v
+                                        if not _kind or _kind == 'content':
+                                            _kind = _f
+                                        break
                             if _kind == 'content' and len(_c) > 0:
                                 # Close a reasoning block before the visible answer starts.
                                 if _reasoning_open:
@@ -1477,6 +1490,16 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
                                     if _m: yield _m
                             elif len(_c) > 0:
                                 print("AIEXE_KIND unhandled kind=%r content=%r" % (_kind, _c[:60]), flush=True)
+                            else:
+                                # No text found anywhere — log the SHAPE (keys only, once per
+                                # shape) so a new Venice chunk format is visible in the log.
+                                try:
+                                    _shape = "%s|%s" % (_kind, ",".join(sorted(json_data.keys())))
+                                    if _shape not in AIEXE_SEEN_CHUNK_SHAPES and len(json_data) > 1:
+                                        AIEXE_SEEN_CHUNK_SHAPES.add(_shape)
+                                        print("AIEXE_KIND textless chunk kind=%r keys=%s" % (_kind, ",".join(sorted(json_data.keys()))), flush=True)
+                                except Exception:
+                                    pass
                         except json.JSONDecodeError:
                             print(f"Failed to parse line: {line}")
 
