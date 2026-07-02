@@ -5279,6 +5279,13 @@ function humanizeProviderErrorMessage(label, status, rawBody = '') {
 
 function humanizeAssistantErrorText(text) {
   const value = String(text || '');
+  // "adapter stream error: [Errno 61] Connection refused" = the adapter process is
+  // down (or still starting) — never show the raw errno to the user.
+  if (/adapter (stream )?error/i.test(value)
+      || (isVeniceAdapterSelected() && /connection refused|errno 61|econnrefused/i.test(value))) {
+    return "The Venice Pro adapter isn't reachable — it looks stopped (or still starting). "
+      + 'Open Settings → Provider and press Start, then resend your message.';
+  }
   const match = value.match(/^(.+?) request failed \((\d{3})\):\s*([\s\S]*)$/);
   if (match) return humanizeProviderErrorMessage(match[1], Number(match[2]), match[3]);
   return value;
@@ -13237,6 +13244,16 @@ function startNewChat() {
 }
 
 function appendErrorMessageToChat(chatId, text, forcedTs = 0) {
+  // Adapter-down error: also offer the one-click start toast so recovery is one tap.
+  if (/adapter (stream )?error/i.test(String(text || '')) && isVeniceAdapterSelected()) {
+    showAppNotification({
+      title: "You're on Venice Pro (local adapter)",
+      message: "It isn't running. Click here to start it (~30s) — then resend your message.",
+      kind: 'warning',
+      durationMs: 14000,
+      onClick: () => { void startVeniceAdapterThenResend(); },
+    });
+  }
   return appendMessageToChat(chatId, 'error', humanizeAssistantErrorText(text), forcedTs);
 }
 
