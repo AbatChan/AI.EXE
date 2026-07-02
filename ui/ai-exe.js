@@ -14668,7 +14668,10 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
         thinkActive: Boolean(thinkModeEnabled || requestToken.thinkForced),
       };
       // No token for 70s = dropped connection: abort, retry once, then fail cleanly.
-      const chatStallIdleMs = 70000;
+      // EXCEPT the Venice adapter: it is non-streaming end-to-end (one delta with the
+      // whole reply at the END), so "no deltas yet" is normal for minutes on reasoning
+      // models — give it the same budget as the backend's adapter HTTP timeout.
+      const chatStallIdleMs = isVeniceAdapterSelected() ? AGENT_STEP_TIMEOUT_ADAPTER_MS : 70000;
       let res = null;
       let chatStallRetried = false;
       for (;;) {

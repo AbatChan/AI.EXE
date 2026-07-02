@@ -662,6 +662,7 @@ def inject_request_interceptor(driver, api_data_json):
           window.fetch = original;
           if (init && init.body) {{
             let body = JSON.parse(init.body);
+            try {{ window.__aiexe_body_keys = Object.keys(body).join(','); }} catch (e) {{}}
             if ('requestId' in body) {{ delete apiData.requestId; }}
             Object.assign(body, apiData);
             init.body = JSON.stringify(body);
@@ -1485,6 +1486,14 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
                 if _m: yield _m
             _reasoning_open = False
 
+        # Diagnostic: the field names of Venice's REAL request body (captured pre-swap by the
+        # interceptor) — reveals whether a reasoning/web flag exists to set per-request.
+        try:
+            _bk = driver.execute_script("return window.__aiexe_body_keys || ''")
+            if _bk:
+                print("AIEXE_BODY_KEYS %s" % _bk, flush=True)
+        except Exception:
+            pass
         # Remember which Venice conversation this AI.EXE chat lives in (URL materializes to
         # /chat/classic/<slug> once the first message is sent — poll briefly).
         if _chat_key:
