@@ -87,7 +87,7 @@ class AdapterStartRequest(BaseModel):
     password: str = ""
     port: int = 9999
     headless: bool = True
-    hide_prompt: bool = True   # hide the raw typed prompt in the Venice window (toggle in Settings)
+    hide_prompt: bool = False  # hide the raw typed prompt in the Venice window (off by default)
 
 
 class AdapterStatusResponse(BaseModel):

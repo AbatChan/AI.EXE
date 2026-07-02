@@ -445,7 +445,7 @@ class AdapterManager:
         return self._port_alive()
 
     def start(self, username: str, password: str, port: int = 9999, headless: bool = True,
-              python_exe: str = "", script: str = "", hide_prompt: bool = True) -> dict:
+              python_exe: str = "", script: str = "", hide_prompt: bool = False) -> dict:
         with self._lock:
             if self.running():
                 return {"ok": True, "detail": "already running",
