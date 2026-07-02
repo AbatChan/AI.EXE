@@ -5514,7 +5514,15 @@ function setModelButtonContent(button, model, priced) {
   label.className = 'model-name-text';
   label.textContent = normalizeProviderModelName(model) || 'Model';
   button.appendChild(label);
-  if (priced) button.appendChild(createModelCreditIcon());
+  if (priced) {
+    // Tooltip lives on the coin only (span wrapper: the tooltip system needs an
+    // HTMLElement anchor, and an <svg> isn't one) — model rows stay tooltip-free.
+    const hint = document.createElement('span');
+    hint.className = 'model-credit-hint';
+    hint.appendChild(createModelCreditIcon());
+    setAppTooltip(hint, 'Credit-metered — uses Venice credits');
+    button.appendChild(hint);
+  }
 }
 
 function setAppTooltip(el, text) {
@@ -11982,10 +11990,7 @@ function renderComposerModelPill() {
   const cur = String(getProviderModel(c.provider) || '');
   const priced = isProviderModelPriced(c.provider, cur);
   setModelButtonContent(composerModelPill, cur || 'Model', priced);
-  const credits = String(liveProviderCredits[c.provider] || '').trim();
-  setAppTooltip(composerModelPill, (cur ? ('Model: ' + normalizeProviderModelName(cur)) : 'Choose model')
-    + (priced ? ' · credit-metered' : '')
-    + (credits ? (' · ' + credits) : ''));
+  setAppTooltip(composerModelPill, '');   // coin icon carries the only tooltip
   // The pill's width changes the space left for the action chips — re-run the +N overflow.
   if (typeof recalcComposerChipOverflow === 'function') setTimeout(recalcComposerChipOverflow, 0);
 }
@@ -12007,7 +12012,6 @@ function buildComposerModelList(filter) {
       item.className = 'composer-model-item' + (m === cur ? ' active' : '') + (priced ? ' priced' : '');
       item.setAttribute('role', 'option');
       setModelButtonContent(item, m, priced);
-      setAppTooltip(item, normalizeProviderModelName(m) + (priced ? ' · credit-metered' : ''));
       item.addEventListener('click', () => {
         appSettings[c.def.modelField] = m;
         saveAppSettings();

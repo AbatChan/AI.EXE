@@ -6047,6 +6047,11 @@ html.platform-mac .settings-sidebar {
   flex: 0 0 auto;
   color: #d6b45f;
 }
+.model-credit-hint {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+}
 .composer-model-pop {
   /* fixed (positioned by JS at open): escapes the left cluster's overflow:hidden clip */
   position: fixed;
