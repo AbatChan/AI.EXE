@@ -34,7 +34,8 @@ def provider_complete(payload: ProviderCompleteRequest) -> ProviderCompleteRespo
     api_key = api_key_store.get_for_internal_use() or "local"
     llm = LLMClient(base, model, api_key, kind=kind)
     try:
-        content = llm.complete(payload.messages, temperature=payload.temperature, max_tokens=payload.max_tokens)
+        content = llm.complete(payload.messages, temperature=payload.temperature,
+                               max_tokens=payload.max_tokens, chat_id=payload.chat_id)
         return ProviderCompleteResponse(ok=bool(content.strip()), content=content)
     except LLMError as exc:
         return ProviderCompleteResponse(ok=False, error=str(exc))
