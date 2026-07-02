@@ -69,7 +69,7 @@ VC_MODEL_ROW_TITLE_CSS = _vcfg('MODEL_ROW_TITLE_CSS', "p[title]")
 VC_CLOSE_BUTTON_XPATH = _vcfg('CLOSE_BUTTON_XPATH', "//button[@aria-label='Close']")
 VC_NEW_CHAT_XPATH = _vcfg('NEW_CHAT_XPATH', "//button[@aria-label='New chat']")
 VC_CHAT_SETTINGS_BUTTON_XPATH = _vcfg('CHAT_SETTINGS_BUTTON_XPATH', "//button[@aria-label='Settings']")
-VC_STOP_GENERATING_XPATH = _vcfg('STOP_GENERATING_XPATH', "//button[@aria-label='Stop generating' or @aria-label='Stop' or @aria-label='Cancel generation']")
+VC_STOP_GENERATING_XPATH = _vcfg('STOP_GENERATING_XPATH', "//button[translate(@aria-label,'STOP','stop')='stop' or @aria-label='Stop generating']")
 VC_CHAT_SETTINGS_SWITCH_XPATH = _vcfg('CHAT_SETTINGS_SWITCH_XPATH', "//p[normalize-space()='{}']/ancestor::div[contains(@class,'css-bngl5n')]//input[@type='checkbox']")
 
 
