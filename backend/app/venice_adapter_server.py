@@ -188,13 +188,10 @@ def login_to_venice_with_username(username, password):
     _t.sleep(3)
     _submit = "//button[@type='submit' or contains(., 'Continue') or contains(., 'Sign in') or contains(., 'Log in')]"
     # Already signed in via the saved Chrome profile? Venice redirects off /sign-in.
+    # (Not minimized here — the boot sequence minimizes once after scrape+credits.)
     try:
         if "/sign-in" not in driver.current_url:
             print("Already logged in (saved session).")
-            try:
-                driver.minimize_window()
-            except Exception:
-                pass
             return driver
     except Exception:
         pass
@@ -260,10 +257,9 @@ def login_to_venice_with_username(username, password):
     except Exception as _e:
         print("Login auto-fill error (will wait for a manual sign-in): " + str(_e))
     ensure_logged_in(driver)
-    try:
-        driver.minimize_window()  # out of the way; the adapter keeps using it to serve
-    except Exception:
-        pass
+    # Deliberately NOT minimized here: startup still needs to scrape models + read credits,
+    # which is only reliable while the window paints. The boot sequence minimizes ONCE at
+    # the end (one visible window that sets things up, then gets out of the way).
     print(f"Logged in as {username}")
     return driver
 
@@ -643,6 +639,10 @@ def _aiexe_reopen_driver(reason):
             print("AIEXE_MODELS scraped after browser restart: %d models" % len(scraped), flush=True)
     except Exception as error:
         print("AIEXE_MODELS scrape after browser restart failed: %s" % error, flush=True)
+    try:  # restart done — same single-minimize rule as boot
+        driver.minimize_window()
+    except Exception:
+        pass
     return driver
 
 
@@ -1068,20 +1068,20 @@ def _aiexe_read_credits(driver, allow_ui=True):
         except Exception:
             pass
 
-    def _capture_visible_credit_text():
+    def _capture_visible_credit_text(source):
         try:
             for p in driver.find_elements(By.XPATH, VC_CREDITS_TEXT_XPATH):
                 txt = (p.text or "").strip()
                 if txt and 'credit' in txt.lower() and any(ch.isdigit() for ch in txt):
                     if AIEXE_CREDITS != txt:
                         AIEXE_CREDITS = txt
-                        print("AIEXE_CREDITS %s" % txt, flush=True)
+                        print("AIEXE_CREDITS %s (from %s)" % (txt, source), flush=True)
                     return True
         except Exception:
             pass
         return False
 
-    if _capture_visible_credit_text():
+    if _capture_visible_credit_text("visible"):
         return
     if not allow_ui:
         # Passive fallback: scan the page text without opening anything.
@@ -1095,7 +1095,7 @@ def _aiexe_read_credits(driver, allow_ui=True):
             txt = (txt or "").strip()
             if txt and any(ch.isdigit() for ch in txt) and AIEXE_CREDITS != txt:
                 AIEXE_CREDITS = txt
-                print("AIEXE_CREDITS %s" % txt, flush=True)
+                print("AIEXE_CREDITS %s (from page-text-passive)" % txt, flush=True)
         except Exception:
             pass
         return
@@ -1112,7 +1112,7 @@ def _aiexe_read_credits(driver, allow_ui=True):
         """)
         if toggled:
             time.sleep(0.6)
-            if _capture_visible_credit_text():
+            if _capture_visible_credit_text("sidebar"):
                 return
     except Exception:
         pass
@@ -1142,7 +1142,7 @@ def _aiexe_read_credits(driver, allow_ui=True):
         """)
         if opened_account:
             time.sleep(0.8)
-            captured = _capture_visible_credit_text()
+            captured = _capture_visible_credit_text("account-menu")
             try:  # close the account menu we opened so it can't block the composer
                 driver.find_element(By.TAG_NAME, "body").send_keys(Keys.ESCAPE)
             except Exception:
@@ -1162,7 +1162,7 @@ def _aiexe_read_credits(driver, allow_ui=True):
         if txt and any(ch.isdigit() for ch in txt):
             if AIEXE_CREDITS != txt:
                 AIEXE_CREDITS = txt
-                print("AIEXE_CREDITS %s" % txt, flush=True)
+                print("AIEXE_CREDITS %s (from page-text)" % txt, flush=True)
             return
     except Exception:
         pass
@@ -2313,6 +2313,10 @@ try:  # remember which model Venice is CURRENTLY on, so AI.EXE can adopt it (not
 except Exception:
     pass
 _aiexe_read_credits(driver)
+try:  # startup done — ONE minimize, after all window-dependent work finished
+    driver.minimize_window()
+except Exception:
+    pass
 print(f"Starting server at port {args.host}:{args.port}")
 http_server = WSGIServer((args.host, args.port), app)
 http_server.serve_forever()
