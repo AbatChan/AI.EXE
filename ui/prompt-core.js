@@ -4,7 +4,7 @@
     const promptTemplateDefaults = {
       chat_main: [
         '<|im_start|>system',
-        'You are AI.EXE, an offline software-engineering assistant.',
+        'You are AI.EXE, {{ASSISTANT_DESCRIPTOR}}.',
         'Current date and time: {{CURRENT_DATETIME}} (from the device clock). This is known information — answer date/time questions directly and use the current year;',
         '',
         'Rules:',
@@ -493,8 +493,21 @@
         ].join('\n')
         : inlineChatNameInstruction;
 
+      // Adapter only: the Venice thread keeps this chat's RAW earlier replies (with their
+      // [[CHAT_NAME]] tags) visible to the model, so it mimics the tag every turn unless
+      // told not to. One dynamic line, only after the chat is already named.
+      const noRenameLine = (!inlineChatNameInstruction
+          && aiMessages.length > 0
+          && Boolean(deps.providerShowsRawHistory && deps.providerShowsRawHistory()))
+        ? 'This chat is already named — NEVER output a [[CHAT_NAME: ...]] line in this response.'
+        : '';
+      const assistantDescriptor = String(
+        (deps.getAssistantDescriptor && deps.getAssistantDescriptor()) || 'a software-engineering assistant'
+      );
+
       const template = await loadPromptTemplate('chat_main');
       return renderPromptTemplate(template, {
+        ASSISTANT_DESCRIPTOR: assistantDescriptor,
         CURRENT_USER: currentUserTag,
         CURRENT_DATETIME: (() => {
           try { return new Date().toLocaleString(); } catch (_) { return new Date().toString(); }
@@ -504,7 +517,7 @@
         USER_CUSTOM_REMINDER: customContextReminder,
         MODE_INSTRUCTIONS: modeInstructions,
         CANVAS_INSTRUCTIONS: canvasInstructions,
-        CHAT_NAME_INSTRUCTION: resolvedChatNameInstruction,
+        CHAT_NAME_INSTRUCTION: resolvedChatNameInstruction || noRenameLine,
         THINK_INSTRUCTION: thinkInstruction,
         HISTORY: transcript,
         LATEST_USER: latestUserMessage,

@@ -9677,6 +9677,12 @@ const promptCore = window.AIExePromptCore && typeof window.AIExePromptCore.creat
     // Venice adapter flips Venice's own Reasoning switch — reasoning is captured from the
     // native channel, so the prompt must NOT also ask for a <thinking> block (doubles it).
     providerHandlesThinkNatively: () => isVeniceAdapterSelected(),
+    // The Venice thread shows the model its own RAW earlier replies (tags included).
+    providerShowsRawHistory: () => isVeniceAdapterSelected(),
+    // "offline" is only true on the local runtime — remote providers aren't offline.
+    getAssistantDescriptor: () => (getSelectedInferenceProvider() === 'local'
+      ? 'an offline software-engineering assistant'
+      : 'a software-engineering assistant'),
     getUncensoredEscalationInstruction,
     shouldInlineNameChatResponse,
   })
@@ -13957,16 +13963,21 @@ function beginAdapterStartupProgress(opts = {}) {
         if (st && st.running) {
           sawRunning = true;
           deadPolls = 0;
-          const log = await fetchLog();
-          if (/sign in manually|Sign in - Venice|still on \/sign-in|verification code|email code/i.test(log)) {
-            setMsg('Waiting for you to sign in to Venice in the Chrome window…');
-          } else if (/AIEXE_MODELS|AIEXE_PRICED|AIEXE_CREDITS/i.test(log)) {
-            setMsg('Reading models & credits from Venice…');
-          } else if (/Already logged in|Logging in to venice/i.test(log)) {
-            setMsg('Logging in to Venice…');
-          } else {
-            setMsg('Opening Chrome (~30s)…');
-          }
+          // Last marker wins: the log keeps old lines (a past sign-in prompt must not
+          // keep saying "waiting for sign-in" after login succeeded and scraping began).
+          const tail = (await fetchLog()).slice(-6000);
+          const lastAt = (re) => {
+            const rx = new RegExp(re.source, 'gi');
+            let idx = -1; let m;
+            while ((m = rx.exec(tail)) !== null) idx = m.index;
+            return idx;
+          };
+          const stages = [
+            { at: lastAt(/sign in manually|Sign in - Venice|still on \/sign-in|verification code|email code/), msg: 'Waiting for you to sign in to Venice in the Chrome window…' },
+            { at: lastAt(/Logging in to venice|Already logged in/), msg: 'Logging in to Venice…' },
+            { at: lastAt(/AIEXE_MODELS|AIEXE_PRICED|AIEXE_CREDITS|AIEXE_MODEL /), msg: 'Reading models & credits from Venice…' },
+          ].filter((s) => s.at >= 0).sort((a, b) => b.at - a.at);
+          setMsg(stages.length ? stages[0].msg : 'Opening Chrome (~30s)…');
         } else if (sawRunning) {
           deadPolls += 1;
           if (deadPolls >= 3) {                    // was up, now gone: it crashed
