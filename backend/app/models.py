@@ -66,6 +66,8 @@ class ProviderHealthResponse(BaseModel):
     models: List[str] = []
     detail: str = ""
     current_model: str = ""   # Venice adapter: the model the Venice page is actually on
+    credits: str = ""         # Venice adapter: cached account balance text, e.g. "10,279 Credits"
+    priced_models: List[str] = []  # Venice adapter: models marked with the credit/coin icon
 
 
 class ProviderCompleteRequest(BaseModel):

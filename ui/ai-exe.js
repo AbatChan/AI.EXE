@@ -666,6 +666,9 @@ const accountPopoverName = document.getElementById('accountPopoverName');
 const accountProfileBtn = document.getElementById('accountProfileBtn');
 const accountSettingsBtn = document.getElementById('accountSettingsBtn');
 const accountUsageBtn = document.getElementById('accountUsageBtn');
+const accountUsageSub = document.getElementById('accountUsageSub');
+const accountCreditRow = document.getElementById('accountCreditRow');
+const accountCreditText = document.getElementById('accountCreditText');
 const accountLogoutBtn = document.getElementById('accountLogoutBtn');
 const accountLogoutText = document.getElementById('accountLogoutText');
 const newChatBtn = document.getElementById('newChatBtn');
@@ -4765,6 +4768,8 @@ function toggleAccountPopover() {
     const maxLeft = Math.max(10, window.innerWidth - popoverWidth - 10);
     accountPopover.style.left = `${Math.min(Math.max(10, rect.left), maxLeft)}px`;
     accountPopover.style.bottom = `${Math.max(12, window.innerHeight - rect.top + 12)}px`;
+    if (typeof updateAccountUsageSubline === 'function') updateAccountUsageSubline();
+    if (typeof refreshAccountUsageInline === 'function') void refreshAccountUsageInline();
   }
   accountPopover.classList.toggle('open', !isOpen);
   accountPopover.setAttribute('aria-hidden', isOpen ? 'true' : 'false');
@@ -5410,6 +5415,117 @@ function openSettingsSection(section) {
 // from the provider's /models endpoint with the user's key. The static presets are
 // only a fallback. Works for OpenAI-compatible providers (chat/completions -> models).
 const liveProviderModels = {};
+const liveProviderPricedModels = {};
+const liveProviderCredits = {};
+
+function normalizeProviderModelName(model) {
+  return String(model || '').trim().replace(/:latest$/i, '');
+}
+
+function rememberProviderHealthMeta(provider, health) {
+  if (!provider || !health) return;
+  if (Array.isArray(health.priced_models)) {
+    liveProviderPricedModels[provider] = health.priced_models
+      .map((m) => normalizeProviderModelName(m))
+      .filter(Boolean);
+  }
+  if (typeof health.credits === 'string') {
+    liveProviderCredits[provider] = health.credits.trim();
+    updateAccountUsageSubline();
+  }
+}
+
+function setAccountCreditLine(text, visible = true) {
+  if (!accountCreditRow || !accountCreditText) return;
+  const clean = String(text || '').trim();
+  accountCreditText.textContent = clean || 'Credits unavailable';
+  accountCreditRow.hidden = !visible;
+}
+
+function updateAccountUsageSubline(text) {
+  if (!accountUsageSub) return;
+  if (typeof text === 'string') {
+    const clean = text.trim() || 'Check balance';
+    accountUsageSub.textContent = clean;
+    if (/credit/i.test(clean) || /checking/i.test(clean) || /unavailable/i.test(clean)) {
+      setAccountCreditLine(clean, true);
+    }
+    return;
+  }
+  const provider = getSelectedInferenceProvider();
+  const def = getInferenceProviderDef(provider);
+  const credits = String(liveProviderCredits[provider] || '').trim();
+  if (credits) {
+    accountUsageSub.textContent = credits;
+    setAccountCreditLine(credits, true);
+  } else if (provider === 'local') {
+    accountUsageSub.textContent = 'Local runtime';
+    setAccountCreditLine('', false);
+  } else if (def && def.protocol === 'ollama') {
+    // No cached balance: stay quiet until refreshAccountUsageInline confirms the
+    // adapter is actually serving — never show "Checking credits…" for an off adapter.
+    accountUsageSub.textContent = 'Check adapter balance';
+    setAccountCreditLine('', false);
+  } else if (provider === 'venice') {
+    accountUsageSub.textContent = 'Check Venice API balance';
+    setAccountCreditLine('Check Venice API balance', true);
+  } else {
+    accountUsageSub.textContent = 'Provider usage';
+    setAccountCreditLine('', false);
+  }
+}
+
+function isProviderModelPriced(provider, model) {
+  const priced = Array.isArray(liveProviderPricedModels[provider]) ? liveProviderPricedModels[provider] : [];
+  if (!priced.length) return false;
+  const clean = normalizeProviderModelName(model);
+  return priced.some((m) => normalizeProviderModelName(m) === clean);
+}
+
+function createModelCreditIcon() {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('class', 'model-credit-icon');
+  svg.setAttribute('viewBox', '0 0 24 24');
+  svg.setAttribute('fill', 'none');
+  svg.setAttribute('stroke', 'currentColor');
+  svg.setAttribute('stroke-width', '2');
+  svg.setAttribute('aria-hidden', 'true');
+  [
+    'M9 14c0 1.657 2.686 3 6 3s6-1.343 6-3-2.686-3-6-3-6 1.343-6 3z',
+    'M9 14v4c0 1.657 2.686 3 6 3s6-1.343 6-3v-4',
+    'M3 6c0 1.657 2.686 3 6 3s6-1.343 6-3-2.686-3-6-3-6 1.343-6 3z',
+    'M3 6v10c0 1.657 2.686 3 6 3',
+  ].forEach((d) => {
+    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    path.setAttribute('d', d);
+    svg.appendChild(path);
+  });
+  return svg;
+}
+
+function setModelButtonContent(button, model, priced) {
+  if (!button) return;
+  button.textContent = '';
+  const label = document.createElement('span');
+  label.className = 'model-name-text';
+  label.textContent = normalizeProviderModelName(model) || 'Model';
+  button.appendChild(label);
+  if (priced) button.appendChild(createModelCreditIcon());
+}
+
+function setAppTooltip(el, text) {
+  if (!el) return;
+  const clean = String(text || '').trim();
+  if (clean) {
+    el.dataset.tooltip = clean;
+    el.classList.add('ui-tooltip-anchor');
+    el.setAttribute('aria-label', clean);
+  } else {
+    delete el.dataset.tooltip;
+    el.classList.remove('ui-tooltip-anchor');
+  }
+  if (el.hasAttribute('title')) el.removeAttribute('title');
+}
 // Per-provider uncensored fallback target, chosen from Venice's own trait metadata
 // (model_spec.traits includes 'most_uncensored') — never by guessing the model name.
 const liveProviderUncensored = {};
@@ -5618,13 +5734,16 @@ function updateProviderConnectionStatus(provider, def, quiet) {
   if (!base) { el.textContent = ''; return; }
   const myToken = (updateProviderConnectionStatus._token = (updateProviderConnectionStatus._token || 0) + 1);
   if (!quiet) { el.textContent = 'Checking connection…'; el.style.color = 'var(--muted, #9ca3af)'; }
-  const onModels = (models, veniceCurrent) => {
+  const onModels = (models, veniceCurrent, health) => {
     if (myToken !== updateProviderConnectionStatus._token) return;
+    rememberProviderHealthMeta(provider, health);
     const list = (models || []).filter(Boolean);
     const n = list.length;
     const liveNow = String(veniceCurrent || '').trim();
+    const credits = String(liveProviderCredits[provider] || '').trim();
     el.textContent = '● connected' + (n ? (' · ' + n + ' model(s)') : '')
-      + (liveNow ? (' · Venice is on ' + liveNow) : '');
+      + (liveNow ? (' · Venice is on ' + liveNow) : '')
+      + (credits ? (' · ' + credits) : '');
     el.style.color = 'var(--success, #22c55e)';
     // The adapter has no key+/models path, so its models never reached the Model preset
     // dropdown (only "Custom model ID" showed). Capture them here and repopulate so they're
@@ -5657,7 +5776,7 @@ function updateProviderConnectionStatus(provider, def, quiet) {
     // through the backend (server-side) — also how inference will reach it.
     fetch(getAIExeBackendUrl() + '/api/provider-health')
       .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
-      .then((h) => (h && h.reachable ? onModels(h.models, h.current_model) : onDown(' — start the adapter (or it is still logging in)')))
+      .then((h) => (h && h.reachable ? onModels(h.models, h.current_model, h) : onDown(' — start the adapter (or it is still logging in)')))
       .catch(() => onDown(' — AI.EXE backend offline'));
     return;
   }
@@ -11345,11 +11464,103 @@ function extractVeniceBalances(obj) {
   walk(obj);
   return found;
 }
+
+async function isVeniceAdapterServing() {
+  try {
+    const res = await fetch(getAIExeBackendUrl() + '/api/adapter/status');
+    if (!res.ok) return false;
+    const st = await res.json();
+    return Boolean(st && st.serving);
+  } catch (_) {
+    return false;
+  }
+}
+
+async function refreshAccountUsageInline() {
+  const provider = getSelectedInferenceProvider();
+  const def = getInferenceProviderDef(provider);
+  if (provider === 'local') {
+    updateAccountUsageSubline('Local runtime');
+    setAccountCreditLine('', false);
+    return '';
+  }
+  if (def && def.protocol === 'ollama') {
+    if (!(await isVeniceAdapterServing())) {
+      // Adapter off: no credit check, no "Checking credits…" — just say why.
+      updateAccountUsageSubline('Adapter not running');
+      setAccountCreditLine('', false);
+      return '';
+    }
+    updateAccountUsageSubline('Checking credits…');
+    try {
+      const res = await fetch(getAIExeBackendUrl() + '/api/provider-health');
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const health = await res.json();
+      rememberProviderHealthMeta(provider, health);
+      const credits = String((health && health.credits) || liveProviderCredits[provider] || '').trim();
+      updateAccountUsageSubline(credits || 'Credits unavailable');
+      return credits;
+    } catch (_) {
+      updateAccountUsageSubline('Credits unavailable');
+      return '';
+    }
+  }
+  const base = String(getProviderEndpoint(provider) || '').replace(/\/chat\/completions\/?$/i, '');
+  const key = String(getProviderApiKey(provider) || '').trim();
+  if (!/venice/i.test(base) || !base || !key) {
+    updateAccountUsageSubline('Provider usage');
+    return '';
+  }
+  updateAccountUsageSubline('Checking credits…');
+  try {
+    const res = await fetch(base + '/api_keys/rate_limits', { headers: { Authorization: `Bearer ${key}` } });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const balances = extractVeniceBalances(await res.json());
+    const keys = Object.keys(balances);
+    const summary = keys.length ? keys.map((k) => `${balances[k]} ${k}`).join(' · ') : '';
+    updateAccountUsageSubline(summary || 'Usage unavailable');
+    return summary;
+  } catch (_) {
+    updateAccountUsageSubline('Usage unavailable');
+    return '';
+  }
+}
+
 async function showProviderUsageNotification() {
   const provider = getSelectedInferenceProvider();
   const def = getInferenceProviderDef(provider);
-  if (provider === 'local' || (def && def.protocol === 'ollama')) {
+  if (provider === 'local') {
     showAppNotification({ title: 'Usage', message: 'This provider runs locally — no credits or usage limits.', kind: 'info' });
+    return;
+  }
+  if (def && def.protocol === 'ollama') {
+    if (!(await isVeniceAdapterServing())) {
+      updateAccountUsageSubline('Adapter not running');
+      setAccountCreditLine('', false);
+      showAppNotification({
+        title: 'Usage',
+        message: 'The Venice Pro adapter is not running — start it in Settings → Provider to see credits.',
+        kind: 'info',
+      });
+      return;
+    }
+    updateAccountUsageSubline('Checking adapter balance…');
+    try {
+      const res = await fetch(getAIExeBackendUrl() + '/api/provider-health');
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const health = await res.json();
+      rememberProviderHealthMeta(provider, health);
+      const credits = String((health && health.credits) || liveProviderCredits[provider] || '').trim();
+      updateAccountUsageSubline(credits || 'Credits unavailable');
+      showAppNotification({
+        title: 'Venice Pro usage',
+        message: credits || 'Adapter is reachable, but no credit balance has been captured yet. Open or refresh Venice once, then check again.',
+        kind: 'info',
+      });
+    } catch (err) {
+      updateAccountUsageSubline('Credits unavailable');
+      showAppNotification({ title: 'Usage', message: 'Could not read adapter usage: ' + String(err && err.message ? err.message : err), kind: 'info' });
+    }
     return;
   }
   const base = String(getProviderEndpoint(provider) || '').replace(/\/chat\/completions\/?$/i, '');
@@ -11364,12 +11575,15 @@ async function showProviderUsageNotification() {
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const balances = extractVeniceBalances(await res.json());
     const keys = Object.keys(balances);
+    const summary = keys.length ? keys.map((k) => `${balances[k]} ${k}`).join(' · ') : 'No balance figures';
+    updateAccountUsageSubline(summary);
     showAppNotification({
       title: 'Venice usage',
-      message: keys.length ? keys.map((k) => `${balances[k]} ${k}`).join(' · ') : 'Connected, but Venice returned no balance figures.',
+      message: keys.length ? summary : 'Connected, but Venice returned no balance figures.',
       kind: 'info',
     });
   } catch (err) {
+    updateAccountUsageSubline('Usage unavailable');
     showAppNotification({ title: 'Usage', message: 'Could not read usage: ' + String(err && err.message ? err.message : err), kind: 'info' });
   }
 }
@@ -11741,9 +11955,13 @@ function renderComposerModelPill() {
   const c = composerModelChoices();
   if (!c || !c.list.length) { composerModelWrap.style.display = 'none'; return; }
   composerModelWrap.style.display = '';
-  const cur = String(getProviderModel(c.provider) || '').replace(/:latest$/, '');
-  composerModelPill.textContent = cur || 'Model';
-  composerModelPill.title = cur ? ('Model: ' + cur) : 'Choose model';
+  const cur = String(getProviderModel(c.provider) || '');
+  const priced = isProviderModelPriced(c.provider, cur);
+  setModelButtonContent(composerModelPill, cur || 'Model', priced);
+  const credits = String(liveProviderCredits[c.provider] || '').trim();
+  setAppTooltip(composerModelPill, (cur ? ('Model: ' + normalizeProviderModelName(cur)) : 'Choose model')
+    + (priced ? ' · credit-metered' : '')
+    + (credits ? (' · ' + credits) : ''));
   // The pill's width changes the space left for the action chips — re-run the +N overflow.
   if (typeof recalcComposerChipOverflow === 'function') setTimeout(recalcComposerChipOverflow, 0);
 }
@@ -11761,10 +11979,11 @@ function buildComposerModelList(filter) {
     .forEach((m) => {
       const item = document.createElement('button');
       item.type = 'button';
-      item.className = 'composer-model-item' + (m === cur ? ' active' : '');
+      const priced = isProviderModelPriced(c.provider, m);
+      item.className = 'composer-model-item' + (m === cur ? ' active' : '') + (priced ? ' priced' : '');
       item.setAttribute('role', 'option');
-      item.textContent = m.replace(/:latest$/, '');
-      item.title = m;
+      setModelButtonContent(item, m, priced);
+      setAppTooltip(item, normalizeProviderModelName(m) + (priced ? ' · credit-metered' : ''));
       item.addEventListener('click', () => {
         appSettings[c.def.modelField] = m;
         saveAppSettings();
@@ -11818,6 +12037,7 @@ async function refreshComposerModelsFromProvider() {
     const r = await fetch(getAIExeBackendUrl() + '/api/provider-health');
     if (!r.ok) { renderComposerModelPill(); return; }
     const h = await r.json();
+    rememberProviderHealthMeta(provider, h);
     if (h && h.reachable && Array.isArray(h.models) && h.models.length) {
       liveProviderModels[provider] = h.models.filter(Boolean);
       // Same adopt rule as Settings: only replace a mock/unset model, never a real pick.
@@ -11842,6 +12062,8 @@ const inputActionsEl = document.getElementById('inputActions');
 const composerOverflowBtn = document.getElementById('composerOverflowBtn');
 const composerOverflowPop = document.getElementById('composerOverflowPop');
 const inputControlsLeftEl = inputActionsEl ? inputActionsEl.closest('.input-controls-left') : null;
+let composerOverflowChips = [];
+let composerOverflowSuppressClick = false;
 
 function composerChipLabel(chip) {
   const lab = chip.querySelector('.label-on-hover');
@@ -11850,6 +12072,11 @@ function composerChipLabel(chip) {
 
 function closeComposerOverflowPop() {
   if (composerOverflowPop) composerOverflowPop.classList.add('hidden');
+  if (composerOverflowBtn) composerOverflowBtn.classList.remove('open');
+}
+
+function visibleComposerOverflowChips() {
+  return composerOverflowChips.filter((chip) => chip && chip.isConnected && chip.classList.contains('chip-overflowed'));
 }
 
 function recalcComposerChipOverflow() {
@@ -11859,6 +12086,7 @@ function recalcComposerChipOverflow() {
   if (composerOverflowPop && !composerOverflowPop.classList.contains('hidden')) return;
   const chips = Array.from(inputActionsEl.querySelectorAll('.iact-btn')).filter((c) => !c.classList.contains('hidden'));
   chips.forEach((c) => c.classList.remove('chip-overflowed'));   // reset, then measure
+  composerOverflowChips = [];
   composerOverflowBtn.classList.add('hidden');
   if (!chips.length) return;
   const avail = inputControlsLeftEl.getBoundingClientRect().right - inputActionsEl.getBoundingClientRect().left;
@@ -11874,36 +12102,114 @@ function recalcComposerChipOverflow() {
   }
   const overflowed = chips.slice(keep);
   overflowed.forEach((c) => c.classList.add('chip-overflowed'));
+  composerOverflowChips = overflowed;
   composerOverflowBtn.textContent = '+' + overflowed.length;
   composerOverflowBtn.classList.remove('hidden');
 }
 
-if (composerOverflowBtn) {
-  composerOverflowBtn.addEventListener('click', (e) => {
-    e.stopPropagation();
-    if (!composerOverflowPop || !inputActionsEl) return;
-    if (!composerOverflowPop.classList.contains('hidden')) { closeComposerOverflowPop(); return; }
-    if (composerOverflowPop.parentElement !== document.body) document.body.appendChild(composerOverflowPop);
-    composerOverflowPop.innerHTML = '';
-    Array.from(inputActionsEl.querySelectorAll('.iact-btn.chip-overflowed')).forEach((chip) => {
-      const item = document.createElement('button');
-      item.type = 'button';
-      item.className = 'composer-overflow-item';
-      const svg = chip.querySelector('svg');
-      if (svg) item.appendChild(svg.cloneNode(true));
-      item.appendChild(document.createTextNode(composerChipLabel(chip)));
-      item.addEventListener('click', (ev) => {
-        ev.stopPropagation();
-        closeComposerOverflowPop();
-        chip.click();                       // forward to the real chip — state/handlers intact
-        setTimeout(recalcComposerChipOverflow, 60);
-      });
-      composerOverflowPop.appendChild(item);
+function removeComposerOverflowChip(chip) {
+  if (!chip || pendingInferenceCount > 0 && isCurrentViewInferenceChat()) return;
+  const id = String(chip.id || '');
+  if (id === 'canvasBtn') {
+    setCanvasMode(false);
+    syncInputAugmentState();
+  } else if (id === 'attachBtn') {
+    clearPendingAttachments();
+  } else if (id === 'agentBtn') {
+    setDeveloperAgentMode(false);
+    syncInputAugmentState();
+  } else if (id === 'thinkBtn') {
+    setThinkMode(false);
+    syncInputAugmentState();
+  } else if (id === 'contextBtn') {
+    setActiveManualContext('');
+    updateContextButtonState();
+    syncInputAugmentState();
+  } else if (chip.classList.contains('active')) {
+    chip.click();
+  }
+  setTimeout(recalcComposerChipOverflow, 60);
+}
+
+function openComposerOverflowPop(sourceEvent) {
+  if (sourceEvent) {
+    sourceEvent.preventDefault();
+    sourceEvent.stopPropagation();
+  }
+  if (!composerOverflowPop || !inputActionsEl) return;
+  if (!composerOverflowPop.classList.contains('hidden')) { closeComposerOverflowPop(); return; }
+  if (composerOverflowPop.parentElement !== document.body) document.body.appendChild(composerOverflowPop);
+  composerOverflowPop.innerHTML = '';
+  let overflowed = visibleComposerOverflowChips();
+  if (!overflowed.length) {
+    overflowed = Array.from(inputActionsEl.querySelectorAll('.iact-btn.chip-overflowed'));
+    composerOverflowChips = overflowed;
+  }
+  console.debug('[AIEXE] composer +N click', {
+    cached: composerOverflowChips.length,
+    visible: overflowed.length,
+    label: composerOverflowBtn.textContent,
+    source: sourceEvent ? sourceEvent.type : 'direct',
+  });
+  overflowed.forEach((chip) => {
+    const item = document.createElement('div');
+    item.className = 'composer-overflow-item';
+    const action = document.createElement('button');
+    action.type = 'button';
+    action.className = 'composer-overflow-action';
+    const svg = chip.querySelector('svg');
+    if (svg) action.appendChild(svg.cloneNode(true));
+    action.appendChild(document.createTextNode(composerChipLabel(chip)));
+    action.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      closeComposerOverflowPop();
+      chip.click();                       // forward to the real chip — state/handlers intact
+      setTimeout(recalcComposerChipOverflow, 60);
     });
-    const r = composerOverflowBtn.getBoundingClientRect();
-    composerOverflowPop.style.left = Math.max(8, Math.min(r.left, window.innerWidth - 164)) + 'px';
-    composerOverflowPop.style.bottom = (window.innerHeight - r.top + 10) + 'px';
-    composerOverflowPop.classList.remove('hidden');
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'composer-overflow-remove';
+    remove.setAttribute('aria-label', 'Remove ' + composerChipLabel(chip));
+    remove.textContent = '×';
+    remove.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      removeComposerOverflowChip(chip);
+      closeComposerOverflowPop();
+    });
+    item.appendChild(action);
+    item.appendChild(remove);
+    composerOverflowPop.appendChild(item);
+  });
+  if (!overflowed.length) {
+    const empty = document.createElement('div');
+    empty.className = 'composer-overflow-empty';
+    empty.textContent = 'No hidden actions';
+    composerOverflowPop.appendChild(empty);
+    setTimeout(recalcComposerChipOverflow, 0);
+  }
+  const r = composerOverflowBtn.getBoundingClientRect();
+  const popWidth = Math.max(164, composerOverflowPop.getBoundingClientRect().width || 164);
+  composerOverflowPop.style.left = Math.max(8, Math.min(r.left, window.innerWidth - popWidth - 8)) + 'px';
+  composerOverflowPop.style.bottom = (window.innerHeight - r.top + 10) + 'px';
+  composerOverflowPop.style.top = 'auto';
+  composerOverflowPop.classList.remove('hidden');
+  composerOverflowBtn.classList.add('open');
+}
+
+if (composerOverflowBtn) {
+  composerOverflowBtn.addEventListener('pointerdown', (e) => {
+    composerOverflowSuppressClick = true;
+    openComposerOverflowPop(e);
+  });
+  composerOverflowBtn.addEventListener('click', (e) => {
+    if (composerOverflowSuppressClick) {
+      composerOverflowSuppressClick = false;
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+    openComposerOverflowPop(e);
   });
 }
 if (composerOverflowPop) composerOverflowPop.addEventListener('click', (e) => e.stopPropagation());

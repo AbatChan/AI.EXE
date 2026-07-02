@@ -70,6 +70,8 @@ VC_CLOSE_BUTTON_XPATH = _vcfg('CLOSE_BUTTON_XPATH', "//button[@aria-label='Close
 VC_NEW_CHAT_XPATH = _vcfg('NEW_CHAT_XPATH', "//button[@aria-label='New chat']")
 VC_CHAT_SETTINGS_BUTTON_XPATH = _vcfg('CHAT_SETTINGS_BUTTON_XPATH', "//button[@aria-label='Settings']")
 VC_STOP_GENERATING_XPATH = _vcfg('STOP_GENERATING_XPATH', "//button[translate(@aria-label,'STOP','stop')='stop' or @aria-label='Stop generating']")
+VC_PRICED_ICON_PATH_PREFIX = _vcfg('PRICED_ICON_PATH_PREFIX', "M9 14c0")   # the coin-stack svg's first path
+VC_CREDITS_TEXT_XPATH = _vcfg('CREDITS_TEXT_XPATH', "//p[contains(., 'Credits')]")
 VC_CHAT_SETTINGS_SWITCH_XPATH = _vcfg('CHAT_SETTINGS_SWITCH_XPATH', "//p[normalize-space()='{}']/ancestor::div[contains(@class,'css-bngl5n')]//input[@type='checkbox']")
 
 
@@ -814,6 +816,9 @@ def _aiexe_model_catalog():
 
 AIEXE_SETTINGS_DONE = set()   # chat keys whose Venice per-chat settings were already normalized
 AIEXE_SEEN_CHUNK_SHAPES = set()   # textless chunk shapes already logged (dedup)
+AIEXE_PRICED_MODELS = set()   # model names whose picker row shows Venice's coin icon (credit-metered)
+AIEXE_PRICED_CHECKED_MODELS = set()   # model rows already inspected for the coin icon
+AIEXE_CREDITS = ""            # last credit-balance text read from the sidebar ("10,279 Credits")
 
 
 def _aiexe_set_switch(driver, label, want_on):
@@ -891,7 +896,13 @@ def _aiexe_model_button(driver):
         for b in driver.find_elements(By.TAG_NAME, "button"):
             try:
                 t = (b.text or "").strip().lower()
-                if t and b.is_displayed() and any(t == k or (k in t and len(t) <= len(k) + 14) for k in known):
+                short = t.replace("...", "").replace("…", "").strip()
+                if t and b.is_displayed() and any(
+                    t == k
+                    or (k in t and len(t) <= len(k) + 14)
+                    or (len(short) >= 4 and k.startswith(short))
+                    for k in known
+                ):
                     return b
             except Exception:
                 pass
@@ -903,7 +914,10 @@ def _aiexe_model_button(driver):
         for el in driver.find_elements(By.XPATH, "//button//p | //button//span"):
             try:
                 t = (el.text or el.get_attribute("title") or "").strip().lower()
-                if t and el.is_displayed() and t in known:
+                short = t.replace("...", "").replace("…", "").strip()
+                if t and el.is_displayed() and (
+                    t in known or any(len(short) >= 4 and k.startswith(short) for k in known)
+                ):
                     return el.find_element(By.XPATH, "./ancestor::button[1]")
             except Exception:
                 pass
@@ -924,6 +938,11 @@ def _aiexe_current_model(driver):
 
 
 def _aiexe_open_model_modal(driver):
+    try:
+        if driver.execute_script("return !!document.querySelector('.model-switcher-scroll-container, [class*=\"model-switcher-scroll-container\"] p[title], [role=\"dialog\"] p[title]');"):
+            return True
+    except Exception:
+        pass
     b = _aiexe_model_button(driver)
     if b is None:
         print("AIEXE_MODEL could NOT find the model button", flush=True)
@@ -944,14 +963,35 @@ def _aiexe_dismiss_modal(driver):
     """Belt-and-suspenders: close any open dialog so it can't block the composer."""
     try:
         driver.find_element(By.TAG_NAME, "body").send_keys(Keys.ESCAPE)
+        time.sleep(0.15)
     except Exception:
         pass
-    try:
-        for b in driver.find_elements(By.XPATH, VC_CLOSE_BUTTON_XPATH):
-            if b.is_displayed():
-                b.click()
-    except Exception:
-        pass
+    for _ in range(4):
+        try:
+            if not driver.execute_script("return !!document.querySelector('[role=\"dialog\"], .chakra-modal__content');"):
+                break
+        except Exception:
+            pass
+        clicked = False
+        try:
+            buttons = driver.find_elements(By.XPATH, VC_CLOSE_BUTTON_XPATH)
+            for b in buttons:
+                try:
+                    if b.is_displayed():
+                        driver.execute_script("arguments[0].click();", b)
+                        clicked = True
+                        time.sleep(0.25)
+                        break
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        if not clicked:
+            try:
+                driver.find_element(By.TAG_NAME, "body").send_keys(Keys.ESCAPE)
+                time.sleep(0.2)
+            except Exception:
+                break
 
 
 def _aiexe_close_modal(driver):
@@ -959,6 +999,8 @@ def _aiexe_close_modal(driver):
 
 
 def _aiexe_model_titles(driver):
+    """Model names from the visible picker rows. Also records which rows carry Venice's
+    coin icon (= the model debits credits per use) into AIEXE_PRICED_MODELS."""
     names = []
     for p in driver.find_elements(By.CSS_SELECTOR, VC_MODEL_ROW_TITLE_CSS):
         try:
@@ -967,7 +1009,140 @@ def _aiexe_model_titles(driver):
             t = ""
         if t and t not in names:
             names.append(t)
+            _aiexe_note_priced_model(driver, p, t)
     return names
+
+
+def _aiexe_title_has_priced_icon(driver, title_el):
+    """True when the model row around title_el contains Venice's coin-stack icon.
+
+    A shared modal ancestor contains many model titles and many coin icons, so never walk
+    past the nearest model row. Otherwise a non-metered sibling can inherit another row's
+    coin icon, which is how rows like GLM 5.2 were being marked incorrectly.
+    """
+    try:
+        return bool(driver.execute_script("""
+          const title = arguments[0];
+          const prefix = arguments[1];
+          const expected = String(title.getAttribute('title') || title.textContent || '').trim();
+          const row = title.closest('[role="group"], [role="menuitem"], [role="menuitemradio"]');
+          if (!row || !expected) return false;
+          const titles = Array.from(row.querySelectorAll('p[title]'));
+          if (titles.length !== 1) return false;
+          const rowTitle = String(titles[0].getAttribute('title') || titles[0].textContent || '').trim();
+          if (rowTitle !== expected) return false;
+          return Array.from(row.querySelectorAll('svg path, path'))
+            .some((p) => String(p.getAttribute('d') || '').startsWith(prefix));
+        """, title_el, VC_PRICED_ICON_PATH_PREFIX))
+    except Exception:
+        return False
+
+
+def _aiexe_note_priced_model(driver, title_el, name):
+    try:
+        if not name:
+            return
+        AIEXE_PRICED_CHECKED_MODELS.add(name)
+        if _aiexe_title_has_priced_icon(driver, title_el):
+            if name not in AIEXE_PRICED_MODELS:
+                AIEXE_PRICED_MODELS.add(name)
+                print("AIEXE_PRICED_MODEL %r" % name, flush=True)
+    except Exception:
+        pass
+
+
+def _aiexe_read_credits(driver):
+    """Best-effort read of the account's credit balance ('10,279 Credits' in the sidebar).
+    Cached in AIEXE_CREDITS so /api/aiexe/state stays selenium-free."""
+    global AIEXE_CREDITS
+    try:
+        _aiexe_dismiss_modal(driver)
+    except Exception:
+        pass
+
+    def _capture_visible_credit_text():
+        try:
+            for p in driver.find_elements(By.XPATH, VC_CREDITS_TEXT_XPATH):
+                txt = (p.text or "").strip()
+                if txt and 'credit' in txt.lower() and any(ch.isdigit() for ch in txt):
+                    if AIEXE_CREDITS != txt:
+                        AIEXE_CREDITS = txt
+                        print("AIEXE_CREDITS %s" % txt, flush=True)
+                    return True
+        except Exception:
+            pass
+        return False
+
+    if _capture_visible_credit_text():
+        return
+
+    try:
+        toggled = driver.execute_script("""
+          const bodyText = String((document.body && document.body.innerText) || '');
+          if (/\\d[\\d,.\\s]*\\s+Credits?\\b/i.test(bodyText)) return false;
+          const btn = Array.from(document.querySelectorAll('button'))
+            .find((b) => /^(show|open|toggle)\\s+sidebar$/i.test(String(b.getAttribute('aria-label') || '').trim()));
+          if (!btn) return false;
+          btn.click();
+          return true;
+        """)
+        if toggled:
+            time.sleep(0.6)
+            if _capture_visible_credit_text():
+                return
+    except Exception:
+        pass
+
+    try:
+        opened_account = driver.execute_script("""
+          const bodyText = String((document.body && document.body.innerText) || '');
+          if (/\\d[\\d,.\\s]*\\s+Credits?\\b/i.test(bodyText)) return false;
+          const visible = (el) => {
+            if (!el) return false;
+            const cs = getComputedStyle(el);
+            const r = el.getBoundingClientRect();
+            return cs.display !== 'none' && cs.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+          };
+          const buttons = Array.from(document.querySelectorAll('button')).filter(visible);
+          const accountButton = buttons.find((b) => {
+            const text = String(b.innerText || b.textContent || '');
+            return b.querySelector('img.chakra-avatar__img, img[alt], [class*="avatar"] img')
+              && (/\\bPRO\\b/i.test(text) || /menu/i.test(String(b.className || '')) || b.hasAttribute('aria-haspopup'));
+          }) || buttons.find((b) => {
+            const text = String(b.innerText || b.textContent || '');
+            return /\\bPRO\\b/i.test(text) && b.hasAttribute('aria-haspopup');
+          });
+          if (!accountButton) return false;
+          accountButton.click();
+          return true;
+        """)
+        if opened_account:
+            time.sleep(0.8)
+            captured = _capture_visible_credit_text()
+            try:  # close the account menu we opened so it can't block the composer
+                driver.find_element(By.TAG_NAME, "body").send_keys(Keys.ESCAPE)
+            except Exception:
+                pass
+            if captured:
+                return
+    except Exception:
+        pass
+    try:
+        txt = driver.execute_script("""
+          const root = document.body || document.documentElement;
+          const text = String((root && (root.innerText || root.textContent)) || '');
+          const m = text.match(/(?:^|\\b)(\\d[\\d,\\.\\s]{0,18})\\s+Credits?\\b/i);
+          return m ? `${m[1].replace(/\\s+/g, '')} Credits` : '';
+        """)
+        txt = (txt or "").strip()
+        if txt and any(ch.isdigit() for ch in txt):
+            if AIEXE_CREDITS != txt:
+                AIEXE_CREDITS = txt
+                print("AIEXE_CREDITS %s" % txt, flush=True)
+            return
+    except Exception:
+        pass
+
 
 
 def _aiexe_text_model_count(driver):
@@ -1069,6 +1244,173 @@ def _aiexe_collect_models_from_modal(driver):
     return names
 
 
+def _aiexe_find_visible_model_title(driver, name):
+    target = (name or "").strip().lower()
+    if not target:
+        return None
+    rows = driver.find_elements(By.CSS_SELECTOR, VC_MODEL_ROW_TITLE_CSS)
+    for p in rows:
+        try:
+            if (p.get_attribute("title") or "").strip().lower() == target:
+                return p
+        except Exception:
+            pass
+    for p in rows:
+        try:
+            if target in (p.get_attribute("title") or "").strip().lower():
+                return p
+        except Exception:
+            pass
+    return None
+
+
+def _aiexe_search_input(driver):
+    import time as _t
+    try:
+        scroller = _aiexe_model_scroll_container(driver)
+        if scroller is not None:
+            driver.execute_script("arguments[0].scrollTop = 0;", scroller)
+            _t.sleep(0.2)
+    except Exception:
+        pass
+    try:
+        box = driver.execute_script("""
+          const configured = arguments[0];
+          const visible = (el) => {
+            if (!el) return false;
+            const cs = getComputedStyle(el);
+            const r = el.getBoundingClientRect();
+            return cs.display !== 'none' && cs.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+          };
+          const inputs = Array.from(document.querySelectorAll('input'));
+          const matchesSearch = (el) => /search/i.test([
+            el.getAttribute('placeholder') || '',
+            el.getAttribute('aria-label') || '',
+            el.getAttribute('name') || '',
+          ].join(' '));
+          let found = null;
+          try { found = document.querySelector(configured); } catch (e) { found = null; }
+          if (!found || !matchesSearch(found)) {
+            found = inputs.find((el) => matchesSearch(el) && visible(el))
+              || inputs.find((el) => matchesSearch(el));
+          }
+          if (found) {
+            try { found.scrollIntoView({block:'center', inline:'nearest'}); } catch (e) {}
+            try { found.focus(); } catch (e) {}
+          }
+          return found || null;
+        """, VC_MODEL_SEARCH_CSS)
+        if box is not None:
+            return box
+    except Exception:
+        pass
+    try:
+        sbtn = driver.execute_script("""
+          const buttons = Array.from(document.querySelectorAll('button'));
+          return buttons.find((b) => /search models/i.test([
+            b.innerText || '',
+            b.textContent || '',
+            b.getAttribute('aria-label') || '',
+            b.getAttribute('title') || '',
+          ].join(' '))) || null;
+        """)
+        if sbtn is None:
+            sbtn = driver.find_element(By.XPATH, VC_MODEL_SEARCH_BUTTON_XPATH)
+        driver.execute_script("arguments[0].click();", sbtn)
+        _t.sleep(0.35)
+    except Exception:
+        pass
+    for _ in range(8):
+        try:
+            box = driver.execute_script("""
+              const inputs = Array.from(document.querySelectorAll('input'));
+              const matchesSearch = (el) => /search/i.test([
+                el.getAttribute('placeholder') || '',
+                el.getAttribute('aria-label') || '',
+                el.getAttribute('name') || '',
+              ].join(' '));
+              const found = inputs.find(matchesSearch) || null;
+              if (found) {
+                try { found.scrollIntoView({block:'center', inline:'nearest'}); } catch (e) {}
+                try { found.focus(); } catch (e) {}
+              }
+              return found;
+            """)
+            if box is not None:
+                return box
+        except Exception:
+            pass
+        _t.sleep(0.25)
+    try:
+        diag = driver.execute_script("""
+          return {
+            inputs: Array.from(document.querySelectorAll('input')).map((el) => ({
+              placeholder: el.getAttribute('placeholder') || '',
+              aria: el.getAttribute('aria-label') || '',
+              type: el.getAttribute('type') || '',
+              visible: !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length),
+            })).slice(0, 12),
+            buttons: Array.from(document.querySelectorAll('button')).map((el) =>
+              String(el.innerText || el.textContent || el.getAttribute('aria-label') || '').trim()
+            ).filter(Boolean).slice(0, 30),
+          };
+        """)
+        print("AIEXE_PRICED search input unavailable diag=%r" % diag, flush=True)
+    except Exception:
+        pass
+    return None
+
+
+def _aiexe_collect_priced_models_by_search(driver, candidates):
+    """Search every known model in the already-open picker and record coin icons.
+
+    Some Venice rows are not present in the default/recommended list or the virtualized scroll
+    window. This mirrors the selection path: reveal Search models, type the model name, inspect
+    the resulting row for the credit icon, then move on without clicking/selecting anything.
+    """
+    import time as _t
+    box = _aiexe_search_input(driver)
+    if box is None:
+        print("AIEXE_PRICED search input unavailable", flush=True)
+        return
+    names = []
+    for source in (candidates or [], AIEXE_FALLBACK_MODELS):
+        for name in source or []:
+            clean = (name or "").strip().replace(":latest", "")
+            if clean and clean not in names and clean not in AIEXE_PRICED_CHECKED_MODELS:
+                names.append(clean)
+    checked = 0
+    before = len(AIEXE_PRICED_MODELS)
+    for name in names:
+        try:
+            _aiexe_set_native_value(driver, box, name, "HTMLInputElement")
+        except Exception:
+            try:
+                box.clear()
+                box.send_keys(name)
+            except Exception:
+                continue
+        found = None
+        for _ in range(6):
+            _t.sleep(0.2)
+            found = _aiexe_find_visible_model_title(driver, name)
+            if found is not None:
+                break
+        if found is not None:
+            checked += 1
+            try:
+                title = (found.get_attribute("title") or name).strip()
+            except Exception:
+                title = name
+            _aiexe_note_priced_model(driver, found, title)
+    try:
+        _aiexe_set_native_value(driver, box, "", "HTMLInputElement")
+    except Exception:
+        pass
+    print("AIEXE_PRICED searched=%d newly_priced=%d total=%d" %
+          (checked, max(0, len(AIEXE_PRICED_MODELS) - before), len(AIEXE_PRICED_MODELS)), flush=True)
+
+
 def _aiexe_wait_composer(driver):
     """Return a fresh, enabled Venice composer textarea.
 
@@ -1145,7 +1487,10 @@ def _aiexe_submit_prompt(driver):
 def aiexe_scrape_models(driver):
     """Read Venice's real model list from the picker (title attrs). Best-effort; cached once."""
     import time as _t
+    global AIEXE_PRICED_MODELS, AIEXE_PRICED_CHECKED_MODELS
     try:
+        AIEXE_PRICED_MODELS = set()
+        AIEXE_PRICED_CHECKED_MODELS = set()
         if 'venice.ai/chat' not in driver.current_url:
             driver.get(VC_CHAT_URL)
         # Wait for the composer + model button to render, else the modal never opens (the
@@ -1158,6 +1503,7 @@ def aiexe_scrape_models(driver):
             return []
         _t.sleep(1)
         names = _aiexe_collect_models_from_modal(driver)
+        _aiexe_collect_priced_models_by_search(driver, names)
         _aiexe_close_modal(driver)
         return names
     except Exception:
@@ -1523,6 +1869,7 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
                 if _m: yield _m
             _reasoning_open = False
 
+        _aiexe_read_credits(driver)  # refresh the balance after each reply (cheap, cached)
         # Diagnostic: the field names of Venice's REAL request body (captured pre-swap by the
         # interceptor) — reveals whether a reasoning/web flag exists to set per-request.
         try:
@@ -1699,8 +2046,20 @@ def version():
 
 @app.route('/api/aiexe/state', methods=['GET'])
 def aiexe_state():
-    # Cached only — never touches selenium, so it's always instant and safe mid-chat.
-    return Response(json.dumps({"current_model": AIEXE_CURRENT_MODEL}), content_type='application/json')
+    # Usually cached; one immediate DOM read only when NO generation holds the lock —
+    # _aiexe_read_credits sends ESCAPE (Venice's stop key) and would abort a live reply.
+    if not AIEXE_CREDITS and selenium_lock.acquire(blocking=False):
+        try:
+            _aiexe_read_credits(driver)
+        except Exception:
+            pass
+        finally:
+            selenium_lock.release()
+    return Response(json.dumps({
+        "current_model": AIEXE_CURRENT_MODEL,
+        "credits": AIEXE_CREDITS,
+        "priced_models": sorted(AIEXE_PRICED_MODELS),
+    }), content_type='application/json')
 
 def get_mock_model(name, parameter_size):
     return {
@@ -1832,6 +2191,7 @@ try:  # remember which model Venice is CURRENTLY on, so AI.EXE can adopt it (not
         print("AIEXE_MODEL current at startup: %r" % _cur, flush=True)
 except Exception:
     pass
+_aiexe_read_credits(driver)
 print(f"Starting server at port {args.host}:{args.port}")
 http_server = WSGIServer((args.host, args.port), app)
 http_server.serve_forever()

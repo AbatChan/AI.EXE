@@ -69,7 +69,12 @@ def read_provider_health(base_url: str, kind: str) -> dict:
         try:
             st = httpx.get(f"{base}/api/aiexe/state", timeout=3)
             if st.status_code == 200:
-                out["current_model"] = str(st.json().get("current_model") or "")
+                state = st.json()
+                out["current_model"] = str(state.get("current_model") or "")
+                out["credits"] = str(state.get("credits") or "")
+                priced = state.get("priced_models") or []
+                if isinstance(priced, list):
+                    out["priced_models"] = [str(m) for m in priced if m]
         except Exception:
             pass
     return out

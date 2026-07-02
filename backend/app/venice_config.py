@@ -67,6 +67,10 @@ CHAT_SETTINGS_BUTTON_XPATH = "//button[@aria-label='Settings']"
 # The stop control shown while Venice is generating (clicked to clear an aborted request).
 # Verified from the live DOM: <button aria-label="stop"> (lowercase).
 STOP_GENERATING_XPATH = "//button[translate(@aria-label,'STOP','stop')='stop' or @aria-label='Stop generating']"
+# Credit-metered ("premium") models show a coin-stack icon in their picker row; this is the
+# first path of that svg. The account's balance text lives in a <p> like "10,279 Credits".
+PRICED_ICON_PATH_PREFIX = "M9 14c0"
+CREDITS_TEXT_XPATH = "//p[contains(., 'Credits')]"
 # Row switch inside that dialog, keyed by the row's visible label text ({} = label).
 CHAT_SETTINGS_SWITCH_XPATH = "//p[normalize-space()='{}']/ancestor::div[contains(@class,'css-bngl5n')]//input[@type='checkbox']"
 

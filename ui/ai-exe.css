@@ -1262,6 +1262,28 @@ body.resizing-panels .panel-resizer {
   white-space: nowrap;
 }
 
+.account-popover-credit {
+  min-height: 24px;
+  padding-left: 8px;
+  color: var(--text2);
+  font-size: 12px;
+}
+
+.account-popover-credit[hidden] {
+  display: none;
+}
+
+.account-credit-icon {
+  color: #d6b45f;
+}
+
+.account-popover-credit span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .account-popover-dot {
   width: 6px;
   height: 6px;
@@ -1294,6 +1316,27 @@ body.resizing-panels .panel-resizer {
 
 .account-popover-arrow {
   margin-left: auto;
+  color: var(--text3);
+}
+
+.account-popover-copy {
+  min-width: 0;
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.account-popover-copy > span:first-child,
+.account-popover-sub {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-popover-sub {
+  font-size: 11px;
   color: var(--text3);
 }
 
@@ -5955,31 +5998,44 @@ html.platform-mac .settings-sidebar {
   overflow: hidden;
 }
 .composer-model-pill {
-  /* inline-block, NOT flex: text-overflow ellipsis doesn't apply to a bare text node
-     inside a flex container, so long model names weren't ellipsizing. */
-  display: inline-block;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   width: 100%;
   max-width: 148px;
   height: 26px;
-  line-height: 24px;   /* 26px minus the 1px borders — keeps the text vertically centered */
-  padding: 0 10px;
-  border: 1px solid var(--border2);
+  padding: 0 8px;
+  border: none;
   border-radius: 999px;
   background: transparent;
   color: var(--text2);
-  font-size: 12px;
+  font-family: var(--font-sans);
+  font-size: 13px;
+  font-weight: 400;
+  letter-spacing: 0.5px;
   line-height: 1;
   cursor: pointer;
   white-space: nowrap;
   overflow: hidden;
-  text-overflow: ellipsis;
   transition: color 0.18s ease, background 0.18s ease, border-color 0.18s ease;
 }
 .composer-model-pill:hover { color: var(--text1, inherit); background: var(--bg2, rgba(255,255,255,0.05)); }
+.model-name-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.model-credit-icon {
+  width: 13px;
+  height: 13px;
+  flex: 0 0 auto;
+  color: #d6b45f;
+}
 .composer-model-pop {
   /* fixed (positioned by JS at open): escapes the left cluster's overflow:hidden clip */
   position: fixed;
-  z-index: 60;
+  z-index: 9400;
   width: 264px;
   padding: 8px;
   border: 1px solid var(--border2);
@@ -6019,21 +6075,29 @@ html.platform-mac .settings-sidebar {
   cursor: pointer;
   white-space: nowrap;
   overflow: hidden;
-  text-overflow: ellipsis;
 }
 .composer-model-item:hover { background: var(--bg2, rgba(255,255,255,0.06)); color: var(--text1, inherit); }
 .composer-model-item.active { color: var(--accent, #22d3ee); }
+.composer-model-item.priced .model-credit-icon { color: #d6b45f; }
 
 /* Overflow "+N" for the composer action chips: when the row runs out of space, trailing
    chips are hidden and represented by a +N pill that opens a mini popup listing them. */
 .composer-overflow-btn {
   flex-shrink: 0;
   font-variant-numeric: tabular-nums;
+  min-width: 28px;
+  height: 26px;
+  justify-content: center;
+  pointer-events: auto;
+}
+.composer-overflow-btn.open {
+  color: var(--accent);
+  background: rgba(0, 229, 255, 0.08);
 }
 .iact-btn.chip-overflowed { display: none; }
 .composer-overflow-pop {
   position: fixed;
-  z-index: 60;
+  z-index: 9400;
   min-width: 148px;
   padding: 6px;
   border: 1px solid var(--border2);
@@ -6045,20 +6109,58 @@ html.platform-mac .settings-sidebar {
 .composer-overflow-item {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 4px;
   width: 100%;
-  padding: 7px 10px;
+  padding: 0;
   font-size: 12.5px;
-  text-align: left;
   color: var(--text2);
-  border: none;
   border-radius: 8px;
   background: transparent;
-  cursor: pointer;
   white-space: nowrap;
+  overflow: hidden;
 }
 .composer-overflow-item:hover { background: var(--bg2, rgba(255,255,255,0.06)); color: var(--text1, inherit); }
+.composer-overflow-action,
+.composer-overflow-remove {
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.composer-overflow-action {
+  min-width: 0;
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 6px 7px 10px;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.composer-overflow-remove {
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
+  margin-right: 2px;
+  border-radius: 999px;
+  font-size: 18px;
+  line-height: 1;
+  color: var(--text3);
+}
+.composer-overflow-remove:hover {
+  color: var(--accent);
+  background: rgba(0, 229, 255, 0.08);
+}
 .composer-overflow-item svg { width: 12px; height: 12px; flex-shrink: 0; }
+.composer-overflow-empty {
+  padding: 7px 10px;
+  color: var(--text3);
+  font-size: 12.5px;
+  white-space: nowrap;
+}
 
 .composer-plus-btn {
   width: 26px;

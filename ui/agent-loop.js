@@ -750,8 +750,17 @@
       // re-planner dropped phases this turn) OR from the fresh plan (first run). On a
       // fresh non-resume request we ignore plan.md so an unrelated edit doesn't
       // resurrect the phase tracker.
-      const planPhases = Array.isArray(planSpec && planSpec.phases)
+      let planPhases = Array.isArray(planSpec && planSpec.phases)
         ? planSpec.phases.filter((p) => p && p.title) : [];
+      // Phasing a <=3-file build is pure overhead (a landing page got a phased plan for
+      // index.html + style.css); fresh plans only — a resume keeps plan.md's phases.
+      // Also clear planSpec.phases: agent-core keys phasedProject off it independently.
+      const plannedFileCount = Array.isArray(planSpec && planSpec.expectedFiles)
+        ? planSpec.expectedFiles.filter(Boolean).length : 0;
+      if (planPhases.length >= 2 && plannedFileCount > 0 && plannedFileCount <= 3) {
+        planPhases = [];
+        if (planSpec) planSpec.phases = [];
+      }
       const isResume = Boolean(requestToken && requestToken.isAgentResume);
       const filePhases = await readAgentPlanFilePhases();
       const fileHasUnfinished = filePhases && filePhases.length >= 2

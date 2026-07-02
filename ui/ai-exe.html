@@ -167,6 +167,17 @@
               <span class="account-popover-dot"></span>
               <span id="accountPopoverName">Guest</span>
             </div>
+            <div class="account-popover-row account-popover-credit" id="accountCreditRow" hidden>
+              <span class="account-popover-icon account-credit-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <ellipse cx="15" cy="14" rx="6" ry="3"></ellipse>
+                  <path d="M9 14v4c0 1.7 2.7 3 6 3s6-1.3 6-3v-4"></path>
+                  <ellipse cx="9" cy="6" rx="6" ry="3"></ellipse>
+                  <path d="M3 6v10c0 1.7 2.7 3 6 3"></path>
+                </svg>
+              </span>
+              <span id="accountCreditText">Checking credits…</span>
+            </div>
             <button class="account-popover-item" id="accountProfileBtn" type="button">
               <span class="account-popover-icon">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -194,7 +205,10 @@
                   <path d="M12 12 19 5"></path>
                 </svg>
               </span>
-              <span>Usage remaining</span>
+              <span class="account-popover-copy">
+                <span>Usage remaining</span>
+                <span class="account-popover-sub" id="accountUsageSub">Check balance</span>
+              </span>
               <span class="account-popover-arrow">›</span>
             </button>
             <button class="account-popover-item" id="accountLogoutBtn" type="button">

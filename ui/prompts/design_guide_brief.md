@@ -12,6 +12,8 @@ Modern UI rules. Follow these for every HTML/CSS file unless the user overrides 
 - Icons: use inline SVG (clean line/solid icons), never emoji as UI icons — emoji look dated and render inconsistently across systems.
 - Use real/relevant imagery for inspectable subjects (product, place, person, food, portfolio, object). Do not use abstract gradients as the subject.
 - Motion: 120-250ms, ease-out/ease-in-out, opacity/transform only, consistent, honor prefers-reduced-motion.
+- Scale styling to scope: a small/single-page build gets a COMPACT stylesheet (style only what the page actually uses; no exhaustive design system, no rules for components that don't exist).
+- Every `var(--x)` you reference MUST be defined in this file's `:root` (use the defaults below or your own) — never use an undefined token.
 
 Default tokens:
 ```css
