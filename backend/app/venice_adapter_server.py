@@ -824,6 +824,7 @@ AIEXE_SEEN_CHUNK_SHAPES = set()   # textless chunk shapes already logged (dedup)
 AIEXE_PRICED_MODELS = set()   # model names whose picker row shows Venice's coin icon (credit-metered)
 AIEXE_PRICED_CHECKED_MODELS = set()   # model rows already inspected for the coin icon
 AIEXE_CREDITS = ""            # last credit-balance text read from the sidebar ("10,279 Credits")
+AIEXE_CREDITS_TRUSTED = False  # True = came from the real sidebar/menu <p>, not a page-text regex guess
 
 
 def _aiexe_set_switch(driver, label, want_on):
@@ -1061,7 +1062,7 @@ def _aiexe_read_credits(driver, allow_ui=True):
     Cached in AIEXE_CREDITS so /api/aiexe/state stays selenium-free.
     allow_ui=False = passive only: read what's already on screen, never click the
     sidebar/account menu open (used post-reply on non-metered models)."""
-    global AIEXE_CREDITS
+    global AIEXE_CREDITS, AIEXE_CREDITS_TRUSTED
     if allow_ui:
         try:
             _aiexe_dismiss_modal(driver)
@@ -1069,6 +1070,7 @@ def _aiexe_read_credits(driver, allow_ui=True):
             pass
 
     def _capture_visible_credit_text(source):
+        global AIEXE_CREDITS, AIEXE_CREDITS_TRUSTED
         try:
             for p in driver.find_elements(By.XPATH, VC_CREDITS_TEXT_XPATH):
                 txt = (p.text or "").strip()
@@ -1076,6 +1078,7 @@ def _aiexe_read_credits(driver, allow_ui=True):
                     if AIEXE_CREDITS != txt:
                         AIEXE_CREDITS = txt
                         print("AIEXE_CREDITS %s (from %s)" % (txt, source), flush=True)
+                    AIEXE_CREDITS_TRUSTED = True
                     return True
         except Exception:
             pass
@@ -1093,7 +1096,8 @@ def _aiexe_read_credits(driver, allow_ui=True):
               return m ? `${m[1].replace(/\\s+/g, '')} Credits` : '';
             """)
             txt = (txt or "").strip()
-            if txt and any(ch.isdigit() for ch in txt) and AIEXE_CREDITS != txt:
+            # A page-text guess never overwrites a real sidebar/menu capture.
+            if txt and any(ch.isdigit() for ch in txt) and AIEXE_CREDITS != txt and not AIEXE_CREDITS_TRUSTED:
                 AIEXE_CREDITS = txt
                 print("AIEXE_CREDITS %s (from page-text-passive)" % txt, flush=True)
         except Exception:
@@ -1102,8 +1106,6 @@ def _aiexe_read_credits(driver, allow_ui=True):
 
     try:
         toggled = driver.execute_script("""
-          const bodyText = String((document.body && document.body.innerText) || '');
-          if (/\\d[\\d,.\\s]*\\s+Credits?\\b/i.test(bodyText)) return false;
           const btn = Array.from(document.querySelectorAll('button'))
             .find((b) => /^(show|open|toggle)\\s+sidebar$/i.test(String(b.getAttribute('aria-label') || '').trim()));
           if (!btn) return false;
@@ -1119,8 +1121,6 @@ def _aiexe_read_credits(driver, allow_ui=True):
 
     try:
         opened_account = driver.execute_script("""
-          const bodyText = String((document.body && document.body.innerText) || '');
-          if (/\\d[\\d,.\\s]*\\s+Credits?\\b/i.test(bodyText)) return false;
           const visible = (el) => {
             if (!el) return false;
             const cs = getComputedStyle(el);
@@ -1159,7 +1159,8 @@ def _aiexe_read_credits(driver, allow_ui=True):
           return m ? `${m[1].replace(/\\s+/g, '')} Credits` : '';
         """)
         txt = (txt or "").strip()
-        if txt and any(ch.isdigit() for ch in txt):
+        # A page-text guess never overwrites a real sidebar/menu capture.
+        if txt and any(ch.isdigit() for ch in txt) and not AIEXE_CREDITS_TRUSTED:
             if AIEXE_CREDITS != txt:
                 AIEXE_CREDITS = txt
                 print("AIEXE_CREDITS %s (from page-text)" % txt, flush=True)
