@@ -414,7 +414,14 @@
                   <line x1="6" y1="6" x2="18" y2="18"></line>
                 </svg>
               </button>
-              <div class="input-actions">
+              <div class="composer-model-wrap" id="composerModelWrap" style="display:none;">
+                <button class="composer-model-pill" id="composerModelPill" type="button" title="Model" aria-label="Choose model" aria-haspopup="listbox"></button>
+                <div class="composer-model-pop hidden" id="composerModelPop">
+                  <input class="composer-model-search" id="composerModelSearch" type="text" placeholder="Search models…" autocomplete="off" spellcheck="false">
+                  <div class="composer-model-list" id="composerModelList" role="listbox"></div>
+                </div>
+              </div>
+              <div class="input-actions" id="inputActions">
                 <button class="iact-btn hidden" id="continueBtn" onclick="continueMessage()">
                   <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <polyline points="8 4 17 12 8 20"></polyline>
@@ -462,6 +469,8 @@
                   <span class="close-on-hover">×</span><span class="label-on-hover">Context</span>
                 </button>
               </div>
+              <button class="iact-btn composer-overflow-btn hidden" id="composerOverflowBtn" type="button" aria-label="More actions"></button>
+              <div class="composer-overflow-pop hidden" id="composerOverflowPop"></div>
             </div>
             <div class="input-controls-right">
               <button class="composer-mic-btn" id="micBtn" type="button" title="Dictate" aria-label="Dictate message">

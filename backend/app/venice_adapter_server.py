@@ -63,6 +63,8 @@ VC_SEND_BUTTON_XPATHS = _vcfg('SEND_BUTTON_XPATHS', ["//button[@type='submit' an
 VC_MODEL_BUTTON_XPATHS = _vcfg('MODEL_BUTTON_XPATHS', ["//button[.//p[@data-testid='minds-chat-agent-model-label']]", "//p[@data-testid='minds-chat-agent-model-label']/ancestor::button[1]", "//button[contains(@class,'css-d73kup')]"])
 VC_MODEL_LABEL_XPATH = _vcfg('MODEL_LABEL_XPATH', "//p[@data-testid='minds-chat-agent-model-label']")
 VC_MODEL_SEARCH_CSS = _vcfg('MODEL_SEARCH_CSS', "input[placeholder*='Search']")
+# Venice's modal "Search models..." control is a BUTTON that reveals the real input on click.
+VC_MODEL_SEARCH_BUTTON_XPATH = _vcfg('MODEL_SEARCH_BUTTON_XPATH', "//button[contains(., 'Search models')]")
 VC_MODEL_ROW_TITLE_CSS = _vcfg('MODEL_ROW_TITLE_CSS', "p[title]")
 VC_CLOSE_BUTTON_XPATH = _vcfg('CLOSE_BUTTON_XPATH', "//button[@aria-label='Close']")
 VC_NEW_CHAT_XPATH = _vcfg('NEW_CHAT_XPATH', "//button[@aria-label='New chat']")
@@ -711,6 +713,7 @@ def presence_of_either_element_located(locators):
     return _predicate
 
 AIEXE_MODELS_CACHE = []
+AIEXE_CURRENT_MODEL = ""   # last model name observed on Venice's composer button (cache — no selenium)
 AIEXE_TEXT_MODEL_CATALOG = [
     "Claude Sonnet 5", "GLM 5.2", "Kimi K2.7 Code", "MiniMax M3 Preview", "MiMo-V2.5",
     "Claude Fable 5", "NVIDIA Nemotron 3 Ultra", "Qwen 3.7 Plus", "Claude Opus 4.8",
@@ -742,6 +745,16 @@ def _aiexe_model_catalog():
             if name and name not in names:
                 names.append(name)
     return names
+
+
+def _aiexe_set_native_value(driver, el, text, proto="HTMLTextAreaElement"):
+    """Set a React/Chakra-controlled field's value via the native prototype setter + input
+    event (plain send_keys doesn't always register). Used for the composer and search box."""
+    driver.execute_script(
+        "var el=arguments[0], v=arguments[1], p=arguments[2];"
+        "var d=Object.getOwnPropertyDescriptor(window[p].prototype,'value');"
+        "(d&&d.set?d.set:function(x){el.value=x;}).call(el, v);"
+        "el.dispatchEvent(new Event('input', {bubbles:true}));", el, text, proto)
 
 
 def _aiexe_model_button(driver):
@@ -1052,6 +1065,9 @@ def aiexe_select_model(driver, name):
                 break
             _t.sleep(0.5)
         cur = _aiexe_current_model(driver)
+        global AIEXE_CURRENT_MODEL
+        if cur:
+            AIEXE_CURRENT_MODEL = cur
         if cur and cur.lower() == nl:
             print("AIEXE_MODEL already on %r" % name, flush=True)
             return
@@ -1072,14 +1088,45 @@ def aiexe_select_model(driver, name):
 
         target = _find_target()
         if target is None:
+            # The default modal shows only the ~17 "recommended" models; the other ~60 exist
+            # only behind Search / "View all models". Venice's "Search models..." control is a
+            # BUTTON (chakra-input styled) — click it to reveal the real <input>, then type.
+            box = None
             try:
-                box = driver.find_element(By.CSS_SELECTOR, VC_MODEL_SEARCH_CSS)
-                box.clear()
-                box.send_keys(name)
-                _t.sleep(0.9)
-                target = _find_target()
+                sbtn = driver.find_element(By.XPATH, VC_MODEL_SEARCH_BUTTON_XPATH)
+                driver.execute_script("arguments[0].click();", sbtn)
+                _t.sleep(0.5)
             except Exception as _e:
-                print("AIEXE_MODEL search box not found (%s)" % _e, flush=True)
+                print("AIEXE_MODEL search button not found (%s)" % str(_e)[:120], flush=True)
+            for _w in range(8):
+                try:
+                    box = driver.find_element(By.CSS_SELECTOR, VC_MODEL_SEARCH_CSS)
+                    if box.is_displayed():
+                        break
+                    box = None
+                except Exception:
+                    box = None
+                _t.sleep(0.4)
+            if box is not None:
+                try:
+                    box.click()
+                except Exception:
+                    pass
+                try:
+                    _aiexe_set_native_value(driver, box, name, "HTMLInputElement")
+                except Exception:
+                    try:
+                        box.clear(); box.send_keys(name)
+                    except Exception:
+                        pass
+                print("AIEXE_MODEL searching for %r" % name, flush=True)
+                for _w in range(10):
+                    _t.sleep(0.5)
+                    target = _find_target()
+                    if target is not None:
+                        break
+            else:
+                print("AIEXE_MODEL search input never appeared after clicking the button", flush=True)
         if target is not None:
             try:
                 row = target.find_element(By.XPATH, "./ancestor::*[@role='group' or @role='menuitem' or @role='menuitemradio'][1]")
@@ -1094,6 +1141,7 @@ def aiexe_select_model(driver, name):
             except Exception:
                 driver.execute_script("arguments[0].click();", row)
             _t.sleep(0.5)
+            AIEXE_CURRENT_MODEL = name
             print("AIEXE_MODEL clicked %r" % name, flush=True)
         else:
             print("AIEXE_MODEL target row NOT found for %r" % name, flush=True)
@@ -1123,14 +1171,6 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
 
     api_data_json = json.dumps(api_data)
     try:
-        try:
-            print("AIEXE_DIAG url=" + str(driver.current_url))
-            for _i, _t in enumerate(driver.find_elements(By.TAG_NAME, "textarea")):
-                print("AIEXE_DIAG textarea[%d] placeholder=%r displayed=%s" % (_i, _t.get_attribute("placeholder"), _t.is_displayed()))
-            for _b in driver.find_elements(By.XPATH, "//button[@type='submit' or @aria-label]"):
-                print("AIEXE_DIAG button aria=%r type=%r text=%r" % (_b.get_attribute("aria-label"), _b.get_attribute("type"), (_b.text or "")[:30]))
-        except Exception as _e:
-            print("AIEXE_DIAG error " + str(_e))
         # New AI.EXE chat (no assistant turns yet) → load a FRESH Venice conversation so chats
         # don't bleed into each other. Follow-ups within the same chat reuse the page (reloading
         # every request proved flaky). AI.EXE sends the full history in the prompt either way.
@@ -1443,6 +1483,11 @@ def openai_like_completion():
 def version():
     return Response(json.dumps({"version":"0.3.6"}), content_type='application/json')
 
+@app.route('/api/aiexe/state', methods=['GET'])
+def aiexe_state():
+    # Cached only — never touches selenium, so it's always instant and safe mid-chat.
+    return Response(json.dumps({"current_model": AIEXE_CURRENT_MODEL}), content_type='application/json')
+
 def get_mock_model(name, parameter_size):
     return {
       "name": name,
@@ -1565,6 +1610,13 @@ try:  # scrape Venice's real model list once (best-effort) so /api/tags advertis
         print("AIEXE_MODELS scraped: %d models" % len(_scraped), flush=True)
 except Exception as _e:
     print("AIEXE_MODELS scrape failed: " + str(_e), flush=True)
+try:  # remember which model Venice is CURRENTLY on, so AI.EXE can adopt it (not pretend)
+    _cur = _aiexe_current_model(driver)
+    if _cur:
+        AIEXE_CURRENT_MODEL = _cur
+        print("AIEXE_MODEL current at startup: %r" % _cur, flush=True)
+except Exception:
+    pass
 print(f"Starting server at port {args.host}:{args.port}")
 http_server = WSGIServer((args.host, args.port), app)
 http_server.serve_forever()
