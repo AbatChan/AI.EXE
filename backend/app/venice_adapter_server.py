@@ -69,6 +69,7 @@ VC_MODEL_ROW_TITLE_CSS = _vcfg('MODEL_ROW_TITLE_CSS', "p[title]")
 VC_CLOSE_BUTTON_XPATH = _vcfg('CLOSE_BUTTON_XPATH', "//button[@aria-label='Close']")
 VC_NEW_CHAT_XPATH = _vcfg('NEW_CHAT_XPATH', "//button[@aria-label='New chat']")
 VC_CHAT_SETTINGS_BUTTON_XPATH = _vcfg('CHAT_SETTINGS_BUTTON_XPATH', "//button[@aria-label='Settings']")
+VC_STOP_GENERATING_XPATH = _vcfg('STOP_GENERATING_XPATH', "//button[@aria-label='Stop generating' or @aria-label='Stop' or @aria-label='Cancel generation']")
 VC_CHAT_SETTINGS_SWITCH_XPATH = _vcfg('CHAT_SETTINGS_SWITCH_XPATH', "//p[normalize-space()='{}']/ancestor::div[contains(@class,'css-bngl5n')]//input[@type='checkbox']")
 
 
@@ -911,10 +912,12 @@ def _aiexe_model_button(driver):
 
 
 def _aiexe_current_model(driver):
-    """Text of the currently-selected model (from the model button), or ''."""
+    """Name of the currently-selected model (from the model button), or ''. First line
+    only — the button text can carry badge suffixes like 'GLM 5.2\\nTEE', which made the
+    same-model check fail and re-open the picker modal on every request."""
     b = _aiexe_model_button(driver)
     try:
-        return (b.text or "").strip() if b is not None else ""
+        return (b.text or "").strip().split("\n")[0].strip() if b is not None else ""
     except Exception:
         return ""
 
@@ -1321,6 +1324,17 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
             except Exception:
                 driver.get(VC_CHAT_URL)
         # else: already on a fresh composer page — just use it
+        # A previous ABORTED request (client timeout/retry) can leave Venice still generating —
+        # the composer is unusable until it stops. Best-effort: click the stop control.
+        try:
+            for _b in driver.find_elements(By.XPATH, VC_STOP_GENERATING_XPATH):
+                if _b.is_displayed():
+                    driver.execute_script("arguments[0].click();", _b)
+                    time.sleep(0.6)
+                    print("AIEXE_NAV stopped an in-flight Venice generation", flush=True)
+                    break
+        except Exception:
+            pass
         # Hide the raw typed prompt in the (minimized) Venice window — model still receives it.
         # Toggle from AI.EXE Settings (passed as AIEXE_HIDE_PROMPT env on start; default OFF).
         try:
@@ -1559,9 +1573,23 @@ def parse_json_request(request):
         except json.JSONDecodeError:
           return None
 
+def _aiexe_locked_stream(request_json, response_format, reopen_context):
+    """Hold the selenium lock for the generator's ENTIRE life, not just its creation.
+    `with selenium_lock: return Response(gen)` released the lock the instant the Response
+    object existed while the real work (type/submit/stream-read) ran lazily OUTSIDE it —
+    so an overlapping request reset the page's shared receivedChunks mid-stream and both
+    requests read a mixed stream (duplicated narration; a decision call receiving another
+    call's answer). A client disconnect raises GeneratorExit, which still exits the with-
+    block and releases the lock."""
+    global driver
+    with selenium_lock:
+        if not _aiexe_driver_alive(driver):
+            driver = _aiexe_reopen_driver(reopen_context)
+        yield from generate_selenium_streamed_response(request_json, driver, response_format=response_format)
+
+
 @app.route('/api/chat', methods=['POST'])
 def chat():
-    global driver
     request_json = parse_json_request(request)
     if request_json is None :
             return Response("Invalid JSON data received", status=400, content_type='text/plain')
@@ -1573,10 +1601,9 @@ def chat():
         response_format = ResponseFormat.CHAT_NON_STREAMED
         content_type = 'application/json; charset=utf-8'
 
-    with selenium_lock:
-        if not _aiexe_driver_alive(driver):
-            driver = _aiexe_reopen_driver("browser session was closed before /api/chat")
-        return Response(generate_selenium_streamed_response(request_json, driver, response_format=response_format), content_type=content_type)
+    return Response(_aiexe_locked_stream(request_json, response_format,
+                                         "browser session was closed before /api/chat"),
+                    content_type=content_type)
 
 @app.route('/api/generate', methods=['POST'])
 def generate():
@@ -1610,18 +1637,15 @@ def generate():
                 "content": prompt
             }
         ]
-    with selenium_lock:
-        if not _aiexe_driver_alive(driver):
-            driver = _aiexe_reopen_driver("browser session was closed before /api/generate")
-        return Response(generate_selenium_streamed_response(request_json, driver, response_format=ResponseFormat.GENERATE), content_type='application/x-ndjson')
+    return Response(_aiexe_locked_stream(request_json, ResponseFormat.GENERATE,
+                                         "browser session was closed before /api/generate"),
+                    content_type='application/x-ndjson')
 
 @app.route('/v1/chat/completions', methods=['POST'])
 def openai_like_completion():
-    global driver
     request_json = parse_json_request(request)
-    if not _aiexe_driver_alive(driver):
-        driver = _aiexe_reopen_driver("browser session was closed before /v1/chat/completions")
-    completion = ''.join(generate_selenium_streamed_response(request_json, driver, response_format=ResponseFormat.COMPLETION_AS_STRING))
+    completion = ''.join(_aiexe_locked_stream(request_json, ResponseFormat.COMPLETION_AS_STRING,
+                                              "browser session was closed before /v1/chat/completions"))
     response_json = {
         "id": "chatcmpl-953",
         "object": "chat.completion",

@@ -64,6 +64,8 @@ CLOSE_BUTTON_XPATH = "//button[@aria-label='Close']"
 NEW_CHAT_XPATH = "//button[@aria-label='New chat']"   # SPA new-chat (no full page reload)
 # Composer's per-chat Settings dialog (Web Enabled / URL Scraping / Reasoning switches).
 CHAT_SETTINGS_BUTTON_XPATH = "//button[@aria-label='Settings']"
+# The stop control shown while Venice is generating (clicked to clear an aborted request).
+STOP_GENERATING_XPATH = "//button[@aria-label='Stop generating' or @aria-label='Stop' or @aria-label='Cancel generation']"
 # Row switch inside that dialog, keyed by the row's visible label text ({} = label).
 CHAT_SETTINGS_SWITCH_XPATH = "//p[normalize-space()='{}']/ancestor::div[contains(@class,'css-bngl5n')]//input[@type='checkbox']"
 
