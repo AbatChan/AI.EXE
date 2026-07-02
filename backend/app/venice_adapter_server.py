@@ -714,6 +714,67 @@ def presence_of_either_element_located(locators):
 
 AIEXE_MODELS_CACHE = []
 AIEXE_CURRENT_MODEL = ""   # last model name observed on Venice's composer button (cache — no selenium)
+
+# --- Per-chat Venice conversation mapping -----------------------------------
+# One Venice conversation per AI.EXE chat (chat turns AND agent planner/decision/narration
+# calls share it): no more new-chat-per-request churn, no sidebar pollution, and most
+# requests need ZERO navigation. Correctness never depends on this — AI.EXE sends the full
+# context in every prompt — so every step is best-effort.
+AIEXE_CHAT_MAP_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "aiexe_chat_map.json")
+AIEXE_CHAT_URLS = {}
+
+
+def _aiexe_stable_chat_url(url):
+    """True for a materialized conversation URL like /chat/classic/<slug> (not ?refreshId=…)."""
+    return re.search(r"venice\.ai/chat/classic/[A-Za-z0-9_-]+(?:$|[?#])", str(url or "")) is not None
+
+
+def _aiexe_load_chat_map():
+    global AIEXE_CHAT_URLS
+    try:
+        with open(AIEXE_CHAT_MAP_PATH, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        if isinstance(data, dict):
+            AIEXE_CHAT_URLS = {str(k): str(v) for k, v in data.items() if k and _aiexe_stable_chat_url(v)}
+    except Exception:
+        AIEXE_CHAT_URLS = {}
+
+
+def _aiexe_save_chat_map():
+    try:
+        with open(AIEXE_CHAT_MAP_PATH, "w", encoding="utf-8") as fh:
+            json.dump(AIEXE_CHAT_URLS, fh, indent=1, sort_keys=True)
+    except Exception:
+        pass
+
+
+def _aiexe_chat_key(data):
+    """Stable per-AI.EXE-chat key: the chat id AI.EXE sends (preferred), else a hash of the
+    first user turn embedded in the flattened prompt (legacy clients)."""
+    if not isinstance(data, dict):
+        return ""
+    for k in ("aiexe_chat_id", "chat_id"):
+        v = str(data.get(k) or "").strip()
+        if v:
+            return "id:" + v[:120]
+        opts = data.get("options")
+        if isinstance(opts, dict):
+            v = str(opts.get(k) or "").strip()
+            if v:
+                return "id:" + v[:120]
+    try:
+        texts = [str(m.get("content") or "") for m in (data.get("messages") or [])
+                 if isinstance(m, dict) and str(m.get("role") or "").lower() == "user"]
+        source = "\n".join(texts)
+        m = re.search(r"<\|im_start\|>user\n([\s\S]*?)\n<\|im_end\|>", source)
+        basis = (m.group(1) if m else source).strip()
+        if not basis:
+            return ""
+        return "hist:" + hashlib.sha256(basis[:4000].encode("utf-8", "ignore")).hexdigest()[:24]
+    except Exception:
+        return ""
+
+
 AIEXE_TEXT_MODEL_CATALOG = [
     "Claude Sonnet 5", "GLM 5.2", "Kimi K2.7 Code", "MiniMax M3 Preview", "MiMo-V2.5",
     "Claude Fable 5", "NVIDIA Nemotron 3 Ultra", "Qwen 3.7 Plus", "Claude Opus 4.8",
@@ -1170,17 +1231,32 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
     }
 
     api_data_json = json.dumps(api_data)
+    _chat_key = _aiexe_chat_key(data)
     try:
-        # New AI.EXE chat (no assistant turns yet) → load a FRESH Venice conversation so chats
-        # don't bleed into each other. Follow-ups within the same chat reuse the page (reloading
-        # every request proved flaky). AI.EXE sends the full history in the prompt either way.
-        _is_first_turn = not any(isinstance(_m, dict) and _m.get('role') == 'assistant'
-                                 for _m in (data.get('messages') or []))
-        if 'venice.ai/chat' not in driver.current_url:
-            driver.get(VC_CHAT_URL)              # not on Venice at all → one real load
-        elif _is_first_turn:
-            # New AI.EXE chat → fresh Venice conversation WITHOUT a full page reload: click
-            # Venice's own "New chat" (SPA nav, ~instant). Fall back to reload if absent.
+        # ONE Venice conversation per AI.EXE chat (see the chat-map block up top). Nav policy:
+        #   same chat + already on its conversation → no navigation at all (the common case);
+        #   different chat with a known conversation  → navigate to it (deleted → new + remap);
+        #   unknown chat                              → New chat (SPA), remembered after send.
+        _cur_url = str(driver.current_url or "")
+        _mapped = AIEXE_CHAT_URLS.get(_chat_key, "") if _chat_key else ""
+        if 'venice.ai/chat' not in _cur_url:
+            driver.get(_mapped or VC_CHAT_URL)   # not on Venice at all → one real load
+            print("AIEXE_NAV cold load -> %s" % (_mapped or VC_CHAT_URL), flush=True)
+        elif _mapped and _cur_url.split('?')[0] == _mapped.split('?')[0]:
+            pass                                  # already on this chat's conversation
+        elif _mapped:
+            driver.get(_mapped)
+            time.sleep(0.6)
+            landed = str(driver.current_url or "")
+            if landed.split('?')[0] != _mapped.split('?')[0]:
+                # Venice deleted/lost that conversation → forget it; a new one gets mapped below.
+                AIEXE_CHAT_URLS.pop(_chat_key, None)
+                _aiexe_save_chat_map()
+                print("AIEXE_NAV mapped chat GONE (%s) — will remap" % _mapped, flush=True)
+            else:
+                print("AIEXE_NAV switched to mapped chat %s" % _mapped, flush=True)
+        elif _aiexe_stable_chat_url(_cur_url):
+            # Unknown chat while sitting on some OTHER conversation → fresh chat (SPA click).
             try:
                 _nc = driver.find_element(By.XPATH, VC_NEW_CHAT_XPATH)
                 driver.execute_script("arguments[0].click();", _nc)
@@ -1188,7 +1264,7 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
                 print("AIEXE_NAV new chat via SPA button", flush=True)
             except Exception:
                 driver.get(VC_CHAT_URL)
-        # follow-ups within the same AI.EXE chat: reuse the page, no navigation at all
+        # else: already on a fresh composer page — just use it
         # Hide the raw typed prompt in the (minimized) Venice window — model still receives it.
         # Toggle from AI.EXE Settings (passed as AIEXE_HIDE_PROMPT env on start; default on).
         try:
@@ -1342,6 +1418,22 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
                 _m = _emit('</thinking>')
                 if _m: yield _m
             _reasoning_open = False
+
+        # Remember which Venice conversation this AI.EXE chat lives in (URL materializes to
+        # /chat/classic/<slug> once the first message is sent — poll briefly).
+        if _chat_key:
+            try:
+                for _w in range(16):
+                    _u = str(driver.current_url or "")
+                    if _aiexe_stable_chat_url(_u):
+                        if AIEXE_CHAT_URLS.get(_chat_key) != _u:
+                            AIEXE_CHAT_URLS[_chat_key] = _u
+                            _aiexe_save_chat_map()
+                            print("AIEXE_CHAT_MAP %s -> %s" % (_chat_key[:32], _u), flush=True)
+                        break
+                    time.sleep(0.5)
+            except Exception:
+                pass
 
         capture_and_redirect_browser_logs(driver)
 
@@ -1602,6 +1694,7 @@ try:
     _aiexe_signal.signal(_aiexe_signal.SIGTERM, lambda *_a: (_aiexe_close_browser(), os._exit(0)))
 except Exception:
     pass
+_aiexe_load_chat_map()
 driver = login_to_venice()
 try:  # scrape Venice's real model list once (best-effort) so /api/tags advertises the truth
     _scraped = aiexe_scrape_models(driver)
