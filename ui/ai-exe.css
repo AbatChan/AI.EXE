@@ -5925,6 +5925,10 @@ html.platform-mac .settings-sidebar {
   align-items: center;
   gap: 8px;
   min-width: 0;
+  /* Take only the space the mic/send cluster leaves, and CLIP on overflow — the pill and
+     chips compress/clip instead of painting over the right controls. */
+  flex: 1 1 auto;
+  overflow: hidden;
 }
 
 .input-controls-right {
@@ -5932,12 +5936,129 @@ html.platform-mac .settings-sidebar {
   align-items: center;
   gap: 15px;
   margin-left: auto;
+  flex: 0 0 auto;   /* mic + send never yield space — nothing can overlap them */
 }
 
 .input-row:focus-within {
   border-color: rgba(0, 229, 255, 0.4);
   box-shadow: 0 0 0 3px rgba(0, 229, 255, 0.06);
 }
+
+/* In-chat model pill: sits between the + button and the action chips. Shrinks with
+   ellipsis so the chips never collide with it; the picker pops UPWARD above the composer. */
+.composer-model-wrap {
+  position: relative;
+  /* Shrink factor 4: when the row is tight, the pill gives up its width (down to ~56px,
+     ellipsized) BEFORE the action chips are touched. */
+  flex: 0 4 auto;
+  min-width: 56px;
+  overflow: hidden;
+}
+.composer-model-pill {
+  /* inline-block, NOT flex: text-overflow ellipsis doesn't apply to a bare text node
+     inside a flex container, so long model names weren't ellipsizing. */
+  display: inline-block;
+  width: 100%;
+  max-width: 148px;
+  height: 26px;
+  line-height: 24px;   /* 26px minus the 1px borders — keeps the text vertically centered */
+  padding: 0 10px;
+  border: 1px solid var(--border2);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text2);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: color 0.18s ease, background 0.18s ease, border-color 0.18s ease;
+}
+.composer-model-pill:hover { color: var(--text1, inherit); background: var(--bg2, rgba(255,255,255,0.05)); }
+.composer-model-pop {
+  /* fixed (positioned by JS at open): escapes the left cluster's overflow:hidden clip */
+  position: fixed;
+  z-index: 60;
+  width: 264px;
+  padding: 8px;
+  border: 1px solid var(--border2);
+  border-radius: 12px;
+  background: var(--bg1, #101014);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+}
+.composer-model-pop.hidden { display: none; }
+.composer-model-search {
+  width: 100%;
+  margin-bottom: 6px;
+  padding: 6px 9px;
+  font-size: 12px;
+  color: inherit;
+  border: 1px solid var(--border2);
+  border-radius: 8px;
+  background: transparent;
+  outline: none;
+}
+.composer-model-list {
+  max-height: 250px;
+  overflow-y: auto;
+}
+.composer-model-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 9px;
+  font-size: 12.5px;
+  text-align: left;
+  color: var(--text2);
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.composer-model-item:hover { background: var(--bg2, rgba(255,255,255,0.06)); color: var(--text1, inherit); }
+.composer-model-item.active { color: var(--accent, #22d3ee); }
+
+/* Overflow "+N" for the composer action chips: when the row runs out of space, trailing
+   chips are hidden and represented by a +N pill that opens a mini popup listing them. */
+.composer-overflow-btn {
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+}
+.iact-btn.chip-overflowed { display: none; }
+.composer-overflow-pop {
+  position: fixed;
+  z-index: 60;
+  min-width: 148px;
+  padding: 6px;
+  border: 1px solid var(--border2);
+  border-radius: 12px;
+  background: var(--bg1, #101014);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+}
+.composer-overflow-pop.hidden { display: none; }
+.composer-overflow-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 10px;
+  font-size: 12.5px;
+  text-align: left;
+  color: var(--text2);
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.composer-overflow-item:hover { background: var(--bg2, rgba(255,255,255,0.06)); color: var(--text1, inherit); }
+.composer-overflow-item svg { width: 12px; height: 12px; flex-shrink: 0; }
 
 .composer-plus-btn {
   width: 26px;

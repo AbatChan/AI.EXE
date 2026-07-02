@@ -1367,6 +1367,10 @@ try {
             kind: 'info', durationMs: 12000,
             onClick: () => { if (typeof startVeniceAdapterThenResend === 'function') void startVeniceAdapterThenResend(); },
           });
+        } else if (s && s.serving) {
+          // Already up (e.g. left running from last session) — populate the composer
+          // model pill right away, no Settings visit needed.
+          if (typeof refreshComposerModelsFromProvider === 'function') void refreshComposerModelsFromProvider();
         }
       }).catch(() => {});
     } catch (_) { /* noop */ }
@@ -5297,6 +5301,13 @@ function syncInferenceProviderOptions() {
   }
 }
 
+// The pre-0.15 adapter shipped mock model IDs (llama-…-akash etc.). A saved model matching
+// these is safe to auto-replace with a real one; a real user pick never is.
+function isStaleMockProviderModel(modelId) {
+  const cur = String(modelId || '').trim();
+  return !cur || /akash|hermes|dolphin|nemotron|^llama-3/i.test(cur);
+}
+
 function getProviderPresetValue(provider, modelId) {
   const cleanModel = String(modelId || '').trim();
   // Match against the LIVE (scraped) models too — otherwise a real model like
@@ -5574,30 +5585,33 @@ function updateProviderConnectionStatus(provider, def, quiet) {
   if (!base) { el.textContent = ''; return; }
   const myToken = (updateProviderConnectionStatus._token = (updateProviderConnectionStatus._token || 0) + 1);
   if (!quiet) { el.textContent = 'Checking connection…'; el.style.color = 'var(--muted, #9ca3af)'; }
-  const onModels = (models) => {
+  const onModels = (models, veniceCurrent) => {
     if (myToken !== updateProviderConnectionStatus._token) return;
     const list = (models || []).filter(Boolean);
     const n = list.length;
-    el.textContent = '● connected' + (n ? (' · ' + n + ' model(s)') : '');
+    const liveNow = String(veniceCurrent || '').trim();
+    el.textContent = '● connected' + (n ? (' · ' + n + ' model(s)') : '')
+      + (liveNow ? (' · Venice is on ' + liveNow) : '');
     el.style.color = 'var(--success, #22c55e)';
     // The adapter has no key+/models path, so its models never reached the Model preset
     // dropdown (only "Custom model ID" showed). Capture them here and repopulate so they're
     // selectable.
     if (isOllama && n) {
       liveProviderModels[provider] = list;
-      // ONLY replace the old MOCK default (llama-…-akash etc.) with a real model — never a
-      // real user pick. Doing `!list.includes(cur)` reset the user's choice on every poll
-      // (a real model that isn't byte-identical to a live entry got clobbered → "changing
-      // back" + wrong model sent). Match the known mock signatures instead.
+      // ONLY auto-set when the saved model is the old MOCK default (llama-…-akash etc.) or
+      // empty — never clobber a real user pick (that caused the "changing back" bug).
+      // Adopt what Venice is ACTUALLY on (fallback list[0]) so we reflect reality.
       const def = getInferenceProviderDef(provider);
       const cur = getProviderModel(provider);
-      const isStaleMock = !cur || /akash|hermes|dolphin|nemotron|^llama-3/i.test(cur);
+      const isStaleMock = isStaleMockProviderModel(cur);
       if (def && def.modelField && isStaleMock && list.length) {
-        appSettings[def.modelField] = list[0];
+        const liveEntry = liveNow ? (list.find((m) => m === liveNow || m === liveNow + ':latest') || '') : '';
+        appSettings[def.modelField] = liveEntry || list[0];
         saveAppSettings();
-        if (settingsApiModelInput && lastPresetProvider === provider) settingsApiModelInput.value = list[0];
+        if (settingsApiModelInput && lastPresetProvider === provider) settingsApiModelInput.value = appSettings[def.modelField];
       }
       if (lastPresetProvider === provider) populateProviderPresetOptions(provider, getProviderModel(provider));
+      if (typeof renderComposerModelPill === 'function') renderComposerModelPill();
     }
   };
   const onDown = (extra) => {
@@ -5610,7 +5624,7 @@ function updateProviderConnectionStatus(provider, def, quiet) {
     // through the backend (server-side) — also how inference will reach it.
     fetch(getAIExeBackendUrl() + '/api/provider-health')
       .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
-      .then((h) => (h && h.reachable ? onModels(h.models) : onDown(' — start the adapter (or it is still logging in)')))
+      .then((h) => (h && h.reachable ? onModels(h.models, h.current_model) : onDown(' — start the adapter (or it is still logging in)')))
       .catch(() => onDown(' — AI.EXE backend offline'));
     return;
   }
@@ -5864,6 +5878,7 @@ function saveSettingsFromUi(options = {}) {
         : String(providerDef.defaultEndpoint || '');
     }
   }
+  if (typeof renderComposerModelPill === 'function') renderComposerModelPill();
   appSettings.modelUrl = settingsModelUrlInput ? settingsModelUrlInput.value.trim() : '';
   appSettings.keepModelOnUpdate = Boolean(settingsKeepModelChk && settingsKeepModelChk.checked);
   appSettings.debugTraceEnabled = Boolean(settingsDebugTraceChk && settingsDebugTraceChk.checked);
@@ -11598,6 +11613,218 @@ async function refreshAdapterStatus() {
   if (settingsAdapterStartBtn) settingsAdapterStartBtn.style.display = procAlive ? 'none' : '';
   if (settingsAdapterStopBtn) settingsAdapterStopBtn.style.display = procAlive ? '' : 'none';
 }
+// ---- In-chat model pill (composer) -----------------------------------------
+// Sits after the + button; lets the user switch the provider model without opening
+// Settings. Same storage as the Settings picker (appSettings[def.modelField]).
+const composerModelWrap = document.getElementById('composerModelWrap');
+const composerModelPill = document.getElementById('composerModelPill');
+const composerModelPop = document.getElementById('composerModelPop');
+const composerModelSearch = document.getElementById('composerModelSearch');
+const composerModelList = document.getElementById('composerModelList');
+
+function composerModelChoices() {
+  const provider = getSelectedInferenceProvider();
+  const def = getInferenceProviderDef(provider);
+  if (!def || provider === 'local' || !def.modelField) return null;
+  const live = Array.isArray(liveProviderModels[provider]) ? liveProviderModels[provider] : [];
+  const presets = Array.isArray(inferenceProviderModelPresets[provider]) ? inferenceProviderModelPresets[provider] : [];
+  const list = (live.length ? live : presets).filter(Boolean);
+  return { provider, def, list };
+}
+
+function renderComposerModelPill() {
+  if (!composerModelWrap || !composerModelPill) return;
+  const c = composerModelChoices();
+  if (!c || !c.list.length) { composerModelWrap.style.display = 'none'; return; }
+  composerModelWrap.style.display = '';
+  const cur = String(getProviderModel(c.provider) || '').replace(/:latest$/, '');
+  composerModelPill.textContent = cur || 'Model';
+  composerModelPill.title = cur ? ('Model: ' + cur) : 'Choose model';
+  // The pill's width changes the space left for the action chips — re-run the +N overflow.
+  if (typeof recalcComposerChipOverflow === 'function') setTimeout(recalcComposerChipOverflow, 0);
+}
+
+function buildComposerModelList(filter) {
+  if (!composerModelList) return;
+  const c = composerModelChoices();
+  composerModelList.innerHTML = '';
+  if (!c) return;
+  const cur = String(getProviderModel(c.provider) || '');
+  const q = String(filter || '').trim().toLowerCase();
+  c.list
+    .filter((m) => !q || m.toLowerCase().includes(q))
+    .slice(0, 200)
+    .forEach((m) => {
+      const item = document.createElement('button');
+      item.type = 'button';
+      item.className = 'composer-model-item' + (m === cur ? ' active' : '');
+      item.setAttribute('role', 'option');
+      item.textContent = m.replace(/:latest$/, '');
+      item.title = m;
+      item.addEventListener('click', () => {
+        appSettings[c.def.modelField] = m;
+        saveAppSettings();
+        if (settingsApiModelInput && lastPresetProvider === c.provider) settingsApiModelInput.value = m;
+        if (lastPresetProvider === c.provider) populateProviderPresetOptions(c.provider, m);
+        renderComposerModelPill();
+        closeComposerModelPop();
+      });
+      composerModelList.appendChild(item);
+    });
+}
+
+function closeComposerModelPop() {
+  if (composerModelPop) composerModelPop.classList.add('hidden');
+}
+
+if (composerModelPill) {
+  composerModelPill.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (!composerModelPop) return;
+    const opening = composerModelPop.classList.contains('hidden');
+    if (opening) {
+      if (composerModelPop.parentElement !== document.body) document.body.appendChild(composerModelPop);
+      buildComposerModelList('');
+      if (composerModelSearch) composerModelSearch.value = '';
+      // position: fixed — anchor above the pill, kept on-screen (escapes overflow clipping)
+      const r = composerModelPill.getBoundingClientRect();
+      composerModelPop.style.left = Math.max(8, Math.min(r.left, window.innerWidth - 272)) + 'px';
+      composerModelPop.style.bottom = (window.innerHeight - r.top + 10) + 'px';
+      composerModelPop.style.top = 'auto';
+      composerModelPop.classList.remove('hidden');
+      if (composerModelSearch) composerModelSearch.focus();
+    } else {
+      closeComposerModelPop();
+    }
+  });
+}
+if (composerModelSearch) {
+  composerModelSearch.addEventListener('input', () => buildComposerModelList(composerModelSearch.value));
+  composerModelSearch.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeComposerModelPop(); });
+}
+if (composerModelPop) composerModelPop.addEventListener('click', (e) => e.stopPropagation());
+document.addEventListener('click', () => closeComposerModelPop());
+// Populate the pill's model list WITHOUT needing the Settings page: fetch provider health
+// directly (Settings' updateProviderConnectionStatus does this too, but only while open).
+async function refreshComposerModelsFromProvider() {
+  try {
+    const provider = getSelectedInferenceProvider();
+    const def = getInferenceProviderDef(provider);
+    if (!def || def.protocol !== 'ollama') { renderComposerModelPill(); return; }
+    const r = await fetch(getAIExeBackendUrl() + '/api/provider-health');
+    if (!r.ok) { renderComposerModelPill(); return; }
+    const h = await r.json();
+    if (h && h.reachable && Array.isArray(h.models) && h.models.length) {
+      liveProviderModels[provider] = h.models.filter(Boolean);
+      // Same adopt rule as Settings: only replace a mock/unset model, never a real pick.
+      const cur = getProviderModel(provider);
+      const isStaleMock = isStaleMockProviderModel(cur);
+      if (def.modelField && isStaleMock) {
+        const liveNow = String(h.current_model || '').trim();
+        const liveEntry = liveNow ? (liveProviderModels[provider].find((m) => m === liveNow || m === liveNow + ':latest') || '') : '';
+        appSettings[def.modelField] = liveEntry || liveProviderModels[provider][0];
+        saveAppSettings();
+      }
+    }
+    renderComposerModelPill();
+  } catch (_) { renderComposerModelPill(); }
+}
+setTimeout(refreshComposerModelsFromProvider, 800);  // boot: after settings load
+
+// ---- Composer action-chip overflow (+N) ------------------------------------
+// When [+][pill][chips] outgrow the row, trailing chips are hidden and replaced by a "+N"
+// pill; clicking it lists them in a mini popup (each forwards to the real chip's handler).
+const inputActionsEl = document.getElementById('inputActions');
+const composerOverflowBtn = document.getElementById('composerOverflowBtn');
+const composerOverflowPop = document.getElementById('composerOverflowPop');
+const inputControlsLeftEl = inputActionsEl ? inputActionsEl.closest('.input-controls-left') : null;
+
+function composerChipLabel(chip) {
+  const lab = chip.querySelector('.label-on-hover');
+  return ((lab ? lab.textContent : chip.textContent) || '').replace(/×/g, '').trim() || 'Action';
+}
+
+function closeComposerOverflowPop() {
+  if (composerOverflowPop) composerOverflowPop.classList.add('hidden');
+}
+
+function recalcComposerChipOverflow() {
+  if (!inputActionsEl || !composerOverflowBtn || !inputControlsLeftEl) return;
+  // Never fight an OPEN menu: background refreshes (model pill render, health polls) land
+  // moments after the user clicks +N and were instantly closing/rebuilding it.
+  if (composerOverflowPop && !composerOverflowPop.classList.contains('hidden')) return;
+  const chips = Array.from(inputActionsEl.querySelectorAll('.iact-btn')).filter((c) => !c.classList.contains('hidden'));
+  chips.forEach((c) => c.classList.remove('chip-overflowed'));   // reset, then measure
+  composerOverflowBtn.classList.add('hidden');
+  if (!chips.length) return;
+  const avail = inputControlsLeftEl.getBoundingClientRect().right - inputActionsEl.getBoundingClientRect().left;
+  const gap = 8;
+  const widths = chips.map((c) => c.getBoundingClientRect().width);
+  const total = widths.reduce((a, w) => a + w, 0) + gap * (chips.length - 1);
+  if (total <= avail) return;                                    // everything fits
+  const reserve = 46;                                            // room for the +N pill
+  let used = 0; let keep = 0;
+  for (let i = 0; i < chips.length; i++) {
+    const w = widths[i] + (i ? gap : 0);
+    if (used + w <= avail - reserve) { used += w; keep = i + 1; } else break;
+  }
+  const overflowed = chips.slice(keep);
+  overflowed.forEach((c) => c.classList.add('chip-overflowed'));
+  composerOverflowBtn.textContent = '+' + overflowed.length;
+  composerOverflowBtn.classList.remove('hidden');
+}
+
+if (composerOverflowBtn) {
+  composerOverflowBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (!composerOverflowPop || !inputActionsEl) return;
+    if (!composerOverflowPop.classList.contains('hidden')) { closeComposerOverflowPop(); return; }
+    if (composerOverflowPop.parentElement !== document.body) document.body.appendChild(composerOverflowPop);
+    composerOverflowPop.innerHTML = '';
+    Array.from(inputActionsEl.querySelectorAll('.iact-btn.chip-overflowed')).forEach((chip) => {
+      const item = document.createElement('button');
+      item.type = 'button';
+      item.className = 'composer-overflow-item';
+      const svg = chip.querySelector('svg');
+      if (svg) item.appendChild(svg.cloneNode(true));
+      item.appendChild(document.createTextNode(composerChipLabel(chip)));
+      item.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        closeComposerOverflowPop();
+        chip.click();                       // forward to the real chip — state/handlers intact
+        setTimeout(recalcComposerChipOverflow, 60);
+      });
+      composerOverflowPop.appendChild(item);
+    });
+    const r = composerOverflowBtn.getBoundingClientRect();
+    composerOverflowPop.style.left = Math.max(8, Math.min(r.left, window.innerWidth - 164)) + 'px';
+    composerOverflowPop.style.bottom = (window.innerHeight - r.top + 10) + 'px';
+    composerOverflowPop.classList.remove('hidden');
+  });
+}
+if (composerOverflowPop) composerOverflowPop.addEventListener('click', (e) => e.stopPropagation());
+document.addEventListener('click', () => closeComposerOverflowPop());
+window.addEventListener('resize', () => {
+  clearTimeout(recalcComposerChipOverflow._t);
+  recalcComposerChipOverflow._t = setTimeout(recalcComposerChipOverflow, 80);
+});
+if (inputActionsEl) {
+  // Recalc when chips get toggled by the + tools menu — but ignore our own
+  // chip-overflowed toggles, or the observer would loop forever.
+  const onlyOverflowToggle = (m) => {
+    const oldC = String(m.oldValue || '').split(/\s+/).filter(Boolean).sort();
+    const newC = String(m.target.className || '').split(/\s+/).filter(Boolean).sort();
+    const diff = oldC.filter((c) => !newC.includes(c)).concat(newC.filter((c) => !oldC.includes(c)));
+    return diff.length > 0 && diff.every((c) => c === 'chip-overflowed');
+  };
+  new MutationObserver((muts) => {
+    if (muts.every(onlyOverflowToggle)) return;
+    clearTimeout(recalcComposerChipOverflow._t);
+    recalcComposerChipOverflow._t = setTimeout(recalcComposerChipOverflow, 30);
+  }).observe(inputActionsEl, { attributes: true, attributeFilter: ['class'], subtree: true, attributeOldValue: true });
+}
+setTimeout(recalcComposerChipOverflow, 900);
+
 const settingsAdapterHidePrompt = document.getElementById('settingsAdapterHidePrompt');
 if (settingsAdapterHidePrompt) {
   settingsAdapterHidePrompt.checked = appSettings.veniceHidePrompt !== false;
@@ -13254,6 +13481,7 @@ async function startVeniceAdapterThenResend() {
           if (typeof refreshAdapterStatus === 'function') refreshAdapterStatus();
           const hasPending = mainInput && String(mainInput.value || '').trim();
           showAppNotification({ title: 'Adapter ready', message: hasPending ? 'Sending your message…' : 'Venice Pro is ready — send your message.', kind: 'success' });
+          if (typeof refreshComposerModelsFromProvider === 'function') void refreshComposerModelsFromProvider();
           if (hasPending && typeof sendMessage === 'function') void sendMessage();  // resends the text still in the box
           return;
         }
