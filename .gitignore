@@ -54,3 +54,8 @@ scripts/__pycache__/
 
 # Local agent/dev environments
 .agent-venv/
+
+# Client documents — never public (kept locally only)
+docs/AI_EXE_Requirements*
+docs/AI_EXE_Revised*
+docs/PROJECT_MEMORY.md
