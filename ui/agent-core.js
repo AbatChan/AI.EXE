@@ -190,7 +190,8 @@
           hints.push('Return only HTML markup for this file.');
           hints.push('Do not output CSS rules as the main body of this file.');
           hints.push('Do not output JavaScript as the main body of this file.');
-          hints.push('If the project has separate style.css or script.js files, prefer linking them instead of embedding large inline <style> or <script> blocks.');
+          hints.push('SHARED STYLES: this is a multi-file project with a shared stylesheet (e.g. css/style.css — see PROJECT_STATE for the real paths). EVERY page MUST `<link rel="stylesheet" href="...">` that shared stylesheet in <head> and rely on it for the design system (tokens, layout, header/footer, components). Do NOT paste a big inline <style> block re-declaring the whole design system in each page — that duplicates CSS, bloats every page, and makes pages drift out of sync. Only a TINY inline <style> for genuinely page-unique tweaks is acceptable; shared/repeated styling belongs in the shared stylesheet. Use the SAME header/footer/nav markup and the same class names across all pages so the shared CSS styles them identically.');
+          hints.push('SHARED COMPONENTS: for multi-page sites, repeated header/nav/logo/footer/CTA markup should come from one classic shared script such as js/components.js. Pages should contain small hooks like <div data-site-header></div> / <div data-site-footer></div>, load the shared component script, and pass the active page via body data-page or location. Do NOT rebuild a different nav/footer/theme inline on each page.');
           hints.push('Pages are opened directly from disk (file://). Inter-page and asset links must be RELATIVE (menu.html, ./style.css, ../style.css from a subfolder) — root-relative paths like /menu.html resolve to the filesystem root and break.');
           hints.push('OFFLINE: load JS as classic scripts — <script src="js/app.js"></script> in dependency order. Do NOT use <script type="module"> or import/export anywhere; ES modules do not load from file:// and silently break the whole page. Share code via globals on window.');
           hints.push('Never load local data with fetch() or XMLHttpRequest — under file:// the browser blocks them and the app silently fails. Embed any data (levels, config, JSON, CSV rows, save state) directly in the script instead.');
@@ -246,6 +247,19 @@
     function parseAgentDecision(outputText) {
       const raw = String(outputText || '').trim();
       if (!raw) return null;
+      const scrubDecisionNarration = (value) => {
+        let s = String(value || '').trim();
+        if (!s) return '';
+        s = s.replace(/^```[a-z]*\s*/i, '').replace(/\s*```$/i, '').trim();
+        const cut = s.search(/<\s*(?:tool_call|function=agent_step|parameter\s*=|decision\b)/i);
+        if (cut >= 0) s = s.slice(0, cut).trim();
+        const jsonCut = s.search(/\{\s*"action"\s*:/i);
+        if (jsonCut >= 0) s = s.slice(0, jsonCut).trim();
+        if (/<\s*(?:tool_call|function=agent_step|parameter\s*=)|<\/parameter>/i.test(s)) return '';
+        if (/^\s*(?:\{|\[|<)/.test(s)) return '';
+        if (/Keys:\s+action,\s+message,\s+tool/i.test(s) || /Rules:\s*-\s*One step only/i.test(s) || /Return EXACTLY ONE JSON object/i.test(s)) return '';
+        return s;
+      };
       const extractJsonObjects = (text) => {
         const src = String(text || '');
         const candidates = [];
@@ -289,17 +303,18 @@
         return Array.from(new Set(candidates.map((item) => String(item || '').trim()).filter(Boolean)));
       };
       let thought = '';
-      const firstCurly = raw.indexOf('{');
-      const firstDecision = raw.indexOf('<decision>');
-      const firstMarker = firstCurly >= 0 && firstDecision >= 0 ? Math.min(firstCurly, firstDecision) : Math.max(firstCurly, firstDecision);
+      const firstMarker = [
+        raw.indexOf('{'),
+        raw.search(/<decision\b/i),
+        raw.search(/<tool_call\b/i),
+        raw.search(/<function=agent_step\b/i),
+        raw.search(/<parameter\s*=/i),
+      ].filter((idx) => idx >= 0).sort((a, b) => a - b)[0] ?? -1;
       if (firstMarker > 0) {
         let t = raw.slice(0, firstMarker).replace(/```[a-z]*\s*$/i, '').trim();
         t = t.replace(/^```[a-z]*\s*/i, '').trim();
         t = t.replace(/^<\/?thought>\s*/gi, '').replace(/<\/?thought>$/gi, '').trim();
-        if (t.length > 5) thought = t;
-        if (/Keys:\s+action,\s+message,\s+tool/i.test(thought) || /Rules:\s*-\s*One step only/i.test(thought) || /Return EXACTLY ONE JSON object/i.test(thought)) {
-          thought = '';
-        }
+        thought = scrubDecisionNarration(t);
       }
       let candidate = raw.replace(/^```[a-z]*\s*/i, '').replace(/\s*```$/i, '').trim();
       const decisionBlockMatch = candidate.match(/<decision>[\s\S]*?<\/decision>/i);
@@ -357,6 +372,29 @@
         dstPath = extractTagRegex('dst_path', candidate) || extractTagRegex('dstPath', candidate);
         const contentMatch = candidate.match(/<content>([\s\S]*?)<\/content>/i);
         content = contentMatch ? contentMatch[1] : '';
+      }
+
+      // qwen / Hermes tool-call format: <tool_call><function=agent_step>
+      // <parameter=NAME>VALUE</parameter>... Parse it directly so qwen's primary
+      // output doesn't fail and fall to the (slow) repair inference every step.
+      if (!action && /<parameter\s*=/i.test(candidate)) {
+        const hermes = (key, keepInner) => {
+          const m = candidate.match(new RegExp(`<parameter\\s*=\\s*["']?${key}["']?\\s*>([\\s\\S]*?)</parameter>`, 'i'));
+          if (!m) return '';
+          return keepInner ? m[1].replace(/^\r?\n/, '').replace(/\s+$/, '') : m[1].trim();
+        };
+        action = hermes('action');
+        tool = hermes('tool');
+        path = hermes('path');
+        message = hermes('message');
+        content = hermes('content', true);
+        command = hermes('command');
+        srcPath = hermes('src_path') || hermes('srcPath');
+        dstPath = hermes('dst_path') || hermes('dstPath');
+        const th = hermes('thought'); if (th && !thought) thought = th;
+        offset = Number(hermes('offset')) || offset;
+        startLine = Number(hermes('start_line')) || startLine;
+        endLine = Number(hermes('end_line')) || endLine;
       }
 
       if (!action && /"action"\s*:\s*"[^"]+"/i.test(candidate)) {
@@ -472,14 +510,14 @@
       }
       return {
         action: resolvedAction,
-        message: String(message || '').trim(),
+        message: scrubDecisionNarration(message),
         tool: validTools.includes(resolvedTool) ? resolvedTool : 'none',
         path: String(path || '').trim(),
         content: String(content || ''),
         command: String(command || '').trim(),
         srcPath: String(srcPath || '').trim(),
         dstPath: String(dstPath || '').trim(),
-        thought: String(thought || '').trim(),
+        thought: scrubDecisionNarration(thought),
         offset: Math.max(0, Number(offset) || 0),
         start_line: Math.max(0, Number(startLine) || 0),
         end_line: Math.max(0, Number(endLine) || 0),
@@ -492,6 +530,9 @@
       const taskKind = String(planSpec && planSpec.taskKind ? planSpec.taskKind : '').toLowerCase();
       const expectedFiles = Array.isArray(planSpec && planSpec.expectedFiles) ? planSpec.expectedFiles : [];
       if (taskKind === 'project') {
+        // Phased = fully model-driven: only new_project below is deterministic.
+        const phasedProject = Array.isArray(planSpec && planSpec.phases)
+          && planSpec.phases.filter((p) => p && p.title).length >= 2;
         const explicitSeparateWorkspaceIntent = /\b(new project|new workspace|fresh workspace|another project|separate project|different project|start from scratch|from scratch)\b/i.test(String(taskText || ''));
         const hasWorkspace = hasOpenWorkspaceContext();
         const projectCreated = Array.isArray(toolEvents)
@@ -508,6 +549,7 @@
             raw: '[fallback-project-new-project]',
           };
         }
+        if (phasedProject) return null; // model drives writes/validate/run
         const writtenPaths = Array.isArray(toolEvents)
           ? toolEvents
             .filter((event) => event && event.ok && ['write_file', 'edit_file', 'mkdir'].includes(String(event.tool || '').toLowerCase()))
@@ -601,6 +643,9 @@
         // so we generate per-file again (visible progress + investigate the per-file path).
         // Flip ENABLE_SINGLE_PASS_PROJECT_GEN to true to use the one-call path.
         const ENABLE_SINGLE_PASS_PROJECT_GEN = false;
+        // Phased: let the model write the current phase's files itself (return null
+        // → decision prompt). Skip straight to the all-written validate/run check.
+        if (!phasedProject) {
         const codeFilesToCreate = expectedFiles
           .map((path) => normalizeWorkspacePath(path || ''))
           .filter((path) => path && path !== '/src' && path !== '/README.md' && !writtenPaths.includes(path));
@@ -697,6 +742,7 @@
             }
           }
         }
+        } // end !phasedProject (phased = model drives writes + validate/run per phase)
       }
       if (taskKind === 'analysis') return null;
       const inferredEditTask = taskKind === 'edit' || !/\b(create|build|make|start|setup|set up)\b/i.test(String(taskText || ''));
@@ -1322,7 +1368,7 @@
         .split('|')
         .map((item) => normalizeWorkspacePath(item))
         .filter((item) => item && item !== '/')
-        .slice(0, 8);
+        .slice(0, 16);
     }
 
     function parseAgentPlanPathList(raw) {
@@ -1475,18 +1521,89 @@
 
     function getPlannedFileRoles(expectedFiles = []) {
       const files = Array.isArray(expectedFiles) ? expectedFiles.map((path) => normalizeWorkspacePath(path || '')).filter(Boolean) : [];
+      const htmlFiles = files.filter((path) => /\.html?$/i.test(path));
+      const cssFiles = files.filter((path) => /\.(css|scss|sass|less)$/i.test(path));
+      const scriptFiles = files.filter((path) => /\.(js|mjs|cjs|ts|jsx|tsx)$/i.test(path));
       return {
         files,
-        htmlFile: files.find((path) => /\.html?$/i.test(path)) || '',
-        cssFile: files.find((path) => /\.(css|scss|sass|less)$/i.test(path)) || '',
-        scriptFile: files.find((path) => /\.(js|mjs|cjs|ts|jsx|tsx)$/i.test(path)) || '',
+        htmlFiles,
+        htmlFile: htmlFiles[0] || '',
+        cssFiles,
+        cssFile: cssFiles[0] || '',
+        scriptFiles,
+        scriptFile: scriptFiles[0] || '',
         pythonFile: files.find((path) => /\.py$/i.test(path)) || '',
       };
     }
 
+    function requestedPublicHtmlPageLimit(taskText = '') {
+      const lower = String(taskText || '').toLowerCase();
+      const words = {
+        one: 1, two: 2, three: 3, four: 4, five: 5,
+        six: 6, seven: 7, eight: 8, nine: 9, ten: 10,
+      };
+      const numeric = lower.match(/\b(\d{1,2})\s*[- ]?\s*(?:page|screen|route)s?\b/);
+      if (numeric) return Math.max(1, Math.min(20, Number(numeric[1]) || 0));
+      const word = lower.match(/\b(one|two|three|four|five|six|seven|eight|nine|ten)\s*[- ]?\s*(?:page|screen|route)s?\b/);
+      return word ? words[word[1]] : 0;
+    }
+
+    function extractPlannedPathFromPhaseTask(task) {
+      const text = String((task && task.text) || task || '');
+      const match = text.match(/(?:^|\s)(\/?[a-z0-9._-]+(?:\/[a-z0-9._-]+)*\.(?:html?|css|scss|sass|less|js|mjs|cjs|ts|jsx|tsx|md|txt|json|csv|py))\b/i);
+      return match ? normalizeWorkspacePath(match[1]) : '';
+    }
+
+    function phaseTaskForPath(path) {
+      return { text: String(path || '').replace(/^\//, ''), done: false };
+    }
+
+    function normalizeWebProjectPhases(phases = [], expectedFiles = [], primaryStack = '') {
+      const isWeb = String(primaryStack || '').toLowerCase() === 'web'
+        || expectedFiles.some((path) => /\.html?$/i.test(String(path || '')));
+      const list = Array.isArray(phases) ? phases.filter((phase) => phase && phase.title) : [];
+      if (!isWeb || list.length < 2) return list;
+      const expected = expectedFiles.map((path) => normalizeWorkspacePath(path || '')).filter(Boolean);
+      const expectedSet = new Set(expected);
+      const htmlFiles = expected.filter((path) => /\.html?$/i.test(path));
+      if (htmlFiles.length < 2) return list;
+      const cssFiles = expected.filter((path) => /\.(css|scss|sass|less)$/i.test(path));
+      const scriptFiles = expected.filter((path) => /\.(js|mjs|cjs|ts|jsx|tsx)$/i.test(path));
+      const docs = expected.filter((path) => /\.(md|txt)$/i.test(path));
+      const primaryHtml = htmlFiles[0] || '';
+      // Structure-first: the entry HTML is built FIRST so the CSS styles the real
+      // markup and the JS operates on real structure (same as writing markup before
+      // styling it). HTML → CSS (tokens, then base) → JS (components, then behavior).
+      const foundation = [
+        primaryHtml,
+        ...cssFiles.filter((path) => /design[-_]?tokens|tokens|theme|variables/i.test(path)),
+        ...cssFiles.filter((path) => !/design[-_]?tokens|tokens|theme|variables/i.test(path)),
+        ...scriptFiles.filter((path) => /components?|shared|layout/i.test(path)),
+        ...scriptFiles.filter((path) => !/components?|shared|layout/i.test(path)),
+      ].filter((path, index, arr) => path && arr.indexOf(path) === index);
+      const foundationSet = new Set(foundation);
+      const normalized = [];
+      const first = Object.assign({}, list[0], { tasks: foundation.map(phaseTaskForPath) });
+      normalized.push(first);
+      list.slice(1).forEach((phase) => {
+        const tasks = (Array.isArray(phase.tasks) ? phase.tasks : [])
+          .map((task) => {
+            const path = extractPlannedPathFromPhaseTask(task);
+            return path && expectedSet.has(path) && !foundationSet.has(path) ? phaseTaskForPath(path) : null;
+          })
+          .filter(Boolean);
+        if (tasks.length > 0) {
+          normalized.push(Object.assign({}, phase, { tasks }));
+        } else if (docs.length > 0 && /\b(brand|design|identity|typography|motion|style|strategy|seo|cro|guide|docs?|readme|notes?)\b/i.test(`${phase.title} ${(phase.tasks || []).map((task) => String((task && task.text) || task || '')).join(' ')}`)) {
+          normalized.push(Object.assign({}, phase, { tasks: [phaseTaskForPath(docs[0])] }));
+        }
+      });
+      return normalized;
+    }
+
     function buildAgentProjectContract(taskText = '', taskKind = '', primaryStack = '', expectedFiles = []) {
       if (String(taskKind || '').toLowerCase() !== 'project') return '';
-      const { files, htmlFile, cssFile, scriptFile } = getPlannedFileRoles(expectedFiles);
+      const { files, htmlFiles, htmlFile, cssFiles, cssFile, scriptFile } = getPlannedFileRoles(expectedFiles);
       const lower = String(taskText || '').toLowerCase();
       const lines = [];
       lines.push(`Planned files: ${files.join(', ') || '(none)'}`);
@@ -1503,18 +1620,24 @@
           lines.push(`- ${htmlFile}: semantic structure with the requested sections, shared classes, and stable IDs.`);
         }
         if (htmlFile && cssFile) {
-          const cssHref = cssFile.replace(/^\//, '');
-          lines.push(`- ${htmlFile} must include <link rel="stylesheet" href="${cssHref}"> in <head>.`);
-          lines.push(`- ${htmlFile} must not contain a <style> block or large inline style attributes.`);
-          lines.push(`- ${cssFile} must contain the visual design and only CSS.`);
-          lines.push(`- ${cssFile}: design tokens, layout, responsive rules, and a reusable animation set; prefer shared selectors over a unique one-off style for every element.`);
+          const cssHrefs = cssFiles.map((path) => path.replace(/^\//, ''));
+          const pageList = htmlFiles.length > 1 ? htmlFiles.join(', ') : htmlFile;
+          lines.push(`- Every HTML page (${pageList}) must include these stylesheet links in <head>: ${cssHrefs.map((href) => `<link rel="stylesheet" href="${href}">`).join(' ')}`);
+          lines.push('- No planned HTML page may contain a <style> block or large inline style attributes when shared CSS is planned.');
+          lines.push(`- Planned CSS files (${cssFiles.join(', ')}) must contain the visual design and only CSS.`);
+          lines.push(`- ${cssFile}: design tokens, layout, responsive rules, and reusable animation/motion rules; prefer shared selectors over a unique one-off style for every element.`);
         }
         if (htmlFile && scriptFile) {
           const scriptSrc = scriptFile.replace(/^\//, '');
-          lines.push(`- ${htmlFile} must include <script src="${scriptSrc}" defer></script>.`);
-          lines.push(`- ${htmlFile} must not contain inline JavaScript.`);
-          lines.push(`- ${scriptFile} must only reference IDs/classes that exist in ${htmlFile}.`);
+          const pageList = htmlFiles.length > 1 ? htmlFiles.join(', ') : htmlFile;
+          lines.push(`- Every HTML page that needs behavior (${pageList}) must include <script src="${scriptSrc}" defer></script>.`);
+          lines.push('- Planned HTML pages must not contain inline JavaScript.');
+          lines.push(`- ${scriptFile} must only reference IDs/classes/hooks that exist in the planned HTML pages.`);
           lines.push(`- ${scriptFile}: implement the full behavior the request needs, organized with reusable functions.`);
+        }
+        if (htmlFiles.length > 1 && (cssFile || scriptFile)) {
+          lines.push('- Multi-page consistency: use the same logo/header/nav/footer/CTA source of truth on every page. Prefer shared hooks rendered by js/components.js when that file is planned; otherwise copy the exact same class structure, not a redesigned variant.');
+          lines.push('- Public HTML pages must match the planned public page count/scope. Strategy, design-system, SEO, CRO, and implementation-guide deliverables belong in shared tokens/CSS/components and README/docs unless the user explicitly requested them as navigable pages.');
         }
         if (/\bsurprise|reveal|secret|easter egg\b/.test(lower)) {
           lines.push(`- Shared interaction contract: include a primary button with id="surprise-btn" and a reveal region with id="surprise-panel"${htmlFile ? ` in ${htmlFile}` : ''}.`);
@@ -1665,7 +1788,7 @@
       let affectedFiles = parseAgentPlanPathList(parsed && parsed.affected_files ? parsed.affected_files : '').map(mapBinaryDocPath);
       let filesToInspect = parseAgentPlanPathList(parsed && parsed.files_to_inspect ? parsed.files_to_inspect : '');
       const doneCriteria = parseAgentPlanTextList(parsed && parsed.done_criteria ? parsed.done_criteria : '', 5); // cap 5
-      const phases = parseAgentPlanPhases(parsed && parsed.phases ? parsed.phases : ''); // [{title,tasks}]
+      let phases = parseAgentPlanPhases(parsed && parsed.phases ? parsed.phases : ''); // [{title,tasks}]
       const validationSteps = parseAgentPlanTextList(parsed && parsed.validation ? parsed.validation : '', 6);
       const looksLikeWebProjectTask = taskKind === 'project' && (WEB_TASK_HINT_REGEX.test(lower) || /\bcalculator\b/.test(lower));
       const singleHtmlFileProject = taskKind === 'project' && isSingleHtmlFileRequest(taskText);
@@ -1721,6 +1844,33 @@
       if (docsOnlyTask && expectedFiles.length === 0) {
         expectedFiles = ['/README.md'];
       }
+      const publicHtmlLimit = taskKind === 'project' && (primaryStack === 'web' || looksLikeWebProjectTask)
+        ? requestedPublicHtmlPageLimit(taskText) : 0;
+      const plannedHtmlFiles = expectedFiles.filter((path) => /\.html?$/i.test(path));
+      if (publicHtmlLimit > 0 && plannedHtmlFiles.length > publicHtmlLimit) {
+        const keptHtml = plannedHtmlFiles.slice(0, publicHtmlLimit);
+        const keptHtmlSet = new Set(keptHtml.map((path) => normalizeWorkspacePath(path)));
+        const removed = new Set(plannedHtmlFiles
+          .filter((path) => !keptHtmlSet.has(normalizeWorkspacePath(path)))
+          .map((path) => normalizeWorkspacePath(path)));
+        expectedFiles = expectedFiles.filter((path) => !removed.has(normalizeWorkspacePath(path)));
+        const askedForWrittenNotes = /\b(?:strategy|guide|documentation|docs?|notes?|identity|typography|system|seo|cro|motion|content|implementation|brand)\b/i.test(lower);
+        if (askedForWrittenNotes && !expectedFiles.includes('/README.md')) {
+          expectedFiles.push('/README.md');
+        }
+        phases = phases.map((phase) => {
+          const tasks = Array.isArray(phase && phase.tasks) ? phase.tasks : [];
+          const keptTasks = tasks.filter((task) => {
+            const text = String((task && task.text) || task || '');
+            const normalizedTaskPath = normalizeWorkspacePath(text.split(/\s+/)[0] || '');
+            return !removed.has(normalizedTaskPath);
+          });
+          if (keptTasks.length === 0 && expectedFiles.includes('/README.md')) {
+            keptTasks.push({ text: 'README.md project notes', done: false });
+          }
+          return Object.assign({}, phase, { tasks: keptTasks });
+        }).filter((phase) => Array.isArray(phase && phase.tasks) && phase.tasks.length > 0);
+      }
       if (taskKind === 'edit' && expectedFiles.length === 0 && affectedFiles.length > 0) {
         expectedFiles = affectedFiles.slice();
       }
@@ -1754,6 +1904,7 @@
       if (taskKind === 'project' && needsReadme && !expectedFiles.includes('/README.md')) {
         expectedFiles.push('/README.md');
       }
+      phases = normalizeWebProjectPhases(phases, expectedFiles, primaryStack);
       const parsedSummary = String(parsed && parsed.summary ? parsed.summary : '').trim().slice(0, 220);
       return {
         taskKind,
@@ -1843,6 +1994,48 @@
       };
     }
 
+    // Harvest shared vocab (stylesheets, tokens, classes, shell hooks) from already-built
+    // files so later pages reuse real names. Deterministic, no model call. '' if nothing built.
+    function harvestFoundationVocabulary(fileContents = {}) {
+      const entries = Object.entries(fileContents || {})
+        .map(([p, c]) => [String(p || ''), String(c || '')])
+        .filter(([p, c]) => p && c.trim());
+      if (!entries.length) return '';
+      // drop file-ext/unit false positives
+      const stop = new Set(['css', 'scss', 'sass', 'less', 'png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'ico', 'js', 'mjs', 'cjs', 'json', 'html', 'htm', 'woff', 'woff2', 'ttf', 'eot', 'map', 'min']);
+      const cssPaths = [];
+      const componentScripts = [];
+      const tokens = new Set();
+      const classes = new Set();
+      const dataHooks = new Set();
+      for (const [path, content] of entries) {
+        const lower = path.toLowerCase();
+        const rel = path.replace(/^\//, '');
+        if (/\.(css|scss|sass|less)$/.test(lower)) {
+          cssPaths.push(rel);
+          let m;
+          const tokRe = /--([a-zA-Z][\w-]*)\s*:/g;
+          while ((m = tokRe.exec(content)) && tokens.size < 48) tokens.add(`--${m[1]}`);
+          const clsRe = /\.([a-zA-Z_][\w-]{1,40})(?=[\s.,#:>{[)]|$)/g;
+          while ((m = clsRe.exec(content)) && classes.size < 80) {
+            if (!stop.has(m[1].toLowerCase())) classes.add(`.${m[1]}`);
+          }
+        }
+        if (/(?:^|\/)(?:components?|layout|shared|shell)\.[cm]?js$/.test(lower)) componentScripts.push(rel);
+        let dm;
+        const dataRe = /\bdata-([a-z][\w-]*)\b/g;
+        while ((dm = dataRe.exec(content)) && dataHooks.size < 20) dataHooks.add(`data-${dm[1]}`);
+      }
+      const lines = [];
+      const uniq = (arr) => Array.from(new Set(arr));
+      if (cssPaths.length) lines.push(`Link these stylesheet(s) — single source of truth for all styling: ${uniq(cssPaths).join(', ')}`);
+      if (componentScripts.length) lines.push(`Load shared component script(s) (they render the header/nav/footer): ${uniq(componentScripts).join(', ')}`);
+      if (dataHooks.size) lines.push(`Shared component placeholders: ${Array.from(dataHooks).slice(0, 8).map((d) => `<div ${d}></div>`).join(' ')}`);
+      if (tokens.size) lines.push(`Design tokens (use via var(--name)): ${Array.from(tokens).join(', ')}`);
+      if (classes.size) lines.push(`Existing CSS classes (reuse these — do NOT rename or duplicate): ${Array.from(classes).join(', ')}`);
+      return lines.join('\n').slice(0, 1800);
+    }
+
     return {
       deriveProjectNameFromTask,
       isAgentTaskGameLike,
@@ -1874,6 +2067,7 @@
       isOpenWorkspaceFollowupMutation,
       normalizeAgentPlanSpec,
       buildFallbackAgentPlanSpec,
+      harvestFoundationVocabulary,
     };
   }
 

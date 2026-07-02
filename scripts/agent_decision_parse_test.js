@@ -46,6 +46,37 @@ function ok(name, cond) {
   ok('well-formed edit_file decision is unchanged', d && d.action === 'tool' && d.tool === 'edit_file' && d.path === '/style.css');
 }
 
+// Hermes/Qwen tool-call XML must parse without leaking the raw tool call or file
+// content as user-facing narration.
+{
+  const raw = `I'll start by creating the shared component script.
+
+<tool_call>
+<function=agent_step>
+<parameter=action>
+tool
+</parameter>
+<parameter=tool>
+write_file
+</parameter>
+<parameter=path>
+/js/components.js
+</parameter>
+<parameter=content>
+// components
+document.addEventListener('DOMContentLoaded', function () {
+  window.FlowPilot = {};
+});
+</parameter>
+</function>
+</tool_call>`;
+  const d = parseAgentDecision(raw);
+  ok('Hermes tool_call parses as write_file', d && d.action === 'tool' && d.tool === 'write_file' && d.path === '/js/components.js');
+  ok('Hermes tool_call keeps content', d && d.content.includes('window.FlowPilot'));
+  ok('Hermes tool_call narration keeps only the note', d && d.thought === "I'll start by creating the shared component script.");
+  ok('Hermes tool_call narration does not leak XML', d && !/<tool_call|<parameter|function=agent_step/i.test(`${d.thought} ${d.message}`));
+}
+
 // Existing behavior preserved: tool-name-in-action repair still works.
 {
   const d = parseAgentDecision('{"action":"read_file","path":"/x.js","start_line":1,"end_line":40}');
