@@ -445,7 +445,7 @@ class AdapterManager:
         return self._port_alive()
 
     def start(self, username: str, password: str, port: int = 9999, headless: bool = True,
-              python_exe: str = "", script: str = "", hide_prompt: bool = False) -> dict:
+              python_exe: str = "", script: str = "", hide_prompt: bool = False, model: str = "") -> dict:
         with self._lock:
             if self.running():
                 return {"ok": True, "detail": "already running",
@@ -459,6 +459,10 @@ class AdapterManager:
             env = dict(os.environ)
             env["PYTHONUNBUFFERED"] = "1"  # so adapter prints (incl. AIEXE_DIAG) hit the log live
             env["AIEXE_HIDE_PROMPT"] = "1" if hide_prompt else "0"
+            if str(model or "").strip():
+                # Preselect at boot (window still visible) so the first send never needs
+                # the minimized-picker fallback that restores a corner window.
+                env["AIEXE_PRESELECT_MODEL"] = str(model).strip()
             user = str(username or "").strip()
             passwd = str(password or "")
             profile = os.path.join(self._dir, ".chrome-profile")

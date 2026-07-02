@@ -26,7 +26,7 @@ def adapter_install() -> AdapterActionResponse:
 def adapter_start(payload: AdapterStartRequest) -> AdapterActionResponse:
     return AdapterActionResponse(**adapter_manager.start(
         payload.username, payload.password, payload.port, payload.headless,
-        hide_prompt=payload.hide_prompt))
+        hide_prompt=payload.hide_prompt, model=payload.model))
 
 
 @router.post("/adapter/stop", response_model=AdapterActionResponse)

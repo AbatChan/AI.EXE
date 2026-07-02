@@ -2313,6 +2313,14 @@ try:  # remember which model Venice is CURRENTLY on, so AI.EXE can adopt it (not
         print("AIEXE_MODEL current at startup: %r" % _cur, flush=True)
 except Exception:
     pass
+try:  # preselect the app's model while the window is STILL VISIBLE — a minimized
+    # picker can't render rows, and the corner-restore fallback annoys the user.
+    _want = (os.getenv('AIEXE_PRESELECT_MODEL') or '').replace(':latest', '').strip()
+    if _want:
+        print("AIEXE_MODEL preselecting %r at boot" % _want, flush=True)
+        aiexe_select_model(driver, _want)
+except Exception:
+    pass
 _aiexe_read_credits(driver)
 try:  # startup done — ONE minimize, after all window-dependent work finished
     driver.minimize_window()

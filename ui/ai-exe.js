@@ -12361,7 +12361,11 @@ if (settingsAdapterStartBtn) {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         // Visible browser: Venice's login is behind Cloudflare, which blocks headless. The
         // window also lets you complete an email verification code once (profile persists).
-        body: JSON.stringify({ username: user, password: pass, port: adapterTargetPort(), headless: false, hide_prompt: veniceHidePromptOn() }),
+        body: JSON.stringify({
+          username: user, password: pass, port: adapterTargetPort(), headless: false,
+          hide_prompt: veniceHidePromptOn(),
+          model: String(getProviderModel(VENICE_ADAPTER_PROVIDER_ID) || '').replace(/:latest$/i, ''),
+        }),
       })).json();
       if (r.ok && r.detail === 'already running') {
         showAppNotification({ title: 'Adapter', message: 'Adapter already running.', kind: 'success' });
@@ -14057,7 +14061,11 @@ async function startVeniceAdapterThenResend() {
     if (st && !st.installed) { await fetch(backend + '/api/adapter/install', { method: 'POST' }); }
     await fetch(backend + '/api/adapter/start', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username: user, password: pass, port: adapterTargetPort(), headless: false, hide_prompt: veniceHidePromptOn() }),
+      body: JSON.stringify({
+        username: user, password: pass, port: adapterTargetPort(), headless: false,
+        hide_prompt: veniceHidePromptOn(),
+        model: String(getProviderModel(VENICE_ADAPTER_PROVIDER_ID) || '').replace(/:latest$/i, ''),
+      }),
     });
     for (let i = 0; i < 90; i++) {                    // up to ~135s (manual login/captcha)
       await new Promise((r) => setTimeout(r, 1500));

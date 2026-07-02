@@ -90,6 +90,7 @@ class AdapterStartRequest(BaseModel):
     port: int = 9999
     headless: bool = True
     hide_prompt: bool = False  # hide the raw typed prompt in the Venice window (off by default)
+    model: str = ""            # app's selected model — preselected at boot while the window is visible
 
 
 class AdapterStatusResponse(BaseModel):

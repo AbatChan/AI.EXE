@@ -1499,6 +1499,16 @@
               observation: `write_file blocked for ${path}: the new content ${newContentStructureIssue}. The existing file was kept. Use edit_file for a targeted change instead of rewriting the whole file.`,
             };
           }
+          // Mangled semver is mid-file corruption, NOT truncation — the save-and-append
+          // flow below can't fix it (the corrupted prefix stays). Reject so the next step
+          // is a FRESH write_file generation instead of a doomed continuation.
+          if (creatingNewFile && /mangled dependency versions/.test(newContentStructureIssue)) {
+            return {
+              ok: false,
+              mutated,
+              observation: `write_file rejected for ${path}: the generated content ${newContentStructureIssue} Nothing was saved. Call write_file for ${path} again with freshly generated content — every dependency version must be plain semver such as "^18.3.1".`,
+            };
+          }
         }
         const parentPath = deps.parentWorkspacePath(path);
         if (parentPath && parentPath !== '/' && parentPath !== '.') {
