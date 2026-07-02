@@ -386,10 +386,31 @@
         return '';
       }
       if (/\.json$/i.test(normalized)) {
+        let parsed = null;
         try {
-          JSON.parse(text);
+          parsed = JSON.parse(text);
         } catch (err) {
           return `is not valid JSON (${String((err && err.message) || '')})`;
+        }
+        // package.json: catch clearly-mangled dependency versions ("^1^.2.0" — a real
+        // corrupted-generation case) that npm install hard-rejects. High-confidence
+        // signals only (digit followed by caret, caret before a dot, or no digit at
+        // all); legit ranges like ^18.2.0, ~1.2, >=16, 1.x, * all pass untouched.
+        if (/(?:^|\/)package\.json$/i.test(normalized) && parsed && typeof parsed === 'object') {
+          const bad = [];
+          ['dependencies', 'devDependencies', 'peerDependencies'].forEach((key) => {
+            const section = parsed[key];
+            if (!section || typeof section !== 'object') return;
+            Object.keys(section).forEach((name) => {
+              const v = String(section[name] || '').trim();
+              const mangled = /\d\^|\^\.|\^\^/.test(v)
+                || (!/\d/.test(v) && !/^(\*|x|latest|next)$/i.test(v));
+              if (mangled) bad.push(`${name}: "${v}"`);
+            });
+          });
+          if (bad.length) {
+            return `has mangled dependency versions that npm install will reject — ${bad.slice(0, 4).join(', ')}${bad.length > 4 ? ` (+${bad.length - 4} more)` : ''}. Rewrite package.json with real semver versions.`;
+          }
         }
       }
       return '';
@@ -857,10 +878,10 @@
         if (decoded && /\n/.test(decoded)) return decoded;
       } catch (_) { /* fall through */ }
       return text
-        .replace(/\\\\/g, ' ')
+        .replace(/\\\\/g, '\u0000')
         .replace(/\\n/g, '\n').replace(/\\r/g, '\r').replace(/\\t/g, '\t')
         .replace(/\\"/g, '"').replace(/\\'/g, "'")
-        .replace(/ /g, '\\');
+        .replace(/\u0000/g, '\\');
     };
     async function executeDeveloperToolCall(chatId, decision, taskText, toolEvents = [], planSpec = null, runOptions = {}) {
       const tool = String(decision && decision.tool ? decision.tool : '').toLowerCase();
