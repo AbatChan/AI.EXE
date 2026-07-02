@@ -1428,9 +1428,11 @@ function currentAgentStepTimeoutMs() {
 // and a flat 150s wrongly killed a legitimately long (but progressing) generation.
 // generateFullAgentFile heartbeats markAgentToolProgress() after each pass, so the
 // loop only abandons a tool that makes NO progress for this long (a true hang).
-const agentToolTimeoutMs = 150000;
-const agentToolIdleTimeoutMs = 130000;
-const agentToolHardCapMs = 420000;
+// Provider-dependent: the Venice adapter can spend minutes on a big file with zero
+// visible progress when the stream falls back to one-shot mode.
+function currentAgentToolTimeoutMs() { return isVeniceAdapterSelected() ? 300000 : 150000; }
+function currentAgentToolIdleTimeoutMs() { return isVeniceAdapterSelected() ? 300000 : 130000; }
+function currentAgentToolHardCapMs() { return isVeniceAdapterSelected() ? 900000 : 420000; }
 const agentTotalTimeoutMs = 600000;
 // Heartbeat for in-progress tool generation (loop's idle watchdog reads this).
 let lastAgentToolProgressAt = 0;
@@ -10012,7 +10014,7 @@ const agentPlanner = window.AIExeAgentPlanner && typeof window.AIExeAgentPlanner
     getAgentExpandedReadChars,
     agentDecisionMaxTokens,
     agentPlanGrammar,
-    agentStepTimeoutMs: currentAgentStepTimeoutMs(),
+    get agentStepTimeoutMs() { return currentAgentStepTimeoutMs(); },
     isLikelyCompletePythonGameSource,
     normalizeAgentPlanSpec,
   })
@@ -10148,15 +10150,15 @@ const agentLoop = window.AIExeAgentLoop && typeof window.AIExeAgentLoop.createAg
   ? window.AIExeAgentLoop.createAgentLoop({
     nativeBridge,
     agentTotalTimeoutMs,
-    agentToolTimeoutMs,
-    agentToolIdleTimeoutMs,
-    agentToolHardCapMs,
+    get agentToolTimeoutMs() { return currentAgentToolTimeoutMs(); },
+    get agentToolIdleTimeoutMs() { return currentAgentToolIdleTimeoutMs(); },
+    get agentToolHardCapMs() { return currentAgentToolHardCapMs(); },
     markAgentToolProgress,
     getLastAgentToolProgressAt,
     agentMaxSteps,
     agentDecisionMaxTokens,
     agentDecisionGrammar,
-    agentStepTimeoutMs: currentAgentStepTimeoutMs(),
+    get agentStepTimeoutMs() { return currentAgentStepTimeoutMs(); },
     agentMaxToolOutputChars,
     mergeAgentActivityIntoList,
     pushActiveAgentStreamActivity,

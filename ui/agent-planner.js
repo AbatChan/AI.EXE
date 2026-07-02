@@ -28,7 +28,10 @@
       : () => 0;
     const agentDecisionMaxTokens = Number(deps.agentDecisionMaxTokens) || 120;
     const agentPlanGrammar = String(deps.agentPlanGrammar || '');
-    const agentStepTimeoutMs = Number(deps.agentStepTimeoutMs) || 20000;
+    // Read per call, not snapshot at boot — the budget is provider-dependent (the Venice
+    // adapter needs minutes; a snapshot froze the wrong value and the plan step timed out,
+    // silently downgrading runs to the fallback plan: wrong name, 2 files, no phases).
+    const agentStepTimeoutMs = () => Number(deps.agentStepTimeoutMs) || 20000;
 
     function looksLikePlaceholderImplementation(content) {
       const text = String(content || '').toLowerCase();
@@ -847,7 +850,7 @@
           ok: false,
           timedOut: true,
           message: 'Agent plan step timed out.',
-        }), agentStepTimeoutMs)),
+        }), agentStepTimeoutMs())),
       ]);
       if (!res || !res.ok) {
         const fb = buildFallbackAgentPlanSpec(taskText, { chatId, forceProjectScope });
