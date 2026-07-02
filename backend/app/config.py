@@ -2,7 +2,7 @@
 import os
 import time
 
-BACKEND_VERSION = "0.17.8"
+BACKEND_VERSION = "0.17.9"
 
 
 class Settings:
@@ -35,6 +35,11 @@ class Settings:
 
     # §6/§7 — uploaded workshop modules land under <workshop_dir>/modules/.
     workshop_dir = os.environ.get("AIEXE_WORKSHOP_DIR", os.path.join(data_dir, "workshop"))
+
+    # Per-request HTTP budget for the Venice Pro adapter (browser automation + reasoning
+    # models take minutes) vs. a normal API provider. Env-overridable, used in one place.
+    adapter_http_timeout = int(os.environ.get("AIEXE_ADAPTER_HTTP_TIMEOUT", "300"))
+    provider_http_timeout = int(os.environ.get("AIEXE_PROVIDER_HTTP_TIMEOUT", "120"))
 
 
 settings = Settings()

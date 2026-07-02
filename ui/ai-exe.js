@@ -1046,10 +1046,23 @@ const pendingPreflightConfirmations = new Map();
 const smartTitleRenamePending = new Set();
 let notificationContainer = null;
 let urlContextMode = 'chat';
+// --- Central knobs: flip once here, applies everywhere -----------------------
 // ONE switch for the Venice-window prompt-hide default: flip this and the setting's
 // default flips everywhere (checkbox, start payloads, adapter env). A user's explicit
 // toggle in Settings still overrides it (stored value wins once set).
 const VENICE_HIDE_PROMPT_DEFAULT = false;
+// The Venice Pro adapter's identity + default endpoint (provider def, health pings,
+// start payloads, and port parsing all derive from these).
+const VENICE_ADAPTER_PROVIDER_ID = 'veniceadapter';
+const VENICE_ADAPTER_DEFAULT_URL = 'http://127.0.0.1:9999';
+// Per-decision agent budgets: API providers answer in seconds; the adapter drives a real
+// browser and reasoning models can think for minutes before the JSON.
+const AGENT_STEP_TIMEOUT_MS = 45000;
+const AGENT_STEP_TIMEOUT_ADAPTER_MS = 300000;
+
+function isVeniceAdapterSelected() {
+  try { return getSelectedInferenceProvider() === VENICE_ADAPTER_PROVIDER_ID; } catch (_) { return false; }
+}
 
 function veniceHidePromptOn() {
   const v = appSettings ? appSettings.veniceHidePrompt : undefined;
@@ -1186,11 +1199,11 @@ const inferenceProviderDefs = {
     modelField: 'veniceAdapterModel',
     endpointField: 'veniceAdapterEndpoint',
     endpointLabel: 'Adapter URL',
-    endpointPlaceholder: 'http://127.0.0.1:9999',
+    endpointPlaceholder: VENICE_ADAPTER_DEFAULT_URL,
     modelPlaceholder: 'llama-3.1-405b-akash-api',
     defaultModel: 'llama-3.1-405b-akash-api',
-    defaultEndpoint: 'http://127.0.0.1:9999',
-    endpointUrl: 'http://127.0.0.1:9999',
+    defaultEndpoint: VENICE_ADAPTER_DEFAULT_URL,
+    endpointUrl: VENICE_ADAPTER_DEFAULT_URL,
     helpText: 'Native-Ollama adapter for your Venice Pro subscription — no API key, no credits. Temporary/testing only: it drives the Venice website via browser automation, so it is fragile and can break when Venice changes their site.',
     protocol: 'ollama',
   },
@@ -1365,7 +1378,7 @@ try {
 (function () {
   const nudge = () => setTimeout(() => {
     try {
-      if (typeof getSelectedInferenceProvider !== 'function' || getSelectedInferenceProvider() !== 'veniceadapter') return;
+      if (!isVeniceAdapterSelected()) return;
       const user = String((appSettings && appSettings.veniceAdapterUsername) || '').trim();
       const pass = String((appSettings && appSettings.veniceAdapterPassword) || '');
       if (!user || !pass) return;
@@ -1406,8 +1419,8 @@ function currentAgentStepTimeoutMs() {
   // 300s for the adapter: Venice reasoning models (reasoning can be FORCED ON, e.g.
   // Claude Sonnet 4.6) legitimately think for minutes before emitting the decision JSON.
   try {
-    return getSelectedInferenceProvider() === 'veniceadapter' ? 300000 : 45000;
-  } catch (_) { return 45000; }
+    return isVeniceAdapterSelected() ? AGENT_STEP_TIMEOUT_ADAPTER_MS : AGENT_STEP_TIMEOUT_MS;
+  } catch (_) { return AGENT_STEP_TIMEOUT_MS; }
 }
 // Tool execution can run its own (slow) content-generation inference; bound it so a
 // stalled write/edit can't hang the agent loop. This is now an IDLE limit, not a
@@ -11454,7 +11467,7 @@ if (settingsProviderSelect) {
       : 'local';
     // Leaving the Venice Pro adapter: stop it so its Chrome window closes (no orphan browser,
     // and the profile lock is freed for next time).
-    if (prevProvider === 'veniceadapter' && appSettings.inferenceProvider !== 'veniceadapter') {
+    if (prevProvider === VENICE_ADAPTER_PROVIDER_ID && appSettings.inferenceProvider !== VENICE_ADAPTER_PROVIDER_ID) {
       fetch(getAIExeBackendUrl() + '/api/adapter/stop', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
         .then(() => { if (typeof refreshAdapterStatus === 'function') refreshAdapterStatus(); })
         .catch(() => {});
@@ -11541,9 +11554,9 @@ if (settingsDebugTraceChk) {
 
 // --- Venice Pro adapter: Start/Stop the local adapter process via the backend ---
 function adapterTargetPort() {
-  const url = String((settingsApiEndpointInput && settingsApiEndpointInput.value) || appSettings.veniceAdapterEndpoint || 'http://127.0.0.1:9999');
+  const url = String((settingsApiEndpointInput && settingsApiEndpointInput.value) || appSettings.veniceAdapterEndpoint || VENICE_ADAPTER_DEFAULT_URL);
   const m = url.match(/:(\d{2,5})(?:\/|$)/);
-  return m ? Number(m[1]) : 9999;
+  return m ? Number(m[1]) : (Number(VENICE_ADAPTER_DEFAULT_URL.match(/:(\d{2,5})/)[1]) || 9999);
 }
 // Noise that isn't an error: HTTP access-log lines ("GET /api/tags HTTP/1.1" 200 ...),
 // server startup banners, and clean-shutdown notices.
@@ -13551,7 +13564,7 @@ async function sendMessage() {
   if (!ensureSignedIn()) return;
   // On the Venice Pro adapter: make sure it's actually serving before we send (auto-start +
   // wait if needed). Runs before we clear the input, so the message is never lost.
-  if (getSelectedInferenceProvider() === 'veniceadapter') {
+  if (isVeniceAdapterSelected()) {
     const ready = await ensureVeniceAdapterReady();
     if (!ready) return;
   }
@@ -14928,7 +14941,7 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
         model: String(getProviderModel(inferenceProvider) || ''),
         workspace: getWorkspaceDebugSnapshot(),
       });
-      if (inferenceProvider === 'veniceadapter') {
+      if (inferenceProvider === VENICE_ADAPTER_PROVIDER_ID) {
         appendErrorMessageToChat(chatId, res && res.message
           ? res.message
           : "The Venice Pro adapter is running, but Venice did not return a usable response. Check Settings → Provider, then resend.");
