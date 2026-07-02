@@ -62,6 +62,10 @@ MODEL_SEARCH_BUTTON_XPATH = "//button[contains(., 'Search models')]"
 MODEL_ROW_TITLE_CSS = "p[title]"        # each model row's name is in a <p title="...">
 CLOSE_BUTTON_XPATH = "//button[@aria-label='Close']"
 NEW_CHAT_XPATH = "//button[@aria-label='New chat']"   # SPA new-chat (no full page reload)
+# Composer's per-chat Settings dialog (Web Enabled / URL Scraping / Reasoning switches).
+CHAT_SETTINGS_BUTTON_XPATH = "//button[@aria-label='Settings']"
+# Row switch inside that dialog, keyed by the row's visible label text ({} = label).
+CHAT_SETTINGS_SWITCH_XPATH = "//p[normalize-space()='{}']/ancestor::div[contains(@class,'css-bngl5n')]//input[@type='checkbox']"
 
 # --- Streaming API ----------------------------------------------------------
 # The internal endpoint Venice's frontend POSTs to for a completion; the fetch interceptor

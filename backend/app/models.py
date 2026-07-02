@@ -73,6 +73,7 @@ class ProviderCompleteRequest(BaseModel):
     max_tokens: int = 4096
     temperature: float = 0.2
     chat_id: str = ""   # AI.EXE chat id — the adapter maps it to one Venice conversation
+    think: str = ""     # "on" | "off" — adapter normalizes Venice's per-chat Reasoning switch
 
 
 class ProviderCompleteResponse(BaseModel):
