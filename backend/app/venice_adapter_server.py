@@ -68,6 +68,8 @@ VC_MODEL_SEARCH_BUTTON_XPATH = _vcfg('MODEL_SEARCH_BUTTON_XPATH', "//button[cont
 VC_MODEL_ROW_TITLE_CSS = _vcfg('MODEL_ROW_TITLE_CSS', "p[title]")
 VC_CLOSE_BUTTON_XPATH = _vcfg('CLOSE_BUTTON_XPATH', "//button[@aria-label='Close']")
 VC_NEW_CHAT_XPATH = _vcfg('NEW_CHAT_XPATH', "//button[@aria-label='New chat']")
+VC_CHAT_SETTINGS_BUTTON_XPATH = _vcfg('CHAT_SETTINGS_BUTTON_XPATH', "//button[@aria-label='Settings']")
+VC_CHAT_SETTINGS_SWITCH_XPATH = _vcfg('CHAT_SETTINGS_SWITCH_XPATH', "//p[normalize-space()='{}']/ancestor::div[contains(@class,'css-bngl5n')]//input[@type='checkbox']")
 
 
 app = Flask(__name__)
@@ -808,6 +810,59 @@ def _aiexe_model_catalog():
     return names
 
 
+AIEXE_SETTINGS_DONE = set()   # chat keys whose Venice per-chat settings were already normalized
+
+
+def _aiexe_set_switch(driver, label, want_on):
+    """Flip one labeled switch in Venice's per-chat Settings dialog (must be open).
+    Skips disabled switches (e.g. Reasoning on forced-reasoning models). Best-effort."""
+    try:
+        sw = driver.find_element(By.XPATH, VC_CHAT_SETTINGS_SWITCH_XPATH.format(label))
+    except Exception:
+        print("AIEXE_SETTINGS switch %r not found" % label, flush=True)
+        return
+    try:
+        if sw.get_attribute("disabled") is not None or sw.get_attribute("aria-disabled") == "true":
+            print("AIEXE_SETTINGS %r is locked by Venice (cannot change)" % label, flush=True)
+            return
+        is_on = (sw.get_attribute("aria-checked") == "true") or bool(sw.get_attribute("checked"))
+        if bool(want_on) != is_on:
+            driver.execute_script(
+                "arguments[0].closest('label').querySelector('.chakra-switch__track').click();", sw)
+            time.sleep(0.3)
+            print("AIEXE_SETTINGS %r -> %s" % (label, "on" if want_on else "off"), flush=True)
+    except Exception as _e:
+        print("AIEXE_SETTINGS %r error: %s" % (label, str(_e)[:120]), flush=True)
+
+
+def _aiexe_normalize_chat_settings(driver, keep_reasoning=False):
+    """Open Venice's per-chat Settings and turn OFF what hurts the adapter: Web Enabled
+    (agent JSON decisions were doing live web searches — '10 Citations' — pure latency),
+    URL Scraping, and Reasoning unless AI.EXE's Think mode asked for it. Fully guarded."""
+    try:
+        btn = None
+        for b in driver.find_elements(By.XPATH, VC_CHAT_SETTINGS_BUTTON_XPATH):
+            if b.is_displayed():
+                btn = b
+                break
+        if btn is None:
+            print("AIEXE_SETTINGS button not found", flush=True)
+            return
+        driver.execute_script("arguments[0].click();", btn)
+        time.sleep(0.8)
+        _aiexe_set_switch(driver, "Web Enabled", False)
+        _aiexe_set_switch(driver, "URL Scraping", False)
+        _aiexe_set_switch(driver, "Reasoning", bool(keep_reasoning))
+        _aiexe_dismiss_modal(driver)
+        time.sleep(0.3)
+    except Exception as _e:
+        print("AIEXE_SETTINGS error: %s" % str(_e)[:150], flush=True)
+        try:
+            _aiexe_dismiss_modal(driver)
+        except Exception:
+            pass
+
+
 def _aiexe_set_native_value(driver, el, text, proto="HTMLTextAreaElement"):
     """Set a React/Chakra-controlled field's value via the native prototype setter + input
     event (plain send_keys doesn't always register). Used for the composer and search box."""
@@ -1295,6 +1350,17 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
         except Exception:
             pass
         _aiexe_dismiss_modal(driver)  # never let a stray dialog block the composer
+        # Normalize Venice's per-chat settings once per chat (and again if Think flips):
+        # web search / URL scraping OFF, Reasoning follows AI.EXE's Think mode.
+        try:
+            _think = 'on' if str(data.get('aiexe_think') or '') == 'on' else 'off'
+            _skey = "%s|%s" % (_chat_key or 'nokey', _think)
+            if _chat_key and _skey not in AIEXE_SETTINGS_DONE:
+                _aiexe_normalize_chat_settings(driver, keep_reasoning=(_think == 'on'))
+                AIEXE_SETTINGS_DONE.add(_skey)
+                AIEXE_SETTINGS_DONE.discard("%s|%s" % (_chat_key, 'on' if _think == 'off' else 'off'))
+        except Exception:
+            pass
         # Venice SPA navigation/model-picker changes can rerender the composer. Never reuse
         # the textarea found before model selection; reacquire it right before typing.
         element = _aiexe_wait_composer(driver)

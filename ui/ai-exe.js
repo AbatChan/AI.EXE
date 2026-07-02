@@ -1393,8 +1393,10 @@ const agentMaxToolOutputChars = 26000;
 // Browser-automation providers (Venice adapter) legitimately take far longer per decision
 // than an API call — typing + streaming through a real page. 45s was timing agent runs out.
 function currentAgentStepTimeoutMs() {
+  // 300s for the adapter: Venice reasoning models (reasoning can be FORCED ON, e.g.
+  // Claude Sonnet 4.6) legitimately think for minutes before emitting the decision JSON.
   try {
-    return getSelectedInferenceProvider() === 'veniceadapter' ? 120000 : 45000;
+    return getSelectedInferenceProvider() === 'veniceadapter' ? 300000 : 45000;
   } catch (_) { return 45000; }
 }
 // Tool execution can run its own (slow) content-generation inference; bound it so a
@@ -6665,7 +6667,7 @@ async function streamAnthropicChatCompletion(prompt, handlers = {}, options = {}
 // Native Ollama (the Venice Pro adapter) — routed THROUGH the backend, because the adapter
 // sends no CORS header so the WebView can't call it directly. The backend (always running,
 // configured with the same provider) reaches the adapter server-side. No API key, no credits.
-async function requestOllamaChatCompletion(provider, prompt, maxTokens, systemPrompt = '') {
+async function requestOllamaChatCompletion(provider, prompt, maxTokens, systemPrompt = '', thinkActive = false) {
   const model = getProviderModel(provider);
   if (!model) return null;
   const messages = systemPrompt
@@ -6681,7 +6683,13 @@ async function requestOllamaChatCompletion(provider, prompt, maxTokens, systemPr
     const response = await fetch(getAIExeBackendUrl() + '/api/provider/complete', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ messages, max_tokens: Math.max(1, Number(maxTokens) || 4096), temperature: 0.2, chat_id: chatId }),
+      body: JSON.stringify({
+        messages,
+        max_tokens: Math.max(1, Number(maxTokens) || 4096),
+        temperature: 0.2,
+        chat_id: chatId,
+        think: thinkActive ? 'on' : 'off',   // adapter normalizes Venice's per-chat Reasoning switch
+      }),
     });
     if (!response.ok) return { ok: false, output: '', status: response.status };
     const data = await response.json();
@@ -6695,7 +6703,7 @@ async function requestOllamaChatCompletion(provider, prompt, maxTokens, systemPr
 // Streaming shim: the adapter is slow/non-streaming, so fetch the full reply and fire
 // onDelta once (keeps the file-gen streaming caller happy).
 async function streamOllamaChatCompletion(provider, prompt, handlers = {}, options = {}) {
-  const result = await requestOllamaChatCompletion(provider, prompt, options.maxTokens, options.systemPrompt || '');
+  const result = await requestOllamaChatCompletion(provider, prompt, options.maxTokens, options.systemPrompt || '', Boolean(options.thinkActive));
   if (result && result.ok && typeof handlers.onDelta === 'function' && result.output) {
     handlers.onDelta(String(result.output));
   }
