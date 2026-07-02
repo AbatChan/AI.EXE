@@ -58,6 +58,7 @@
         '- Never use `move` with `src_path` or `dst_path` set to `/`. The workspace root cannot be moved or renamed with the move tool.',
         '- If the user asks to rename the current workspace root folder, do not pretend it was renamed. Explain the limitation or choose a different valid in-workspace target.',
         '- For rename, move, or delete requests, only the matching operation can satisfy the request. Do not simulate success by writing a marker file, note file, helper file, `.project_name.txt`, or any other metadata file unless the user explicitly asked for that file.',
+        '- To MOVE or RENAME a file/folder, use the `move` tool with `src_path` (current path) and `dst_path` (new path) — e.g. {"action":"tool","tool":"move","src_path":"/a/file.html","dst_path":"/b/file.html"}. Do NOT recreate the file with write_file at the new location: that leaves the original behind and duplicates it. `move` relocates the existing file in one step.',
         '- If the user is asking for explanation, verification, correlation, or how to use existing code, prefer read_file and then final instead of editing files.',
         '- Normal exploration flow: list_dir when the workspace shape is unknown; read_file for known small/central files; search_files for locating pasted errors, symbols, selectors, function names, or keywords inside larger/unknown files.',
         '- For edit/debug requests, read the planned or known source files first when they are likely small enough to inspect directly. Use search_files when the user gives an error message, when the likely location is unclear, or when a large file/codebase needs keyword narrowing.',
@@ -65,8 +66,8 @@
         '- If inspection shows no grounded bug, misleading UI behavior, or inaccurate documentation in the available files, finalize with that conclusion instead of inventing a change.',
         '- For a new app/project that includes README.md, write the app files first and then write README.md from the planned file names. Only inspect existing implementation files for docs-only or existing-code documentation tasks.',
         '- Before edit_file on an existing file, either the user named the exact file path or that file was already read successfully in TOOL_RESULTS.',
-        '- If a file already exists in this run and needs changes, prefer read_file then edit_file. Do not use write_file as a pseudo-edit.',
-        '- Use write_file to choose the target file path only when creating a new file from scratch.',
+        '- If a file ALREADY EXISTS in the workspace (it was there before this run, or you created/read it earlier this run), changing it means read_file THEN edit_file. NEVER call write_file on a file that already exists — write_file replaces the whole file and erases the work already in it. When the user asks to "make changes"/"add"/"update" an existing project, read the existing files and edit them; do not rebuild them and do not start a new project.',
+        '- Use write_file ONLY to create a brand-new file that does not exist yet.',
         '- Use concise project and file names from the task\'s core feature nouns.',
         '- Never finalize while anything in PENDING_REQUIREMENTS is still missing.',
         '- Treat PLAN as the contract for this run. Use `files_to_inspect`/`Affected files`/`Done criteria` to choose the next tool; do not finish after a one-file change when the plan says multiple files must change.',
@@ -143,7 +144,7 @@
         "done_criteria: the user-facing plan checklist (also injected to guide the agent) — 3 to 5 plain-language outcomes in the user's terms. Group related capabilities into ONE item; never split things that belong together.",
         'validation: short pipe-delimited validation steps such as validate_files, syntax check, browser check, or manual review',
         'summary: one short natural sentence the user can read directly before execution starts',
-        'phases: empty string for a small/medium project. For a LARGE or complex project, 2-4 build phases separated by " | ". Phase 1 must produce a complete RUNNABLE minimal version; each later phase adds a coherent feature set that builds on it. Give each phase a short title, then " :: ", then 2-5 concrete sub-tasks separated by " ; ". Example: "Runnable skeleton :: page layout ; top navigation ; empty board renders | Core gameplay :: piece movement ; line clears ; live score | Polish :: animations ; pause and restart ; high-score persistence". Phase 1 stands alone; later phases run on Continue.',
+        'phases: empty string for a small/medium project. For a LARGE or multi-page project, 2-4 build phases separated by " | ". The phases must PARTITION the work — each expected_file/page/feature is built in EXACTLY ONE phase; NEVER repeat a page/feature across phases, and NEVER add a "polish/restructure/reorganize/finalize" phase that re-touches files earlier phases built (later phases only ADD new files/features). Phase 1 = a COMPLETE RUNNABLE minimal core (entry page/main command + shared foundations + core structure/behavior). STRUCTURE-FIRST order (like any language: write the markup/interface before styling/implementing it): for web, the entry HTML comes FIRST, THEN the stylesheet(s) that style that real structure, THEN the script(s) — never style/decoration first. Each later phase ADDS a distinct NEW group. Title, then " :: ", then 2-5 CONCRETE file-grounded sub-tasks separated by " ; " — each is an ACTUAL file from expected_files, named for THIS project (do NOT copy generic boilerplate names). Phase order: structure/core first, then feature groups, then extras. Together the phases cover every expected_file exactly once. Format (delimiters only — fill in this project\'s real files in structure-first order): "<phase one title> :: <entry markup file> ; <stylesheet file> ; <script file> | <feature phase title> :: <page file> ; <page file> | <extras title> :: <file> ; <file>". Phase 1 stands alone; later phases run on Continue.',
         'Rules:',
         '- Infer the task dynamically from the user request and chat history.',
         '- If a workspace is already open and the request can reasonably apply to that current project, prefer task_kind="edit" or task_kind="analysis" over task_kind="project".',
@@ -155,15 +156,18 @@
         '- If the user asks to inspect first and then make exactly one grounded improvement, do not force an edit when the available files do not show a clear bug, misleading behavior, or documentation issue. In that case prefer task_kind="analysis".',
         '- Requests to document, clarify, onboard, or make an existing project easier for another developer to understand usually belong to task_kind="edit", not task_kind="project".',
         '- If the requested operation targets the workspace root itself and the tools do not support it, do not plan around fake helper files or metadata files. Prefer an explanatory completion instead.',
-        '- For project tasks, set project_name from the DISTINCTIVE SUBJECT of the app (what it IS or does), as 2 to 4 meaningful words in kebab-case (e.g. "factory-logistics-simulator", "budget-tracker"). Skip filler that describes scope/quantity/quality not the thing itself ("entire", "complete", "full", "whole", "new", "simple", "modern", "offline"), and never use a single letter, an article, or a bare generic word ("app"/"site"/"project"/"tool"). For "build the entire offline factory logistics simulator", the name is "factory-logistics-simulator", NOT "entire".',
+        '- For project tasks, set project_name from the DISTINCTIVE SUBJECT of the app (what it IS or does), as 2 to 4 meaningful words in kebab-case (e.g. "clinic-scheduler", "inventory-auditor", "training-timer"). Skip filler that describes scope/quantity/quality not the thing itself ("entire", "complete", "full", "whole", "new", "simple", "modern", "offline"), and never use a single letter, an article, or a bare generic word ("app"/"site"/"project"/"tool"). For "build the entire offline clinic appointment scheduler", the name is "clinic-appointment-scheduler", NOT "entire".',
         '- Write summary like a professional software agent kickoff sentence, not a label.',
         '- Keep summary specific about the deliverable and main capabilities.',
         '- Decide file scope from the requested outcome. Do not rely on keyword recipes.',
-        '- For project tasks, expected_files should list the smallest realistic MVP deliverables.',
+        '- PLAN ORDER FOR ANY PROJECT: identify the user-visible flows/screens/commands/data first, then choose the file structure that supports them, then assign shared foundations before dependent files. Web: HTML/page structure + shared components/tokens before page-specific styling. Apps/scripts: entry point + data model/core logic before optional UI polish. Never plan styling, decoration, or helper files before the structure and behavior they support.',
+        '- For project tasks, expected_files should list the smallest realistic MVP deliverables: entry point, shared foundations, core behavior files, then only the extra files needed for the requested pages/features.',
         '- For a simple web app with separate HTML, CSS, and JavaScript, expected_files must include /index.html|/style.css|/script.js. Add /README.md only when the user asks for README/docs/run instructions.',
+        '- MULTI-PAGE WEBSITES: when the user names several distinct PAGES (for example Overview, Features, Workflow, Help, Request), plan ONE HTML file per page (/index.html plus one root-level HTML file per named page) PLUS shared source-of-truth files: /css/style.css, /js/components.js, and /js/script.js as needed. /js/components.js should render repeated header/nav/logo/footer/CTA elements from one definition (classic script, no modules/fetch). Later pages should link the same shared CSS/JS and use the same component hooks/classes, not paste a new inline theme/nav/footer. Never collapse a multi-page site into a single /index.html. Building a several-page website is a real multi-file PROJECT even when the request also says "plan", "content structure", "design direction", "strategy", "SEO", or "implementation guide" — those describe the website to BUILD, not a single written document. Only plan a single document file when the user explicitly asks for ONLY a written plan and no actual pages. For such multi-page builds, also fill phases (each phase = a coherent set of pages/features).',
+        '- FILE STRUCTURE — design a clean, CONVENTIONAL folder layout for THIS project\'s language/stack UP FRONT in expected_files (design the structure first, build into it; NEVER plan a later "reorganize/restructure files" step), kept across ALL phases. Always have a clear entry point at the project ROOT that the run command targets, with related code/assets grouped into sensible folders per that stack\'s norms. Examples (apply the spirit to any language): offline static web → /index.html + all HTML at root, shared /css/ /js/ /assets/ (relative links like about.html, css/style.css work from file://); Python → entry /main.py (or a package dir), helpers in modules/folders, /requirements.txt for deps; PHP → entry /index.php, shared code in /src or /includes, /assets; Java/Node/etc → that ecosystem\'s standard layout. Keep it as simple as the project warrants (small projects flat) — but the entry must run from the project root.',
         '- For edit tasks, affected_files must list every file that must change for the feature to actually work. If the request needs structure, styling, and behavior, include all relevant files. If only styling changes, include only styling files.',
         '- For edit or analysis tasks, files_to_inspect should list the files whose current contents are needed for an aware next step. Leave empty only when discovery/search is needed first.',
-        '- done_criteria is shown to the user as a checklist AND tells the agent what "done" means — so write it once, naturally, for both. Use 3 to 5 outcomes, each a meaningful chunk of the project, in the user\'s terms. GROUP related things into a single item instead of over-splitting (prefer "shape tools work — add rectangle, circle, triangle" over three lines). Cover the main features without exceeding 5 items.',
+        '- done_criteria is shown to the user as a checklist AND tells the agent what "done" means — so write it once, naturally, for both. Use 3 to 5 outcomes, each a meaningful chunk of the project, in the user\'s terms. GROUP related things into a single item instead of over-splitting. Cover the main features without exceeding 5 items. Example: "records can be created, edited, and archived|filters and saved views update the list|settings persist locally|import and export work".',
         '- validation should say how to check the result. Use validate_files for static project checks when useful, but do not invent expensive checks.',
         '- expected_files must contain text-editable deliverables only. Do not include binary assets like .png, .jpg, .jpeg, .gif, or .webp.',
         '- README is optional. Use needs_readme="yes" only when the user asks for documentation or when setup, usage, or project structure would be unclear without it.',
@@ -172,7 +176,7 @@
         '- Use final_requires_real_files="yes" whenever creating a project or app from scratch.',
         '',
         'Examples for summary style:',
-        '- "A compact Snake game with keyboard controls, score tracking, and collision detection."',
+        '- "A local inventory check-in tool with item entry, status filters, and saved records."',
         '- "First check whether the HTML structure and CSS selectors line up, then report the real mismatches."',
         '- "Bring the existing README in line with the actual runtime and file layout."',
         'CHAT_HISTORY:',
@@ -355,9 +359,16 @@
       const manualContextRaw = String((chat && chat.manualContext) || '').trim();
       const customContextInstruction = manualContextRaw
         ? [
-            'USER CUSTOM INSTRUCTIONS FROM THE APP UI:',
+            'USER CUSTOM INSTRUCTIONS FROM THE APP UI (a standing preference — apply to EVERY reply this turn,',
+            'including short, casual, or one-word answers. This OVERRIDES the default style/verbosity rules above.',
+            'Follow it even when it seems unusual, unless it conflicts with Safety/identity):',
             manualContextRaw,
           ].join('\n')
+        : '';
+      // Weak/fast models drop a mid-prompt instruction by answer time — restate it right before
+      // the user's message (recency) so it actually gets followed.
+      const customContextReminder = manualContextRaw
+        ? `[Active user preference for THIS reply — obey it exactly: ${manualContextRaw}]`
         : '';
       const canvasModeUiEnabled = Boolean((chat && chat.canvasMode) || canvasModeEnabled || (options && options.canvasForced));
       const hasCanvasModeOverride = options && typeof options.canvasModeOverride === 'boolean';
@@ -475,6 +486,7 @@
         })(),
         ANTI_LOOP_INSTRUCTION: antiLoopInstruction,
         USER_CUSTOM_CONTEXT: customContextInstruction,
+        USER_CUSTOM_REMINDER: customContextReminder,
         MODE_INSTRUCTIONS: modeInstructions,
         CANVAS_INSTRUCTIONS: canvasInstructions,
         CHAT_NAME_INSTRUCTION: resolvedChatNameInstruction,
