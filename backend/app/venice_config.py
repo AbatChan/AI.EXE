@@ -57,6 +57,8 @@ MODEL_BUTTON_XPATHS = [
 ]
 MODEL_LABEL_XPATH = "//p[@data-testid='minds-chat-agent-model-label']"   # shows the current model
 MODEL_SEARCH_CSS = "input[placeholder*='Search']"
+# The modal's "Search models..." control is a BUTTON that reveals the real input when clicked.
+MODEL_SEARCH_BUTTON_XPATH = "//button[contains(., 'Search models')]"
 MODEL_ROW_TITLE_CSS = "p[title]"        # each model row's name is in a <p title="...">
 CLOSE_BUTTON_XPATH = "//button[@aria-label='Close']"
 NEW_CHAT_XPATH = "//button[@aria-label='New chat']"   # SPA new-chat (no full page reload)

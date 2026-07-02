@@ -63,6 +63,15 @@ def read_provider_health(base_url: str, kind: str) -> dict:
         models = [m.get("id", "") for m in data.get("data", []) if isinstance(m, dict)]
     out["reachable"] = True
     out["models"] = [m for m in models if m]
+    if kind == "ollama":
+        # Venice adapter extension: which model the Venice page is ACTUALLY on right now
+        # (cached adapter-side; instant). Best-effort — plain Ollama has no such endpoint.
+        try:
+            st = httpx.get(f"{base}/api/aiexe/state", timeout=3)
+            if st.status_code == 200:
+                out["current_model"] = str(st.json().get("current_model") or "")
+        except Exception:
+            pass
     return out
 
 

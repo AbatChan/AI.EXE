@@ -65,6 +65,7 @@ class ProviderHealthResponse(BaseModel):
     base_url: str = ""
     models: List[str] = []
     detail: str = ""
+    current_model: str = ""   # Venice adapter: the model the Venice page is actually on
 
 
 class ProviderCompleteRequest(BaseModel):
