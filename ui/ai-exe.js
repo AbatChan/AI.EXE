@@ -11496,22 +11496,26 @@ async function refreshAccountUsageInline() {
     return '';
   }
   if (def && def.protocol === 'ollama') {
+    // Live status while the popover stays open: off → starting (loader) → balance.
+    const repoll = () => {
+      clearTimeout(refreshAccountUsageInline._startingT);
+      refreshAccountUsageInline._startingT = setTimeout(() => {
+        if (accountPopover && accountPopover.classList.contains('open')) void refreshAccountUsageInline();
+      }, 2500);
+    };
     const st = await getVeniceAdapterStatus();
     if (!st || (!st.running && !st.serving)) {
       // Adapter off: no credit check, no "Checking credits…" — just say why.
       updateAccountUsageSubline('Adapter not running');
       setAccountCreditLine('', false);
+      repoll();   // catches a Start clicked while the popover is open
       return '';
     }
     if (!st.serving) {
       // Starting up (Chrome opening / scraping models+credits): loader, no fetch yet.
       accountUsageSub.textContent = 'Adapter starting…';
       setAccountCreditLine('Adapter starting…', true, true);
-      // Re-check while the popover stays open so it flips to the balance when ready.
-      clearTimeout(refreshAccountUsageInline._startingT);
-      refreshAccountUsageInline._startingT = setTimeout(() => {
-        if (accountPopover && accountPopover.classList.contains('open')) void refreshAccountUsageInline();
-      }, 2500);
+      repoll();
       return '';
     }
     updateAccountUsageSubline('Checking credits…');

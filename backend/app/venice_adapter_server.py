@@ -102,6 +102,11 @@ def get_webdriver(headless=True, debug_browser=False, docker=False):
         chrome_options.add_argument("--disable-blink-features=AutomationControlled")
     except Exception:
         pass
+    # Keep rendering/timers alive while minimized — the model scrape + priced-icon sweep
+    # run on a minimized window (Venice's picker is virtualized: no paint = no rows).
+    chrome_options.add_argument("--disable-background-timer-throttling")
+    chrome_options.add_argument("--disable-backgrounding-occluded-windows")
+    chrome_options.add_argument("--disable-renderer-backgrounding")
     if headless:
         chrome_options.add_argument("--headless")
     if debug_browser:
@@ -632,7 +637,7 @@ def _aiexe_reopen_driver(reason):
         pass
     driver = login_to_venice()
     try:
-        scraped = aiexe_scrape_models(driver)
+        scraped = aiexe_scrape_models_with_restore(driver)
         if scraped:
             AIEXE_MODELS_CACHE = scraped
             print("AIEXE_MODELS scraped after browser restart: %d models" % len(scraped), flush=True)
@@ -1510,6 +1515,28 @@ def aiexe_scrape_models(driver):
         return []
 
 
+def aiexe_scrape_models_with_restore(driver):
+    """Scrape; if empty (a minimized Chrome can still throttle paint despite the flags,
+    leaving Venice's virtualized picker rowless), restore the window, retry once, re-minimize."""
+    names = aiexe_scrape_models(driver)
+    if names:
+        return names
+    print("AIEXE_MODELS scrape empty while minimized — restoring window for one retry", flush=True)
+    try:
+        driver.maximize_window()
+        time.sleep(1.0)
+    except Exception:
+        pass
+    try:
+        names = aiexe_scrape_models(driver)
+    finally:
+        try:
+            driver.minimize_window()
+        except Exception:
+            pass
+    return names
+
+
 def aiexe_select_model(driver, name):
     """Pick `name` in Venice's model modal before sending. Fully guarded — a failure just
     leaves the current model selected, never breaks the chat."""
@@ -2178,7 +2205,7 @@ except Exception:
 _aiexe_load_chat_map()
 driver = login_to_venice()
 try:  # scrape Venice's real model list once (best-effort) so /api/tags advertises the truth
-    _scraped = aiexe_scrape_models(driver)
+    _scraped = aiexe_scrape_models_with_restore(driver)
     if _scraped:
         AIEXE_MODELS_CACHE = _scraped
         print("AIEXE_MODELS scraped: %d models" % len(_scraped), flush=True)
