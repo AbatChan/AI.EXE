@@ -6723,9 +6723,68 @@ async function requestOllamaChatCompletion(provider, prompt, maxTokens, systemPr
   }
 }
 
-// Streaming shim: the adapter is slow/non-streaming, so fetch the full reply and fire
-// onDelta once (keeps the file-gen streaming caller happy).
+// REAL-TIME streaming through the adapter: the backend re-streams the adapter's NDJSON
+// (one {message:{content}} line per Venice chunk) so chat text, <thinking> and the agent's
+// live file-generation view all update as the model writes — no more one-delta-at-the-end.
+// Falls back to the one-shot passthrough if the stream endpoint fails.
 async function streamOllamaChatCompletion(provider, prompt, handlers = {}, options = {}) {
+  const model = getProviderModel(provider);
+  if (!model) return null;
+  const messages = options.systemPrompt
+    ? [{ role: 'system', content: String(options.systemPrompt) }, { role: 'user', content: String(prompt || '') }]
+    : [{ role: 'user', content: String(prompt || '') }];
+  let chatId = '';
+  try { const c = getActiveChat(); chatId = (c && c.id) || ''; } catch (_) { /* noop */ }
+  try {
+    const response = await fetch(getAIExeBackendUrl() + '/api/provider/stream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      signal: options.abortController ? options.abortController.signal : undefined,
+      body: JSON.stringify({
+        messages,
+        max_tokens: Math.max(1, Number(options.maxTokens) || 4096),
+        temperature: 0.2,
+        chat_id: chatId,
+        think: options.thinkActive ? 'on' : 'off',
+      }),
+    });
+    if (!response.ok || !response.body) throw new Error('stream HTTP ' + response.status);
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    let output = '';
+    let streamErr = '';
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let nl;
+      while ((nl = buf.indexOf('\n')) !== -1) {
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        if (!line) continue;
+        let obj = null;
+        try { obj = JSON.parse(line); } catch (_) { continue; }
+        if (obj && obj.error) { streamErr = String(obj.error); continue; }
+        const delta = obj && obj.message && typeof obj.message.content === 'string' ? obj.message.content : '';
+        if (delta) {
+          output += delta;
+          if (typeof handlers.onDelta === 'function') handlers.onDelta(delta);
+        }
+      }
+    }
+    if (output.trim()) {
+      return {
+        ok: true, output, provider, model,
+        status: { lastInferenceRoute: `${provider}:${model}`, lastPersistentError: '', lastCompletionStatus: 'ok', lastCompletionLikelyTruncated: false },
+      };
+    }
+    if (streamErr) return { ok: false, output: '', error: streamErr, message: streamErr, provider, model };
+    // Empty stream with no explicit error — try the one-shot path before giving up.
+  } catch (err) {
+    if (err && err.name === 'AbortError') return { ok: false, cancelled: true, message: 'Cancelled by user.' };
+    // fall through to the one-shot fallback
+  }
   const result = await requestOllamaChatCompletion(provider, prompt, options.maxTokens, options.systemPrompt || '', Boolean(options.thinkActive));
   if (result && result.ok && typeof handlers.onDelta === 'function' && result.output) {
     handlers.onDelta(String(result.output));
