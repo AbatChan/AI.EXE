@@ -679,7 +679,9 @@
         if (String(decision.tool || '').toLowerCase() === 'edit_file') {
           const rawContent = String(decision.content || '').trim();
           const looksLikeEditProgram = rawContent.startsWith('[') || rawContent.startsWith('{');
-          const looksLikeRawCode = rawContent.length > 40 && !looksLikeEditProgram;
+          const looksLikeInstruction = /^(?:fix|repair|update|change|replace|remove|add|make)\b/i.test(rawContent)
+            || /validation issues|project contract|without adding placeholder/i.test(rawContent);
+          const looksLikeRawCode = rawContent.length > 40 && !looksLikeEditProgram && !looksLikeInstruction;
           const isProjectCreation = String(planSpec && planSpec.taskKind || '').toLowerCase() === 'project';
           const expectedFiles = Array.isArray(planSpec && planSpec.expectedFiles) ? planSpec.expectedFiles : [];
           const targetPath = deps.normalizeWorkspacePath(decision.path || '');

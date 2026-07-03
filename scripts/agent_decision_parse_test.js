@@ -11,7 +11,7 @@ global.window = global;
 require(path.join(__dirname, '..', 'ui', 'agent-core.js'));
 
 const core = global.AIExeAgentCore.createAgentCore({});
-const { parseAgentDecision } = core;
+const { parseAgentDecision, deriveFallbackAgentDecision } = core;
 
 let passed = 0;
 function ok(name, cond) {
@@ -116,6 +116,27 @@ document.addEventListener('DOMContentLoaded', function () {
 {
   const d = parseAgentDecision('{"path": "/script.js", "content": "check this"}');
   ok('path + trivial content still infers read_file', d && d.tool === 'read_file');
+}
+
+// Validation repair must read the broken target first, even when the file was
+// just written in the same run. Jumping straight to edit/write wasted steps:
+// raw repair instructions got mistaken for file content, then write_file was
+// blocked because the existing target had not been read.
+{
+  const d = deriveFallbackAgentDecision('Create a Vite React app.', [
+    { tool: 'new_project', ok: true, path: '/' },
+    { tool: 'write_file', ok: true, path: '/src/components/Header.tsx', writtenPath: '/src/components/Header.tsx' },
+    {
+      tool: 'validate_files',
+      ok: true,
+      validationPassed: false,
+      validationIssues: ['/src/components/Header.tsx: has a JavaScript syntax error: Unexpected token ":"'],
+    },
+  ], {
+    taskKind: 'project',
+    expectedFiles: ['/src/components/Header.tsx'],
+  });
+  ok('validation repair reads a just-written broken file before editing', d && d.tool === 'read_file' && d.path === '/src/components/Header.tsx');
 }
 
 // --- parseAgentEditProgram shape tolerance ---

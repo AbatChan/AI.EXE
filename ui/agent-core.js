@@ -630,8 +630,7 @@
               && String(event.tool || '').toLowerCase() === 'edit_file'
               && normalizeWorkspacePath(event.path || '') === targetPath
             ));
-            const targetWasWritten = writtenPaths.includes(targetPath);
-            const repairTool = (readAfterValidation || readFailedAfterValidation || targetWasWritten)
+            const repairTool = (readAfterValidation || readFailedAfterValidation)
               ? (editAlreadyFailed ? 'write_file' : 'edit_file')
               : 'read_file';
             return {
