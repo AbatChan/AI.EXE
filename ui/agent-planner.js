@@ -424,99 +424,45 @@
         json: ['json'],
       };
       const wantedLanguages = languageAliases[String(extension || '').toLowerCase()] || [String(extension || '').toLowerCase()];
+
+      // 1) Unwrap a markdown code fence (WRAPPER extraction — keeps inner whole).
+      //    Prefer the block whose language matches this file; else first/unlabeled.
       const fencedBlocks = [];
       for (const match of text.matchAll(/```([a-z0-9_+\-]*)\s*([\s\S]*?)```/gi)) {
         const language = String(match[1] || '').trim().toLowerCase();
         const body = String(match[2] || '').trim();
-        if (!body) continue;
-        fencedBlocks.push({ language, body });
+        if (body) fencedBlocks.push({ language, body });
       }
       if (fencedBlocks.length) {
-        const matched = fencedBlocks.find((block) => wantedLanguages.includes(block.language))
-          || fencedBlocks.find((block) => !block.language)
-          || fencedBlocks[0];
-        if (matched && matched.body) {
-          text = matched.body;
-        }
+        const matched = fencedBlocks.find((b) => wantedLanguages.includes(b.language))
+          || fencedBlocks.find((b) => !b.language) || fencedBlocks[0];
+        if (matched && matched.body) text = matched.body;
       }
-      const leakedPrompt = /return only the file contents\.|file path:\s*\/|mvp_requirements:|recent_tool_results:|file_content:/i.test(text);
-      const fencedBlock = text.match(/```[a-z0-9_-]*\s*([\s\S]*?)```/i);
-      if (leakedPrompt && fencedBlock && fencedBlock[1]) {
-        text = String(fencedBlock[1] || '').trim();
-      }
-      // Some models return the file as a JSON-escaped blob — one line of literal
-      // \n / \" instead of real newlines — which parses as invalid ("Invalid
-      // escape"). Detect that shape (many escapes, ~no real newlines) and unescape.
+      // A lone unpaired fence (stream cut mid-block) — peel leading/trailing ```.
+      if (/^```/.test(text)) text = text.replace(/^```[a-z0-9_+\-]*\s*/i, '').replace(/\s*```$/, '').trim();
+
+      // 2) JSON-escaped blob (literal \n, ~no real newlines) → unescape so it parses.
       if ((text.match(/\\n/g) || []).length >= 3 && (text.match(/\n/g) || []).length <= 2) {
         text = text.replace(/\\([nrt"'\\])/g, (m, ch) => (ch === 'n' ? '\n' : ch === 'r' ? '' : ch === 't' ? '\t' : ch)).trim();
       }
-      text = text
-        .replace(/^.*?\bFILE_CONTENT:\s*/is, '')
-        .replace(/^(?:Return only the file contents\..*|File path:\s*.*|Rules:\s*|MVP_REQUIREMENTS:\s*|TASK:\s*|RECENT_TOOL_RESULTS:\s*|PREVIOUS_ATTEMPT_TO_IMPROVE:\s*)$/gim, '')
-        .trim();
-      // Drop leaked prompt-scaffolding lines wherever they appear. A weak local model
-      // can echo the contract / requirements / date into the file body, interleaved
-      // with the real code — the fence extraction above misses it when the code is
-      // split across multiple mislabeled fences.
-      text = text.split('\n').filter((line) => {
-        const t = line.trim();
-        if (/^(?:PROJECT_CONTRACT|Planned files|Quality contract|MVP_REQUIREMENTS|RECENT_TOOL_RESULTS|PREVIOUS_ATTEMPT_TO_IMPROVE|FILE_CONTENT|Generation budget contract|Web project contract|Python project contract)\s*:/i.test(t)) return false;
-        if (/^(?:Today's date is|Current date)\b/i.test(t)) return false;
-        if (/^-\s+(?:Build the complete|Reuse shared|Write a usable MVP|Keep the file internally|If this is(?: a)?\b|Prefer (?:a |self-contained)|Respect |Use the current year|Do not (?:ship|invent|output)|Return only |Treat this as)/i.test(t)) return false;
-        return true;
-      }).join('\n').trim();
-      if (/^```/i.test(text)) {
-        text = text.replace(/^```[a-z0-9_-]*\s*/i, '').replace(/\s*```$/i, '').trim();
-      }
-      text = text
-        .replace(/^Here(?:'|’)s the file(?: content)?[:\s-]*/i, '')
-        .replace(/^Below is the file(?: content)?[:\s-]*/i, '')
-        .trim();
-      if (/^(?:-\s+(?:Write|Keep|If this|Prefer|Respect|Use|Follow|Never|Do not)\b[\s\S]*?\n)+(?:```)?/i.test(text)) {
-        const firstLikelyCode = (() => {
-          if (/\.(html?)$/i.test(normalizedPath)) return text.search(/<!doctype html\b|<html\b|<head\b|<body\b|<section\b|<main\b|<div\b/i);
-          if (/\.css$/i.test(normalizedPath)) return text.search(/(?:^|\n)\s*(?:\/\*|:root\b|@media\b|@import\b|[.#a-z][^{;\n]*\{)/i);
-          if (/\.(js|mjs|cjs|ts|jsx|tsx)$/i.test(normalizedPath)) return text.search(/(?:^|\n)\s*(?:["']use strict["'];?|import\b|const\b|let\b|var\b|function\b|class\b|document\.|window\.)/i);
-          if (/\.md$/i.test(normalizedPath)) return text.search(/(?:^|\n)\s*#/);
-          return -1;
-        })();
-        if (firstLikelyCode > 0) {
-          text = text.slice(firstLikelyCode).trim();
-        }
-      }
-      if (/\.(html?)$/i.test(normalizedPath)) {
-        const htmlStart = text.search(/<!doctype html\b|<html\b/i);
-        if (htmlStart > 0) {
-          text = text.slice(htmlStart).trim();
-        }
-      } else if (/\.css$/i.test(normalizedPath)) {
-        const styleBlockMatch = text.match(/<style[^>]*>([\s\S]*?)<\/style>/i);
-        if (styleBlockMatch && styleBlockMatch[1]) {
-          text = String(styleBlockMatch[1] || '').trim();
-        }
-        text = text
-          .replace(/<!doctype html[\s\S]*$/i, '')
-          .replace(/<html\b[\s\S]*$/i, '')
-          .replace(/<head\b[\s\S]*$/i, '')
-          .replace(/<body\b[\s\S]*$/i, '')
-          .trim();
-      } else if (/\.(js|mjs|cjs|ts|jsx|tsx)$/i.test(normalizedPath)) {
-        const scriptBlockMatch = text.match(/<script[^>]*>([\s\S]*?)<\/script>/i);
-        if (scriptBlockMatch && scriptBlockMatch[1]) {
-          text = String(scriptBlockMatch[1] || '').trim();
-        }
-        // Only strip a wrapping HTML document for PLAIN js/ts. JSX/TSX bodies
-        // legitimately contain <header>/<Header>/<main>/<body>/<html>; \b stops
-        // <head... from matching <Header> (this ate the render tree to EOF).
-        if (!/\.(jsx|tsx)$/i.test(normalizedPath)) {
-          text = text
-            .replace(/<!doctype html[\s\S]*$/i, '')
-            .replace(/<html\b[\s\S]*$/i, '')
-            .replace(/<head\b[\s\S]*$/i, '')
-            .replace(/<body\b[\s\S]*$/i, '')
-            .trim();
-        }
-      }
+
+      // 3) Drop WHOLE LINES that are verbatim prompt scaffolding a weak model echoed.
+      //    Line-level only — never a delete-to-EOF regex (that cut real code, e.g. a
+      //    JSX <Header> read as an <head> tag).
+      const isScaffoldLine = (t) =>
+        /^(?:FILE_CONTENT|TASK|RULES|MVP_REQUIREMENTS|PROJECT_CONTRACT|PROJECT_STATE|RECENT_TOOL_RESULTS|PREVIOUS_ATTEMPT_TO_IMPROVE|Planned files|Quality contract|Web project contract|Python project contract|Generation budget contract)\s*:/i.test(t)
+        || /^Return only the file contents\.?$/i.test(t)
+        || /^File path:\s*\/\S+$/i.test(t)
+        || /^(?:Today's date is|Current date)\b/i.test(t)
+        || /^-\s+(?:Build the complete|Reuse shared|Write a usable MVP|Keep the file internally|Prefer (?:a |self-contained)|Return only )\b/i.test(t);
+      text = text.split('\n').filter((line) => !isScaffoldLine(line.trim())).join('\n').trim();
+
+      // 4) A single leading prose lead-in ("Here's the file:", "Below is the file:").
+      text = text.replace(/^(?:Sure[,!.]?\s*)?(?:Here(?:'|’)?s|Here is|Below is)\b[^\n]{0,40}?\bfile(?:\s+content)?\b[^\n]{0,20}?[:\-]\s*\n?/i, '').trim();
+
+      // That's it. No tag-based/HTML-document stripping and no "find where the code
+      // starts" slicing — those second-guessed good output and cut real code. If a
+      // model genuinely returns the wrong shape, the build surfaces it loudly.
       return text;
     }
 
