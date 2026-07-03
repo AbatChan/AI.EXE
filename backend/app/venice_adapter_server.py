@@ -1114,7 +1114,16 @@ def _aiexe_read_credits(driver, allow_ui=True):
         """)
         if toggled:
             time.sleep(0.6)
-            if _capture_visible_credit_text("sidebar"):
+            captured = _capture_visible_credit_text("sidebar")
+            try:  # close the sidebar we opened — leave the UI as we found it
+                driver.execute_script("""
+                  const btn = Array.from(document.querySelectorAll('button'))
+                    .find((b) => /^(hide|close|collapse|toggle)\\s+sidebar$/i.test(String(b.getAttribute('aria-label') || '').trim()));
+                  if (btn) btn.click();
+                """)
+            except Exception:
+                pass
+            if captured:
                 return
     except Exception:
         pass
