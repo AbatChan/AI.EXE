@@ -541,6 +541,28 @@
         lastNarrationDetail = detail;
       };
 
+      const buildDeterministicStartupNarration = (decision) => {
+        const tool = String(decision && decision.tool || '').toLowerCase();
+        const projectName = String((planSpec && planSpec.projectName) || deps.deriveProjectNameFromTask(taskText) || 'project').trim();
+        const expectedFiles = Array.isArray(planSpec && planSpec.expectedFiles)
+          ? planSpec.expectedFiles.map((p) => deps.normalizeWorkspacePath(p || '')).filter(Boolean)
+          : [];
+        const fileCount = expectedFiles.length;
+        if (tool === 'new_project') {
+          if (fileCount > 1) {
+            return `I'll create the ${projectName} workspace, scaffold the planned files, then validate and run it.`;
+          }
+          return `I'll create the ${projectName} workspace and start with the project entry file.`;
+        }
+        if (tool === 'write_file' && fileCount > 0) {
+          const path = deps.normalizeWorkspacePath(decision && decision.path || '');
+          return path
+            ? `I'll start writing the planned project files, beginning with ${path}.`
+            : "I'll start writing the planned project files now.";
+        }
+        return '';
+      };
+
       const setAgentProgress = (text) => {
         if (!deps.isInferenceActive(requestToken)) return;
         if (!deps.hasLiveAssistantRow()) {
@@ -1450,7 +1472,7 @@
           const narration = isFinal ? finalThought : (decision.thought || decision.message || '');
           if (narration) appendAgentNarration(narration);
         } else if (!deterministicBatchNarrated) {
-          const batchThought = decision.thought;
+          const batchThought = decision.thought || buildDeterministicStartupNarration(decision);
           if (batchThought) appendAgentNarration(batchThought);
           deterministicBatchNarrated = true;
         }

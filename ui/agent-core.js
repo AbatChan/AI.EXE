@@ -1991,6 +1991,11 @@
         : (((WEB_TASK_HINT_REGEX.test(lower) || /\bcalculator\b/.test(lower))) ? 'web' : 'generic');
       const needsReadme = shouldFallbackPlanNeedReadme(taskText);
       const projectName = deriveProjectNameFromTask(taskText);
+      const fallbackSummary = (() => {
+        const trimmed = String(taskText || '').replace(/\s+/g, ' ').trim();
+        if (!trimmed) return projectName ? `Build ${projectName}.` : 'Build the requested project.';
+        return trimmed.length > 220 ? `${trimmed.slice(0, 217).trim()}...` : trimmed;
+      })();
       const singleHtmlFileProject = taskKind === 'project' && isSingleHtmlFileRequest(taskText);
       if (singleHtmlFileProject) primaryStack = 'web';
       const rootEntries = Array.isArray(workspaceContext.rootEntries) ? workspaceContext.rootEntries : [];
@@ -2024,7 +2029,7 @@
         phases: [],
         validationSteps: taskKind === 'project' ? ['validate_files'] : [],
         projectContract: buildAgentProjectContract(taskText, taskKind, primaryStack, fallbackExpectedFiles),
-        summary: '',
+        summary: fallbackSummary,
       };
     }
 

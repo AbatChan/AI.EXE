@@ -11,7 +11,7 @@ global.window = global;
 require(path.join(__dirname, '..', 'ui', 'agent-core.js'));
 
 const core = global.AIExeAgentCore.createAgentCore({});
-const { parseAgentDecision, deriveFallbackAgentDecision } = core;
+const { parseAgentDecision, deriveFallbackAgentDecision, buildFallbackAgentPlanSpec } = core;
 
 let passed = 0;
 function ok(name, cond) {
@@ -137,6 +137,14 @@ document.addEventListener('DOMContentLoaded', function () {
     expectedFiles: ['/src/components/Header.tsx'],
   });
   ok('validation repair reads a just-written broken file before editing', d && d.tool === 'read_file' && d.path === '/src/components/Header.tsx');
+}
+
+// Fallback project plans need a summary too; otherwise deterministic new_project
+// starts with tool cards only and no visible narration when the model planner
+// path is skipped/timed out.
+{
+  const p = buildFallbackAgentPlanSpec('Build a personal finance dashboard app.', { forceProjectScope: true });
+  ok('fallback project plan includes a visible summary', p && p.taskKind === 'project' && /personal finance dashboard/i.test(p.summary || ''));
 }
 
 // --- parseAgentEditProgram shape tolerance ---
