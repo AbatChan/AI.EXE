@@ -243,7 +243,19 @@
       }
       if (typeof deps.clearAgentStreamingFile === 'function') deps.clearAgentStreamingFile(path);
       const finalContent = deps.sanitizeAgentGeneratedFileContent(raw, path);
-      recordAgentFileGenTrace(path, promptChars, String(finalContent || '').length, guard, wasTruncated,
+      // Sanitize should tidy, not amputate. If it drops a big chunk, surface it —
+      // a silent post-generation cut (e.g. an over-eager scaffolding strip) reads
+      // as "truncation" but the completeness check already passed on raw.
+      const rawLen = String(raw || '').length;
+      const finalLen = String(finalContent || '').length;
+      if (rawLen > 200 && finalLen < rawLen * 0.6 && typeof deps.recordDebugTrace === 'function') {
+        deps.recordDebugTrace('agent_file_sanitize_shrink', {
+          path: String(path || ''), rawLen: String(rawLen), finalLen: String(finalLen),
+          rawTail: String(raw).slice(-80), finalTail: String(finalContent).slice(-80),
+        }, { path: String(path || ''), rawLen, finalLen, rawTail: String(raw).slice(-160), finalTail: String(finalContent).slice(-160) });
+        try { console.warn(`[AIEXE_FILEGEN] sanitize shrank ${path}: ${rawLen}→${finalLen} chars; finalTail=${JSON.stringify(String(finalContent).slice(-80))}`); } catch (_) {}
+      }
+      recordAgentFileGenTrace(path, promptChars, finalLen, guard, wasTruncated,
         guard >= 6 ? 'continuation_exhausted' : 'ok');
       return finalContent;
     }

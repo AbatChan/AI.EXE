@@ -496,21 +496,26 @@
         }
         text = text
           .replace(/<!doctype html[\s\S]*$/i, '')
-          .replace(/<html[\s\S]*$/i, '')
-          .replace(/<head[\s\S]*$/i, '')
-          .replace(/<body[\s\S]*$/i, '')
+          .replace(/<html\b[\s\S]*$/i, '')
+          .replace(/<head\b[\s\S]*$/i, '')
+          .replace(/<body\b[\s\S]*$/i, '')
           .trim();
-      } else if (/\.(js|ts|jsx|tsx)$/i.test(normalizedPath)) {
+      } else if (/\.(js|mjs|cjs|ts|jsx|tsx)$/i.test(normalizedPath)) {
         const scriptBlockMatch = text.match(/<script[^>]*>([\s\S]*?)<\/script>/i);
         if (scriptBlockMatch && scriptBlockMatch[1]) {
           text = String(scriptBlockMatch[1] || '').trim();
         }
-        text = text
-          .replace(/<!doctype html[\s\S]*$/i, '')
-          .replace(/<html[\s\S]*$/i, '')
-          .replace(/<head[\s\S]*$/i, '')
-          .replace(/<body[\s\S]*$/i, '')
-          .trim();
+        // Only strip a wrapping HTML document for PLAIN js/ts. JSX/TSX bodies
+        // legitimately contain <header>/<Header>/<main>/<body>/<html>; \b stops
+        // <head... from matching <Header> (this ate the render tree to EOF).
+        if (!/\.(jsx|tsx)$/i.test(normalizedPath)) {
+          text = text
+            .replace(/<!doctype html[\s\S]*$/i, '')
+            .replace(/<html\b[\s\S]*$/i, '')
+            .replace(/<head\b[\s\S]*$/i, '')
+            .replace(/<body\b[\s\S]*$/i, '')
+            .trim();
+        }
       }
       return text;
     }
