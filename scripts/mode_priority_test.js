@@ -60,6 +60,8 @@ function assertOrder(prompt, earlier, later) {
   assert.ok(a < b, `expected "${earlier}" before "${later}"`);
 }
 
+const customInstructionsMarker = 'USER CUSTOM INSTRUCTIONS FROM THE APP UI';
+
 async function testPromptCombinations() {
   const baseMessages = [
     { role: 'user', text: 'Create a launch plan for the app.' },
@@ -70,9 +72,9 @@ async function testPromptCombinations() {
     manualContext: 'Prefer concise sections.',
   });
   assert.ok(contextPrompt.includes('Priority order:'));
-  assert.ok(contextPrompt.includes('USER CUSTOM INSTRUCTIONS FROM THE APP UI:'));
-  assertOrder(contextPrompt, 'Priority order:', 'USER CUSTOM INSTRUCTIONS FROM THE APP UI:');
-  assertOrder(contextPrompt, 'USER CUSTOM INSTRUCTIONS FROM THE APP UI:', '<|im_start|>user');
+  assert.ok(contextPrompt.includes(customInstructionsMarker));
+  assertOrder(contextPrompt, 'Priority order:', customInstructionsMarker);
+  assertOrder(contextPrompt, customInstructionsMarker, '<|im_start|>user');
 
   const thinkPrompt = await buildPrompt({
     messages: baseMessages,
@@ -99,7 +101,7 @@ async function testPromptCombinations() {
   assert.ok(combinedPrompt.includes('CRITICAL FORMATTING ORDER FOR COMBINED UI MODES'));
   assert.ok(combinedPrompt.includes('THINK_MODE: ON'));
   assert.ok(combinedPrompt.includes('CANVAS_MODE: ON'));
-  assertOrder(combinedPrompt, 'USER CUSTOM INSTRUCTIONS FROM THE APP UI:', 'UI MODE: Canvas mode is enabled');
+  assertOrder(combinedPrompt, customInstructionsMarker, 'UI MODE: Canvas mode is enabled');
   assertOrder(combinedPrompt, 'CRITICAL FORMATTING ORDER FOR COMBINED UI MODES', 'THINK_MODE: ON');
   assertOrder(combinedPrompt, 'THINK_MODE: ON', 'CANVAS_MODE: ON');
 

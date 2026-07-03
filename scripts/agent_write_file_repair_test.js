@@ -202,4 +202,81 @@ const repairedScript = [
   assert.equal(inlineWrites.length, 1, 'inline script is written once');
   assert.equal(inlineWrites[0].content, validInline, 'inline content is preserved exactly');
   console.log('PASS: valid inline planner content is not discarded');
+
+  const brokenPackageJson = JSON.stringify({
+    name: 'amora-dating-platform',
+    private: true,
+    version: '1.0.0',
+    type: 'module',
+    scripts: { dev: 'vite', build: 'tsc -b && vite build' },
+    dependencies: {
+      react: '^1^.3.1',
+      'react-dom': '^1^.3.1',
+      'react-router-dom': '^2^.26.0',
+      'lucide-react': '.439.0',
+      clsx: '^3^.1.1',
+      'framer-motion': '^4^.5.4',
+      zustand: '^6^.5.5',
+    },
+    devDependencies: {
+      '@types/react': '^1^.3.3',
+      '@types/react-dom': '^1^.3.0',
+      '@vitejs/plugin-react': '^6^.3.1',
+      autoprefixer: '^7^.4.20',
+      postcss: '^8^.4.45',
+      tailwindcss: '^5^.4.10',
+      typescript: '^9^.5.4',
+      vite: '^9^.4.3',
+    },
+  }, null, 2);
+
+  const packageGeneratorCalls = [];
+  const { executor: packageExecutor, writes: packageWrites, traces: packageTraces } = makeExecutor(async (...args) => {
+    packageGeneratorCalls.push(args);
+    return '';
+  });
+  const packageSaved = await packageExecutor.executeDeveloperToolCall(
+    'chat_write_repair',
+    { action: 'tool', tool: 'write_file', path: '/package.json', content: brokenPackageJson },
+    'Create a React TypeScript Tailwind dating platform.',
+    [],
+    { ...planSpec, expectedFiles: ['/package.json'] }
+  );
+
+  assert.equal(packageSaved.ok, true, 'mangled package.json versions are repaired and saved');
+  assert.equal(packageGeneratorCalls.length, 0, 'inline package.json is repaired locally without regenerating');
+  assert.equal(packageWrites.length, 1, 'package.json is written once after deterministic repair');
+  const repairedPackage = JSON.parse(packageWrites[0].content);
+  assert.equal(repairedPackage.dependencies.react, '^18.3.1');
+  assert.equal(repairedPackage.dependencies['react-router-dom'], '^6.26.2');
+  assert.equal(repairedPackage.dependencies['lucide-react'], '^0.468.0');
+  assert.equal(repairedPackage.devDependencies.tailwindcss, '^3.4.10');
+  assert.equal(repairedPackage.devDependencies.typescript, '^5.5.4');
+  assert.ok(packageTraces.some((entry) => entry.kind === 'agent_package_json_versions_repaired'), 'package repair is traced');
+  console.log('PASS: mangled package.json dependency versions are repaired before save');
+
+  const jsxWithConstProps = [
+    "import type { Card, ColumnId } from '../types'",
+    "import CardItem from './Card'",
+    '',
+    'export default function Column({ cards, columnOrder }: { cards: Card[], columnOrder: ColumnId[] }) {',
+    "  const columnIndex = columnOrder.indexOf('todo')",
+    '  const isFirst = columnIndex === 0',
+    '  const isLast = columnIndex === columnOrder.length - 1',
+    '  return (',
+    '    <section className="column">',
+    '      {cards.map(card => (',
+    '        <CardItem key={card.id} card={card} isFirst={isFirst} isLast={isLast} />',
+    '      ))}',
+    '    </section>',
+    '  )',
+    '}',
+  ].join('\n');
+  assert.equal(packageExecutor.getJsReassignedConstIssue(jsxWithConstProps), '', 'JSX props like isFirst={isFirst} are not const reassignments');
+  assert.match(
+    packageExecutor.getJsReassignedConstIssue('const isFirst = true;\nisFirst = false;'),
+    /reassigns the const variable `isFirst`/,
+    'real const reassignment is still flagged'
+  );
+  console.log('PASS: JSX props do not trip const reassignment guard');
 })();

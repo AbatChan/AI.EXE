@@ -1344,6 +1344,57 @@ bool LaunchPythonConsoleMac(const std::filesystem::path &root,
   return true;
 }
 
+bool LaunchViteDevServerMac(const std::filesystem::path &root, int port,
+                            std::string *err) {
+  auto sh_quote = [](const std::string &s) {
+    std::string out = "'";
+    for (char c : s) {
+      if (c == '\'') out += "'\\''";
+      else out += c;
+    }
+    out += "'";
+    return out;
+  };
+
+  const std::string url = "http://127.0.0.1:" + std::to_string(port) + "/";
+  std::ostringstream script;
+  script << "#!/bin/bash\n"
+         << "cd " << sh_quote(root.string()) << " || exit 1\n"
+         << "if ! command -v npm >/dev/null 2>&1; then\n"
+         << "  echo 'Node.js/npm is required to run this Vite project. Install Node.js, then run again.'\n"
+         << "  read -n 1 -s -r -p 'Press any key to close this window...'\n"
+         << "  exit 1\n"
+         << "fi\n"
+         << "if [ ! -d node_modules ]; then echo 'Installing npm dependencies...'; npm install || exit 1; fi\n"
+         << "( sleep 2; open " << sh_quote(url) << " ) >/dev/null 2>&1 &\n"
+         << "echo 'Starting Vite dev server at " << url << "'\n"
+         << "npm run dev -- --host 127.0.0.1 --port " << port << " --strictPort\n";
+
+  NSString *tmpDir = NSTemporaryDirectory();
+  NSString *scriptPath = [tmpDir stringByAppendingPathComponent:
+      [NSString stringWithFormat:@"aiexe-vite-%u.command",
+          (unsigned)[[NSProcessInfo processInfo] processIdentifier]]];
+  NSString *contents = [NSString stringWithUTF8String:script.str().c_str()];
+  NSError *writeErr = nil;
+  if (![contents writeToFile:scriptPath
+                  atomically:YES
+                    encoding:NSUTF8StringEncoding
+                       error:&writeErr]) {
+    if (err) *err = "Could not prepare the Vite launcher.";
+    return false;
+  }
+  NSFileManager *fm = [NSFileManager defaultManager];
+  [fm setAttributes:@{NSFilePosixPermissions : @(0755)}
+       ofItemAtPath:scriptPath
+              error:nil];
+  NSURL *launcher = [NSURL fileURLWithPath:scriptPath];
+  if (!launcher || ![[NSWorkspace sharedWorkspace] openURL:launcher]) {
+    if (err) *err = "Could not open a Terminal to run the Vite project.";
+    return false;
+  }
+  return true;
+}
+
 std::string StatusToJson(const WebRuntimeStatus &s) {
   std::ostringstream oss;
   oss << "{"
@@ -1943,7 +1994,16 @@ std::string BuildStreamEvent(const std::string &id, bool done,
       message = "No project is open to run.";
     } else {
       const RunTarget target = DetectRunTarget(root);
-      if (target.kind == RunTargetKind::kWeb) {
+      if (target.kind == RunTargetKind::kViteWeb) {
+        const int port = StableVitePortForRoot(root);
+        if (LaunchViteDevServerMac(root, port, &op_err)) {
+          output = "http://127.0.0.1:" + std::to_string(port) + "/";
+          message = "Starting Vite dev server.";
+        } else {
+          ok = false;
+          message = op_err.empty() ? "Could not run the Vite project." : op_err;
+        }
+      } else if (target.kind == RunTargetKind::kWeb) {
         std::string url = StartLocalAppServer(root, &op_err);
         if (url.empty()) {
           ok = false;

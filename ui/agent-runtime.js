@@ -60,6 +60,14 @@
         const bal = (o, c) => (text.split(o).length - 1) - (text.split(c).length - 1);
         if (bal('{', '}') > 0 || bal('(', ')') > 0 || bal('[', ']') > 0) return true;
       }
+      if (ext === 'json') {
+        // Truncated JSON (e.g. a package.json cut before its closing braces) — count
+        // structural braces/brackets with string contents removed so a "{" inside a
+        // value can't false-flag. Unbalanced = cut mid-file → continue.
+        const bare = text.replace(/"(?:\\.|[^"\\])*"/g, '""');
+        const bal = (o, c) => (bare.split(o).length - 1) - (bare.split(c).length - 1);
+        if (bal('{', '}') > 0 || bal('[', ']') > 0) return true;
+      }
       if (['css', 'scss', 'less', 'js', 'mjs', 'cjs', 'ts', 'jsx', 'tsx'].includes(ext)) {
         // Unterminated /* block comment */ — a common mid-comment truncation.
         if ((text.match(/\/\*/g) || []).length > (text.match(/\*\//g) || []).length) return true;

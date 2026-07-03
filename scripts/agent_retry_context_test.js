@@ -169,12 +169,37 @@ ok('complete, brace-balanced CSS is NOT flagged as truncated',
 
 // JS cut off mid-function (the trace's script.js ended at "// ===== Render:").
 const truncatedJs = `function renderAll() {\n  renderSummary();\n  // ===== Render:`;
-ok('truncated JS (unbalanced braces) is detected',
+ok('truncated JS (dangling tail) is detected',
   looksTruncatedFileContent(truncatedJs, '/script.js') === true);
 
 const completeJs = `function add(a, b) {\n  return a + b;\n}\nadd(1, 2);\n`;
 ok('complete JS is NOT flagged as truncated',
   looksTruncatedFileContent(completeJs, '/script.js') === false);
+
+const truncatedJson = `{
+  "name": "task-board",
+  "scripts": { "dev": "vite" },
+  "dependencies": {
+    "react": "^18.3.1"`;
+ok('truncated package.json with open braces is detected',
+  looksTruncatedFileContent(truncatedJson, '/package.json') === true);
+
+const completeJsonWithBracesInStrings = `{
+  "name": "brace-string",
+  "description": "literal { brace in a string is fine",
+  "dependencies": { "vite": "^5.4.3" }
+}`;
+ok('complete package.json with braces inside strings is NOT flagged',
+  looksTruncatedFileContent(completeJsonWithBracesInStrings, '/package.json') === false);
+
+const completeTsWithHtmlString = [
+  'const markup = `<header><script>window.ok = true</script></header>`',
+  'export function render() {',
+  '  return markup',
+  '}',
+].join('\n');
+ok('complete TS that builds HTML strings is NOT flagged as truncated',
+  looksTruncatedFileContent(completeTsWithHtmlString, '/markup.ts') === false);
 
 const unterminatedComment = `/* Ledgerly stylesheet */\n:root { --x: 1px; }\n.card { color: red; }\n/* TODO: dark theme`;
 ok('CSS with an unterminated /* comment is detected as truncated',

@@ -990,6 +990,54 @@ bool LaunchPythonConsoleWin(const std::filesystem::path &root,
   return true;
 }
 
+bool LaunchViteDevServerWin(const std::filesystem::path &root, int port,
+                            std::string *err) {
+  const std::string url = "http://127.0.0.1:" + std::to_string(port) + "/";
+  std::ostringstream bat;
+  bat << "@echo off\r\n"
+      << "cd /d \"" << root.string() << "\"\r\n"
+      << "where npm >nul 2>nul\r\n"
+      << "if errorlevel 1 (\r\n"
+      << "  echo Node.js/npm is required to run this Vite project. Install Node.js, then run again.\r\n"
+      << "  pause\r\n"
+      << "  exit /b 1\r\n"
+      << ")\r\n"
+      << "if not exist node_modules (\r\n"
+      << "  echo Installing npm dependencies...\r\n"
+      << "  call npm install || goto end\r\n"
+      << ")\r\n"
+      << "start \"\" \"" << url << "\"\r\n"
+      << "echo Starting Vite dev server at " << url << "\r\n"
+      << "call npm run dev -- --host 127.0.0.1 --port " << port << " --strictPort\r\n"
+      << ":end\r\n"
+      << "echo.\r\n"
+      << "pause\r\n";
+
+  wchar_t temp_dir[MAX_PATH] = {0};
+  if (GetTempPathW(MAX_PATH, temp_dir) == 0) {
+    if (err) *err = "Could not locate a temp folder for the launcher.";
+    return false;
+  }
+  std::wstring bat_path = std::wstring(temp_dir) + L"aiexe-vite-" +
+                          std::to_wstring(GetCurrentProcessId()) + L".bat";
+  std::ofstream out(bat_path, std::ios::binary | std::ios::trunc);
+  if (!out) {
+    if (err) *err = "Could not prepare the Vite launcher.";
+    return false;
+  }
+  const std::string text = bat.str();
+  out.write(text.data(), static_cast<std::streamsize>(text.size()));
+  out.close();
+
+  HINSTANCE result = ShellExecuteW(nullptr, L"open", bat_path.c_str(), nullptr,
+                                   root.wstring().c_str(), SW_SHOWNORMAL);
+  if (reinterpret_cast<INT_PTR>(result) <= 32) {
+    if (err) *err = "Could not open a console to run the Vite project.";
+    return false;
+  }
+  return true;
+}
+
 std::string StatusToJson(const WebRuntimeStatus &s) {
   std::ostringstream oss;
   oss << "{"
@@ -1673,7 +1721,16 @@ private:
         message = "No project is open to run.";
       } else {
         const RunTarget target = DetectRunTarget(root);
-        if (target.kind == RunTargetKind::kWeb) {
+        if (target.kind == RunTargetKind::kViteWeb) {
+          const int port = StableVitePortForRoot(root);
+          if (LaunchViteDevServerWin(root, port, &op_err)) {
+            output = "http://127.0.0.1:" + std::to_string(port) + "/";
+            message = "Starting Vite dev server.";
+          } else {
+            ok = false;
+            message = op_err.empty() ? "Could not run the Vite project." : op_err;
+          }
+        } else if (target.kind == RunTargetKind::kWeb) {
           std::string url = StartLocalAppServer(root, &op_err);
           if (url.empty()) {
             ok = false;

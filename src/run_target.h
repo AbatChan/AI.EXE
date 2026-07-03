@@ -2,7 +2,10 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <string>
 
 // Decide what "Run" should do for an open project. Web projects are served over
@@ -10,7 +13,7 @@
 // Detection is shallow (project root only) — matches how the agent lays out the
 // generated projects this targets.
 
-enum class RunTargetKind { kNone, kWeb, kPython };
+enum class RunTargetKind { kNone, kWeb, kViteWeb, kPython };
 
 struct RunTarget {
   RunTargetKind kind = RunTargetKind::kNone;
@@ -18,6 +21,16 @@ struct RunTarget {
   // entry to run. Always an absolute path inside the project root.
   std::filesystem::path entry;
 };
+
+inline int StableVitePortForRoot(const std::filesystem::path& root) {
+  std::string key = root.lexically_normal().generic_string();
+  std::uint32_t h = 2166136261u;
+  for (unsigned char c : key) {
+    h ^= c;
+    h *= 16777619u;
+  }
+  return 5173 + static_cast<int>(h % 1000u);
+}
 
 inline RunTarget DetectRunTarget(const std::filesystem::path& root) {
   namespace fs = std::filesystem;
@@ -37,11 +50,26 @@ inline RunTarget DetectRunTarget(const std::filesystem::path& root) {
                    [](unsigned char c) { return static_cast<char>(::tolower(c)); });
     return name;
   };
+  auto file_contains_ci = [](const fs::path& p, const std::string& needle) {
+    std::ifstream in(p, std::ios::binary);
+    if (!in) return false;
+    std::string body((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    std::transform(body.begin(), body.end(), body.begin(),
+                   [](unsigned char c) { return static_cast<char>(::tolower(c)); });
+    std::string n = needle;
+    std::transform(n.begin(), n.end(), n.begin(),
+                   [](unsigned char c) { return static_cast<char>(::tolower(c)); });
+    return body.find(n) != std::string::npos;
+  };
 
   // Web wins when there is an HTML entry — that is the case the localhost server
   // handles and the one generated web apps use.
   if (fs::exists(root / "index.html", ec)) {
-    target.kind = RunTargetKind::kWeb;
+    const bool vite_project = fs::exists(root / "package.json", ec)
+      && (fs::exists(root / "vite.config.ts", ec)
+        || fs::exists(root / "vite.config.js", ec)
+        || file_contains_ci(root / "package.json", "\"vite\""));
+    target.kind = vite_project ? RunTargetKind::kViteWeb : RunTargetKind::kWeb;
     target.entry = root / "index.html";
     return target;
   }

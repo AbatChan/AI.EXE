@@ -721,8 +721,9 @@
       }
       for (const name of Object.keys(firstDeclIndex)) {
         if (declCount[name] > 1) continue;
-        // A bare assignment `name =` (not ==, ===, =>, or a property/.name), after
-        // the declaration, and not itself a const/let/var declaration.
+        // A bare assignment `name =` (not ==, ===, =>, JSX `prop={...}`, or a
+        // property/.name), after the declaration, and not itself a const/let/var
+        // declaration.
         const assignRe = new RegExp(`(^|[^.\\w$=!<>])(${name})\\s*=(?![=>])`, 'g');
         let a;
         while ((a = assignRe.exec(stripped))) {
@@ -730,6 +731,12 @@
           if (nameAt <= firstDeclIndex[name]) continue;
           const before = stripped.slice(Math.max(0, nameAt - 7), nameAt);
           if (/\b(?:const|let|var)\s*$/.test(before)) continue;
+          const jsxContext = stripped.slice(Math.max(0, nameAt - 160), nameAt);
+          const lastLt = jsxContext.lastIndexOf('<');
+          const lastGt = jsxContext.lastIndexOf('>');
+          if (lastLt > lastGt && /<[A-Za-z][\w:.-]*(?:\s+[A-Za-z_$][\w$:.:-]*(?:\s*=\s*(?:""|''|\{\}|[^\s>]+))?)*\s*$/s.test(jsxContext.slice(lastLt))) {
+            continue;
+          }
           return `reassigns the const variable \`${name}\` (declared with const but later assigned — this throws "Assignment to constant variable" at runtime)`;
         }
       }
