@@ -71,6 +71,21 @@
       const lastChar = tail.slice(-1);
       // Dangling backslash = cut mid-\n string; continue rather than regenerate.
       if (/\\$/.test(tail)) return true;
+      // Ends on an opener → cut mid-construct (catches short stubs any length).
+      if (/[([{,:]$/.test(tail)) return true;
+      // Dangling OPENING tag as the last thing (JSX cut at `<div ...>`); the char
+      // check below misses it because ">" reads as a valid closer.
+      {
+        const lt = tail.lastIndexOf('<');
+        if (lt !== -1) {
+          const lastTag = tail.slice(lt);
+          if (/^<[A-Za-z][^>]*>$/.test(lastTag)
+              && !/^<\//.test(lastTag) && !/\/>$/.test(lastTag)
+              && !/^<(?:br|hr|img|input|meta|link|area|base|col|embed|source|track|wbr)\b/i.test(lastTag)) {
+            return true;
+          }
+        }
+      }
       if (tail.length > 400 && /[A-Za-z0-9_,:(\[{]/.test(lastChar) && !/[}\])>;]$/.test(tail)) return true;
       return false;
     }

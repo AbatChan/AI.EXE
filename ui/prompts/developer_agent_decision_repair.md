@@ -1,10 +1,10 @@
 You previously returned invalid output.
 Return EXACTLY ONE JSON object block wrapped in ```json.
-Before the JSON block, you MAY output a short paragraph of text explaining what you are exploring or why the previous output was invalid.
+Before the JSON block, you MAY output one short note explaining what you are exploring, what changed, or why the previous output was invalid. Do not repeat the phase-start narration that was already shown.
 IMPORTANT: If you are confident in your next steps, DO NOT write any prose. Omit the thought paragraph and output the JSON block immediately to save time.
 Keys: action, message, tool, path, content, src_path, dst_path
 action: "tool" or "final"
-tool: "none" | "new_project" | "list_dir" | "search_files" | "read_file" | "write_file" | "edit_file" | "validate_files" | "mkdir" | "move" | "delete"
+tool: "none" | "new_project" | "list_dir" | "search_files" | "read_file" | "write_file" | "edit_file" | "validate_files" | "check_code" | "run_app" | "run_command" | "mkdir" | "move" | "delete"
 
 Valid output examples (your reply is ONE ```json block shaped like these — use your real values, not these):
 A tool step:
@@ -26,6 +26,7 @@ Rules:
 - If the task is not done yet, return {"action":"tool",...}.
 - If the task is complete, return {"action":"final","tool":"none",...}.
 - If the same blocker appears twice for the same target or requirement, do not retry the same underlying action with a different tool. Either choose a genuinely different grounded step or finalize with a limitation/explanation.
+- Prefer writing files directly: write_file creates needed parent folders automatically. Use mkdir only when the folder itself is a user-visible deliverable or the plan explicitly requires an empty folder.
 - If the user is asking for explanation or instructions about existing code, prefer read_file and then final instead of editing files.
 - If the next file to edit is unclear, prefer PLAN paths, validation issue paths, and already-listed source files. Use search_files to locate pasted errors, symbols, selectors, or keywords inside files; do not use it as filename discovery.
 - For a new app/project that includes README.md, do not stop to inspect before writing it; use the planned files and recent writes. Only read implementation files first for docs-only or existing-code documentation tasks.

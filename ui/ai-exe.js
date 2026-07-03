@@ -14316,6 +14316,11 @@ function sanitizeAssistantText(text) {
   clean = clean.replace(/<[^A-Za-z0-9\s]{1,3}\s*tool[▁_\s-]*calls?[▁_\s-]*(?:begin|end)[\s\S]*$/i, '');
   // Strip hallucinated <*_file> rewrite directives chat models emit as raw text.
   clean = clean.replace(/<\s*(?:rewrite|write|edit|create|update|new|replace)_file\b[\s\S]*$/i, '');
+  // Reword internal planner section labels a model parrots into user-facing text.
+  clean = clean.replace(/\bPENDING_REQUIREMENTS\b/g, 'the remaining checklist');
+  clean = clean.replace(/\b(?:RECENT_)?TOOL_RESULTS\b/g, 'the tool results');
+  clean = clean.replace(/\bDONE_CRITERIA\b/g, 'the plan');
+  clean = clean.replace(/\b(?:AGENT_ENVIRONMENT|PROJECT_CONTRACT|PROJECT_STATE)\b/g, 'the project setup');
   clean = clean
     .replace(/^\s*assistant\s*$/gim, '')
     .replace(/^\s*user\s*$/gim, '')
@@ -14604,9 +14609,19 @@ function appendLiveDelta(chatId, delta) {
     resetActiveAgentStreamState();
   }
   const nextRaw = `${activeStreamRawText}${raw}`;
-  const nextDisplay = stripLeadingInlineChatNameFragment(stripCanvasBlocksForDisplay(
-    sanitizeStreamDelta(nextRaw)
-  ), chatId);
+  const namingChat = findChatById(chatId);
+  let appliedInlineName = false;
+  if (shouldInlineNameChatResponse(namingChat) && nextRaw.includes(']]')) {
+    const parsedName = extractInlineChatNameMarker(nextRaw);
+    if (parsedName && parsedName.title) {
+      applyInlineChatNameFromResponse(chatId, nextRaw);
+      appliedInlineName = true;
+    }
+  }
+  const rawDisplay = stripCanvasBlocksForDisplay(sanitizeStreamDelta(nextRaw));
+  const nextDisplay = appliedInlineName
+    ? stripInlineChatNameMarkers(rawDisplay)
+    : stripLeadingInlineChatNameFragment(rawDisplay, chatId);
   const thinkingState = buildThinkingState(nextRaw);
   activeStreamRawText = nextRaw;
   activeStreamText = nextDisplay;

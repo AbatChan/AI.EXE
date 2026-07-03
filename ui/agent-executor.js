@@ -370,6 +370,81 @@
       return '';
     }
 
+    const packageJsonSafeVersions = {
+      '@types/react': '^18.3.3',
+      '@types/react-dom': '^18.3.0',
+      '@vitejs/plugin-react': '^4.3.1',
+      autoprefixer: '^10.4.20',
+      clsx: '^2.1.1',
+      'class-variance-authority': '^0.7.0',
+      'date-fns': '^3.6.0',
+      eslint: '^9.9.0',
+      'eslint-plugin-react-hooks': '^5.1.0',
+      'eslint-plugin-react-refresh': '^0.4.9',
+      'framer-motion': '^11.5.4',
+      'lucide-react': '^0.468.0',
+      postcss: '^8.4.45',
+      react: '^18.3.1',
+      'react-dom': '^18.3.1',
+      'react-router-dom': '^6.26.2',
+      tailwindcss: '^3.4.10',
+      'tailwind-merge': '^2.5.2',
+      typescript: '^5.5.4',
+      vite: '^5.4.3',
+      zustand: '^4.5.5',
+    };
+
+    function isMangledPackageVersion(value) {
+      const v = String(value || '').trim();
+      return /^\./.test(v)
+        || /\d\^|\^\.|\^\^/.test(v)
+        || (!/\d/.test(v) && !/^(\*|x|latest|next)$/i.test(v));
+    }
+
+    function collectMangledPackageVersions(parsed) {
+      const bad = [];
+      if (!parsed || typeof parsed !== 'object') return bad;
+      ['dependencies', 'devDependencies', 'peerDependencies'].forEach((key) => {
+        const section = parsed[key];
+        if (!section || typeof section !== 'object') return;
+        Object.keys(section).forEach((name) => {
+          const v = String(section[name] || '').trim();
+          if (isMangledPackageVersion(v)) bad.push(`${name}: "${v}"`);
+        });
+      });
+      return bad;
+    }
+
+    function repairPackageJsonDependencyVersions(content) {
+      let parsed = null;
+      try {
+        parsed = JSON.parse(String(content || ''));
+      } catch (_) {
+        return { content: String(content || ''), repaired: false, remainingBad: [] };
+      }
+      if (!parsed || typeof parsed !== 'object') {
+        return { content: String(content || ''), repaired: false, remainingBad: [] };
+      }
+      let repaired = false;
+      ['dependencies', 'devDependencies', 'peerDependencies'].forEach((key) => {
+        const section = parsed[key];
+        if (!section || typeof section !== 'object') return;
+        Object.keys(section).forEach((name) => {
+          if (!isMangledPackageVersion(section[name])) return;
+          const known = packageJsonSafeVersions[name];
+          if (!known) return;
+          section[name] = known;
+          repaired = true;
+        });
+      });
+      const remainingBad = collectMangledPackageVersions(parsed);
+      return {
+        content: repaired ? `${JSON.stringify(parsed, null, 2)}\n` : String(content || ''),
+        repaired,
+        remainingBad,
+      };
+    }
+
     // Structural diagnostic per language; empty string = sound.
     function getStructuralIssueForPath(path, content) {
       const normalized = deps.normalizeWorkspacePath(path || '');
@@ -397,17 +472,7 @@
         // signals only (digit followed by caret, caret before a dot, or no digit at
         // all); legit ranges like ^18.2.0, ~1.2, >=16, 1.x, * all pass untouched.
         if (/(?:^|\/)package\.json$/i.test(normalized) && parsed && typeof parsed === 'object') {
-          const bad = [];
-          ['dependencies', 'devDependencies', 'peerDependencies'].forEach((key) => {
-            const section = parsed[key];
-            if (!section || typeof section !== 'object') return;
-            Object.keys(section).forEach((name) => {
-              const v = String(section[name] || '').trim();
-              const mangled = /\d\^|\^\.|\^\^/.test(v)
-                || (!/\d/.test(v) && !/^(\*|x|latest|next)$/i.test(v));
-              if (mangled) bad.push(`${name}: "${v}"`);
-            });
-          });
+          const bad = collectMangledPackageVersions(parsed);
           if (bad.length) {
             return `has mangled dependency versions that npm install will reject — ${bad.slice(0, 4).join(', ')}${bad.length > 4 ? ` (+${bad.length - 4} more)` : ''}. Rewrite package.json with real semver versions.`;
           }
@@ -429,6 +494,46 @@
         if (typeof event.content === 'string' && event.content) return event.content;
       }
       return '';
+    }
+
+    async function readWorkspaceText(path) {
+      if (typeof deps.invokeWorkspaceAction !== 'function') return '';
+      try {
+        const response = await deps.invokeWorkspaceAction('workspaceReadFile', { path: deps.normalizeWorkspacePath(path || '') });
+        return response && response.ok ? String(response.output || '') : '';
+      } catch (_) {
+        return '';
+      }
+    }
+
+    async function isViteWorkspaceProject() {
+      const packageText = await readWorkspaceText('/package.json');
+      if (!packageText.trim()) return false;
+      if (/"vite"\s*:/.test(packageText) || /"dev"\s*:\s*"[^"]*\bvite\b/i.test(packageText) || /"build"\s*:\s*"[^"]*\bvite\b/i.test(packageText) || /@vitejs\/plugin-/i.test(packageText)) {
+        return true;
+      }
+      const viteTs = await readWorkspaceText('/vite.config.ts');
+      const viteJs = viteTs ? '' : await readWorkspaceText('/vite.config.js');
+      const viteMjs = (viteTs || viteJs) ? '' : await readWorkspaceText('/vite.config.mjs');
+      return Boolean((viteTs || viteJs || viteMjs).trim());
+    }
+
+    function commandOutputTail(output, maxChars = 5000) {
+      const raw = String(output || '').trim();
+      if (!raw) return '';
+      return raw.length > maxChars ? `...(truncated)\n${raw.slice(-maxChars)}` : raw;
+    }
+
+    function parseRunCommandExitStatus(message) {
+      const status = String(message || '');
+      if (status === 'timed_out' || /\btimed_out\b/i.test(status)) return { timedOut: true, exitCode: null };
+      const exitMatch = status.match(/exit_code=(-?\d+)/);
+      return { timedOut: false, exitCode: exitMatch ? Number(exitMatch[1]) : 0 };
+    }
+
+    function looksLikeMissingNodeDependencies(output) {
+      const text = String(output || '');
+      return /(?:vite|tsc|eslint):\s*(?:command not found|not recognized)|Cannot find module ['"][^'"]*(?:vite|typescript|@vitejs|eslint)|could not determine executable|missing script:\s*build|ENOENT/i.test(text);
     }
 
     function getCssSyntaxIssue(css) {
@@ -748,6 +853,51 @@
       return Array.from(missing);
     }
 
+    function extractRelativeCodeImports(source) {
+      const imports = [];
+      const text = String(source || '');
+      const patterns = [
+        /\bimport\s+(?:[^'"]+\s+from\s+)?['"](\.{1,2}\/[^'"]+)['"]/g,
+        /\bexport\s+[^'"]+\s+from\s+['"](\.{1,2}\/[^'"]+)['"]/g,
+        /\bimport\s*\(\s*['"](\.{1,2}\/[^'"]+)['"]\s*\)/g,
+      ];
+      patterns.forEach((pattern) => {
+        for (const match of text.matchAll(pattern)) {
+          const spec = String(match[1] || '').trim();
+          if (spec && !imports.includes(spec)) imports.push(spec);
+        }
+      });
+      return imports;
+    }
+
+    function resolveRelativeImportCandidates(fromPath, specifier) {
+      const from = deps.normalizeWorkspacePath(fromPath || '');
+      let spec = String(specifier || '').split('?')[0].split('#')[0];
+      if (!from || !/^\.\.?\//.test(spec)) return [];
+      const parts = from.split('/').filter(Boolean);
+      parts.pop();
+      spec.split('/').forEach((part) => {
+        if (!part || part === '.') return;
+        if (part === '..') parts.pop();
+        else parts.push(part);
+      });
+      const base = deps.normalizeWorkspacePath(`/${parts.join('/')}`);
+      if (/\.[a-z0-9]+$/i.test(base)) return [base];
+      return [
+        `${base}.ts`,
+        `${base}.tsx`,
+        `${base}.js`,
+        `${base}.jsx`,
+        `${base}.mjs`,
+        `${base}.cjs`,
+        `${base}.json`,
+        `${base}/index.ts`,
+        `${base}/index.tsx`,
+        `${base}/index.js`,
+        `${base}/index.jsx`,
+      ];
+    }
+
     function validateWebProjectConsistency(fileContents, planSpec, advisoryOut = null) {
       const issues = [];
       const activeExpectedFiles = getActivePlannedFiles(planSpec);
@@ -757,9 +907,22 @@
         .filter((path) => /\.html?$/i.test(path) && String(fileContents[path] || '').trim());
       const cssFiles = allExpectedFiles.filter((path) => /\.(css|scss|sass|less)$/i.test(String(path || '')));
       const scriptFiles = allExpectedFiles.filter((path) => /\.(js|mjs|cjs|ts|jsx|tsx)$/i.test(String(path || '')));
+      const frameworkWebProject = allExpectedFiles.some((path) => /(?:^|\/)package\.json$/i.test(String(path || '')))
+        && (allExpectedFiles.some((path) => /(?:^|\/)vite\.config\.[cm]?[jt]s$/i.test(String(path || '')))
+          || scriptFiles.some((path) => /\.(jsx|tsx)$/i.test(String(path || ''))));
+      const browserScriptFiles = scriptFiles.filter((path) => {
+        const p = String(path || '');
+        if (/(?:^|\/)(?:vite|webpack|rollup|postcss|tailwind|eslint)\.config\.[cm]?[jt]s$/i.test(p)) return false;
+        if (/(?:^|\/)tsconfig(?:\.[^/]*)?\.json$/i.test(p)) return false;
+        if (/\.d\.ts$/i.test(p)) return false;
+        return true;
+      });
       const cssFile = cssFiles[0] || '';
-      const scriptFile = scriptFiles[0] || '';
-      const sharedComponentScripts = scriptFiles.filter((path) => /(?:^|\/)(?:components?|layout|shared|shell)\.[cm]?js$/i.test(path));
+      const scriptFile = browserScriptFiles.find((path) => /(?:^|\/)src\/main\.(?:jsx|tsx|js|ts)$/i.test(path))
+        || browserScriptFiles.find((path) => /(?:^|\/)(?:main|index|app)\.(?:jsx|tsx|js|ts|mjs)$/i.test(path))
+        || browserScriptFiles[0]
+        || '';
+      const sharedComponentScripts = browserScriptFiles.filter((path) => /(?:^|\/)(?:components?|layout|shared|shell)\.[cm]?js$/i.test(path));
       const requiredPageScripts = sharedComponentScripts.length ? sharedComponentScripts : (scriptFile ? [scriptFile] : []);
       if (!activeHtmlFiles.length || (!cssFiles.length && !scriptFiles.length)) return issues;
       const htmlFile = activeHtmlFiles[0] || '';
@@ -770,12 +933,14 @@
       activeHtmlFiles.forEach((pagePath) => {
         const pageHtml = String(fileContents[pagePath] || '');
         if (!pageHtml) return;
-        cssFiles.forEach((plannedCssFile) => {
-          const cssHref = plannedCssFile.replace(/^\//, '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-          if (!new RegExp(`href=["'][^"']*${cssHref}["']`, 'i').test(pageHtml)) {
-            issues.push(`${pagePath}: does not link shared stylesheet ${plannedCssFile}; pages must use the global CSS source of truth instead of redefining styles locally`);
-          }
-        });
+        if (!frameworkWebProject) {
+          cssFiles.forEach((plannedCssFile) => {
+            const cssHref = plannedCssFile.replace(/^\//, '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            if (!new RegExp(`href=["'][^"']*${cssHref}["']`, 'i').test(pageHtml)) {
+              issues.push(`${pagePath}: does not link shared stylesheet ${plannedCssFile}; pages must use the global CSS source of truth instead of redefining styles locally`);
+            }
+          });
+        }
         if (cssFiles.length && /<style[\s>]/i.test(pageHtml)) {
           issues.push(`${pagePath}: contains a page-local <style> block even though shared CSS is planned (${cssFiles.join(', ')}); move page-specific rules into ${cssFile || 'the shared stylesheet'} and keep the HTML semantic`);
         }
@@ -1361,12 +1526,13 @@
         let content = decodeEscapedFileContent(String(decision.content || ''));
         const shouldAutoGenerate = deps.isAgentGeneratedContentTarget(path, taskText);
         const initialInlineContent = content;
+        const packageJsonTarget = /(?:^|\/)package\.json$/i.test(path);
         const inlineStructureIssue = String(content).trim() ? getStructuralIssueForPath(path, content) : '';
         // Trust non-trivial, structurally-valid content the model already supplied.
         // A retry decision may include a complete corrected file; discarding it and
         // auto-generating again is what caused the visible write/rewrite loop.
         const modelSuppliedComplete = shouldAutoGenerate
-          && content.trim().length >= 80
+          && content.trim().length >= (packageJsonTarget ? 20 : 80)
           && !inlineStructureIssue;
         let structuralRepairAttempted = false;
         const repairStructuralIssueOnce = async (stageLabel) => {
@@ -1390,7 +1556,7 @@
           if (generated) content = generated;
           return getStructuralIssueForPath(path, content);
         };
-        if (shouldAutoGenerate && !modelSuppliedComplete) {
+        if (shouldAutoGenerate && !modelSuppliedComplete && !(packageJsonTarget && String(content).trim())) {
           const generated = await deps.generateAgentWriteFileContent(taskText, toolEvents, path, content, planSpec);
           if (generated) content = generated;
           await repairStructuralIssueOnce('initial generated content');
@@ -1479,6 +1645,19 @@
         // Save a fresh file even if it's incomplete — never discard generated work;
         // the WARNING below + a continuation pass finish it from the saved state.
         // Only block a structure-breaking EDIT that would corrupt an existing good file.
+        if (/(?:^|\/)package\.json$/i.test(path)) {
+          const repairedPackage = repairPackageJsonDependencyVersions(content);
+          if (repairedPackage.repaired && !repairedPackage.remainingBad.length) {
+            content = repairedPackage.content;
+            primaryQualityNote = `${primaryQualityNote} Note: repaired mangled package.json dependency versions before saving.`;
+            if (typeof deps.recordDebugTrace === 'function') {
+              deps.recordDebugTrace('agent_package_json_versions_repaired', {
+                path,
+                chars: String(content.length),
+              }, { path, contentPreview: content.slice(0, 1400) });
+            }
+          }
+        }
         const newContentStructureIssue = getStructuralIssueForPath(path, content);
         if (newContentStructureIssue) {
           const priorKnownContent = creatingNewFile ? '' : getLatestKnownContentForPath(toolEvents, path);
@@ -1762,9 +1941,76 @@
         };
       }
 
-      // Smoke-run the app in a hidden sandboxed preview and return real runtime
-      // console errors from startup.
+      // For framework projects, run the real build command so the agent sees
+      // missing imports, TS/JS parse errors, and bundler diagnostics. Plain HTML
+      // still uses the hidden browser smoke test below.
       if (tool === 'run_app') {
+        const viteProject = await isViteWorkspaceProject();
+        if (viteProject) {
+          if (typeof deps.invokeWorkspaceAction !== 'function') {
+            return { ok: false, mutated, observation: 'run_app cannot build this Vite project because the native command runner is not available in this build.' };
+          }
+          deps.setActiveAgentStreamStatus(chatId, 'Building the Vite app...');
+          const res = await deps.invokeWorkspaceAction('runCommand', { program: 'npm', argsLine: ['run', 'build'].join('\n') });
+          if (!res || !res.ok) {
+            return { ok: false, mutated, observation: `run_app could not start the Vite build: ${(res && res.message) || 'unknown error'}.` };
+          }
+          const status = parseRunCommandExitStatus(res.message);
+          const tail = commandOutputTail(res.output);
+          if (status.timedOut) {
+            return {
+              ok: true,
+              mutated,
+              runErrorCount: 1,
+              observation: `run_app Vite build timed out before completion. This usually means the build command hung or dependency setup is still incomplete.${tail ? `\nOutput:\n${tail}` : ''}`,
+            };
+          }
+          if (status.exitCode === 0) {
+            return {
+              ok: true,
+              mutated,
+              runErrorCount: 0,
+              observation: `run_app Vite build passed (npm run build exited 0).${tail ? `\nOutput:\n${tail}` : ''}`,
+            };
+          }
+          const missingDeps = looksLikeMissingNodeDependencies(`${res.message || ''}\n${res.output || ''}`);
+          if (missingDeps) {
+            // Deps missing (tsc/vite not found) → install them here and retry the
+            // build in-step, instead of dead-ending on an "environment limitation".
+            deps.setActiveAgentStreamStatus(chatId, 'Installing npm dependencies...');
+            const inst = await deps.invokeWorkspaceAction('runCommand', { program: 'npm', argsLine: 'install' });
+            const instStatus = parseRunCommandExitStatus(inst && inst.message);
+            if (!inst || !inst.ok || (instStatus.exitCode !== 0 && !instStatus.timedOut)) {
+              const instTail = commandOutputTail(inst && inst.output);
+              return {
+                ok: true,
+                mutated,
+                runErrorCount: 1,
+                observation: `run_app: tried to install project dependencies (npm install) but it did not complete cleanly. Run run_command \`npm install\` and read the error, or install deps outside the app, then run_app again.${instTail ? `\nOutput:\n${instTail}` : ''}`,
+              };
+            }
+            deps.setActiveAgentStreamStatus(chatId, 'Re-running the Vite build...');
+            const res2 = await deps.invokeWorkspaceAction('runCommand', { program: 'npm', argsLine: ['run', 'build'].join('\n') });
+            const status2 = parseRunCommandExitStatus(res2 && res2.message);
+            const tail2 = commandOutputTail(res2 && res2.output);
+            if (res2 && res2.ok && status2.exitCode === 0) {
+              return { ok: true, mutated, runErrorCount: 0, observation: `run_app: installed dependencies (npm install) and the Vite build then passed (npm run build exited 0).${tail2 ? `\nOutput:\n${tail2}` : ''}` };
+            }
+            return {
+              ok: true,
+              mutated,
+              runErrorCount: 1,
+              observation: `run_app: installed dependencies, but the Vite build still failed${status2.exitCode != null ? ` (exit ${status2.exitCode})` : ''}. Read these real build errors, fix the root cause in the referenced files, then run_app again.\nOutput:\n${tail2 || '(no output)'}`,
+            };
+          }
+          return {
+            ok: true,
+            mutated,
+            runErrorCount: 1,
+            observation: `run_app Vite build failed (npm run build exited ${status.exitCode}). Read these real build errors, fix the root cause in the referenced files, then run_app again.\nOutput:\n${tail || '(no output)'}`,
+          };
+        }
+
         if (typeof deps.runWorkspaceAppSmokeTest !== 'function') {
           return { ok: false, mutated, observation: 'run_app is not available in this build.' };
         }
@@ -1936,6 +2182,29 @@
             issues.push(`Python project imports third-party package(s) not declared in requirements.txt: ${missingDeps.join(', ')}. Create or extend /requirements.txt (one package per line) so the Run button can install them into the virtual environment — do NOT pip-install from inside the code.`);
           }
         }
+        const codePaths = Object.keys(fileContents).filter((path) => /\.(js|mjs|cjs|ts|jsx|tsx)$/i.test(path));
+        for (const path of codePaths) {
+          const source = String(fileContents[path] || '');
+          const specs = extractRelativeCodeImports(source);
+          for (const spec of specs) {
+            const candidates = resolveRelativeImportCandidates(path, spec);
+            if (!candidates.length) continue;
+            let found = candidates.some((candidate) => Object.prototype.hasOwnProperty.call(fileContents, candidate));
+            if (!found) {
+              for (const candidate of candidates) {
+                const res = await deps.invokeWorkspaceAction('workspaceReadFile', { path: candidate });
+                if (res && res.ok) {
+                  fileContents[candidate] = String(res.output || '');
+                  found = true;
+                  break;
+                }
+              }
+            }
+            if (!found) {
+              issues.push(`${path}: imports ${spec}, but none of these files exist: ${candidates.slice(0, 5).join(', ')}${candidates.length > 5 ? ', ...' : ''}`);
+            }
+          }
+        }
         if (!issues.length) {
           // Advisory model-driven cross-file review; never blocks.
           let advisoryNotes = mechanicalAdvisory.slice();
@@ -1965,9 +2234,14 @@
       }
 
       if (tool === 'mkdir') {
-        const path = deps.normalizeWorkspacePath(decision.path || '');
+        const rawPath = String(decision.path || '').trim();
+        const path = deps.normalizeWorkspacePath(rawPath);
         if (!path || path === '/') {
-          return { ok: false, mutated, observation: 'mkdir requires a valid folder path.' };
+          return {
+            ok: true,
+            mutated,
+            observation: 'mkdir skipped: no valid folder path was provided. This is harmless because write_file creates parent folders automatically.',
+          };
         }
         if (projectTask && explicitSeparateWorkspaceIntent && hasOpenWorkspace && !workspaceCreatedThisTurn) {
           return {
@@ -1986,7 +2260,11 @@
         }
         const response = await deps.invokeWorkspaceAction('workspaceMkdir', { path });
         if (!response || !response.ok) {
-          return { ok: false, mutated, observation: `mkdir failed for ${path}: ${(response && response.message) || 'unknown error'}` };
+          return {
+            ok: true,
+            mutated,
+            observation: `mkdir skipped: ${path} could not be created (${(response && response.message) || 'unknown error'}). This is harmless if the next write_file targets a file inside it, because write_file creates parent folders automatically.`,
+          };
         }
         deps.setWorkspaceSelection(path, 'folder');
         deps.upsertWorkspaceTreeEntry({
