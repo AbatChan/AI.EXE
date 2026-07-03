@@ -15,3 +15,7 @@
 // root for the process lifetime and reused.
 std::string StartLocalAppServer(const std::filesystem::path& root,
                                 std::string* err);
+
+// True when something is already accepting TCP connections on 127.0.0.1:port.
+// Used by external dev-server launchers (Vite) to make Run idempotent.
+bool IsLoopbackTcpPortOpen(int port);

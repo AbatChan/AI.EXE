@@ -335,3 +335,20 @@ std::string StartLocalAppServer(const std::filesystem::path& root,
   }
   return "http://127.0.0.1:" + std::to_string(port) + "/";
 }
+
+bool IsLoopbackTcpPortOpen(int port) {
+  if (port <= 0 || port > 65535) return false;
+  EnsureSocketsReady();
+  socket_t s = socket(AF_INET, SOCK_STREAM, 0);
+  if (s == kInvalidSocket) return false;
+
+  sockaddr_in addr;
+  std::memset(&addr, 0, sizeof(addr));
+  addr.sin_family = AF_INET;
+  addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  addr.sin_port = htons(static_cast<uint16_t>(port));
+
+  const int rc = connect(s, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
+  CloseSocket(s);
+  return rc == 0;
+}

@@ -1723,8 +1723,13 @@ private:
         const RunTarget target = DetectRunTarget(root);
         if (target.kind == RunTargetKind::kViteWeb) {
           const int port = StableVitePortForRoot(root);
-          if (LaunchViteDevServerWin(root, port, &op_err)) {
-            output = "http://127.0.0.1:" + std::to_string(port) + "/";
+          output = "http://127.0.0.1:" + std::to_string(port) + "/";
+          if (IsLoopbackTcpPortOpen(port)) {
+            const std::wstring url_w(output.begin(), output.end());
+            ShellExecuteW(nullptr, L"open", url_w.c_str(), nullptr, nullptr,
+                          SW_SHOWNORMAL);
+            message = "Vite dev server already running.";
+          } else if (LaunchViteDevServerWin(root, port, &op_err)) {
             message = "Starting Vite dev server.";
           } else {
             ok = false;

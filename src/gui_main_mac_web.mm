@@ -1996,8 +1996,14 @@ std::string BuildStreamEvent(const std::string &id, bool done,
       const RunTarget target = DetectRunTarget(root);
       if (target.kind == RunTargetKind::kViteWeb) {
         const int port = StableVitePortForRoot(root);
-        if (LaunchViteDevServerMac(root, port, &op_err)) {
-          output = "http://127.0.0.1:" + std::to_string(port) + "/";
+        output = "http://127.0.0.1:" + std::to_string(port) + "/";
+        if (IsLoopbackTcpPortOpen(port)) {
+          NSURL *appUrl = [NSURL URLWithString:[NSString stringWithUTF8String:output.c_str()]];
+          if (appUrl) {
+            [[NSWorkspace sharedWorkspace] openURL:appUrl];
+          }
+          message = "Vite dev server already running.";
+        } else if (LaunchViteDevServerMac(root, port, &op_err)) {
           message = "Starting Vite dev server.";
         } else {
           ok = false;
