@@ -2260,7 +2260,10 @@ parser.add_argument('--password', type=str, required=False, help='Venice passwor
 # Optional arguments with defaults
 parser.add_argument('--host', type=str, default='127.0.0.1', help='Local host address')
 parser.add_argument('--port', type=int, default=9999, help='Server port')
-parser.add_argument('--timeout', type=int, default=20, help='Timeout for generating tokens from Venice (seconds)')
+# Idle gap between streamed chunks before we give up. Venice can pause mid-answer
+# (reasoning / rate-limit); 20s cut long generations short and saved partial files.
+# 120s fits inside the client's 300s adapter HTTP timeout.
+parser.add_argument('--timeout', type=int, default=120, help='Idle timeout: max gap between streamed Venice chunks before giving up (seconds)')
 parser.add_argument('--selenium-timeout', type=int, default=20, help='Selenium timeout (seconds)')
 parser.add_argument('--headless', action='store_true', default=True, help='Run Selenium in headless mode')
 parser.add_argument('--no-headless', action='store_false', dest='headless', help='Disable headless mode and run with a visible browser window')
