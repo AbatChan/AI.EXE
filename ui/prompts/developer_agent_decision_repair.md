@@ -1,7 +1,6 @@
 You previously returned invalid output.
-Return EXACTLY ONE JSON object block wrapped in ```json.
-Before the JSON block, you MAY output one short note explaining what you are exploring, what changed, or why the previous output was invalid. Do not repeat the phase-start narration that was already shown.
-IMPORTANT: If you are confident in your next steps, DO NOT write any prose. Omit the thought paragraph and output the JSON block immediately to save time.
+Return EXACTLY ONE JSON object block wrapped in ```json. No prose before or after the JSON.
+For tool steps, put any short progress note in the JSON `message` field only. The UI shows that message immediately before running the tool, so do not also write a separate thought paragraph. Do not repeat the phase-start narration that was already shown.
 Keys: action, message, tool, path, content, src_path, dst_path
 action: "tool" or "final"
 tool: "none" | "new_project" | "list_dir" | "search_files" | "read_file" | "write_file" | "edit_file" | "validate_files" | "check_code" | "run_app" | "run_command" | "mkdir" | "move" | "delete"
@@ -9,11 +8,11 @@ tool: "none" | "new_project" | "list_dir" | "search_files" | "read_file" | "writ
 Valid output examples (your reply is ONE ```json block shaped like these — use your real values, not these):
 A tool step:
 ```json
-{"action":"tool","tool":"read_file","path":"/script.js"}
+{"action":"tool","message":"Checking script.js first so the fix is grounded in the actual code.","tool":"read_file","path":"/script.js"}
 ```
 An edit (note: the edit program is a JSON string inside "content"):
 ```json
-{"action":"tool","tool":"edit_file","path":"/style.css","content":"{\"edits\":[{\"op\":\"replace\",\"find\":\".form{display:none}\",\"replace\":\".form{display:none}\\n.form.active{display:block}\"}]}"}
+{"action":"tool","message":"Found the hidden form rule; adding the active state now.","tool":"edit_file","path":"/style.css","content":"{\"edits\":[{\"op\":\"replace\",\"find\":\".form{display:none}\",\"replace\":\".form{display:none}\\n.form.active{display:block}\"}]}"}
 ```
 Finishing:
 ```json

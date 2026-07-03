@@ -552,7 +552,7 @@
           if (fileCount > 1) {
             return `I'll create the ${projectName} workspace, scaffold the planned files, then validate and run it.`;
           }
-          return `I'll create the ${projectName} workspace and start with the project entry file.`;
+          return `I'll create the ${projectName} workspace and start writing the project files.`;
         }
         if (tool === 'write_file' && fileCount > 0) {
           const path = deps.normalizeWorkspacePath(decision && decision.path || '');
@@ -1472,7 +1472,7 @@
           const narration = isFinal ? finalThought : (decision.thought || decision.message || '');
           if (narration) appendAgentNarration(narration);
         } else if (!deterministicBatchNarrated) {
-          const batchThought = decision.thought || buildDeterministicStartupNarration(decision);
+          const batchThought = decision.thought || decision.message || buildDeterministicStartupNarration(decision);
           if (batchThought) appendAgentNarration(batchThought);
           deterministicBatchNarrated = true;
         }
