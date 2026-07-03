@@ -694,7 +694,14 @@
       const response = await deps.invokeWorkspaceAction('runWorkspaceApp', {});
       if (!response || !response.ok) {
         window.alert((response && response.message) || 'Failed to run the project.');
+        return;
       }
+      // Native run opens the app externally (Chrome/default browser for web
+      // projects, terminal/cmd for servers). Keep the embedded artifact browser
+      // out of the way so it remains reserved for adapter/account flows.
+      if (typeof deps.setMiddleViewMode === 'function') deps.setMiddleViewMode('chat');
+      if (typeof deps.renderMiddleView === 'function') deps.renderMiddleView();
+      if (typeof deps.renderSidebarCounts === 'function') deps.renderSidebarCounts();
     }
 
     return {
