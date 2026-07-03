@@ -186,7 +186,11 @@
       // Live-stream the partial content into the work panel so the file is seen
       // filling in as it generates; the real file is committed by write_file later.
       const emitPartial = (text) => {
-        if (typeof deps.updateAgentStreamingFile === 'function') deps.updateAgentStreamingFile(path, String(text || ''));
+        if (typeof deps.updateAgentStreamingFile !== 'function') return;
+        const preview = typeof deps.sanitizeAgentGeneratedFileContent === 'function'
+          ? deps.sanitizeAgentGeneratedFileContent(text, path)
+          : String(text || '');
+        deps.updateAgentStreamingFile(path, preview);
       };
       beat();
       const first = await runRawAgentFileInference(prompt, emitPartial, `${path} (initial)`);
@@ -383,7 +387,13 @@
         preferStreaming: true,
         onDelta: (delta) => {
           beatToolProgress();
-          if (delta && typeof deps.updateAgentStreamingFile === 'function') { streamed += String(delta); deps.updateAgentStreamingFile(path, streamed); }
+          if (delta && typeof deps.updateAgentStreamingFile === 'function') {
+            streamed += String(delta);
+            const preview = typeof deps.sanitizeAgentGeneratedEditProgram === 'function'
+              ? deps.sanitizeAgentGeneratedEditProgram(streamed)
+              : streamed;
+            deps.updateAgentStreamingFile(path, preview);
+          }
         },
       });
       if (typeof deps.clearAgentStreamingFile === 'function') deps.clearAgentStreamingFile(path);

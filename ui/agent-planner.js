@@ -451,11 +451,13 @@
       //    JSX <Header> read as an <head> tag).
       const isScaffoldLine = (t) =>
         /^(?:FILE_CONTENT|TASK|RULES|MVP_REQUIREMENTS|PROJECT_CONTRACT|PROJECT_STATE|RECENT_TOOL_RESULTS|PREVIOUS_ATTEMPT_TO_IMPROVE|Planned files|Quality contract|Web project contract|Python project contract|Generation budget contract)\s*:/i.test(t)
-        || /^Return only the file contents\.?$/i.test(t)
+        || /^Return only the file contents\b/i.test(t)
         || /^File path:\s*\/\S+$/i.test(t)
         || /^(?:Today's date is|Current date)\b/i.test(t)
+        || /^-\s+If this is (?:README\.md|a main source file)\b/i.test(t)
         || /^-\s+(?:Build the complete|Reuse shared|Write a usable MVP|Keep the file internally|Prefer (?:a |self-contained)|Return only )\b/i.test(t);
       text = text.split('\n').filter((line) => !isScaffoldLine(line.trim())).join('\n').trim();
+      if (/^```/.test(text)) text = text.replace(/^```[a-z0-9_+\-]*\s*/i, '').replace(/\s*```$/, '').trim();
 
       // 4) A single leading prose lead-in ("Here's the file:", "Below is the file:").
       text = text.replace(/^(?:Sure[,!.]?\s*)?(?:Here(?:'|’)?s|Here is|Below is)\b[^\n]{0,40}?\bfile(?:\s+content)?\b[^\n]{0,20}?[:\-]\s*\n?/i, '').trim();

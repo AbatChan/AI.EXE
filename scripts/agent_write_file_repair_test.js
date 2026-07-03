@@ -203,6 +203,51 @@ const repairedScript = [
   assert.equal(inlineWrites[0].content, validInline, 'inline content is preserved exactly');
   console.log('PASS: valid inline planner content is not discarded');
 
+  const leakedHtmlPreview = [
+    'Return only the file contents. No markdown fences. No explanation.',
+    '- If this is README.md, include setup or run instructions.',
+    '- If this is a main source file, include the core functionality requested by the task.',
+    '',
+    '```html',
+    '<!DOCTYPE html>',
+    '<html lang="en">',
+    '<head><title>Personal Finance Dashboard</title></head>',
+    '<body><div id="root"></div></body>',
+    '</html>',
+  ].join('\n');
+  const cleanedHtmlPreview = planner.sanitizeAgentGeneratedFileContent(leakedHtmlPreview, '/index.html');
+  assert.ok(cleanedHtmlPreview.startsWith('<!DOCTYPE html>'), 'HTML scaffold prompt lines are stripped from generated file content');
+  assert.doesNotMatch(cleanedHtmlPreview, /Return only the file contents|If this is README|```/);
+  console.log('PASS: echoed file-generation scaffold is stripped from HTML content');
+
+  const deterministicPackageCalls = [];
+  const { executor: deterministicPackageExecutor, writes: deterministicPackageWrites } = makeExecutor(async (...args) => {
+    deterministicPackageCalls.push(args);
+    return '{"name":"bad","dependencies":{"react":"^1^.3.1"}}';
+  });
+  const deterministicPackageSaved = await deterministicPackageExecutor.executeDeveloperToolCall(
+    'chat_write_repair',
+    { action: 'tool', tool: 'write_file', path: '/package.json', content: '' },
+    'Create a Vite React TypeScript personal finance dashboard.',
+    [],
+    {
+      ...planSpec,
+      projectName: 'personal finance dashboard',
+      expectedFiles: ['/package.json', '/vite.config.ts', '/src/main.tsx', '/src/App.tsx'],
+    }
+  );
+
+  assert.equal(deterministicPackageSaved.ok, true, 'empty package.json for Vite React scaffold is generated locally');
+  assert.equal(deterministicPackageCalls.length, 0, 'deterministic package.json does not call the model generator');
+  assert.equal(deterministicPackageWrites.length, 1, 'deterministic package.json is written once');
+  const deterministicPackage = JSON.parse(deterministicPackageWrites[0].content);
+  assert.equal(deterministicPackage.name, 'personal-finance-dashboard');
+  assert.equal(deterministicPackage.scripts.build, 'tsc -b && vite build');
+  assert.equal(deterministicPackage.dependencies.react, '^18.3.1');
+  assert.equal(deterministicPackage.devDependencies.vite, '^5.4.3');
+  assert.match(deterministicPackageSaved.observation, /deterministic Vite React package\.json/);
+  console.log('PASS: Vite React package.json is generated deterministically without model repair');
+
   const brokenPackageJson = JSON.stringify({
     name: 'amora-dating-platform',
     private: true,

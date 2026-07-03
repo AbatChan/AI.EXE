@@ -445,6 +445,43 @@
       };
     }
 
+    function buildDeterministicPackageJson(path, taskText, planSpec) {
+      const normalized = deps.normalizeWorkspacePath(path || '');
+      if (!/(?:^|\/)package\.json$/i.test(normalized)) return '';
+      const expectedFiles = getAllPlannedFiles(planSpec);
+      const hasVite = expectedFiles.some((p) => /(?:^|\/)vite\.config\.[cm]?[jt]s$/i.test(String(p || '')))
+        || /(?:^|\s)(vite|react|tsx|typescript)\b/i.test(String(taskText || ''));
+      const hasReact = expectedFiles.some((p) => /\.(jsx|tsx)$/i.test(String(p || '')))
+        || /\breact\b/i.test(String(taskText || ''));
+      if (!hasVite || !hasReact) return '';
+      const rawName = String((planSpec && planSpec.projectName) || deps.deriveProjectNameFromTask(taskText) || 'app')
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '') || 'app';
+      return `${JSON.stringify({
+        name: rawName,
+        private: true,
+        version: '0.1.0',
+        type: 'module',
+        scripts: {
+          dev: 'vite',
+          build: 'tsc -b && vite build',
+          preview: 'vite preview',
+        },
+        dependencies: {
+          react: packageJsonSafeVersions.react,
+          'react-dom': packageJsonSafeVersions['react-dom'],
+        },
+        devDependencies: {
+          '@types/react': packageJsonSafeVersions['@types/react'],
+          '@types/react-dom': packageJsonSafeVersions['@types/react-dom'],
+          '@vitejs/plugin-react': packageJsonSafeVersions['@vitejs/plugin-react'],
+          typescript: packageJsonSafeVersions.typescript,
+          vite: packageJsonSafeVersions.vite,
+        },
+      }, null, 2)}\n`;
+    }
+
     // Structural diagnostic per language; empty string = sound.
     function getStructuralIssueForPath(path, content) {
       const normalized = deps.normalizeWorkspacePath(path || '');
@@ -1534,6 +1571,14 @@
         const shouldAutoGenerate = deps.isAgentGeneratedContentTarget(path, taskText);
         const initialInlineContent = content;
         const packageJsonTarget = /(?:^|\/)package\.json$/i.test(path);
+        let primaryQualityNote = '';
+        if (packageJsonTarget && !String(content || '').trim()) {
+          const deterministicPackage = buildDeterministicPackageJson(path, taskText, planSpec);
+          if (deterministicPackage) {
+            content = deterministicPackage;
+            primaryQualityNote = ' Note: generated deterministic Vite React package.json.';
+          }
+        }
         const inlineStructureIssue = String(content).trim() ? getStructuralIssueForPath(path, content) : '';
         // Trust non-trivial, structurally-valid content the model already supplied.
         // A retry decision may include a complete corrected file; discarding it and
@@ -1578,7 +1623,6 @@
             observation: `write_file blocked for ${path}: content is empty. When creating a new file from scratch, use write_file with the complete final contents.`,
           };
         }
-        let primaryQualityNote = '';
         const projectStyleTask = deps.isAgentTaskSoftwareProject(taskText) || /\bcomplete\b/.test(taskLower);
         const gameLikeTask = deps.isAgentTaskGameLike(taskText);
         const primaryTarget = /\.(py|js|ts|jsx|tsx|html)$/i.test(path);
