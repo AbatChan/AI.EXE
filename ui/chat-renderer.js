@@ -1951,7 +1951,7 @@
       const clean = Array.from(attachments || [])
         .map((item) => (item && typeof item === 'object' ? item : null))
         .filter(Boolean)
-        .slice(0, 12);
+        .slice(0, 10);
       if (!clean.length) return null;
 
       const strip = document.createElement('div');
@@ -1959,21 +1959,33 @@
       clean.forEach((item) => {
         const name = String(item.name || 'attachment').trim() || 'attachment';
         const ext = name.includes('.') ? name.split('.').pop() : '';
-        const kind = String(item.kind || '').toLowerCase() === 'text' ? 'TEXT' : 'FILE';
+        const rawKind = String(item.kind || '').toLowerCase();
+        const kind = rawKind === 'image' ? 'IMAGE' : (rawKind === 'text' ? 'TEXT' : 'FILE');
         const typeLabel = ext ? ext.toUpperCase() : kind;
+        const previewDataUrl = rawKind === 'image' && /^data:image\//i.test(String(item.previewDataUrl || ''))
+          ? String(item.previewDataUrl || '')
+          : '';
         const chip = document.createElement('div');
-        chip.className = 'attach-chip msg-attachment-chip';
+        chip.className = `attach-chip msg-attachment-chip${previewDataUrl ? ' image' : ''}`;
         chip.title = name;
 
         const icon = document.createElement('span');
         icon.className = 'attach-chip-icon';
         icon.setAttribute('aria-hidden', 'true');
-        icon.innerHTML = `
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
-            <polyline points="14 2 14 8 20 8"></polyline>
-          </svg>
-        `;
+        if (previewDataUrl) {
+          const img = document.createElement('img');
+          img.className = 'attach-chip-thumb';
+          img.src = previewDataUrl;
+          img.alt = '';
+          icon.appendChild(img);
+        } else {
+          icon.innerHTML = `
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+              <polyline points="14 2 14 8 20 8"></polyline>
+            </svg>
+          `;
+        }
 
         const textWrap = document.createElement('span');
         textWrap.className = 'attach-chip-text';

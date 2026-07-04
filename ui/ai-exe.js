@@ -3563,11 +3563,15 @@ function normalizePendingAttachmentMeta(item) {
   if (!item || typeof item !== 'object') return null;
   const id = String(item.id || `att_${nowTs().toString(36)}_${Math.random().toString(36).slice(2, 8)}`).trim();
   const name = String(item.name || 'attachment').trim() || 'attachment';
-  const kind = String(item.kind || '').toLowerCase() === 'text' ? 'text' : 'file';
+  const rawKind = String(item.kind || '').toLowerCase();
+  const kind = rawKind === 'text' ? 'text' : (rawKind === 'image' ? 'image' : 'file');
   const size = Math.max(0, Number(item.size) || 0);
   const mime = String(item.mime || '').slice(0, 120);
   const note = String(item.note || '').slice(0, 600);
   const content = kind === 'text' ? String(item.content || '').slice(0, maxAttachmentTextChars) : '';
+  const previewDataUrl = kind === 'image' && /^data:image\//i.test(String(item.previewDataUrl || ''))
+    ? String(item.previewDataUrl || '').slice(0, 180000)
+    : '';
   return {
     id,
     name,
@@ -3576,6 +3580,7 @@ function normalizePendingAttachmentMeta(item) {
     mime,
     note,
     ...(kind === 'text' ? { content } : {}),
+    ...(previewDataUrl ? { previewDataUrl } : {}),
   };
 }
 
@@ -3584,6 +3589,23 @@ function normalizePendingAttachmentList(list) {
     .map(normalizePendingAttachmentMeta)
     .filter(Boolean)
     .slice(0, maxPendingAttachments);
+}
+
+function normalizeMessageAttachmentList(list) {
+  return Array.from(list || [])
+    .map((item) => {
+      const normalized = normalizePendingAttachmentMeta(item);
+      if (!normalized) return null;
+      return {
+        name: normalized.name,
+        kind: normalized.kind,
+        mime: normalized.mime,
+        size: normalized.size,
+        ...(normalized.previewDataUrl ? { previewDataUrl: normalized.previewDataUrl } : {}),
+      };
+    })
+    .filter(Boolean)
+    .slice(0, 10);
 }
 
 function persistPendingAttachmentsForCurrentContext() {
@@ -3635,6 +3657,25 @@ function isLikelyImageAttachment(file) {
   return /\.(png|jpe?g|webp|gif|bmp|tiff?|svg)$/i.test(name);
 }
 
+function getAttachmentTypeLabel(item) {
+  const name = String((item && item.name) || '').trim();
+  const ext = name.includes('.') ? name.split('.').pop() : '';
+  if (ext) return ext.toUpperCase();
+  const kind = String((item && item.kind) || '').toLowerCase();
+  if (kind === 'image') return 'IMAGE';
+  if (kind === 'text') return 'TEXT';
+  return 'FILE';
+}
+
+function buildAttachmentFileIcon() {
+  return `
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+      <polyline points="14 2 14 8 20 8"></polyline>
+    </svg>
+  `;
+}
+
 function renderInputAttachments() {
   if (!inputAttachments) return;
   inputAttachments.innerHTML = '';
@@ -3643,22 +3684,18 @@ function renderInputAttachments() {
   }
   pendingAttachments.forEach((item) => {
     const chip = document.createElement('div');
-    chip.className = 'attach-chip';
-    const ext = String(item.name || '').split('.').pop() || '';
-    const typeLabel = item.kind === 'text'
-      ? (ext ? ext.toUpperCase() : 'TEXT')
-      : (ext ? ext.toUpperCase() : 'FILE');
-    const kind = item.kind === 'text' ? 'TEXT' : 'FILE';
+    chip.className = `attach-chip${item.kind === 'image' && item.previewDataUrl ? ' image' : ''}`;
+    const typeLabel = getAttachmentTypeLabel(item);
+    const iconHtml = item.kind === 'image' && item.previewDataUrl
+      ? `<img class="attach-chip-thumb" src="${escapeHtml(item.previewDataUrl)}" alt="">`
+      : buildAttachmentFileIcon();
     chip.innerHTML = `
         <span class="attach-chip-icon" aria-hidden="true">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
-            <polyline points="14 2 14 8 20 8"></polyline>
-          </svg>
+          ${iconHtml}
         </span>
         <span class="attach-chip-text">
           <span class="attach-chip-label">${escapeHtml(item.name || 'attachment')}</span>
-          <span class="attach-chip-kind">${escapeHtml(typeLabel || kind)}</span>
+          <span class="attach-chip-kind">${escapeHtml(typeLabel || 'FILE')}</span>
         </span>
       `;
     const removeBtn = document.createElement('button');
@@ -3697,8 +3734,63 @@ function syncInputAugmentState() {
   renderComposerConfirmationUi();
 }
 
+async function createImageAttachmentPreview(file) {
+  if (!file) return '';
+  const mime = String(file.type || '').toLowerCase();
+  const isSvg = mime === 'image/svg+xml' || /\.svg$/i.test(String(file.name || ''));
+  if (isSvg && Number(file.size || 0) <= 180000) {
+    try {
+      return await new Promise((resolve) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ''));
+        reader.onerror = () => resolve('');
+        reader.readAsDataURL(file);
+      });
+    } catch (_) {
+      return '';
+    }
+  }
+  let objectUrl = '';
+  try {
+    objectUrl = URL.createObjectURL(file);
+    const img = await new Promise((resolve, reject) => {
+      const image = new Image();
+      image.onload = () => resolve(image);
+      image.onerror = reject;
+      image.src = objectUrl;
+    });
+    const maxSide = 520;
+    const width = Math.max(1, Number(img.naturalWidth || img.width) || 1);
+    const height = Math.max(1, Number(img.naturalHeight || img.height) || 1);
+    const scale = Math.min(1, maxSide / Math.max(width, height));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(width * scale));
+    canvas.height = Math.max(1, Math.round(height * scale));
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return '';
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    return canvas.toDataURL('image/jpeg', 0.78);
+  } catch (_) {
+    if (Number(file && file.size || 0) <= 220000) {
+      try {
+        return await new Promise((resolve) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(String(reader.result || ''));
+          reader.onerror = () => resolve('');
+          reader.readAsDataURL(file);
+        });
+      } catch (__) { /* ignore */ }
+    }
+    return '';
+  } finally {
+    if (objectUrl) {
+      try { URL.revokeObjectURL(objectUrl); } catch (_) { }
+    }
+  }
+}
+
 async function parseAttachmentFile(file) {
-  const safeName = String((file && file.name) || 'attachment').trim() || 'attachment';
+  const safeName = String((file && (file.webkitRelativePath || file.relativePath || file.name)) || 'attachment').trim() || 'attachment';
   const size = Number((file && file.size) || 0);
   const base = {
     id: `att_${nowTs().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
@@ -3707,10 +3799,12 @@ async function parseAttachmentFile(file) {
     mime: String((file && file.type) || ''),
   };
   if (isLikelyImageAttachment(file)) {
+    const previewDataUrl = await createImageAttachmentPreview(file);
     return {
       ...base,
-      kind: 'file',
-      note: 'Image files are not processed by Attach. Use text/code/document files here.',
+      kind: 'image',
+      ...(previewDataUrl ? { previewDataUrl } : {}),
+      note: 'Image attached for visual reference.',
     };
   }
   const isText = isLikelyTextAttachment(file);
@@ -3855,6 +3949,63 @@ async function handleAttachSelection(fileList) {
   renderInputAttachments();
 }
 
+async function readFilesFromDirectoryEntry(entry, prefix = '', limit = maxPendingAttachments) {
+  if (!entry || limit <= 0) return [];
+  if (entry.isFile) {
+    return new Promise((resolve) => {
+      entry.file((file) => {
+        if (prefix && file && !file.relativePath) {
+          try {
+            Object.defineProperty(file, 'relativePath', {
+              value: `${prefix}${file.name || 'file'}`,
+              configurable: true,
+            });
+          } catch (_) { }
+        }
+        resolve(file ? [file] : []);
+      }, () => resolve([]));
+    });
+  }
+  if (!entry.isDirectory || typeof entry.createReader !== 'function') return [];
+  const reader = entry.createReader();
+  const children = [];
+  while (children.length < limit) {
+    const batch = await new Promise((resolve) => {
+      reader.readEntries((entries) => resolve(Array.from(entries || [])), () => resolve([]));
+    });
+    if (!batch.length) break;
+    for (const child of batch) {
+      if (children.length >= limit) break;
+      const childPrefix = `${prefix}${entry.name || 'folder'}/`;
+      const files = await readFilesFromDirectoryEntry(child, childPrefix, limit - children.length);
+      children.push(...files.slice(0, limit - children.length));
+    }
+  }
+  return children;
+}
+
+async function filesFromDataTransfer(dataTransfer) {
+  if (!dataTransfer) return [];
+  const items = Array.from(dataTransfer.items || []);
+  if (items.length) {
+    const files = [];
+    for (const item of items) {
+      if (files.length >= maxPendingAttachments) break;
+      if (!item || item.kind !== 'file') continue;
+      const entry = typeof item.webkitGetAsEntry === 'function' ? item.webkitGetAsEntry() : null;
+      if (entry && entry.isDirectory) {
+        const nested = await readFilesFromDirectoryEntry(entry, '', maxPendingAttachments - files.length);
+        files.push(...nested.slice(0, maxPendingAttachments - files.length));
+      } else {
+        const file = typeof item.getAsFile === 'function' ? item.getAsFile() : null;
+        if (file) files.push(file);
+      }
+    }
+    if (files.length) return files.slice(0, maxPendingAttachments);
+  }
+  return Array.from(dataTransfer.files || []).slice(0, maxPendingAttachments);
+}
+
 function dataTransferHasFiles(dataTransfer) {
   if (!dataTransfer) return false;
   if (dataTransfer.files && dataTransfer.files.length > 0) return true;
@@ -3901,7 +4052,7 @@ function installComposerAttachmentDropTarget() {
     dragDepth = 0;
     setComposerDragOver(false);
     if (pendingInferenceCount > 0 && isCurrentViewInferenceChat()) return;
-    void handleAttachSelection(evt.dataTransfer.files);
+    void filesFromDataTransfer(evt.dataTransfer).then((files) => handleAttachSelection(files));
   });
 }
 
@@ -11324,6 +11475,9 @@ function loadStoredChats() {
             agentMeta: m && m.role === 'ai'
               ? cloneAgentMeta(m.agentMeta)
               : null,
+            attachments: m && m.role === 'user'
+              ? normalizeMessageAttachmentList(m.attachments)
+              : [],
             branchAnchorTs: Number(m && m.branchAnchorTs) || 0,
           }))
         : [];
@@ -13376,12 +13530,7 @@ function appendMessageToChat(chatId, role, text, forcedTs = 0, options = {}) {
   const ts = Number(forcedTs) || nowTs();
   const message = { role, text: cleaned, ts };
   if (Array.isArray(options.attachments) && options.attachments.length) {
-    message.attachments = options.attachments.slice(0, 12).map((a) => ({
-      name: String((a && a.name) || 'attachment').slice(0, 200),
-      kind: (a && a.kind) === 'text' ? 'text' : 'file',
-      mime: String((a && a.mime) || '').slice(0, 120),
-      size: Math.max(0, Number(a && a.size) || 0),
-    }));
+    message.attachments = normalizeMessageAttachmentList(options.attachments);
   }
   let shouldScheduleSmartRename = false;
   if (role === 'ai' && typeof options.thinking === 'string' && options.thinking.trim()) {
@@ -14203,7 +14352,7 @@ async function sendMessage() {
   clearInputBox();
   // Capture the attached files' display info BEFORE clearing, so we can show a capsule on the
   // sent user message (the content is already folded into the prompt by buildPromptWithInputAugments).
-  const sentAttachments = (pendingAttachments || []).map((a) => ({ name: a.name, kind: a.kind, mime: a.mime, size: a.size }));
+  const sentAttachments = normalizeMessageAttachmentList(pendingAttachments);
   clearPendingAttachments();
   const chat = (inNewChatMode || !getActiveChat()) ? createChat(userText) : getActiveChat();
   if (!chat) return;
