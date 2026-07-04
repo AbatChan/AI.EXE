@@ -1947,6 +1947,52 @@
       bubble.appendChild(toggle);
     }
 
+    function buildMessageAttachmentStrip(attachments = []) {
+      const clean = Array.from(attachments || [])
+        .map((item) => (item && typeof item === 'object' ? item : null))
+        .filter(Boolean)
+        .slice(0, 12);
+      if (!clean.length) return null;
+
+      const strip = document.createElement('div');
+      strip.className = 'msg-attachment-chips';
+      clean.forEach((item) => {
+        const name = String(item.name || 'attachment').trim() || 'attachment';
+        const ext = name.includes('.') ? name.split('.').pop() : '';
+        const kind = String(item.kind || '').toLowerCase() === 'text' ? 'TEXT' : 'FILE';
+        const typeLabel = ext ? ext.toUpperCase() : kind;
+        const chip = document.createElement('div');
+        chip.className = 'attach-chip msg-attachment-chip';
+        chip.title = name;
+
+        const icon = document.createElement('span');
+        icon.className = 'attach-chip-icon';
+        icon.setAttribute('aria-hidden', 'true');
+        icon.innerHTML = `
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+            <polyline points="14 2 14 8 20 8"></polyline>
+          </svg>
+        `;
+
+        const textWrap = document.createElement('span');
+        textWrap.className = 'attach-chip-text';
+        const label = document.createElement('span');
+        label.className = 'attach-chip-label';
+        label.textContent = name;
+        const type = document.createElement('span');
+        type.className = 'attach-chip-kind';
+        type.textContent = typeLabel || kind;
+        textWrap.appendChild(label);
+        textWrap.appendChild(type);
+
+        chip.appendChild(icon);
+        chip.appendChild(textWrap);
+        strip.appendChild(chip);
+      });
+      return strip;
+    }
+
     function buildMsgNode(role, text, chatId = '', messageTs = 0, loopDetected = false, thinkingText = '', branchAnchorTs = 0, agentActivities = [], agentMeta = null, displayTs = 0, thinkingMeta = null, attachments = []) {
       const div = document.createElement('div');
       div.className = `msg ${role}`;
@@ -2101,21 +2147,8 @@
         }
       }
 
-      // Attachment capsule(s) — show the files the user attached to this message.
-      if (role === 'user' && Array.isArray(attachments) && attachments.length) {
-        const chips = document.createElement('div');
-        chips.className = 'msg-attachment-chips';
-        attachments.forEach((a) => {
-          const nm = String((a && a.name) || 'attachment');
-          const chip = document.createElement('span');
-          chip.className = 'msg-attachment-chip';
-          chip.title = nm;
-          const icon = (a && a.kind) === 'text' ? '📄' : '📎';
-          chip.textContent = `${icon} ${nm}`;
-          chips.appendChild(chip);
-        });
-        bubble.appendChild(chips);
-      }
+      const userAttachmentStrip = role === 'user' ? buildMessageAttachmentStrip(attachments) : null;
+      if (userAttachmentStrip) stack.appendChild(userAttachmentStrip);
 
       stack.appendChild(bubble);
 

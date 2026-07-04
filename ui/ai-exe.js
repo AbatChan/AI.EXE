@@ -3855,6 +3855,56 @@ async function handleAttachSelection(fileList) {
   renderInputAttachments();
 }
 
+function dataTransferHasFiles(dataTransfer) {
+  if (!dataTransfer) return false;
+  if (dataTransfer.files && dataTransfer.files.length > 0) return true;
+  try {
+    return Array.from(dataTransfer.types || []).includes('Files');
+  } catch (_) {
+    return false;
+  }
+}
+
+function setComposerDragOver(active) {
+  if (!inputRow) return;
+  inputRow.classList.toggle('drag-over', Boolean(active));
+}
+
+function installComposerAttachmentDropTarget() {
+  if (!inputRow || inputRow.dataset.dropTargetInstalled === 'true') return;
+  inputRow.dataset.dropTargetInstalled = 'true';
+  let dragDepth = 0;
+
+  inputRow.addEventListener('dragenter', (evt) => {
+    if (!dataTransferHasFiles(evt.dataTransfer)) return;
+    evt.preventDefault();
+    dragDepth += 1;
+    setComposerDragOver(true);
+  });
+
+  inputRow.addEventListener('dragover', (evt) => {
+    if (!dataTransferHasFiles(evt.dataTransfer)) return;
+    evt.preventDefault();
+    if (evt.dataTransfer) evt.dataTransfer.dropEffect = 'copy';
+    setComposerDragOver(true);
+  });
+
+  inputRow.addEventListener('dragleave', (evt) => {
+    if (!dataTransferHasFiles(evt.dataTransfer)) return;
+    dragDepth = Math.max(0, dragDepth - 1);
+    if (dragDepth === 0) setComposerDragOver(false);
+  });
+
+  inputRow.addEventListener('drop', (evt) => {
+    if (!dataTransferHasFiles(evt.dataTransfer)) return;
+    evt.preventDefault();
+    dragDepth = 0;
+    setComposerDragOver(false);
+    if (pendingInferenceCount > 0 && isCurrentViewInferenceChat()) return;
+    void handleAttachSelection(evt.dataTransfer.files);
+  });
+}
+
 function editManualContext() {
   if (pendingInferenceCount > 0 && isCurrentViewInferenceChat()) return;
   if (!ensureSignedIn()) return;
@@ -12630,6 +12680,7 @@ if (attachFileInput) {
     void handleAttachSelection(attachFileInput.files);
   });
 }
+installComposerAttachmentDropTarget();
 if (authUserInput) {
   authUserInput.addEventListener('input', () => setAuthNote(''));
   authUserInput.addEventListener('keydown', (e) => {
