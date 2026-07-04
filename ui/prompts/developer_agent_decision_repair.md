@@ -3,7 +3,7 @@ Return EXACTLY ONE JSON object block wrapped in ```json. No prose before or afte
 For tool steps, put any short progress note in the JSON `message` field only. The UI shows that message immediately before running the tool, so do not also write a separate thought paragraph. Do not repeat the phase-start narration that was already shown.
 Keys: action, message, tool, path, content, src_path, dst_path
 action: "tool" or "final"
-tool: "none" | "new_project" | "list_dir" | "search_files" | "read_file" | "write_file" | "edit_file" | "validate_files" | "check_code" | "run_app" | "run_command" | "mkdir" | "move" | "delete"
+tool: "none" | "new_project" | "list_dir" | "search_files" | "read_file" | "read_files" | "write_file" | "edit_file" | "validate_files" | "check_code" | "run_app" | "run_command" | "mkdir" | "move" | "delete"
 
 Valid output examples (your reply is ONE ```json block shaped like these — use your real values, not these):
 A tool step:

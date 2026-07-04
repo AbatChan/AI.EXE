@@ -818,12 +818,9 @@
       });
     }
 
-    async function buildAgentPlanSpec(chatId, taskText, planOptions = {}) {
-      const forceProjectScope = Boolean(planOptions && planOptions.forceProjectScope);
-      const prompt = await buildAgentPlanPrompt(chatId, taskText);
-      // Plan = one-shot JSON; needs room for a reasoning model's hidden tokens too,
-      // else it truncates mid-criterion ("...and col"). 768 (decision budget) was far short.
-      const planMaxTokens = Math.max(4096, Number(agentDecisionMaxTokens) || 0);
+    // One decompose attempt: infer + parse. Returns { spec, res } — spec is the parsed
+    // plan or null (so the caller can retry a transient failure before degrading).
+    async function attemptAgentPlanSpec(prompt, planMaxTokens, taskText, chatId, forceProjectScope) {
       const res = await Promise.race([
         requestAgentPlannerInference(prompt, planMaxTokens, agentPlanGrammar),
         new Promise((resolve) => setTimeout(() => resolve({
@@ -832,18 +829,7 @@
           message: 'Agent plan step timed out.',
         }), agentStepTimeoutMs())),
       ]);
-      if (!res || !res.ok) {
-        const fb = buildFallbackAgentPlanSpec(taskText, { chatId, forceProjectScope });
-        if (fb && typeof fb === 'object') {
-          fb._planSource = res && res.timedOut ? 'fallback:timeout' : 'fallback:infer_fail';
-          fb._planRaw = String((res && res.message) || '').slice(0, 300);
-          // Hard provider failure (credits/key/forbidden) — flag so the loop stops.
-          if (res && (res.hardFail || [401, 402, 403].includes(Number(res.httpStatus)))) {
-            fb._planHardError = String(res.message || '').trim() || 'The inference provider rejected the request.';
-          }
-        }
-        return fb;
-      }
+      if (!res || !res.ok) return { spec: null, res };
       let parsed = null;
       try {
         parsed = JSON.parse(String(res.output || '').trim());
@@ -872,13 +858,39 @@
       }
       if (parsed) {
         const spec = deps.normalizeAgentPlanSpec(parsed, taskText, { chatId, forceProjectScope });
-        if (spec && typeof spec === 'object') spec._planSource = 'model';
-        return spec;
+        if (spec && typeof spec === 'object') return { spec, res };
       }
+      return { spec: null, res };
+    }
+
+    async function buildAgentPlanSpec(chatId, taskText, planOptions = {}) {
+      const forceProjectScope = Boolean(planOptions && planOptions.forceProjectScope);
+      const prompt = await buildAgentPlanPrompt(chatId, taskText);
+      // Plan = one-shot JSON; needs room for a reasoning model's hidden tokens too,
+      // else it truncates mid-criterion ("...and col"). 768 (decision budget) was far short.
+      const planMaxTokens = Math.max(4096, Number(agentDecisionMaxTokens) || 0);
+      let attempt = await attemptAgentPlanSpec(prompt, planMaxTokens, taskText, chatId, forceProjectScope);
+      // A transient timeout/truncation on the decompose must NOT silently degrade a
+      // real framework build into the generic single-file fallback. Retry once (unless
+      // it's a hard provider failure — credits/key — which won't succeed on retry).
+      const isHardFail = (r) => Boolean(r && (r.hardFail || [401, 402, 403].includes(Number(r.httpStatus))));
+      if (!attempt.spec && !isHardFail(attempt.res)) {
+        attempt = await attemptAgentPlanSpec(prompt, planMaxTokens, taskText, chatId, forceProjectScope);
+      }
+      if (attempt.spec) {
+        attempt.spec._planSource = 'model';
+        return attempt.spec;
+      }
+      const res = attempt.res;
       const fb = buildFallbackAgentPlanSpec(taskText, { chatId, forceProjectScope });
       if (fb && typeof fb === 'object') {
-        fb._planSource = 'fallback:parse';
-        fb._planRaw = String(res.output || '').slice(0, 300);
+        fb._planSource = (!res || !res.ok)
+          ? (res && res.timedOut ? 'fallback:timeout' : 'fallback:infer_fail')
+          : 'fallback:parse';
+        fb._planRaw = String((res && (res.output || res.message)) || '').slice(0, 300);
+        if (isHardFail(res)) {
+          fb._planHardError = String(res.message || '').trim() || 'The inference provider rejected the request.';
+        }
       }
       return fb;
     }

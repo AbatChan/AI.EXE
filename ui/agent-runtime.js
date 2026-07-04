@@ -731,6 +731,10 @@
       const srcPath = deps.normalizeWorkspacePath(decision && (decision.srcPath || decision.src_path) ? (decision.srcPath || decision.src_path) : '');
       const dstPath = deps.normalizeWorkspacePath(decision && (decision.dstPath || decision.dst_path) ? (decision.dstPath || decision.dst_path) : '');
       if (tool === 'new_project') return 'new project';
+      if (tool === 'read_files' && Array.isArray(decision && decision.paths) && decision.paths.length) {
+        const n = decision.paths.length;
+        return n === 1 ? deps.normalizeWorkspacePath(decision.paths[0]) : `${n} files`;
+      }
       if (tool === 'move') {
         if (srcPath && dstPath) return `${srcPath} -> ${dstPath}`;
         return srcPath || dstPath || '';

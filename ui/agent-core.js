@@ -355,6 +355,7 @@
       let endLine = 0;
       let scope = '';
       let command = '';
+      let readPathsList = [];
 
       if (typeof DOMParser !== 'undefined' && /<decision>/i.test(candidate)) {
         try {
@@ -464,6 +465,8 @@
           if (parsed.start_line != null) startLine = Number(parsed.start_line) || 0;
           if (parsed.end_line != null) endLine = Number(parsed.end_line) || 0;
           if (parsed.scope != null) scope = String(parsed.scope || '');
+          if (Array.isArray(parsed.paths)) readPathsList = parsed.paths.map((p) => String(p || '').trim()).filter(Boolean);
+          else if (typeof parsed.paths === 'string' && parsed.paths.trim()) readPathsList = parsed.paths.split(/[|,\n]+/).map((s) => s.trim()).filter(Boolean);
         }
       }
 
@@ -500,7 +503,7 @@
         return null;
       }
       const normalizedAction = String(action || '').trim().toLowerCase();
-      const validTools = ['none', 'new_project', 'generate_project', 'list_dir', 'search_files', 'read_file', 'write_file', 'edit_file', 'validate_files', 'check_code', 'run_app', 'run_command', 'mkdir', 'move', 'delete'];
+      const validTools = ['none', 'new_project', 'generate_project', 'list_dir', 'search_files', 'read_file', 'read_files', 'write_file', 'edit_file', 'validate_files', 'check_code', 'run_app', 'run_command', 'mkdir', 'move', 'delete'];
       let resolvedAction = normalizedAction;
       let resolvedTool = String(tool || '').toLowerCase();
       // Auto-repair: model put tool name in action field (e.g. "action": "read_file")
@@ -542,6 +545,7 @@
         start_line: Math.max(0, Number(startLine) || 0),
         end_line: Math.max(0, Number(endLine) || 0),
         scope: String(scope || '').trim(),
+        paths: Array.isArray(readPathsList) ? readPathsList : [],
         raw,
       };
     }

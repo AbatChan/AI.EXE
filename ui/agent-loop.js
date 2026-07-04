@@ -901,7 +901,10 @@
       const fileHasUnfinished = filePhases && filePhases.length >= 2
         && typeof deps.firstUnfinishedPhaseIndex === 'function'
         && deps.firstUnfinishedPhaseIndex(filePhases) >= 0;
-      const phasesSource = (isResume && fileHasUnfinished) ? filePhases : planPhases;
+      // plan.md wins when it has unfinished phases and we're still phased (resume OR the
+      // fresh decompose is phased) — stops each Continue re-partitioning the plan.
+      const preferPlanFile = Boolean(fileHasUnfinished && (isResume || planPhases.length >= 2));
+      const phasesSource = preferPlanFile ? filePhases : planPhases;
       const phasedProjectRun = phasesSource.length >= 2;
       if (!phasedProjectRun) {
         // A non-phased run (e.g. a follow-up edit) must not show a stale phase tracker.
@@ -913,8 +916,7 @@
         }
       }
       if (phasedProjectRun) {
-        // plan.md (with ticks) wins over freshly re-planned phases on resume.
-        const phases = (isResume && fileHasUnfinished) ? filePhases : ((filePhases && filePhases.length) ? filePhases : planPhases);
+        const phases = preferPlanFile ? filePhases : (planPhases.length ? planPhases : filePhases);
         planSpec.phases = phases;
         let activeIndex = typeof deps.firstUnfinishedPhaseIndex === 'function'
           ? deps.firstUnfinishedPhaseIndex(phases) : 0;
@@ -1463,6 +1465,9 @@
           }
         }
 
+        // Drop the transient live-stream copy of the planner output before committing
+        // decision.thought — otherwise the same sentence renders twice (once sanitized).
+        deps.consumeLiveAssistantText();
         if (!decision._deterministic) {
           const isFinal = decision.action === 'final' || String(decision.tool || '').toLowerCase() === 'none';
           // Narrate only the model's own thought; synthesized "Writing X" leaked on blocked writes.
@@ -2374,6 +2379,26 @@
           searchQuery: String(decision.tool || '').toLowerCase() === 'search_files' ? String(decision.content || '') : '',
           observation: clippedObservation,
         });
+        // read_files batched several files in one step — register each as an individual
+        // read_file event so the read/write guards treat every path as already read.
+        if (String(decision.tool || '').toLowerCase() === 'read_files' && Array.isArray(toolResult && toolResult.readFilesResult)) {
+          for (const rf of toolResult.readFilesResult) {
+            const rp = deps.normalizeWorkspacePath(rf && rf.path || '');
+            if (!rp) continue;
+            toolEvents.push({
+              tool: 'read_file',
+              ok: true,
+              path: rp,
+              content: String(rf && rf.content || ''),
+              readContent: String(rf && rf.content || ''),
+              startLine: 0,
+              endLine: 0,
+              offset: 0,
+              observation: `read_file ${rp} (read in this step's read_files batch — full content is in that result).`,
+              _fromBatchRead: true,
+            });
+          }
+        }
         if (toolEvents.length > 48) {
           const removableIndex = toolEvents.findIndex((event) => {
             if (!event) return true;

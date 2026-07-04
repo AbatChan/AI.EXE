@@ -373,6 +373,8 @@
     const packageJsonSafeVersions = {
       '@types/react': '^18.3.3',
       '@types/react-dom': '^18.3.0',
+      '@typescript-eslint/eslint-plugin': '^7.18.0',
+      '@typescript-eslint/parser': '^7.18.0',
       '@vitejs/plugin-react': '^4.3.1',
       autoprefixer: '^10.4.20',
       clsx: '^2.1.1',
@@ -431,9 +433,10 @@
         if (!section || typeof section !== 'object') return;
         Object.keys(section).forEach((name) => {
           if (!isMangledPackageVersion(section[name])) return;
-          const known = packageJsonSafeVersions[name];
-          if (!known) return;
-          section[name] = known;
+          // Known dep → correct pin. Unknown dep → "latest" (valid + installable): the
+          // corruption loses digits so the real version is unrecoverable, and a single
+          // unlisted dep must NOT abort the whole repair and hard-reject into a retry loop.
+          section[name] = packageJsonSafeVersions[name] || 'latest';
           repaired = true;
         });
       });
@@ -443,6 +446,18 @@
         repaired,
         remainingBad,
       };
+    }
+
+    // tsconfig noUnusedLocals/noUnusedParameters:true fails the build on any unused
+    // import/param. Flip to false (not delete — keeps JSON/JSONC structure intact).
+    function scrubTsconfigBuildBreakers(content) {
+      const text = String(content || '');
+      let changed = false;
+      const out = text.replace(/("(?:noUnusedLocals|noUnusedParameters)"\s*:\s*)true\b/g, (m, prefix) => {
+        changed = true;
+        return `${prefix}false`;
+      });
+      return { content: out, changed };
     }
 
     function buildDeterministicPackageJson(path, taskText, planSpec) {
@@ -482,10 +497,26 @@
       }, null, 2)}\n`;
     }
 
+    // A code file cut mid-statement: ends on an opener/separator, a dangling line
+    // continuation, or an unterminated block comment. Catches saves truncated before
+    // completion (e.g. vite.config.ts saved ending at "server: {") that .ts/.tsx would
+    // otherwise pass silently. Complete files end on } ; ) etc. and don't trip this.
+    function looksTruncatedCodeTail(text) {
+      const tail = String(text || '').replace(/\s+$/, '');
+      if (!tail) return false;
+      if (/\\$/.test(tail)) return true;
+      if (/[([{,:]$/.test(tail)) return true;
+      if ((tail.match(/\/\*/g) || []).length > (tail.match(/\*\//g) || []).length) return true;
+      return false;
+    }
+
     // Structural diagnostic per language; empty string = sound.
     function getStructuralIssueForPath(path, content) {
       const normalized = deps.normalizeWorkspacePath(path || '');
       const text = String(content || '');
+      if (/\.(ts|tsx|js|jsx|mjs|cjs)$/i.test(normalized) && text.trim() && looksTruncatedCodeTail(text)) {
+        return 'looks truncated — it ends mid-statement (on an opener/separator), so it was cut off before completion; append the remainder so the file is complete';
+      }
       if (/\.html?$/i.test(normalized)) return getHtmlStructureIssue(text);
       if (/\.css$/i.test(normalized)) return getCssSyntaxIssue(text);
       if (/\.(js|mjs|cjs)$/i.test(normalized) && !/\b(import|export)\b/.test(text)) {
@@ -988,15 +1019,22 @@
         if (cssFiles.length && /<style[\s>]/i.test(pageHtml)) {
           issues.push(`${pagePath}: contains a page-local <style> block even though shared CSS is planned (${cssFiles.join(', ')}); move page-specific rules into ${cssFile || 'the shared stylesheet'} and keep the HTML semantic`);
         }
-        requiredPageScripts.forEach((plannedScriptFile) => {
-          const scriptSrc = plannedScriptFile.replace(/^\//, '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-          if (!new RegExp(`src=["'][^"']*${scriptSrc}["']`, 'i').test(pageHtml)) {
-            const sharedLabel = sharedComponentScripts.includes(plannedScriptFile)
-              ? '; repeated header/nav/footer should come from the shared component source of truth'
-              : '';
-            issues.push(`${pagePath}: does not load ${plannedScriptFile}${sharedLabel}`);
-          }
-        });
+        // Framework SPA (Vite/React): index.html loads ONE bundler entry (/src/main.tsx);
+        // pages/components are reached via the JS import graph, not <script src> tags.
+        // Requiring each planned script in the HTML is wrong here (caused a validate→edit
+        // loop). If it loads any /src module entry, the bundler resolves the rest.
+        const loadsSrcModuleEntry = /\bsrc=["'][^"']*\/src\/[A-Za-z0-9_./-]+\.(?:tsx|ts|jsx|js|mjs)["']/i.test(pageHtml);
+        if (!(frameworkWebProject && loadsSrcModuleEntry)) {
+          requiredPageScripts.forEach((plannedScriptFile) => {
+            const scriptSrc = plannedScriptFile.replace(/^\//, '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            if (!new RegExp(`src=["'][^"']*${scriptSrc}["']`, 'i').test(pageHtml)) {
+              const sharedLabel = sharedComponentScripts.includes(plannedScriptFile)
+                ? '; repeated header/nav/footer should come from the shared component source of truth'
+                : '';
+              issues.push(`${pagePath}: does not load ${plannedScriptFile}${sharedLabel}`);
+            }
+          });
+        }
       });
 
       // Multi-page: check JS refs against the union of all pages' ids/classes.
@@ -1376,6 +1414,48 @@
         return { ok: true, mutated, observation };
       }
 
+      // Batch read: verify/inspect several known small files in ONE step instead of a
+      // separate planner round-trip per file. Each path also registers as an individual
+      // read_file event (loop side) so the read/write guards still see them.
+      if (tool === 'read_files') {
+        let paths = Array.isArray(decision.paths) ? decision.paths.slice() : [];
+        if (!paths.length && typeof decision.path === 'string' && decision.path.trim()) {
+          paths = decision.path.split(/[|,\n]+/);
+        }
+        paths = Array.from(new Set(paths
+          .map((p) => deps.normalizeWorkspacePath(String(p || '').trim()))
+          .filter((p) => p && p !== '/')));
+        if (!paths.length) {
+          return { ok: false, mutated, observation: 'read_files needs a "paths" array of file paths. To read one file use read_file.' };
+        }
+        const maxFiles = 10;
+        const overflow = paths.slice(maxFiles);
+        paths = paths.slice(0, maxFiles);
+        const perFileCap = Math.max(1200, Math.floor(deps.agentMaxToolOutputChars / (paths.length + 1)));
+        const sections = [];
+        const readFilesResult = [];
+        for (const p of paths) {
+          const response = await deps.invokeWorkspaceAction('workspaceReadFile', { path: p });
+          if (!response || !response.ok) {
+            sections.push(`### ${p}\nread failed: ${(response && response.message) || 'not found'}`);
+            continue;
+          }
+          const body = String(response.output || '');
+          deps.syncFileTabFromWorkspaceWrite(p, body, deps.workspaceBaseName(p));
+          readFilesResult.push({ path: p, content: body });
+          if (body.length > perFileCap) {
+            sections.push(`### ${p} (${body.length} chars — showing first ${perFileCap}; call read_file "${p}" for the whole file)\n${body.slice(0, perFileCap)}\n...[truncated preview]`);
+          } else {
+            sections.push(`### ${p}\n${body || '(empty file)'}`);
+          }
+        }
+        const overflowNote = overflow.length
+          ? `\n\n[${overflow.length} more path(s) not read — read_files caps at ${maxFiles} per call: ${overflow.join(', ')}]`
+          : '';
+        observation = `read_files (${paths.length} file${paths.length === 1 ? '' : 's'}):\n\n${sections.join('\n\n')}${overflowNote}`;
+        return { ok: true, mutated, observation, readFilesResult };
+      }
+
       if (tool === 'read_file') {
         const path = deps.normalizeWorkspacePath(decision.path || '');
         if (!path || path === '/') {
@@ -1706,6 +1786,18 @@
                 path,
                 chars: String(content.length),
               }, { path, contentPreview: content.slice(0, 1400) });
+            }
+          }
+        }
+        if (/(?:^|\/)tsconfig(?:\.[^/]*)?\.json$/i.test(path)) {
+          const scrubbed = scrubTsconfigBuildBreakers(content);
+          if (scrubbed.changed) {
+            content = scrubbed.content;
+            primaryQualityNote = `${primaryQualityNote} Note: disabled noUnusedLocals/noUnusedParameters in ${path} so an unused import can't fail the build.`;
+            if (typeof deps.recordDebugTrace === 'function') {
+              deps.recordDebugTrace('agent_tsconfig_build_breakers_scrubbed', {
+                path,
+              }, { path, contentPreview: content.slice(0, 800) });
             }
           }
         }
@@ -2405,6 +2497,7 @@
         if (name === 'list_dir') return withTarget('Scanning folder');
         if (name === 'search_files') return withTarget('Searching files');
         if (name === 'read_file') return withTarget('Reading file');
+        if (name === 'read_files') return withTarget('Reading files');
         if (name === 'write_file') return withTarget('Writing file');
         if (name === 'edit_file') return withTarget('Editing file');
         if (name === 'validate_files') return 'Checking written files';
@@ -2421,6 +2514,7 @@
         if (name === 'list_dir') return withTarget('Scanned');
         if (name === 'search_files') return withTarget('Searched');
         if (name === 'read_file') return withTarget('Read');
+        if (name === 'read_files') return withTarget('Read');
         if (name === 'write_file') return withTarget('Wrote');
         if (name === 'edit_file') return withTarget('Edited');
         if (name === 'validate_files') return 'Checked files';

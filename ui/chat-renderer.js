@@ -1508,9 +1508,10 @@
       const meta = normalizeAgentMeta(options.agentMeta);
       const completed = Boolean(meta && meta.completedAt);
       const expanded = completed ? meta.collapsed === false : true;
-      const rows = completed
-        ? normalizedRows
-        : normalizedRows.filter((activity) => activity && activity.status !== 'pending');
+      // Pending rows are transient "currently doing X" placeholders. If a later
+      // done row didn't replace one exactly, keep it hidden on the finalized
+      // message too; otherwise old "Writing..." rows reappear after completion.
+      const rows = normalizedRows.filter((activity) => activity && activity.status !== 'pending');
       const wrapper = document.createElement('div');
       wrapper.className = `msg-agent-panel${completed ? ' completed' : ''}`;
       wrapper.dataset.expanded = expanded ? 'true' : 'false';
@@ -1525,7 +1526,11 @@
           const isLastGroup = groupIndex === groups.length - 1;
           const groupHasRunning = group.items.some((a) => a && a.status === 'running');
           const groupHasError = group.items.some((a) => a && a.status === 'error');
-          const groupStartExpanded = completed ? groupHasError : (groupHasRunning || isLastGroup);
+          // While streaming, keep every group expanded so completed steps stay visible
+          // and the worked log accumulates — collapsing a finished group the instant work
+          // moves on reads as "the steps got removed". On the finalized message, collapse
+          // as usual (errors stay open).
+          const groupStartExpanded = completed ? groupHasError : true;
           if (group.phase === 'other' || (group.items.length < 2 && !alwaysGroupPhases.has(group.phase))) {
             group.items.forEach((activity) => list.appendChild(buildAgentActivityRow(chatId, activity)));
           } else {
