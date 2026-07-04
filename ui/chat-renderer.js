@@ -174,6 +174,7 @@
                 })
                 .filter(Boolean)
             : null;
+          const streamContent = String(item.streamContent || item.content || '').trim().slice(0, 30000);
           return {
             kind: String(item.kind || '').trim().toLowerCase(),
             title: title.slice(0, 160),
@@ -182,6 +183,7 @@
             inlineMode: item.inlineMode === true,
             diff: added > 0 || removed > 0 ? { added, removed } : null,
             diffPreview: diffPreview && diffPreview.length ? diffPreview : null,
+            streamContent,
             openPath: openPath && openPath !== '/' ? openPath : '',
             openKind: String(item.openKind || '').trim().toLowerCase() === 'folder' ? 'folder' : 'file',
             openStartLine: Math.max(0, Number(item.openStartLine) || 0),
@@ -783,6 +785,12 @@
     }
 
     function buildAgentActivityRow(chatId, activity) {
+      if (activity && activity.kind === 'stream_file' && String(activity.streamContent || '').trim()) {
+        return buildAgentStreamingFileView({
+          path: activity.openPath || activity.detail || 'partial file',
+          content: activity.streamContent,
+        });
+      }
       if (activity && activity.kind === 'thought') {
         const item = document.createElement('div');
         item.className = 'msg-agent-activity-thought';

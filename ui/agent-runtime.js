@@ -630,11 +630,10 @@
       if (!value) return true;
       if (/[,:;(\[{]$/.test(value)) return true;
       if (/(?:\b(and|or|with|for|to|by|including|computing|showing|using|plus))$/i.test(value)) return true;
+      if (((value.match(/```/g) || []).length % 2) === 1) return true;
       const lines = value.split(/\n/).map((line) => line.trim()).filter(Boolean);
       const lastLine = lines[lines.length - 1] || value;
-      if (/^[-*]\s+\S[^.!?`)]*$/.test(lastLine) && lines.length > 1) return true;
-      const hasTerminalPunctuation = /[.!?`)"]$/.test(value);
-      if (!hasTerminalPunctuation && value.length > 120) return true;
+      if (/^[-*]\s*$/.test(lastLine)) return true;
       return false;
     }
 
@@ -692,11 +691,21 @@
       if (remote && remote.ok) {
         const text = stripCompletionPreamble(deps.sanitizeAssistantText(remote.output || ''));
         if (text && !isLikelyIncompleteCompletion(text)) return text;
+        recordDebugTrace('agent_completion_rejected', {
+          source: 'remote',
+          reason: text ? 'looked_incomplete' : 'empty_after_sanitize',
+          preview: String(text || '').slice(0, 500),
+        }, { output: String(remote.output || ''), sanitized: text });
       }
       const external = await requestExternalAgentPlanner(prompt, 420, 12000);
       if (external && external.ok) {
         const text = stripCompletionPreamble(deps.sanitizeAssistantText(external.output || ''));
         if (text && !isLikelyIncompleteCompletion(text)) return text;
+        recordDebugTrace('agent_completion_rejected', {
+          source: 'external',
+          reason: text ? 'looked_incomplete' : 'empty_after_sanitize',
+          preview: String(text || '').slice(0, 500),
+        }, { output: String(external.output || ''), sanitized: text });
       }
       return deterministicCompletion;
     }

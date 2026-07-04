@@ -1538,7 +1538,7 @@
                 pushCriteriaNudgeObservation(unmetCriteria);
                 continue;
               }
-              setAgentProgress('Finalizing...');
+              setAgentProgress('Writing the final note...');
               const workspaceLabel = deps.getWorkspaceRootName() || deps.deriveProjectNameFromTask(taskText) || 'project';
               const finalText = await deps.generateAgentCompletionText(taskText, toolEvents, workspaceLabel, planSpec);
               if (agentHasWorkspaceMutations()) {
@@ -1836,7 +1836,7 @@
           }
           // Honor the model's final decision: requirements met, or it reaffirmed
           // finishing after the single advisory nudge.
-          setAgentProgress('Finalizing...');
+          setAgentProgress('Writing the final note...');
           let finalText = deps.sanitizeAssistantText(decision.message || 'Done.') || 'Done.';
           // If run_app still reports errors after the repair attempts, never end on a
           // clean message — disclose it and force Continue.
@@ -2492,7 +2492,7 @@
           }
           if (cl && cl.total) {
             setAgentProgress(cl.allDone
-              ? `All ${cl.total} planned items addressed — finalizing...`
+              ? `All ${cl.total} planned items addressed — writing the final note...`
               : `Progress ${cl.doneCount}/${cl.total} — continuing...`);
           }
         }
@@ -2677,7 +2677,7 @@
           const allExpectedWritten = expectedProjectFiles.length > 0 && expectedProjectFiles.every((p) => writtenSet.has(p));
           // After one repair attempt, ship if only minor cross-file gaps remain.
           if (validationFailureCount >= 2 && onlyMinorGaps && allExpectedWritten) {
-            setAgentProgress('Finalizing...');
+            setAgentProgress('Writing the final note...');
             const workspaceLabel = deps.getWorkspaceRootName() || deps.deriveProjectNameFromTask(taskText) || 'project';
             const baseText = String(await deps.generateAgentCompletionText(taskText, toolEvents, workspaceLabel, planSpec) || '').trim();
             // Short summary only — gap details are in the steps above.
@@ -2801,7 +2801,7 @@
               pushCriteriaNudgeObservation(unmetCriteria);
               continue;
             }
-            setAgentProgress('Finalizing...');
+            setAgentProgress('Writing the final note...');
             const workspaceLabel = deps.getWorkspaceRootName() || deps.deriveProjectNameFromTask(taskText) || 'project';
             const finalText = await deps.generateAgentCompletionText(taskText, toolEvents, workspaceLabel, planSpec);
             if (agentHasWorkspaceMutations()) {

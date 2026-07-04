@@ -6285,6 +6285,23 @@ function commitInterruptedAgentRun(chatId, reason = 'Agent was interrupted befor
   const state = snapshot || activeAgentStreamState;
   if (!state || String(state.chatId || '') !== String(chatId || '')) return false;
   const interruptedActivities = cloneAgentActivities(state.activities || []);
+  const streamingFile = state && state.streamingFile && typeof state.streamingFile === 'object'
+    ? {
+      path: String(state.streamingFile.path || ''),
+      content: String(state.streamingFile.content || ''),
+    }
+    : null;
+  if (streamingFile && streamingFile.content.trim()) {
+    mergeAgentActivityIntoList(interruptedActivities, {
+      kind: 'stream_file',
+      title: 'Partial file',
+      detail: streamingFile.path || 'partial file',
+      openPath: streamingFile.path || '',
+      openKind: 'file',
+      streamContent: streamingFile.content,
+      status: 'done',
+    });
+  }
   if (!interruptedActivities.length) return false;
   mergeAgentActivityIntoList(interruptedActivities, {
     kind: 'error',
@@ -6373,6 +6390,12 @@ function cancelActiveInference() {
       chatId: String(activeAgentStreamState.chatId || ''),
       statusText: String(activeAgentStreamState.statusText || ''),
       activities: cloneAgentActivities(activeAgentStreamState.activities || []),
+      streamingFile: activeAgentStreamState.streamingFile
+        ? {
+          path: String(activeAgentStreamState.streamingFile.path || ''),
+          content: String(activeAgentStreamState.streamingFile.content || ''),
+        }
+        : null,
       startedAt: Number(activeAgentStreamState.startedAt) || Date.now(),
     }
     : null;
