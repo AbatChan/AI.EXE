@@ -835,7 +835,7 @@
       const hasDiffDrawer = Boolean(activity && activity.diffPreview && activity.diffPreview.length);
       const clickable = Boolean(activity && activity.status === 'done' && activity.openPath && !hasDiffDrawer);
       const item = document.createElement(clickable ? 'button' : 'div');
-      item.className = `msg-agent-activity-row${activity && activity.status === 'error' ? ' error' : ''}${activity && activity.status === 'pending' ? ' pending' : ''}${clickable ? ' clickable' : ''}`;
+      item.className = `msg-agent-activity-row${activity && activity.status === 'error' ? ' error' : ''}${clickable ? ' clickable' : ''}`;
       if (item instanceof HTMLButtonElement) item.type = 'button';
       const activityRowPath = normalizeWorkspacePath(activity && activity.openPath ? activity.openPath : '');
       if (activityRowPath && activityRowPath !== '/') item.dataset.activityPath = activityRowPath;
@@ -1400,7 +1400,7 @@
 
     function buildActivitySubgroup(chatId, group, startExpanded) {
       const { phase, items } = group;
-      const runningItem = items.find((a) => a && (a.status === 'running' || a.status === 'pending'));
+      const runningItem = items.find((a) => a && a.status === 'running');
       const errorItem = items.find((a) => a && a.status === 'error');
       const groupStatus = runningItem ? 'running' : (errorItem ? 'error' : 'done');
       const count = items.length;
@@ -1554,11 +1554,10 @@
       const completed = Boolean(meta && meta.completedAt);
       const expanded = completed ? meta.collapsed === false : true;
       const streamingFile = options.streamingFile && typeof options.streamingFile === 'object' ? options.streamingFile : null;
-      // Pending rows should be visible while the agent is running: they are the
-      // durable "about to call this tool" narration the user sees before the
-      // file stream begins. Hide leftovers only on the finalized message so a
-      // stale unmatched "Writing..." row cannot reappear after completion.
-      const baseRows = normalizedRows.filter((activity) => activity && (!completed || activity.status !== 'pending'));
+      // Pending rows are represented by the live loader/status text. Keep them
+      // hidden in the activity list so "Writing file" is not duplicated above
+      // the streaming preview and again below it.
+      const baseRows = normalizedRows.filter((activity) => activity && activity.status !== 'pending');
       const rows = buildLiveRowsWithStreamingFile(baseRows, streamingFile, completed);
       const wrapper = document.createElement('div');
       wrapper.className = `msg-agent-panel${completed ? ' completed' : ''}`;
