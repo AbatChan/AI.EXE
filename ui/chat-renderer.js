@@ -835,7 +835,7 @@
       const hasDiffDrawer = Boolean(activity && activity.diffPreview && activity.diffPreview.length);
       const clickable = Boolean(activity && activity.status === 'done' && activity.openPath && !hasDiffDrawer);
       const item = document.createElement(clickable ? 'button' : 'div');
-      item.className = `msg-agent-activity-row${activity && activity.status === 'error' ? ' error' : ''}${clickable ? ' clickable' : ''}`;
+      item.className = `msg-agent-activity-row${activity && activity.status === 'error' ? ' error' : ''}${activity && activity.status === 'pending' ? ' pending' : ''}${clickable ? ' clickable' : ''}`;
       if (item instanceof HTMLButtonElement) item.type = 'button';
       const activityRowPath = normalizeWorkspacePath(activity && activity.openPath ? activity.openPath : '');
       if (activityRowPath && activityRowPath !== '/') item.dataset.activityPath = activityRowPath;
@@ -1400,7 +1400,7 @@
 
     function buildActivitySubgroup(chatId, group, startExpanded) {
       const { phase, items } = group;
-      const runningItem = items.find((a) => a && a.status === 'running');
+      const runningItem = items.find((a) => a && (a.status === 'running' || a.status === 'pending'));
       const errorItem = items.find((a) => a && a.status === 'error');
       const groupStatus = runningItem ? 'running' : (errorItem ? 'error' : 'done');
       const count = items.length;
@@ -1511,15 +1511,55 @@
       return subgroup;
     }
 
+    function buildLiveRowsWithStreamingFile(rows, streamingFile, completed) {
+      const liveRows = Array.isArray(rows) ? rows.slice() : [];
+      if (completed || !streamingFile || typeof streamingFile !== 'object') return liveRows;
+      const content = String(streamingFile.content || '').trim();
+      if (!content) return liveRows;
+      if (liveRows.some((activity) => activity && activity.kind === 'stream_file')) return liveRows;
+
+      const streamPath = normalizeWorkspacePath(streamingFile.path || '');
+      const streamActivity = {
+        kind: 'stream_file',
+        title: 'Streaming file',
+        detail: formatAgentActivityPathLabel(streamPath || streamingFile.path || 'file'),
+        openPath: streamPath && streamPath !== '/' ? streamPath : '',
+        openKind: 'file',
+        status: 'done',
+        streamContent: content,
+        ts: nowTs(),
+      };
+
+      let insertAfter = -1;
+      for (let i = liveRows.length - 1; i >= 0; i -= 1) {
+        const activity = liveRows[i];
+        if (!activity) continue;
+        const activityPath = normalizeWorkspacePath(activity.openPath || '');
+        if (streamPath && activityPath === streamPath) {
+          insertAfter = i;
+          break;
+        }
+      }
+      if (insertAfter >= 0) {
+        liveRows.splice(insertAfter + 1, 0, streamActivity);
+      } else {
+        liveRows.push(streamActivity);
+      }
+      return liveRows;
+    }
+
     function buildAgentActivityPanel(chatId, activities, options = {}) {
       const normalizedRows = normalizeAgentActivities(activities);
       const meta = normalizeAgentMeta(options.agentMeta);
       const completed = Boolean(meta && meta.completedAt);
       const expanded = completed ? meta.collapsed === false : true;
-      // Pending rows are transient "currently doing X" placeholders. If a later
-      // done row didn't replace one exactly, keep it hidden on the finalized
-      // message too; otherwise old "Writing..." rows reappear after completion.
-      const rows = normalizedRows.filter((activity) => activity && activity.status !== 'pending');
+      const streamingFile = options.streamingFile && typeof options.streamingFile === 'object' ? options.streamingFile : null;
+      // Pending rows should be visible while the agent is running: they are the
+      // durable "about to call this tool" narration the user sees before the
+      // file stream begins. Hide leftovers only on the finalized message so a
+      // stale unmatched "Writing..." row cannot reappear after completion.
+      const baseRows = normalizedRows.filter((activity) => activity && (!completed || activity.status !== 'pending'));
+      const rows = buildLiveRowsWithStreamingFile(baseRows, streamingFile, completed);
       const wrapper = document.createElement('div');
       wrapper.className = `msg-agent-panel${completed ? ' completed' : ''}`;
       wrapper.dataset.expanded = expanded ? 'true' : 'false';
@@ -1554,10 +1594,6 @@
         } else {
           wrapper.appendChild(list);
         }
-      }
-      const streamingFile = options.streamingFile && typeof options.streamingFile === 'object' ? options.streamingFile : null;
-      if (streamingFile && !completed && String(streamingFile.content || '').trim()) {
-        wrapper.appendChild(buildAgentStreamingFileView(streamingFile));
       }
       if (statusText && !completed) wrapper.appendChild(buildAgentProgressLoader(statusText));
       return wrapper;

@@ -3907,6 +3907,18 @@ html.platform-mac .settings-sidebar {
   font-weight: 600;
 }
 
+.msg-agent-activity-row.pending .msg-agent-activity-inline-title,
+.msg-agent-activity-row.pending .msg-agent-activity-title {
+  color: rgba(220, 228, 242, 0.72);
+}
+
+.msg-agent-activity-row.pending .msg-agent-activity-inline-title::after,
+.msg-agent-activity-row.pending .msg-agent-activity-title::after {
+  content: '...';
+  color: rgba(130, 144, 166, 0.68);
+  font-weight: 500;
+}
+
 .msg-agent-activity-inline-path {
   color: rgba(148, 162, 185, 0.78);
   font-weight: 500;
