@@ -4906,6 +4906,14 @@ function resolveChatNamingFallback(chatId, fallbackName = 'New Chat') {
   if (!chat || chat.customName || !chat.isNaming) {
     return false;
   }
+  // A smart-rename scheduled moments earlier (agent edit/analysis chats have no inline
+  // or project namer to set autoNamed) is still in flight — clobbering the name to
+  // "New Chat" and clearing isNaming here makes the async namer abort on its own guard,
+  // stranding the chat on "New Chat". Let the in-flight namer (and its own deterministic
+  // fallback) settle instead.
+  if (smartTitleRenamePending.has(String(chatId || ''))) {
+    return false;
+  }
   chat.name = normalizeChatName(fallbackName || 'New Chat');
   chat.isNaming = false;
   chat.updatedAt = nowTs();
