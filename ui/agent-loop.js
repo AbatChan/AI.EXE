@@ -235,6 +235,7 @@
       // agent is flip-flopping — block further edits to it and finalize.
       const fileStateHistory = new Map(); // path -> Set(contentHash)
       const oscillatingEditPaths = new Set();
+      let oscillationBlocks = 0;   // repeated re-edits of an already-correct file → force finalize
       const hashFileState = (text) => {
         const s = String(text || '');
         let h = 5381;
@@ -2043,9 +2044,19 @@
           && ['write_file', 'edit_file'].includes(String(decision.tool || '').toLowerCase())) {
           const editPath = deps.normalizeWorkspacePath(decision.path || '');
           if (editPath && oscillatingEditPaths.has(editPath)) {
+            oscillationBlocks += 1;
             recordDebugTrace('agent_edit_oscillation_blocked', {
               chatId: String(chatId || ''), step: String(step), path: editPath,
+              blockCount: String(oscillationBlocks),
             }, { chatId: String(chatId || ''), step, path: editPath });
+            // A weak model can loop re-editing an already-correct file for the rest of its step
+            // budget. After a couple of blocks, stop giving it more rope — break to finalize.
+            if (oscillationBlocks >= 2) {
+              recordDebugTrace('agent_oscillation_force_finalize', {
+                chatId: String(chatId || ''), step: String(step), path: editPath,
+              }, { chatId: String(chatId || ''), step, path: editPath });
+              break;
+            }
             toolEvents.push({
               tool: String(decision.tool || ''),
               ok: false,
@@ -2925,6 +2936,15 @@
           : "I couldn't finish in time — press Continue to keep going, or tell me the exact change you want.";
       }
       if (unresolvedValidationClause) fallback += unresolvedValidationClause;
+      // Self-aware exit: if we bailed because the model kept re-editing an already-correct file,
+      // don't pretend it's finished (it tends to confabulate what it "changed"). Be honest that
+      // it was circling and ask the user to pin down what they actually want.
+      if (oscillationBlocks >= 2 && !phaseState) {
+        const changed = fallbackChanged.length
+          ? ` I did apply changes to ${fallbackChanged.slice(0, 4).join(', ')}.`
+          : '';
+        fallback = `I caught myself editing the same file back and forth, so I stopped instead of going in circles.${changed} I might be misreading exactly what you want — tell me the specific part or the exact result you're after and I'll make just that change.`;
+      }
       deps.setThinkingStatus('');
       setAgentProgress('Stopped.');
       deps.consumeLiveAssistantText();
@@ -2934,7 +2954,7 @@
       deps.commitAssistantMessage(chatId, fallback, fallback, {
         agentActivities,
         agentMeta: agentMetaWithRevert({ startedAt, completedAt: Date.now(), collapsed: true }),
-        forceNeedsContinue: !(cl && cl.allDone) || Boolean(unresolvedValidationClause),
+        forceNeedsContinue: !(cl && cl.allDone) || Boolean(unresolvedValidationClause) || oscillationBlocks >= 2,
       });
       recordDebugTrace('agent_done', {
         chatId: String(chatId || ''),

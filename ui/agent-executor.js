@@ -2022,10 +2022,17 @@
           }, { path, anchors: applied && applied.anchors });
         }
         if (!applied || applied.appliedCount <= 0 || String(applied.output || '') === originalContent) {
+          // Split the two failure shapes: an anchor that didn't match (fix the find
+          // text) vs an edit that matched but changed nothing (the file already
+          // contains the replacement — stop re-editing the same block and move on).
+          const matchedButNoChange = applied && applied.appliedCount > 0
+            && String(applied.output || '') === originalContent;
           return {
             ok: false,
             mutated,
-            observation: `edit_file blocked for ${path}: no edits were applied. Use exact existing text in find/anchor fields.`,
+            observation: matchedButNoChange
+              ? `edit_file made no change to ${path}: the file already contains that exact text, so it likely already satisfies the request. Do NOT re-submit the same edit — take the next planned step or finalize instead.`
+              : `edit_file blocked for ${path}: no edits were applied — the find/anchor text was not found. Use exact existing text from the current file in the find/anchor field.`,
           };
         }
         // Never save an edit that breaks a previously-sound file.

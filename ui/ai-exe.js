@@ -7567,6 +7567,21 @@ async function streamAnthropicChatCompletion(prompt, handlers = {}, options = {}
 // Native Ollama (the Venice Pro adapter) — routed THROUGH the backend, because the adapter
 // sends no CORS header so the WebView can't call it directly. The backend (always running,
 // configured with the same provider) reaches the adapter server-side. No API key, no credits.
+// Agent vision priming: the agent's planner/decision calls are text-only, so an attached image
+// is invisible to them. Upload it once + capture a description so the agent works from what's
+// actually in the image instead of guessing. Uses the same chat_id, so the image also pins to
+// the Venice conversation the agent's later steps share.
+async function describeImagesForAgent(images) {
+  if (!Array.isArray(images) || !images.length || !isVeniceAdapterSelected()) return '';
+  const prompt = 'Describe the attached image(s) in precise, concrete detail for a developer who will edit a web project from them. Cover: overall layout and sections, the specific component or area in focus, colors, text/labels, and anything that looks visually off or is clearly being pointed at. Be specific and under 200 words. Do not add commentary.';
+  try {
+    const res = await requestOllamaChatCompletion(VENICE_ADAPTER_PROVIDER_ID, prompt, 900, '', false, { attachments: images });
+    return (res && res.ok && String(res.output || '').trim()) ? String(res.output).trim() : '';
+  } catch (_) {
+    return '';
+  }
+}
+
 async function requestOllamaChatCompletion(provider, prompt, maxTokens, systemPrompt = '', thinkActive = false, extra = {}) {
   const model = getProviderModel(provider);
   if (!model) return null;
@@ -14866,6 +14881,10 @@ async function startVeniceAdapterThenResend() {
   const backend = getAIExeBackendUrl();
   const user = String(appSettings.veniceAdapterUsername || '').trim();
   const pass = String(appSettings.veniceAdapterPassword || '');
+  // Snapshot what the user meant to send when they hit send. If they keep typing while the
+  // adapter boots (~30s), we must NOT auto-send their in-progress text — only auto-send when
+  // the box is still exactly that snapshot.
+  const pendingAtStart = String((mainInput && mainInput.value) || '').trim();
   _adapterStartingForSend = true;
   beginAdapterStartupProgress({ announceReady: false });   // this flow announces ready itself (with the resend)
   try {
@@ -14887,10 +14906,13 @@ async function startVeniceAdapterThenResend() {
         if (s && s.serving) {
           _adapterStartingForSend = false;
           if (typeof refreshAdapterStatus === 'function') refreshAdapterStatus();
-          const hasPending = mainInput && String(mainInput.value || '').trim();
-          showAppNotification({ title: 'Adapter ready', message: hasPending ? 'Sending your message…' : 'Venice Pro is ready — send your message.', kind: 'success' });
+          const nowText = String((mainInput && mainInput.value) || '').trim();
+          // Only auto-send if the box still holds exactly what the user sent — if they've kept
+          // typing (or cleared it), leave their draft alone and just say it's ready.
+          const autoSend = Boolean(nowText && nowText === pendingAtStart);
+          showAppNotification({ title: 'Adapter ready', message: autoSend ? 'Sending your message…' : 'Venice Pro is ready — press send.', kind: 'success' });
           if (typeof refreshComposerModelsFromProvider === 'function') void refreshComposerModelsFromProvider();
-          if (hasPending && typeof sendMessage === 'function') void sendMessage();  // resends the text still in the box
+          if (autoSend && typeof sendMessage === 'function') void sendMessage();  // resend only the unchanged snapshot
           return;
         }
       } catch (_) { /* keep polling */ }
@@ -15653,6 +15675,19 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
     await waitForUiPaint();
     if (!isInferenceActive(requestToken)) {
       return;
+    }
+    // Agent-mode vision priming: fold a description of any attached image into the task BEFORE
+    // routing, so the (text-only) planner/decision steps see it instead of a blind placeholder.
+    if (developerAgentEnabled && isVeniceAdapterSelected()
+        && Array.isArray(requestToken.attachments) && requestToken.attachments.length
+        && /\(image attached[^)]*\)/i.test(String(promptText || ''))) {
+      setThinkingStatus('Looking at your image…');
+      const imageDescription = await describeImagesForAgent(requestToken.attachments);
+      if (!isInferenceActive(requestToken)) return;
+      if (imageDescription) {
+        promptText = String(promptText).replace(/\(image attached[^)]*\)/gi,
+          `(attached image, described for you:\n${imageDescription})`);
+      }
     }
     const pendingConfirmationResolution = await resolvePendingPreflightConfirmation(chatId, promptText);
     if (pendingConfirmationResolution) {

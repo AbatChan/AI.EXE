@@ -177,6 +177,19 @@
         ? plan.validationSteps.map((step) => String(step || '').toLowerCase()).filter(Boolean)
         : [];
 
+      // An edit that matched but changed nothing means the file already contains the
+      // intended content — that file needs no further work and must not keep blocking
+      // finalize (the "update /index.html" false-incomplete loop).
+      const hasNoOpEditAttempt = (targetPath) => (toolEvents || []).some((event) => event
+        && String(event.tool || '').toLowerCase() === 'edit_file'
+        && event.ok === false
+        && normalizeWorkspacePath(event.path || '') === targetPath
+        && /already contains that exact text/i.test(String(event.observation || '')));
+      const affectedFileSatisfied = (targetPath) => hasSuccessfulAgentTool(
+        toolEvents,
+        (event) => ['write_file', 'edit_file'].includes(String(event.tool || '').toLowerCase()) && normalizeWorkspacePath(event.path || '') === targetPath,
+      ) || hasNoOpEditAttempt(targetPath);
+
       const readmeWrite = getLatestSuccessfulAgentWrite(toolEvents, (event) => normalizeWorkspacePath(event.path || '') === '/README.md');
       const primarySourceWrite = getLatestSuccessfulAgentSourceWrite(toolEvents, (event, normalized) => {
         if (isPythonTask) return /\.py$/i.test(normalized);
@@ -258,7 +271,7 @@
           requirements.push({
             id: `expected_${path}`,
             label: `${plan.taskKind === 'edit' ? 'update' : 'write'} ${path}`,
-            met: hasSuccessfulAgentTool(toolEvents, (event) => ['write_file', 'edit_file'].includes(String(event.tool || '').toLowerCase()) && normalizeWorkspacePath(event.path || '') === path),
+            met: affectedFileSatisfied(path),
           });
         });
 
@@ -275,7 +288,7 @@
           requirements.push({
             id: `affected_${path}`,
             label: `update ${path}`,
-            met: hasSuccessfulAgentTool(toolEvents, (event) => ['write_file', 'edit_file'].includes(String(event.tool || '').toLowerCase()) && normalizeWorkspacePath(event.path || '') === path),
+            met: affectedFileSatisfied(path),
           });
         });
       }
@@ -283,16 +296,10 @@
       const expectedNonReadmeFiles = plan.expectedFiles
         .filter((path) => !isDocsTask && path && path !== '/README.md' && path !== '/src');
       const allExpectedFilesWritten = expectedNonReadmeFiles.length > 0
-        && expectedNonReadmeFiles.every((path) => hasSuccessfulAgentTool(
-          toolEvents,
-          (event) => ['write_file', 'edit_file'].includes(String(event.tool || '').toLowerCase()) && normalizeWorkspacePath(event.path || '') === path,
-        ));
+        && expectedNonReadmeFiles.every((path) => affectedFileSatisfied(path));
       const validateRequested = validationSteps.some((step) => /validate_files|static|syntax|check|test|verify/.test(step));
       const plannedAffectedFilesUpdated = plannedAffectedFiles.length > 0
-        && plannedAffectedFiles.every((path) => hasSuccessfulAgentTool(
-          toolEvents,
-          (event) => ['write_file', 'edit_file'].includes(String(event.tool || '').toLowerCase()) && normalizeWorkspacePath(event.path || '') === path,
-        ));
+        && plannedAffectedFiles.every((path) => affectedFileSatisfied(path));
       if ((isSoftwareProject && allExpectedFilesWritten) || (!isSoftwareProject && validateRequested && plannedAffectedFilesUpdated)) {
         requirements.push({
           id: 'validate_written_files',
