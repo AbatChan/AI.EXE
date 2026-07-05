@@ -223,6 +223,7 @@
         hints.push('For multi-section landing pages, style the requested sections with reusable selectors instead of generating oversized repeated CSS.');
         hints.push('Use a small animation system: a few reusable keyframes and transitions, not unique animations for every block.');
         hints.push('Styling guidelines (apply with judgment, skip what does not fit the request): target selectors that actually exist in the HTML; size elements to their content so text is never clipped or overlapping; keep layouts responsive (flex/grid with gaps, allow wrapping); use consistent spacing, hierarchy, and contrast. e.g. a button with a text label should grow to fit the label, not sit in a fixed icon-sized box.');
+        hints.push('For alignment repairs, define one shared layout reference (CSS variables or one parent grid/flex model) and derive related positions from it. Do not repeatedly tune unrelated left/top/padding offsets; line, marker, card, and label positions should share the same geometry.');
         hints.push('Layout rules act on DIRECT children: to place blocks side by side (or change their stacking), the flex/grid rule must be on their actual direct parent in the HTML — check the real nesting before choosing the selector.');
       }
       if (/\.(js|ts|jsx|tsx)$/i.test(normalized)) {
@@ -271,6 +272,22 @@
         let s = String(value || '').trim();
         if (!s) return '';
         s = s.replace(/^```[a-z]*\s*/i, '').replace(/\s*```$/i, '').trim();
+        {
+          const lines = s.split('\n');
+          const durationLine = (value) => /^[·•]?\s*\d+(?:\.\d+)?s\s*$/i.test(String(value || '').trim());
+          const providerLine = (value) => {
+            const t = String(value || '').trim();
+            return /^(?:Qwen|Claude|GPT|Gemini|Grok|DeepSeek|Kimi|GLM|MiniMax|NVIDIA|Mistral|Llama|Venice|Gemma|Aion|Mercury)\b.{0,120}\b\d+(?:\.\d+)?s\b/i.test(t)
+              || /^(?:Qwen|Claude|GPT|Gemini|Grok|DeepSeek|Kimi|GLM|MiniMax|NVIDIA|Mistral|Llama|Venice|Gemma|Aion|Mercury)\b.{0,120}(?:Turbo|Coder|Pro|Flash|Preview|Opus|Sonnet|Fable|Instruct|Uncensored|Reasoning|VL|A3B|FP8|Nano|Ultra|Mini|Max|V\d|[0-9]{1,4}B)\s*$/i.test(t);
+          };
+          s = lines.filter((line, index) => {
+            const t = line.trim();
+            if (!t) return true;
+            if (durationLine(t) && (providerLine(lines[index - 1]) || providerLine(lines[index + 1]))) return false;
+            if (providerLine(t) && (/\b\d+(?:\.\d+)?s\b/i.test(t) || durationLine(lines[index - 1]) || durationLine(lines[index + 1]))) return false;
+            return true;
+          }).join('\n').trim();
+        }
         const cut = s.search(/<\s*(?:tool_call|function=agent_step|parameter\s*=|decision\b)/i);
         if (cut >= 0) s = s.slice(0, cut).trim();
         const jsonCut = s.search(/\{\s*"action"\s*:/i);

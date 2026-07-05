@@ -10,6 +10,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 
 import httpx
 
@@ -208,6 +209,13 @@ class AdapterManager:
         except OSError:
             return ""
 
+    def _append_log(self, line: str) -> None:
+        try:
+            with open(self._log, "ab") as fh:
+                fh.write((str(line or "").rstrip() + "\n").encode("utf-8", "replace"))
+        except OSError:
+            pass
+
     @property
     def install_dir(self) -> str:
         return self._dir
@@ -405,31 +413,42 @@ class AdapterManager:
     def install(self, timeout: int = 600) -> dict:
         """git clone + venv + pip install -r requirements.txt. Returns {ok, detail}."""
         try:
+            self._append_log("AIEXE_INSTALL starting")
             if not os.path.isdir(self._dir):
                 os.makedirs(os.path.dirname(self._dir), exist_ok=True)
+                self._append_log("AIEXE_INSTALL downloading adapter from GitHub")
                 r = subprocess.run(["git", "clone", "--depth", "1", self._repo, self._dir],
                                    capture_output=True, text=True, timeout=timeout)
                 if r.returncode != 0:
+                    self._append_log("AIEXE_INSTALL network_or_git_failed " + (r.stderr[-500:] or r.stdout[-500:]))
                     return {"ok": False, "detail": f"git clone failed: {r.stderr[-300:]}"}
             if not self.is_installed():
+                self._append_log("AIEXE_INSTALL clone_missing_server")
                 return {"ok": False, "detail": "clone done but ollama_like_server.py not found"}
             venv_py = self._venv_python()
             if not os.path.exists(venv_py):
+                self._append_log("AIEXE_INSTALL creating Python environment")
                 r = subprocess.run([sys.executable, "-m", "venv", os.path.join(self._dir, ".venv")],
                                    capture_output=True, text=True, timeout=120)
                 if r.returncode != 0:
+                    self._append_log("AIEXE_INSTALL venv_failed " + (r.stderr[-500:] or r.stdout[-500:]))
                     return {"ok": False, "detail": f"venv failed: {r.stderr[-300:]}"}
             req = os.path.join(self._dir, "requirements.txt")
             if os.path.exists(req):
+                self._append_log("AIEXE_INSTALL installing Python dependencies")
                 r = subprocess.run([venv_py, "-m", "pip", "install", "-r", req],
                                    capture_output=True, text=True, timeout=timeout)
                 if r.returncode != 0:
+                    self._append_log("AIEXE_INSTALL dependency_network_failed " + (r.stderr[-500:] or r.stdout[-500:]))
                     return {"ok": False, "detail": f"pip install failed: {r.stderr[-300:]}"}
             self._patch_adapter()  # adapt to Venice's current sign-in
+            self._append_log("AIEXE_INSTALL installed")
             return {"ok": True, "detail": "installed"}
         except FileNotFoundError as exc:
+            self._append_log("AIEXE_INSTALL missing_tool " + str(exc))
             return {"ok": False, "detail": f"missing tool (git/python?): {exc}"}
         except subprocess.TimeoutExpired:
+            self._append_log("AIEXE_INSTALL timeout")
             return {"ok": False, "detail": "install timed out"}
 
     def _port_alive(self, port: int = 0) -> bool:
@@ -485,6 +504,7 @@ class AdapterManager:
             args = [py, boot, srv, str(port), "1" if headless else "0"]
             try:
                 logf = open(self._log, "wb", buffering=0)  # capture why it lives/dies
+                logf.write(("AIEXE_ADAPTER_START launching %s\n" % time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())).encode("utf-8", "replace"))
                 self._proc = subprocess.Popen(
                     args, cwd=os.path.dirname(srv) or None, env=env,
                     stdout=logf, stderr=subprocess.STDOUT,
@@ -526,7 +546,39 @@ class AdapterManager:
     def status(self) -> dict:
         proc_alive = bool(self._proc and self._proc.poll() is None)
         serving = self._port_alive()  # port bound = login done + server up (ready)
+        log = self.read_log(6000)
+        lower = log.lower()
+        network_issue = bool(re.search(
+            r"(network|internet|connection (?:reset|refused|timed out|timeout)|temporary failure|name or service not known|"
+            r"nodename nor servname|could not resolve|dns|ssl|proxy|github\.com|pypi|read timed out|"
+            r"err_internet_disconnected|err_network_changed|err_name_not_resolved|err_connection_timed_out|err_timed_out)",
+            lower))
+        stage = "ready" if serving else ("starting" if proc_alive else ("stopped" if self.is_installed() else "not_installed"))
+        detail = ""
+        retry_hint = ""
+        if "AIEXE_INSTALL starting".lower() in lower and "AIEXE_INSTALL installed".lower() not in lower and not self.is_installed():
+            stage = "installing"
+            detail = "Downloading the adapter and dependencies."
+        if network_issue:
+            stage = "network"
+            detail = "Network looks slow or unavailable while reaching Venice or installing dependencies."
+            retry_hint = "Try a stronger internet connection if this keeps retrying."
+        elif re.search(r"sign in manually|sign in - venice|still on /sign-in|verification code|email code", lower):
+            stage = "login"
+            detail = "Waiting for Venice sign-in in the Chrome window."
+        elif re.search(r"logging in to venice|already logged in", lower):
+            stage = "login"
+            detail = "Logging in to Venice."
+        elif re.search(r"AIEXE_MODELS|AIEXE_PRICED|AIEXE_CREDITS|AIEXE_MODEL ", log):
+            stage = "syncing"
+            detail = "Reading models and credits from Venice."
+        elif proc_alive and not serving:
+            detail = "Chrome is opening and the adapter is getting ready."
+        elif serving:
+            detail = "Venice Pro is ready."
         return {"installed": self.is_installed(), "running": proc_alive or serving,
                 "serving": serving,
                 "pid": self._proc.pid if proc_alive else None,
-                "port": self._port, "install_dir": self._dir}
+                "port": self._port, "install_dir": self._dir,
+                "stage": stage, "detail": detail,
+                "network_issue": network_issue, "retry_hint": retry_hint}

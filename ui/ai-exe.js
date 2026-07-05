@@ -4971,21 +4971,44 @@ function applyAgentProjectChatName(chatId, planSpec = null) {
   return true;
 }
 
-// Rename the Venice conversation to the chat's real name ONCE (adapter only). Fires when the
-// smart name is applied — the name isn't known until after the first reply, so we can't do it
-// on the message send. Reset-on-failure lets a later turn retry if the slug wasn't mapped yet.
+// Rename the Venice conversation to the chat's current real name (adapter only). The first
+// request usually starts as "New Chat"; smart/inline/manual names arrive later, sometimes
+// before Venice has materialized the slug. Track the exact name pushed instead of a one-shot
+// boolean so later title changes and retry-after-map both work.
 function maybeRenameVeniceChat(chat) {
-  if (!chat || chat.veniceRenamed || !isVeniceAdapterSelected()) return;
+  if (!chat || !isVeniceAdapterSelected()) return;
   const name = String(chat.name || '').trim();
   if (!name || /^new chat$/i.test(name)) return;
-  chat.veniceRenamed = true;
+  if (String(chat.veniceRenamedTo || '').trim() === name) return;
+  if (String(chat.veniceRenamePendingName || '').trim() === name) return;
+  chat.veniceRenamePendingName = name;
   try {
     fetch(getAIExeBackendUrl() + '/api/provider/rename_chat', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ chat_id: String(chat.id || ''), name }),
-    }).then((r) => r.json()).then((res) => { if (!res || !res.ok) chat.veniceRenamed = false; })
-      .catch(() => { chat.veniceRenamed = false; });
-  } catch (_) { chat.veniceRenamed = false; }
+    }).then((r) => r.json()).then((res) => {
+      if (res && res.ok) {
+        chat.veniceRenamed = true;
+        chat.veniceRenamedTo = name;
+      } else {
+        chat.veniceRenamed = false;
+      }
+      if (String(chat.veniceRenamePendingName || '').trim() === name) {
+        chat.veniceRenamePendingName = '';
+      }
+      saveChats();
+    }).catch(() => {
+      chat.veniceRenamed = false;
+      if (String(chat.veniceRenamePendingName || '').trim() === name) {
+        chat.veniceRenamePendingName = '';
+      }
+    });
+  } catch (_) {
+    chat.veniceRenamed = false;
+    if (String(chat.veniceRenamePendingName || '').trim() === name) {
+      chat.veniceRenamePendingName = '';
+    }
+  }
 }
 
 function applyInlineChatNameFromResponse(chatId, text) {
@@ -5186,6 +5209,7 @@ function scheduleSmartChatRename(chatId) {
           latestChat.autoNamed = false;
           saveChats();
           renderHistory();
+          maybeRenameVeniceChat(latestChat);
           return;
         }
         latestChat.name = makeUniqueChatName(nextTitle, key, nextTitle);
@@ -12293,6 +12317,7 @@ function saveChatNameFromModal() {
   chat.updatedAt = nowTs();
   saveChats();
   renderHistory();
+  maybeRenameVeniceChat(chat);
   closeChatActionModal();
 }
 
@@ -12832,6 +12857,8 @@ function friendlyAdapterError(log) {
     return 'Login needs a verification code — click Start, then type the code Venice emails you into the browser window. It stays logged in after.';
   if (/cloudflare|just a moment|verify you are human|captcha|turnstile/.test(lower))
     return "Venice's bot-check (Cloudflare) blocked the automated login.";
+  if (/network|internet|connection (reset|refused|timed out|timeout)|temporary failure|could not resolve|dns|ssl|proxy|github\.com|pypi|read timed out|err_internet_disconnected|err_network_changed|err_name_not_resolved|err_connection_timed_out|err_timed_out/.test(lower))
+    return 'Network looks slow or unavailable while reaching Venice or installing dependencies. Try a stronger internet connection if it keeps retrying.';
   if (/incorrect|invalid password|wrong password|authentication failed|invalid credentials/.test(lower))
     return 'Venice rejected the login — double-check your email and password.';
   if (/chromedriver|session not created|cannot find chrome|chrome not reachable|devtoolsactiveport|no chrome binary/.test(lower))
@@ -12849,6 +12876,23 @@ function friendlyAdapterError(log) {
   const last = lines.reverse().find((l) => !isAdapterLogNoise(l) && /\b(error|exception|failed|timeout|refused)\b/i.test(l)) || '';
   const clean = last.replace(/^[\w.]+(error|exception):\s*(message:\s*)?/i, '').replace(/^\S+ - - \[.*?\]\s*/, '').trim();
   return clean ? ('Adapter stopped: ' + clean.slice(0, 160)) : '';
+}
+
+function adapterStartupMessageFromStatus(status, fallbackLog = '') {
+  const st = status && typeof status === 'object' ? status : {};
+  const stage = String(st.stage || '').toLowerCase();
+  const detail = String(st.detail || '').trim();
+  if (st.serving) return 'Venice Pro is ready.';
+  if (st.network_issue || stage === 'network') {
+    return detail || 'Network looks slow or unavailable while reaching Venice. Still retrying…';
+  }
+  if (stage === 'installing') return detail || 'Installing adapter files and dependencies…';
+  if (stage === 'login') return detail || 'Waiting for Venice sign-in in the Chrome window…';
+  if (stage === 'syncing') return detail || 'Reading models and credits from Venice…';
+  if (detail) return detail;
+  const logMsg = friendlyAdapterError(fallbackLog);
+  if (logMsg) return logMsg;
+  return 'Opening Chrome (~30s)…';
 }
 
 async function refreshAdapterStatus() {
@@ -12875,11 +12919,11 @@ async function refreshAdapterStatus() {
     } else if (procAlive) {
       // Set the text from CACHED login-waiting state so it's decided synchronously (no per-cycle
       // async override → no flash). The log fetch below only updates the cache for next cycle.
-      setStatus(
-        refreshAdapterStatus._loginWaiting
-          ? "◐ Waiting for you to sign in to Venice in the Chrome window (session expired). It serves once you're in."
-          : '◐ Starting adapter — a Chrome window is opening (~30s). Sign in if prompted; it stays logged in after.',
-        'var(--warning, #f59e0b)');
+      const msg = adapterStartupMessageFromStatus(s);
+      setStatus('◐ ' + (msg || (refreshAdapterStatus._loginWaiting
+        ? "Waiting for you to sign in to Venice in the Chrome window (session expired). It serves once you're in."
+        : 'Starting adapter — a Chrome window is opening (~30s). Sign in if prompted; it stays logged in after.')),
+      s.network_issue ? 'var(--danger, #ef4444)' : 'var(--warning, #f59e0b)');
       fetch(getAIExeBackendUrl() + '/api/adapter/logs').then((r) => r.json()).then((d) => {
         refreshAdapterStatus._loginWaiting = /sign in manually|Sign in - Venice|still on \/sign-in|verification code|email code/i.test(String((d && d.log) || ''));
       }).catch(() => {});
@@ -12887,7 +12931,11 @@ async function refreshAdapterStatus() {
       refreshAdapterStatus._pollT = setTimeout(refreshAdapterStatus, 2500);
     } else {
       refreshAdapterStatus._loginWaiting = false;
-      setStatus(s.installed ? '○ Adapter not running — click Start' : '○ Not set up yet — click Start to download and install it', '');
+      if (s.network_issue) {
+        setStatus('○ ' + adapterStartupMessageFromStatus(s), 'var(--danger, #ef4444)');
+      } else {
+        setStatus(s.installed ? '○ Adapter not running — click Start' : '○ Not set up yet — click Start to download and install it', '');
+      }
       if (s.installed) {
         // Stopped after being set up — likely crashed (Chrome/login). Show a plain reason if any.
         fetch(getAIExeBackendUrl() + '/api/adapter/logs').then((r) => r.json()).then((d) => {
@@ -13246,9 +13294,8 @@ if (settingsAdapterStartBtn) {
     try {
       const st = await (await fetch(backend + '/api/adapter/status')).json();
       if (!st.installed) {
-        showAppNotification({ title: 'Installing adapter', message: 'First-time setup (download + dependencies) — this can take a few minutes…', kind: 'info', durationMs: 7000 });
-        const ins = await (await fetch(backend + '/api/adapter/install', { method: 'POST' })).json();
-        if (!ins.ok) { showAppNotification({ title: 'Install failed', message: ins.detail || 'Could not install the adapter.', kind: 'error' }); return; }
+        const installed = await ensureAdapterInstalledWithFeedback(backend);
+        if (!installed) return;
       }
       const r = await (await fetch(backend + '/api/adapter/start', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -14881,12 +14928,33 @@ function beginAdapterStartupProgress(opts = {}) {
   (async () => {
     let sawRunning = false;
     let deadPolls = 0;
+    let statusRetryCount = 0;
+    let networkRetryCount = 0;
     try {
       for (let i = 0; i < 160; i++) {              // ~4 min ceiling (manual sign-in allowed)
         await new Promise((r) => setTimeout(r, 1500));
         if (!toast.isConnected) return;            // user dismissed it — stop narrating
         let st = null;
-        try { st = await (await fetch(backend + '/api/adapter/status')).json(); } catch (_) {}
+        try {
+          const statusRes = await fetch(backend + '/api/adapter/status');
+          if (!statusRes.ok) throw new Error('HTTP ' + statusRes.status);
+          st = await statusRes.json();
+          statusRetryCount = 0;
+        } catch (_) {
+          statusRetryCount += 1;
+          setMsg(`Connection check is slow — retrying ${Math.min(statusRetryCount, 10)}/10…`);
+          if (statusRetryCount >= 10) {
+            closeToast();
+            showAppNotification({
+              title: 'Network or backend issue',
+              message: "AI.EXE can't check the adapter right now. Check your internet/backend connection, then try again.",
+              kind: 'error',
+              durationMs: 10000,
+            });
+            return;
+          }
+          continue;
+        }
         if (st && st.serving) {
           closeToast();
           if (typeof refreshAdapterStatus === 'function') refreshAdapterStatus();
@@ -14896,9 +14964,34 @@ function beginAdapterStartupProgress(opts = {}) {
           }
           return;
         }
+        if (st && st.network_issue) {
+          networkRetryCount += 1;
+          const msg = adapterStartupMessageFromStatus(st);
+          setMsg(`${msg} Retrying ${Math.min(networkRetryCount, 10)}/10…`);
+          if (networkRetryCount === 3) {
+            showAppNotification({
+              title: 'Internet looks slow',
+              message: String(st.retry_hint || 'Venice is not responding cleanly yet. A stronger connection may help.'),
+              kind: 'warning',
+              durationMs: 8000,
+            });
+          }
+          if (networkRetryCount >= 10 && !st.running) {
+            closeToast();
+            showAppNotification({
+              title: 'Adapter network issue',
+              message: 'The adapter could not finish startup because the network looks slow or unavailable. Try a stronger internet connection, then Start again.',
+              kind: 'error',
+              durationMs: 11000,
+            });
+            return;
+          }
+          continue;
+        }
         if (st && st.running) {
           sawRunning = true;
           deadPolls = 0;
+          networkRetryCount = 0;
           // Last marker wins: the log keeps old lines (a past sign-in prompt must not
           // keep saying "waiting for sign-in" after login succeeded and scraping began).
           const tail = (await fetchLog()).slice(-6000);
@@ -14913,7 +15006,7 @@ function beginAdapterStartupProgress(opts = {}) {
             { at: lastAt(/Logging in to venice|Already logged in/), msg: 'Logging in to Venice…' },
             { at: lastAt(/AIEXE_MODELS|AIEXE_PRICED|AIEXE_CREDITS|AIEXE_MODEL /), msg: 'Reading models & credits from Venice…' },
           ].filter((s) => s.at >= 0).sort((a, b) => b.at - a.at);
-          setMsg(stages.length ? stages[0].msg : 'Opening Chrome (~30s)…');
+          setMsg(adapterStartupMessageFromStatus(st, tail) || (stages.length ? stages[0].msg : 'Opening Chrome (~30s)…'));
         } else if (sawRunning) {
           deadPolls += 1;
           if (deadPolls >= 3) {                    // was up, now gone: it crashed
@@ -14937,6 +15030,58 @@ function beginAdapterStartupProgress(opts = {}) {
   })();
 }
 
+async function ensureAdapterInstalledWithFeedback(backend) {
+  let st = null;
+  try { st = await (await fetch(backend + '/api/adapter/status')).json(); } catch (_) {}
+  if (st && st.installed) return true;
+  const toast = showAppNotification({
+    title: 'Installing Venice adapter',
+    message: 'Downloading adapter files and Python dependencies…',
+    kind: 'info',
+    sticky: true,
+  });
+  const body = toast ? toast.querySelector('.app-toast-body') : null;
+  const setMsg = (m) => { if (body && body.textContent !== m) body.textContent = m; };
+  const closeToast = () => {
+    if (!toast) return;
+    const btn = toast.querySelector('.app-toast-close');
+    if (btn) btn.click(); else toast.remove();
+  };
+  const timers = [
+    setTimeout(() => setMsg('Still downloading — internet may be slow, but setup is continuing…'), 15000),
+    setTimeout(() => setMsg('Network is taking longer than usual — retrying dependency download in the background…'), 45000),
+  ];
+  try {
+    const res = await fetch(backend + '/api/adapter/install', { method: 'POST' });
+    const ins = await res.json();
+    if (!ins || !ins.ok) {
+      const detail = String((ins && ins.detail) || 'Could not install the adapter.');
+      const networky = /network|internet|timeout|timed out|github|pypi|could not resolve|temporary failure|ssl|proxy/i.test(detail);
+      showAppNotification({
+        title: networky ? 'Install network issue' : 'Install failed',
+        message: networky
+          ? 'Setup could not finish because the network looks slow or unavailable. Try a stronger internet connection, then click Start again.'
+          : detail,
+        kind: 'error',
+        durationMs: 11000,
+      });
+      return false;
+    }
+    return true;
+  } catch (err) {
+    showAppNotification({
+      title: 'Install connection issue',
+      message: 'Could not reach the backend during install. Check your connection, then click Start again.',
+      kind: 'error',
+      durationMs: 10000,
+    });
+    return false;
+  } finally {
+    timers.forEach((t) => clearTimeout(t));
+    closeToast();
+  }
+}
+
 async function startVeniceAdapterThenResend() {
   if (_adapterStartingForSend) return;
   const backend = getAIExeBackendUrl();
@@ -14947,12 +15092,17 @@ async function startVeniceAdapterThenResend() {
   // the box is still exactly that snapshot.
   const pendingAtStart = String((mainInput && mainInput.value) || '').trim();
   _adapterStartingForSend = true;
-  beginAdapterStartupProgress({ announceReady: false });   // this flow announces ready itself (with the resend)
   try {
     let st = null;
     try { st = await (await fetch(backend + '/api/adapter/status')).json(); } catch (_) {}
-    if (st && !st.installed) { await fetch(backend + '/api/adapter/install', { method: 'POST' }); }
-    await fetch(backend + '/api/adapter/start', {
+    if (st && !st.installed) {
+      const installed = await ensureAdapterInstalledWithFeedback(backend);
+      if (!installed) {
+        _adapterStartingForSend = false;
+        return;
+      }
+    }
+    const startRes = await fetch(backend + '/api/adapter/start', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         username: user, password: pass, port: adapterTargetPort(), headless: false,
@@ -14960,10 +15110,26 @@ async function startVeniceAdapterThenResend() {
         model: String(getProviderModel(VENICE_ADAPTER_PROVIDER_ID) || '').replace(/:latest$/i, ''),
       }),
     });
+    const startPayload = await startRes.json();
+    if (!startPayload || !startPayload.ok) {
+      _adapterStartingForSend = false;
+      showAppNotification({
+        title: "Couldn't start adapter",
+        message: String((startPayload && startPayload.detail) || 'Network or backend issue while starting the adapter.'),
+        kind: 'error',
+        durationMs: 9000,
+      });
+      return;
+    }
+    beginAdapterStartupProgress({ announceReady: false });   // this flow announces ready itself (with the resend)
+    let resendStatusRetries = 0;
     for (let i = 0; i < 90; i++) {                    // up to ~135s (manual login/captcha)
       await new Promise((r) => setTimeout(r, 1500));
       try {
-        const s = await (await fetch(backend + '/api/adapter/status')).json();
+        const statusRes = await fetch(backend + '/api/adapter/status');
+        if (!statusRes.ok) throw new Error('HTTP ' + statusRes.status);
+        const s = await statusRes.json();
+        resendStatusRetries = 0;
         if (s && s.serving) {
           _adapterStartingForSend = false;
           if (typeof refreshAdapterStatus === 'function') refreshAdapterStatus();
@@ -14976,7 +15142,12 @@ async function startVeniceAdapterThenResend() {
           if (autoSend && typeof sendMessage === 'function') void sendMessage();  // resend only the unchanged snapshot
           return;
         }
-      } catch (_) { /* keep polling */ }
+      } catch (_) {
+        resendStatusRetries += 1;
+        if (resendStatusRetries <= 10) {
+          showComposerNotice(`Checking adapter connection — retrying ${resendStatusRetries}/10…`);
+        }
+      }
     }
     _adapterStartingForSend = false;
     showAppNotification({ title: "Adapter didn't start", message: 'Check Settings → Provider (Chrome installed? login/captcha?). Then resend.', kind: 'error', durationMs: 8000 });
@@ -15138,8 +15309,31 @@ function stripThinkingBlocksAndFragments(text) {
     .replace(/(?:^|\n)\s*<\s*\/?\s*t(?:h(?:i(?:n(?:k(?:i(?:n(?:g)?)?)?)?)?)?)?[^>\n]*$/i, '');
 }
 
+function stripProviderUiChrome(text) {
+  const lines = String(text || '').split('\n');
+  const durationLine = (value) => /^[·•]?\s*\d+(?:\.\d+)?s\s*$/i.test(String(value || '').trim());
+  const providerLine = (value) => {
+    const t = String(value || '').trim();
+    return /^(?:Qwen|Claude|GPT|Gemini|Grok|DeepSeek|Kimi|GLM|MiniMax|NVIDIA|Mistral|Llama|Venice|Gemma|Aion|Mercury)\b.{0,140}\b\d+(?:\.\d+)?s\b/i.test(t)
+      || /^(?:Qwen|Claude|GPT|Gemini|Grok|DeepSeek|Kimi|GLM|MiniMax|NVIDIA|Mistral|Llama|Venice|Gemma|Aion|Mercury)\b.{0,120}(?:Turbo|Coder|Pro|Flash|Preview|Opus|Sonnet|Fable|Instruct|Uncensored|Reasoning|VL|A3B|FP8|Nano|Ultra|Mini|Max|V\d|[0-9]{1,4}B)\s*$/i.test(t);
+  };
+  const hasNearbyDuration = (index) => {
+    for (let i = Math.max(0, index - 1); i <= Math.min(lines.length - 1, index + 1); i += 1) {
+      if (i !== index && durationLine(lines[i])) return true;
+    }
+    return false;
+  };
+  return lines.filter((line, index) => {
+    const t = line.trim();
+    if (!t) return true;
+    if (durationLine(t) && (providerLine(lines[index - 1]) || providerLine(lines[index + 1]))) return false;
+    if (providerLine(t) && (/\b\d+(?:\.\d+)?s\b/i.test(t) || hasNearbyDuration(index))) return false;
+    return true;
+  }).join('\n');
+}
+
 function sanitizeAssistantDelta(text) {
-  return stripThinkingBlocksAndFragments(
+  return stripProviderUiChrome(stripThinkingBlocksAndFragments(
     String(text || '')
       .replace(/<\|im_start\|>/gi, '')
       .replace(/<\|im_end\|>/gi, '')
@@ -15152,7 +15346,7 @@ function sanitizeAssistantDelta(text) {
       .replace(/\[END HISTORY\]/gi, '')
       .replace(/AI_EXE_RESPONSE:/gi, '')
       .replace(/FINAL_RESPONSE:/gi, '')
-  );
+  ));
 }
 
 function sanitizeStreamDelta(text) {

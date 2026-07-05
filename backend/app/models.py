@@ -113,6 +113,10 @@ class AdapterStatusResponse(BaseModel):
     pid: Optional[int] = None
     port: int = 9999
     install_dir: str = ""
+    stage: str = ""         # "not_installed" | "installing" | "starting" | "login" | "network" | "ready" | "stopped"
+    detail: str = ""        # short user-facing status detail
+    network_issue: bool = False
+    retry_hint: str = ""
 
 
 class AdapterActionResponse(BaseModel):

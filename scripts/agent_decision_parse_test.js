@@ -83,6 +83,19 @@ document.addEventListener('DOMContentLoaded', function () {
   ok('tool-name-in-action is still repaired to read_file', d && d.action === 'tool' && d.tool === 'read_file' && d.start_line === 1);
 }
 
+// Venice DOM fallback can accidentally include model chrome before the model's
+// JSON. It must not become user-facing agent narration.
+{
+  const d = parseAgentDecision('Qwen 3 Coder 480B Turbo · 3.27s\n{"action":"tool","tool":"read_file","path":"/index.html"}');
+  ok('provider chrome before JSON parses as the tool decision', d && d.action === 'tool' && d.tool === 'read_file' && d.path === '/index.html');
+  ok('provider chrome is not kept as narration', d && !/Qwen|3\.27s/i.test(`${d.thought} ${d.message}`));
+}
+
+{
+  const d = parseAgentDecision('Qwen 3 Coder 480B Turbo\n· 3.27s\n{"action":"tool","tool":"read_file","path":"/style.css"}');
+  ok('wrapped provider chrome before JSON is stripped too', d && d.tool === 'read_file' && d.path === '/style.css' && !/Qwen|3\.27s/i.test(`${d.thought} ${d.message}`));
+}
+
 // Genuinely empty / contentless output still returns null (no false decision).
 {
   const d = parseAgentDecision('{"thought":"hmm"}');

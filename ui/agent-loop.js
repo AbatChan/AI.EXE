@@ -1578,6 +1578,43 @@
               return true;
             }
           }
+          if (duplicateTool !== 'edit_file') {
+            const duplicatePath = normalizeDecisionPath(decision.path || '');
+            const duplicateBlockedCount = toolEvents.filter((event) => (
+              event
+              && !event.ok
+              && String(event.tool || '').toLowerCase() === duplicateTool
+              && normalizeDecisionPath(event.path || '') === duplicatePath
+              && /same tool\/target already failed|already read and no workspace changes|already listed|already ran this exact search|nothing changed since/i.test(String(event.observation || ''))
+            )).length;
+            if (duplicateBlockedCount >= 2) {
+              const targetLabel = duplicatePath || normalizeDecisionPath(decision.dstPath || '') || normalizeDecisionPath(decision.srcPath || '') || 'that target';
+              const blockerNote = `Note: I stopped because ${duplicateTool} kept hitting the same blocker for ${targetLabel}. I did not keep retrying the same action.`;
+              const blockedText = await buildStoppedWithWorkText(blockerNote);
+              setAgentProgress('Stopped.');
+              deps.consumeLiveAssistantText();
+              deps.commitAssistantMessage(chatId, blockedText, blockedText, {
+                agentActivities,
+                agentMeta: agentMetaWithRevert({ startedAt, completedAt: Date.now(), collapsed: false }),
+                forceNeedsContinue: true,
+              });
+              recordDebugTrace('agent_done', {
+                chatId: String(chatId || ''),
+                step: String(step),
+                fallback: 'true',
+                reason: 'duplicate_non_edit_target_blocker',
+              }, {
+                chatId: String(chatId || ''),
+                step,
+                fallback: true,
+                reason: 'duplicate_non_edit_target_blocker',
+                duplicateTool,
+                duplicatePath,
+                toolEvents,
+              });
+              return true;
+            }
+          }
           if (duplicateTool === 'edit_file') {
             const duplicatePath = normalizeDecisionPath(decision.path || '');
             const fallbackDecision = deps.deriveFallbackAgentDecision(taskText, toolEvents, planSpec);
@@ -1616,7 +1653,7 @@
                 && !event.ok
                 && String(event.tool || '').toLowerCase() === duplicateTool
                 && normalizeDecisionPath(event.path || '') === duplicatePath
-                && /same tool\/target already failed|already read and no workspace changes/i.test(String(event.observation || ''))
+                && /same tool\/target already failed|already read and no workspace changes|made no change/i.test(String(event.observation || ''))
               )).length;
               if (duplicateBlockedCount >= 2) {
                 const blockerNote = duplicateTool === 'edit_file'
@@ -2078,6 +2115,14 @@
             const ws = (typeof deps.getWorkspaceContext === 'function' ? deps.getWorkspaceContext() : null) || {};
             const existsInWorkspace = Array.isArray(ws.rootEntries)
               && ws.rootEntries.some((e) => e && e.kind === 'file' && deps.normalizeWorkspacePath(e.path || '') === wPath);
+            const createdThisRun = toolEvents.some((e) => e
+              && String(e.tool || '').toLowerCase() === 'write_file'
+              && deps.normalizeWorkspacePath(e.path || '') === wPath
+              && e.ok !== false);
+            const readSuccessfullyThisRun = toolEvents.some((e) => e
+              && String(e.tool || '').toLowerCase() === 'read_file'
+              && deps.normalizeWorkspacePath(e.path || '') === wPath
+              && e.ok !== false);
             const touchedThisRun = toolEvents.some((e) => e
               && ['read_file', 'write_file', 'edit_file'].includes(String(e.tool || '').toLowerCase())
               && deps.normalizeWorkspacePath(e.path || '') === wPath
@@ -2088,16 +2133,20 @@
               && e.ok === false
               && /mangled dependency versions/i.test(String(e.observation || ''))
               && /Nothing was saved/i.test(String(e.observation || '')));
-            if (existsInWorkspace && !touchedThisRun && !priorRejectedFreshWrite) {
+            const existedBeforeRun = (existsInWorkspace || readSuccessfullyThisRun) && !createdThisRun;
+            if (existedBeforeRun && !priorRejectedFreshWrite) {
               recordDebugTrace('agent_write_over_existing_blocked', {
                 chatId: String(chatId || ''), step: String(step), path: wPath,
+                afterRead: String(Boolean(touchedThisRun)),
               }, { chatId: String(chatId || ''), step, path: wPath });
               toolEvents.push({
                 tool: 'write_file',
                 ok: false,
                 _guardBlock: true,
                 path: wPath,
-                observation: `${wPath} already exists in this project — do NOT overwrite it from scratch (write_file would erase the existing work). First read_file ${wPath}, then make ONLY the requested changes with edit_file. Do the same for every other existing file you need to change: read it, then edit it — never rebuild files that are already here.`,
+                observation: readSuccessfullyThisRun
+                  ? `${wPath} already exists and was read successfully — do NOT overwrite it from scratch. Use edit_file with a targeted find/replace edit for ONLY the requested change. Never rebuild files that are already here.`
+                  : `${wPath} already exists in this project — do NOT overwrite it from scratch (write_file would erase the existing work). First read_file ${wPath}, then make ONLY the requested changes with edit_file. Do the same for every other existing file you need to change: read it, then edit it — never rebuild files that are already here.`,
               });
               continue;
             }

@@ -660,6 +660,11 @@ def _aiexe_reopen_driver(reason):
             print("AIEXE_MODELS scraped after browser restart: %d models" % len(scraped), flush=True)
     except Exception as error:
         print("AIEXE_MODELS scrape after browser restart failed: %s" % error, flush=True)
+    try:
+        _aiexe_read_credits(driver)
+    except Exception:
+        pass
+    _aiexe_cleanup_transient_ui(driver, "browser restart ready")
     try:  # restart done — same single-minimize rule as boot
         driver.minimize_window()
     except Exception:
@@ -1030,10 +1035,69 @@ def _aiexe_dismiss_modal(driver):
                 time.sleep(0.2)
             except Exception:
                 break
+    try:
+        # Chakra's model picker sometimes has no visible close button; clicking the modal
+        # container/backdrop or sending one final ESC after focus moved out closes it.
+        driver.execute_script("""
+          const container = document.querySelector('.chakra-modal__content-container, [class*="modal__content-container"]');
+          const dialog = document.querySelector('[role="dialog"], .chakra-modal__content');
+          if (container && dialog) {
+            const r = dialog.getBoundingClientRect();
+            const x = Math.max(8, Math.min(window.innerWidth - 8, r.left - 12));
+            const y = Math.max(8, Math.min(window.innerHeight - 8, r.top + 12));
+            const el = document.elementFromPoint(x, y) || container;
+            el.dispatchEvent(new MouseEvent('mousedown', {bubbles:true, clientX:x, clientY:y}));
+            el.dispatchEvent(new MouseEvent('mouseup', {bubbles:true, clientX:x, clientY:y}));
+            el.dispatchEvent(new MouseEvent('click', {bubbles:true, clientX:x, clientY:y}));
+          }
+        """)
+        time.sleep(0.15)
+        driver.find_element(By.TAG_NAME, "body").send_keys(Keys.ESCAPE)
+        time.sleep(0.15)
+    except Exception:
+        pass
 
 
 def _aiexe_close_modal(driver):
     _aiexe_dismiss_modal(driver)
+
+
+def _aiexe_cleanup_transient_ui(driver, reason=""):
+    """Leave Venice on a clean composer surface after adapter-driven startup/scrape actions."""
+    try:
+        _aiexe_dismiss_modal(driver)
+    except Exception:
+        pass
+    try:
+        driver.find_element(By.TAG_NAME, "body").send_keys(Keys.ESCAPE)
+        time.sleep(0.15)
+    except Exception:
+        pass
+    try:
+        driver.execute_script("""
+          const visible = (el) => {
+            if (!el) return false;
+            const cs = getComputedStyle(el);
+            const r = el.getBoundingClientRect();
+            return cs.display !== 'none' && cs.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+          };
+          for (const b of Array.from(document.querySelectorAll('button')).filter(visible)) {
+            const label = String(b.getAttribute('aria-label') || '').trim();
+            if (/^(hide|close|collapse)\\s+sidebar$/i.test(label)) {
+              b.click();
+              break;
+            }
+          }
+        """)
+    except Exception:
+        pass
+    try:
+        if driver.execute_script("return !!document.querySelector('[role=\"dialog\"], .chakra-modal__content');"):
+            print("AIEXE_UI cleanup left a modal open%s" % ((" (" + reason + ")") if reason else ""), flush=True)
+        else:
+            print("AIEXE_UI cleanup complete%s" % ((" (" + reason + ")") if reason else ""), flush=True)
+    except Exception:
+        pass
 
 
 def _aiexe_model_titles(driver):
@@ -1685,11 +1749,40 @@ def _aiexe_clear_attachment_cards(driver):
         print("AIEXE_ATTACH clear failed: %s" % exc, flush=True)
 
 
+def _aiexe_strip_reply_chrome(text):
+    """Remove Venice page chrome accidentally captured by DOM fallback."""
+    lines = str(text or "").splitlines()
+
+    def duration_line(value):
+        return re.match(r"^\s*[\u00b7\u2022]?\s*\d+(?:\.\d+)?s\s*$", str(value or ""), re.I) is not None
+
+    def provider_line(value):
+        t = str(value or "").strip()
+        if re.match(r"^(?:Qwen|Claude|GPT|Gemini|Grok|DeepSeek|Kimi|GLM|MiniMax|NVIDIA|Mistral|Llama|Venice|Gemma|Aion|Mercury)\b.{0,140}\b\d+(?:\.\d+)?s\b", t, re.I):
+            return True
+        return re.match(r"^(?:Qwen|Claude|GPT|Gemini|Grok|DeepSeek|Kimi|GLM|MiniMax|NVIDIA|Mistral|Llama|Venice|Gemma|Aion|Mercury)\b.{0,120}(?:Turbo|Coder|Pro|Flash|Preview|Opus|Sonnet|Fable|Instruct|Uncensored|Reasoning|VL|A3B|FP8|Nano|Ultra|Mini|Max|V\d|[0-9]{1,4}B)\s*$", t, re.I) is not None
+
+    kept = []
+    for idx, line in enumerate(lines):
+        t = line.strip()
+        if not t:
+            kept.append(line)
+            continue
+        prev_line = lines[idx - 1] if idx > 0 else ""
+        next_line = lines[idx + 1] if idx + 1 < len(lines) else ""
+        if duration_line(t) and (provider_line(prev_line) or provider_line(next_line)):
+            continue
+        if provider_line(t) and (re.search(r"\b\d+(?:\.\d+)?s\b", t, re.I) or duration_line(prev_line) or duration_line(next_line)):
+            continue
+        kept.append(line)
+    return "\n".join(kept).strip()
+
+
 def _aiexe_read_last_assistant_text(driver):
     """Text of the last rendered assistant message, or '' if the last message is the user's.
     Transport-agnostic reply capture for when the fetch interceptor is bypassed (worker)."""
     try:
-        return driver.execute_script("""
+        text = driver.execute_script("""
             var marker = arguments[0];
             var blocks = document.querySelectorAll("div[data-message-id]");
             if (!blocks.length) return "";
@@ -1700,6 +1793,7 @@ def _aiexe_read_last_assistant_text(driver):
             clone.querySelectorAll("button, [role='group']").forEach(function(n){ n.remove(); });
             return (clone.innerText || clone.textContent || "").trim();
         """, VC_USER_MESSAGE_MARKER_CSS) or ""
+        return _aiexe_strip_reply_chrome(text)
     except Exception:
         return ""
 
@@ -1752,6 +1846,17 @@ def _aiexe_sidebar_row(driver, slug, tries=12):
 def _aiexe_slug_from_url(url):
     m = re.search(r"/chat/classic/([A-Za-z0-9_-]+)", str(url or ""))
     return m.group(1) if m else ""
+
+
+def _aiexe_requested_chat_name(data):
+    if not isinstance(data, dict):
+        return ""
+    name = str(data.get("aiexe_chat_name") or data.get("chat_name") or "").strip()
+    if not name and isinstance(data.get("options"), dict):
+        name = str(data["options"].get("aiexe_chat_name") or data["options"].get("chat_name") or "").strip()
+    if not name or re.match(r"^(new chat|untitled chat|untitled)$", name, re.I):
+        return ""
+    return name[:80]
 
 
 def _aiexe_rename_chat(driver, slug, name):
@@ -1848,8 +1953,11 @@ def aiexe_scrape_models(driver):
             _aiexe_collect_priced_models_by_search(driver, names)
         _aiexe_close_modal(driver)
         return names
-    except Exception:
+    except Exception as exc:
+        print("AIEXE_MODELS scrape exception: %s" % exc, flush=True)
         return []
+    finally:
+        _aiexe_cleanup_transient_ui(driver, "model scrape")
 
 
 def _aiexe_restore_unobtrusive(driver):
@@ -2048,6 +2156,7 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
 
     api_data_json = json.dumps(api_data)
     _chat_key = _aiexe_chat_key(data)
+    _wanted_chat_name = _aiexe_requested_chat_name(data)
     try:
         # ONE Venice conversation per AI.EXE chat (see the chat-map block up top). Nav policy:
         #   same chat + already on its conversation → no navigation at all (the common case);
@@ -2380,9 +2489,16 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
             except Exception:
                 pass
 
-        # NOTE: renaming the Venice conversation is NOT done here (the smart chat name isn't
-        # known until AFTER the first reply). The app calls /api/aiexe/rename_chat ONCE when it
-        # applies that name — see aiexe_rename_chat_route.
+        # If AI.EXE already has a real title on a later turn, mirror it here too. The first
+        # turn usually arrives as "New Chat", so the UI still calls /api/aiexe/rename_chat
+        # when smart naming completes; this backend path catches missed/raced attempts.
+        try:
+            _slug = _aiexe_slug_from_url(AIEXE_CHAT_URLS.get(_chat_key, "")) if _chat_key else ""
+            if _chat_key and _slug and _wanted_chat_name and AIEXE_THREAD_NAMED.get(_chat_key) != _wanted_chat_name:
+                if _aiexe_rename_chat(driver, _slug, _wanted_chat_name):
+                    AIEXE_THREAD_NAMED[_chat_key] = _wanted_chat_name
+        except Exception as _e:
+            print("AIEXE_RENAME deferred path failed: %s" % _e, flush=True)
 
         capture_and_redirect_browser_logs(driver)
 
@@ -2739,7 +2855,11 @@ try:  # preselect the app's model while the window is STILL VISIBLE — a minimi
         aiexe_select_model(driver, _want)
 except Exception:
     pass
-_aiexe_read_credits(driver)
+try:
+    _aiexe_read_credits(driver)
+except Exception:
+    pass
+_aiexe_cleanup_transient_ui(driver, "startup ready")
 try:  # startup done — ONE minimize, after all window-dependent work finished
     driver.minimize_window()
 except Exception:
