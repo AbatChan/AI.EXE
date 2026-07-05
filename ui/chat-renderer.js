@@ -1947,6 +1947,82 @@
       bubble.appendChild(toggle);
     }
 
+
+    function getAttachmentExtension(itemOrName) {
+      const source = typeof itemOrName === 'string'
+        ? itemOrName
+        : String((itemOrName && itemOrName.name) || '');
+      const base = source.split(/[\\/]/).pop() || '';
+      const lower = base.toLowerCase();
+      if (lower === 'dockerfile') return 'docker';
+      if (lower === 'makefile') return 'make';
+      if (lower === 'cmakelists.txt') return 'cmake';
+      if (!base.includes('.')) return '';
+      return base.split('.').pop().toLowerCase();
+    }
+
+    function getAttachmentFileIconMeta(itemOrName = {}) {
+      const ext = getAttachmentExtension(itemOrName);
+      const mime = typeof itemOrName === 'object' && itemOrName
+        ? String(itemOrName.mime || itemOrName.type || '').toLowerCase()
+        : '';
+      const map = {
+        html: ['HTML', '#f97316'], htm: ['HTML', '#f97316'],
+        css: ['CSS', '#38bdf8'], scss: ['SCSS', '#f472b6'], sass: ['SASS', '#f472b6'], less: ['LESS', '#60a5fa'],
+        js: ['JS', '#facc15'], mjs: ['JS', '#facc15'], cjs: ['JS', '#facc15'],
+        ts: ['TS', '#3b82f6'], tsx: ['TSX', '#3b82f6'], jsx: ['JSX', '#facc15'],
+        json: ['JSON', '#22c55e'], yaml: ['YML', '#a78bfa'], yml: ['YML', '#a78bfa'], xml: ['XML', '#fb923c'],
+        php: ['PHP', '#818cf8'], py: ['PY', '#60a5fa'], rb: ['RB', '#ef4444'], java: ['JAVA', '#f97316'],
+        cpp: ['C++', '#22d3ee'], cc: ['C++', '#22d3ee'], cxx: ['C++', '#22d3ee'], c: ['C', '#38bdf8'],
+        h: ['H', '#38bdf8'], hpp: ['H++', '#22d3ee'], cs: ['C#', '#a78bfa'], go: ['GO', '#22d3ee'],
+        rs: ['RS', '#fb923c'], swift: ['SWIFT', '#fb923c'], kt: ['KT', '#a78bfa'], lua: ['LUA', '#3b82f6'],
+        sh: ['SH', '#10b981'], bash: ['SH', '#10b981'], zsh: ['ZSH', '#10b981'], ps1: ['PS', '#60a5fa'],
+        sql: ['SQL', '#06b6d4'], db: ['DB', '#06b6d4'], sqlite: ['DB', '#06b6d4'],
+        md: ['MD', '#94a3b8'], markdown: ['MD', '#94a3b8'], txt: ['TXT', '#94a3b8'], log: ['LOG', '#64748b'],
+        pdf: ['PDF', '#ef4444'], doc: ['DOC', '#3b82f6'], docx: ['DOC', '#3b82f6'], rtf: ['RTF', '#60a5fa'],
+        xls: ['XLS', '#22c55e'], xlsx: ['XLS', '#22c55e'], ods: ['ODS', '#22c55e'], csv: ['CSV', '#22c55e'], tsv: ['TSV', '#22c55e'],
+        ppt: ['PPT', '#f97316'], pptx: ['PPT', '#f97316'], odp: ['PPT', '#f97316'],
+        zip: ['ZIP', '#f59e0b'], rar: ['RAR', '#f59e0b'], '7z': ['7Z', '#f59e0b'], tar: ['TAR', '#f59e0b'], gz: ['GZ', '#f59e0b'],
+        docker: ['DOCK', '#38bdf8'], make: ['MAKE', '#a3e635'], cmake: ['CMAKE', '#22d3ee'], env: ['ENV', '#10b981'],
+      };
+      if (map[ext]) return { label: map[ext][0], color: map[ext][1] };
+      if (/spreadsheet|excel|csv/.test(mime)) return { label: 'XLS', color: '#22c55e' };
+      if (/word|document/.test(mime)) return { label: 'DOC', color: '#3b82f6' };
+      if (/presentation|powerpoint/.test(mime)) return { label: 'PPT', color: '#f97316' };
+      if (/pdf/.test(mime)) return { label: 'PDF', color: '#ef4444' };
+      return null;
+    }
+
+    function escapeAttachmentIconValue(value) {
+      return String(value || '').replace(/[&<>"']/g, (ch) => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+      }[ch] || ch));
+    }
+
+    function buildAttachmentFallbackFileIcon() {
+      return `
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+          <polyline points="14 2 14 8 20 8"></polyline>
+        </svg>
+      `;
+    }
+
+    function buildAttachmentFileIcon(itemOrName = {}) {
+      const meta = getAttachmentFileIconMeta(itemOrName);
+      if (!meta) return buildAttachmentFallbackFileIcon();
+      const label = escapeAttachmentIconValue(meta.label).slice(0, 5);
+      const color = escapeAttachmentIconValue(meta.color);
+      return `
+        <svg class="attach-file-type-icon" viewBox="0 0 40 40" aria-hidden="true">
+          <rect x="8" y="5" width="24" height="30" rx="5" fill="rgba(226, 241, 255, 0.96)"></rect>
+          <path d="M25 5v8h7" fill="rgba(148, 163, 184, 0.42)"></path>
+          <rect x="6" y="20" width="28" height="14" rx="4" fill="${color}"></rect>
+          <text x="20" y="29.8" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="7.4" font-weight="800" fill="#ffffff">${label}</text>
+        </svg>
+      `;
+    }
+
     function buildMessageAttachmentStrip(attachments = []) {
       const clean = Array.from(attachments || [])
         .map((item) => (item && typeof item === 'object' ? item : null))
@@ -1954,16 +2030,24 @@
         .slice(0, 10);
       if (!clean.length) return null;
 
+      const imageAttachmentCount = clean.filter((item) => {
+        const rawKind = String(item && item.kind || '').toLowerCase();
+        const imageDataUrl = String((item && (item.previewDataUrl || item.thumbDataUrl)) || '');
+        return rawKind === 'image' && /^data:image\//i.test(imageDataUrl);
+      }).length;
       const strip = document.createElement('div');
       strip.className = 'msg-attachment-chips';
+      strip.classList.toggle('is-single-image-only', clean.length === 1 && imageAttachmentCount === 1);
+      strip.classList.toggle('has-many-attachments', clean.length > 1);
+      strip.classList.toggle('has-mixed-attachments', imageAttachmentCount > 0 && imageAttachmentCount < clean.length);
       clean.forEach((item) => {
         const name = String(item.name || 'attachment').trim() || 'attachment';
         const ext = name.includes('.') ? name.split('.').pop() : '';
         const rawKind = String(item.kind || '').toLowerCase();
         const kind = rawKind === 'image' ? 'IMAGE' : (rawKind === 'text' ? 'TEXT' : 'FILE');
         const typeLabel = ext ? ext.toUpperCase() : kind;
-        const previewDataUrl = rawKind === 'image' && /^data:image\//i.test(String(item.previewDataUrl || ''))
-          ? String(item.previewDataUrl || '')
+        const previewDataUrl = rawKind === 'image' && /^data:image\//i.test(String(item.previewDataUrl || item.thumbDataUrl || ''))
+          ? String(item.previewDataUrl || item.thumbDataUrl || '')
           : '';
         const chip = document.createElement('div');
         chip.className = `attach-chip msg-attachment-chip${previewDataUrl ? ' image' : ''}`;
@@ -1979,12 +2063,7 @@
           img.alt = '';
           icon.appendChild(img);
         } else {
-          icon.innerHTML = `
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
-              <polyline points="14 2 14 8 20 8"></polyline>
-            </svg>
-          `;
+          icon.innerHTML = buildAttachmentFileIcon(item);
         }
 
         const textWrap = document.createElement('span');
@@ -1998,8 +2077,26 @@
         textWrap.appendChild(label);
         textWrap.appendChild(type);
 
+        if (previewDataUrl) {
+          chip.tabIndex = 0;
+          chip.setAttribute('role', 'button');
+          chip.setAttribute('aria-label', `Open ${name}`);
+          const openPreview = () => {
+            if (typeof window.openAttachmentImageOverlay === 'function') {
+              window.openAttachmentImageOverlay(previewDataUrl, name);
+            }
+          };
+          chip.addEventListener('click', openPreview);
+          chip.addEventListener('keydown', (evt) => {
+            if (evt.key === 'Enter' || evt.key === ' ') {
+              evt.preventDefault();
+              openPreview();
+            }
+          });
+        }
+
         chip.appendChild(icon);
-        chip.appendChild(textWrap);
+        if (!previewDataUrl) chip.appendChild(textWrap);
         strip.appendChild(chip);
       });
       return strip;

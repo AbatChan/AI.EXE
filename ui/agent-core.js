@@ -1359,9 +1359,15 @@
       // falsely credit behavior that lives in an unwritten file).
       const norm = (p) => `/${String(p || '').replace(/^\/+/, '')}`;
       const writtenPaths = new Set(mutations.map((e) => norm(e.path)));
-      const plannedFiles = Array.isArray(planSpec && planSpec.expectedFiles)
-        ? planSpec.expectedFiles.map(norm).filter((p) => p && p !== '/' && p !== '/README.md')
-        : [];
+      // For an EDIT task only the affected files must change (siblings are read-only context);
+      // for a project build every expected file must exist. Using expectedFiles for edits left
+      // the plan stuck at 0/N because untouched siblings never get written.
+      const taskKind = String(planSpec && planSpec.taskKind || '').toLowerCase();
+      const affected = Array.isArray(planSpec && planSpec.affectedFiles) ? planSpec.affectedFiles : [];
+      const requiredSource = (taskKind === 'edit' && affected.length)
+        ? affected
+        : (Array.isArray(planSpec && planSpec.expectedFiles) ? planSpec.expectedFiles : []);
+      const plannedFiles = requiredSource.map(norm).filter((p) => p && p !== '/' && p !== '/README.md');
       const allPlannedWritten = plannedFiles.every((p) => writtenPaths.has(p));
       return list.map((text) => {
         const keywords = agentChecklistKeywords(text);

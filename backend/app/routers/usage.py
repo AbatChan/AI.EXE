@@ -13,8 +13,9 @@ from fastapi.responses import StreamingResponse
 from ..config import settings
 from ..llm import LLMClient, LLMError
 from ..models import (ApiKeySetRequest, ApiKeyStatusResponse, ProviderCompleteRequest,
-                      ProviderCompleteResponse, ProviderHealthResponse, ProviderInfo,
-                      ProviderRequest, ProviderUsageResponse, UsageResponse)
+                      ProviderCompleteResponse, ProviderDeleteChatRequest, ProviderHealthResponse,
+                      ProviderInfo, ProviderRenameChatRequest, ProviderRequest,
+                      ProviderUsageResponse, UsageResponse)
 from ..provider import is_local_provider
 from ..provider_usage import read_provider_balance, read_provider_health
 from ..services import api_key_store, provider_store, usage_manager
@@ -42,7 +43,8 @@ def provider_complete(payload: ProviderCompleteRequest) -> ProviderCompleteRespo
     try:
         content = llm.complete(payload.messages, temperature=payload.temperature,
                                max_tokens=payload.max_tokens, chat_id=payload.chat_id,
-                               think=payload.think)
+                               think=payload.think, chat_name=payload.chat_name,
+                               attachments=payload.attachments)
         return ProviderCompleteResponse(ok=bool(content.strip()), content=content)
     except LLMError as exc:
         return ProviderCompleteResponse(ok=False, error=str(exc))
@@ -65,6 +67,10 @@ def provider_stream(payload: ProviderCompleteRequest) -> StreamingResponse:
         body["aiexe_chat_id"] = payload.chat_id
     if payload.think in ("on", "off"):
         body["aiexe_think"] = payload.think
+    if payload.chat_name:
+        body["aiexe_chat_name"] = payload.chat_name
+    if payload.attachments:
+        body["aiexe_attachments"] = payload.attachments
     url = base.rstrip("/") + "/api/chat"
     read_budget = float(settings.adapter_http_timeout)
 
@@ -83,6 +89,42 @@ def provider_stream(payload: ProviderCompleteRequest) -> StreamingResponse:
             yield json.dumps({"error": f"adapter stream error: {exc}"}) + "\n"
 
     return StreamingResponse(gen(), media_type="application/x-ndjson")
+
+
+@router.post("/provider/delete_chat")
+def provider_delete_chat(payload: ProviderDeleteChatRequest):
+    """Delete the Venice conversation mapped to an AI.EXE chat (adapter only). Best-effort:
+    a missing mapping or non-adapter provider is a no-op, never an error."""
+    base, _model = provider_store.resolve()
+    if not base or provider_store.kind() != "ollama":
+        return {"ok": False, "reason": "not an adapter provider"}
+    url = base.rstrip("/") + "/api/aiexe/delete_chat"
+    try:
+        resp = httpx.post(url, json={"aiexe_chat_id": payload.chat_id, "slug": payload.slug},
+                          timeout=httpx.Timeout(connect=10.0, read=60.0, write=30.0, pool=10.0))
+        if resp.status_code == 200:
+            return resp.json()
+        return {"ok": False, "reason": f"adapter HTTP {resp.status_code}"}
+    except httpx.HTTPError as exc:
+        return {"ok": False, "reason": f"adapter error: {exc}"}
+
+
+@router.post("/provider/rename_chat")
+def provider_rename_chat(payload: ProviderRenameChatRequest):
+    """Rename the Venice conversation mapped to an AI.EXE chat (adapter only, best-effort)."""
+    base, _model = provider_store.resolve()
+    if not base or provider_store.kind() != "ollama":
+        return {"ok": False, "reason": "not an adapter provider"}
+    url = base.rstrip("/") + "/api/aiexe/rename_chat"
+    try:
+        resp = httpx.post(url, json={"aiexe_chat_id": payload.chat_id, "slug": payload.slug,
+                                     "name": payload.name},
+                          timeout=httpx.Timeout(connect=10.0, read=60.0, write=30.0, pool=10.0))
+        if resp.status_code == 200:
+            return resp.json()
+        return {"ok": False, "reason": f"adapter HTTP {resp.status_code}"}
+    except httpx.HTTPError as exc:
+        return {"ok": False, "reason": f"adapter error: {exc}"}
 
 
 @router.get("/provider-usage", response_model=ProviderUsageResponse)

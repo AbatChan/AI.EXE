@@ -3801,6 +3801,24 @@ html.platform-mac .settings-sidebar {
   margin: 0;
 }
 
+/* Inline code in agent narration — same chip look as the final chat reply
+   (.msg-bubble code), so `<details>`, `.faq-a`, `max-height` read as code, not raw backticks. */
+.msg-agent-activity-thought code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  border-radius: 5px;
+  background: rgba(0, 229, 255, 0.08);
+  border: 1px solid rgba(0, 229, 255, 0.14);
+  padding: 1px 5px;
+  white-space: normal;
+}
+
+.msg-agent-activity-thought pre {
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 6px 0;
+}
+
 .msg-thought-panel .msg-agent-activity-thought {
   color: var(--text2);
   font-weight: 400;
@@ -5235,40 +5253,117 @@ html.platform-mac .settings-sidebar {
 }
 
 .msg-attachment-chips {
-  display: grid;
+  --msg-attachment-image-size: 92px;
+  display: flex;
+  flex-wrap: wrap;
   justify-content: flex-end;
   align-self: flex-end;
-  grid-template-columns: repeat(auto-fit, minmax(148px, max-content));
+  align-items: flex-start;
   gap: 10px;
+  width: min(100%, 520px);
   max-width: 100%;
-  overflow: hidden;
+  overflow: visible;
   padding: 0 0 2px;
 }
 
 .msg-attachment-chip {
   min-width: 148px;
   max-width: 220px;
-  width: 100%;
+  width: 220px;
   cursor: default;
 }
 
 .msg-attachment-chip.image {
-  min-width: 148px;
-  max-width: 180px;
-  height: 138px;
-  padding: 8px;
+  width: var(--msg-attachment-image-size);
+  min-width: var(--msg-attachment-image-size);
+  max-width: var(--msg-attachment-image-size);
+  height: var(--msg-attachment-image-size);
+  padding: 0;
   align-items: stretch;
   flex-direction: column;
+  cursor: zoom-in;
 }
 
 .msg-attachment-chip.image .attach-chip-icon {
   width: 100%;
-  height: 86px;
-  border-radius: 10px;
+  height: 100%;
+  border-radius: inherit;
 }
 
 .msg-attachment-chip.image .attach-chip-text {
-  flex: 0 0 auto;
+  display: none;
+}
+
+.msg-attachment-chips.is-single-image-only {
+  --msg-attachment-image-size: 145px;
+  width: auto;
+}
+
+.msg-attachment-chips.has-mixed-attachments,
+.msg-attachment-chips.has-many-attachments {
+  --msg-attachment-image-size: 58px;
+}
+
+.attachment-lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 9998;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 34px;
+  background: rgba(2, 6, 14, 0.78);
+  backdrop-filter: blur(16px);
+}
+
+.attachment-lightbox[hidden] {
+  display: none !important;
+}
+
+.attachment-lightbox-img {
+  max-width: min(92vw, 1120px);
+  max-height: 88vh;
+  display: block;
+  object-fit: contain;
+  border-radius: var(--radius-md);
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.58);
+}
+
+.attachment-lightbox-close {
+  position: fixed;
+  top: 22px;
+  right: 22px;
+  z-index: 1;
+  width: 36px;
+  height: 36px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 999px;
+  background: rgba(9, 14, 26, 0.76);
+  color: #fff;
+  font-size: 0;
+  line-height: 0;
+  cursor: pointer;
+  display: inline-grid;
+  place-items: center;
+  padding: 0;
+  backdrop-filter: blur(12px);
+}
+
+.attachment-lightbox-close:hover {
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.attachment-lightbox-close::before {
+  content: '×';
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  font-size: 30px;
+  line-height: 1;
+  transform: none;
+  margin-top: -2px;
 }
 
 .msg-artifact-card {
@@ -6534,6 +6629,7 @@ html.platform-mac .settings-sidebar {
 }
 
 .input-attachments {
+  --input-image-attachment-size: var(--attachment-chip-h, 58px);
   order: 0;
   display: none;
   flex-wrap: nowrap;
@@ -6544,6 +6640,16 @@ html.platform-mac .settings-sidebar {
   overflow-y: hidden;
   scrollbar-width: thin;
   scrollbar-color: rgba(120, 150, 190, 0.45) transparent;
+  scroll-behavior: smooth;
+}
+
+.input-attachments.is-single-image-only {
+  --input-image-attachment-size: 145px;
+}
+
+.input-attachments.has-mixed-attachments,
+.input-attachments.has-many-attachments {
+  --input-image-attachment-size: var(--attachment-chip-h, 58px);
 }
 
 .input-attachments::-webkit-scrollbar {
@@ -6560,18 +6666,21 @@ html.platform-mac .settings-sidebar {
 }
 
 .attach-chip {
+  --attachment-chip-h: 58px;
+  --attachment-remove-size: 22px;
   display: inline-flex;
   align-items: center;
   gap: 10px;
   min-width: 220px;
   max-width: 300px;
-  height: 58px;
-  padding: 8px 10px;
-  border-radius: 14px;
+  height: var(--attachment-chip-h);
+  padding: 8px 42px 8px 10px;
+  border-radius: var(--radius-sm);
   border: 1px solid rgba(145, 170, 210, 0.25);
   background: linear-gradient(180deg, rgba(38, 48, 70, 0.52), rgba(28, 35, 54, 0.52));
   color: var(--text2);
   flex: 0 0 auto;
+  position: relative;
 }
 
 .attach-chip-icon {
@@ -6591,12 +6700,79 @@ html.platform-mac .settings-sidebar {
   height: 18px;
 }
 
+.attach-chip-icon .attach-file-type-icon {
+  width: 28px;
+  height: 28px;
+  display: block;
+  filter: drop-shadow(0 5px 10px rgba(0, 0, 0, 0.22));
+}
+
+.input-attachments.has-many-attachments .attach-chip-icon .attach-file-type-icon,
+.input-attachments.has-mixed-attachments .attach-chip-icon .attach-file-type-icon {
+  width: 26px;
+  height: 26px;
+}
+
 .attach-chip-thumb {
   width: 100%;
   height: 100%;
   display: block;
   object-fit: cover;
   border-radius: inherit;
+}
+
+.attach-chip.image {
+  --attachment-remove-size: 22px;
+  width: var(--input-image-attachment-size, var(--attachment-chip-h));
+  min-width: var(--input-image-attachment-size, var(--attachment-chip-h));
+  max-width: var(--input-image-attachment-size, var(--attachment-chip-h));
+  height: var(--input-image-attachment-size, var(--attachment-chip-h));
+  padding: 0;
+  gap: 0;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  background: transparent;
+  cursor: zoom-in;
+}
+
+.attach-chip.image .attach-chip-icon {
+  width: 100%;
+  height: 100%;
+  border-radius: inherit;
+}
+
+.attach-chip.image .attach-chip-text {
+  display: none;
+}
+
+.attach-chip.image .attach-chip-remove {
+  top: 6px;
+  right: 6px;
+  z-index: 2;
+  margin: 0;
+  background: rgba(5, 9, 18, 0.72);
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  backdrop-filter: blur(10px);
+}
+
+.input-attachments.has-mixed-attachments .attach-chip.image,
+.input-attachments.has-many-attachments .attach-chip.image,
+.msg-attachment-chips.has-mixed-attachments .attach-chip.image,
+.msg-attachment-chips.has-many-attachments .attach-chip.image {
+  --attachment-remove-size: 18px;
+}
+
+.input-attachments.has-mixed-attachments .attach-chip.image .attach-chip-remove,
+.input-attachments.has-many-attachments .attach-chip.image .attach-chip-remove,
+.msg-attachment-chips.has-mixed-attachments .attach-chip.image .attach-chip-remove,
+.msg-attachment-chips.has-many-attachments .attach-chip.image .attach-chip-remove {
+  top: 4px;
+  right: 4px;
+}
+
+.attach-chip.image .attach-chip-remove:hover {
+  background: rgba(239, 68, 68, 0.9);
 }
 
 .attach-chip.image .attach-chip-icon {
@@ -6634,27 +6810,44 @@ html.platform-mac .settings-sidebar {
 }
 
 .attach-chip-remove {
-  width: 22px;
-  height: 22px;
-  border: 0;
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: var(--attachment-remove-size, 22px);
+  height: var(--attachment-remove-size, 22px);
+  border: 1px solid rgba(255, 255, 255, 0.14);
   border-radius: 999px;
-  background: transparent;
-  color: rgba(227, 237, 251, 0.9);
+  background: rgba(5, 9, 18, 0.45);
+  color: rgba(227, 237, 251, 0.92);
   cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  line-height: 1;
+  display: inline-grid;
+  place-items: center;
+  line-height: 0;
   padding: 0;
-  font-size: 18px;
-  margin-left: 2px;
+  font-size: 0;
+  margin: 0;
   flex-shrink: 0;
-  transform: translateY(-1px);
+  transform: none;
+  z-index: 2;
+  backdrop-filter: blur(10px);
 }
 
 .attach-chip-remove:hover {
   color: #fff;
-  background: rgba(255, 255, 255, 0.12);
+  background: rgba(239, 68, 68, 0.9);
+}
+
+.attach-chip-remove::before {
+  content: '×';
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  font-size: calc(var(--attachment-remove-size, 22px) * 0.78);
+  line-height: 1;
+  transform: none;
+  margin-top: -1px;
 }
 
 .composer-status-line {

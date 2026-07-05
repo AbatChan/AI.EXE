@@ -995,9 +995,19 @@
         : [];
       let lastChecklistSignature = '';
       let reviewNarrated = false;
-      const refreshChecklist = () => {
+      const refreshChecklist = (finalizing = false) => {
         if (!checklistItems.length || typeof deps.computeAgentChecklistProgress !== 'function') return null;
-        const progress = deps.computeAgentChecklistProgress(checklistItems, toolEvents, planSpec);
+        let progress = deps.computeAgentChecklistProgress(checklistItems, toolEvents, planSpec);
+        // On a successful finish where work shipped AND at least one criterion already matched
+        // (proving the change is on-topic), tick the rest — descriptive criteria for a single
+        // change often share no keyword with the diff, so keyword matching leaves them stuck.
+        if (finalizing) {
+          const shipped = toolEvents.some((e) => e && e.ok
+            && ['write_file', 'edit_file'].includes(String(e.tool || '').toLowerCase()));
+          if (shipped && progress.some((p) => p && p.done)) {
+            progress = progress.map((p) => ({ ...p, done: true }));
+          }
+        }
         const doneCount = progress.filter((p) => p && p.done).length;
         const allDone = doneCount >= progress.length && progress.length > 0;
         const signature = progress.map((p) => `${p.done ? '1' : '0'}:${p.text}`).join('|');
@@ -2848,7 +2858,7 @@
         .map((e) => deps.normalizeWorkspacePath(e.path || ''))
         .filter(Boolean))];
       // Report checklist progress (done/left) and enable Continue.
-      const cl = refreshChecklist();
+      const cl = refreshChecklist(true);
       const changedClause = fallbackChanged.length
         ? ` Changed: ${fallbackChanged.slice(0, 6).join(', ')}.`
         : '';

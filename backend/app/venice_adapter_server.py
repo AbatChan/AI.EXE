@@ -22,6 +22,8 @@ import hashlib
 import re
 from enum import Enum
 import array
+import base64
+import tempfile
 
 # --- Venice site config: all fragile selectors/URLs live in venice_config.py (copied next to
 # this file). Edit that file when Venice changes their site; inline fallbacks below keep the
@@ -73,6 +75,25 @@ VC_STOP_GENERATING_XPATH = _vcfg('STOP_GENERATING_XPATH', "//button[translate(@a
 VC_PRICED_ICON_PATH_PREFIX = _vcfg('PRICED_ICON_PATH_PREFIX', "M9 14c0")   # the coin-stack svg's first path
 VC_CREDITS_TEXT_XPATH = _vcfg('CREDITS_TEXT_XPATH', "//p[contains(., 'Credits')]")
 VC_CHAT_SETTINGS_SWITCH_XPATH = _vcfg('CHAT_SETTINGS_SWITCH_XPATH', "//p[normalize-space()='{}']/ancestor::div[contains(@class,'css-bngl5n')]//input[@type='checkbox']")
+# Attachments
+VC_ATTACH_FILE_INPUT_XPATHS = _vcfg('ATTACH_FILE_INPUT_XPATHS', ["//input[@type='file' and @name='attachments']", "//form//input[@type='file']", "//input[@type='file']"])
+VC_ATTACH_CARD_IMG_XPATH = _vcfg('ATTACH_CARD_IMG_XPATH', "//div[contains(@class,'chakra-card')]//img[starts-with(@src,'blob:')]")
+VC_ATTACH_CARD_BY_NAME_XPATH = _vcfg('ATTACH_CARD_BY_NAME_XPATH', "//div[contains(@class,'chakra-card')][.//p[normalize-space()='{}'] or .//img[@alt='{}']]")
+VC_ATTACH_CARD_REMOVE_XPATH = _vcfg('ATTACH_CARD_REMOVE_XPATH', "//div[contains(@class,'chakra-card')]//button[@aria-label='Remove']")
+VC_ATTACH_ACTIONS_BUTTON_XPATH = _vcfg('ATTACH_ACTIONS_BUTTON_XPATH', "//button[@aria-label='Actions']")
+# Sidebar rows: rename / delete / cleanup
+VC_SIDEBAR_CHAT_ROW_XPATH = _vcfg('SIDEBAR_CHAT_ROW_XPATH', "//div[@role='group'][.//a[contains(@href,'/chat/classic/{}')]]")
+VC_SIDEBAR_CHAT_ROW_ANY_XPATH = _vcfg('SIDEBAR_CHAT_ROW_ANY_XPATH', "//a[contains(@href,'/chat/classic/')]")
+VC_CHAT_RENAME_BUTTON_XPATH = _vcfg('CHAT_RENAME_BUTTON_XPATH', ".//button[@aria-label='Rename']")
+VC_CHAT_RENAME_INPUT_XPATH = _vcfg('CHAT_RENAME_INPUT_XPATH', "//input[contains(@class,'chakra-input')]")
+VC_CHAT_RENAME_CONFIRM_XPATH = _vcfg('CHAT_RENAME_CONFIRM_XPATH', "//button[@aria-label='confirm']")
+VC_CHAT_RENAME_CANCEL_XPATH = _vcfg('CHAT_RENAME_CANCEL_XPATH', "//button[@aria-label='Cancel']")
+VC_CHAT_DELETE_BUTTON_XPATH = _vcfg('CHAT_DELETE_BUTTON_XPATH', ".//button[@aria-label='Delete']")
+VC_CHAT_DELETE_CONFIRM_XPATH = _vcfg('CHAT_DELETE_CONFIRM_XPATH', "//footer//button[normalize-space()='Confirm']")
+VC_SIDEBAR_TOGGLE_XPATH = _vcfg('SIDEBAR_TOGGLE_XPATH', "//button[@aria-label='Toggle sidebar' or @aria-label='Show Sidebar']")
+# Rendered assistant reply (DOM fallback when the worker bypasses the fetch interceptor).
+VC_ASSISTANT_MESSAGE_XPATH = _vcfg('ASSISTANT_MESSAGE_XPATH', "//div[@data-message-id]")
+VC_USER_MESSAGE_MARKER_CSS = _vcfg('USER_MESSAGE_MARKER_CSS', "[data-testid='user-message']")
 
 
 app = Flask(__name__)
@@ -646,13 +667,17 @@ def _aiexe_reopen_driver(reason):
     return driver
 
 
-def inject_request_interceptor(driver, api_data_json):
+def inject_request_interceptor(driver, api_data_json, swap_body=True):
+    # On attachment turns we still capture the stream but must NOT clobber Venice's native
+    # request body (it carries the parsed-file references) — swap_body=False keeps the body.
+    swap_js = "true" if swap_body else "false"
     script = f"""
     window.streamComplete = false;
     window.receivedChunks = [];
     window.__aiexe_urls = [];
     (function(original) {{
       const apiData = {api_data_json};
+      const swapBody = {swap_js};
       window.fetch = async function(input, init) {{
         let urlStr = '';
         try {{
@@ -668,7 +693,7 @@ def inject_request_interceptor(driver, api_data_json):
         if (method === 'POST' && urlStr.indexOf('/api/inference/chat') !== -1) {{
           try {{
           window.fetch = original;
-          if (init && init.body) {{
+          if (swapBody && init && init.body) {{
             let body = JSON.parse(init.body);
             try {{ window.__aiexe_body_keys = Object.keys(body).join(','); }} catch (e) {{}}
             if ('requestId' in body) {{ delete apiData.requestId; }}
@@ -733,6 +758,13 @@ AIEXE_CURRENT_MODEL = ""   # last model name observed on Venice's composer butto
 # context in every prompt — so every step is best-effort.
 AIEXE_CHAT_MAP_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "aiexe_chat_map.json")
 AIEXE_CHAT_URLS = {}
+# Attachment IDs already uploaded to each Venice thread (dedupe: full history re-sends every
+# turn, but an attachment stays pinned to the conversation — upload once, never again).
+AIEXE_THREAD_ATTACHMENTS = {}
+# Set true for a request once we upload files; the reply then prefers the DOM (worker transport).
+AIEXE_LAST_TURN_HAD_UPLOAD = False
+# Last name we pushed to each Venice conversation (rename only when it actually changes).
+AIEXE_THREAD_NAMED = {}
 
 
 def _aiexe_stable_chat_url(url):
@@ -1518,6 +1550,274 @@ def _aiexe_submit_prompt(driver):
         return False
 
 
+# --- Attachments ------------------------------------------------------------
+def _aiexe_attachment_id(att):
+    """Stable per-attachment id for dedupe. Prefer the app's id; else hash name+bytes."""
+    if not isinstance(att, dict):
+        return None
+    aid = str(att.get("id") or att.get("attachment_id") or "").strip()
+    if aid:
+        return aid[:120]
+    raw = (str(att.get("name") or "") + "|" + str(att.get("data") or att.get("dataUrl") or "")[:2000])
+    return hashlib.sha1(raw.encode("utf-8", "ignore")).hexdigest()[:24]
+
+
+def _aiexe_decode_attachment(att):
+    """(basename, bytes) from an attachment dict carrying base64/data-URL bytes, else None.
+    Reconciles the extension with the ACTUAL bytes' mime — the app re-encodes image previews to
+    JPEG, so a *.png name over JPEG bytes makes Venice reject the upload ('unable to process')."""
+    try:
+        name = os.path.basename(str(att.get("name") or "attachment").strip()) or "attachment"
+        blob = str(att.get("data") or att.get("dataUrl") or att.get("base64") or "")
+        if not blob:
+            return None
+        mime = str(att.get("mime") or "")
+        if blob.startswith("data:"):
+            head, _, rest = blob.partition(",")
+            blob = rest
+            m = re.match(r"data:([^;,]+)", head)
+            if m:
+                mime = m.group(1)
+        raw = base64.b64decode(blob + "=" * (-len(blob) % 4))
+        if not raw:
+            return None
+        ext_by_mime = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp",
+                       "image/gif": ".gif", "image/svg+xml": ".svg"}
+        want = ext_by_mime.get(mime.lower(), "")
+        if want and not name.lower().endswith(want):
+            name = os.path.splitext(name)[0] + want
+        return (name, raw)
+    except Exception as exc:
+        print("AIEXE_ATTACH decode failed: %s" % exc, flush=True)
+        return None
+
+
+def _aiexe_find_file_input(driver):
+    for xp in VC_ATTACH_FILE_INPUT_XPATHS:
+        try:
+            el = driver.find_element(By.XPATH, xp)
+            if el:
+                return el
+        except Exception:
+            pass
+    # Some composer states hide the input until the + Actions menu is opened.
+    try:
+        driver.find_element(By.XPATH, VC_ATTACH_ACTIONS_BUTTON_XPATH).click()
+        time.sleep(0.4)
+    except Exception:
+        pass
+    for xp in VC_ATTACH_FILE_INPUT_XPATHS:
+        try:
+            el = driver.find_element(By.XPATH, xp)
+            if el:
+                return el
+        except Exception:
+            pass
+    return None
+
+
+def _aiexe_upload_attachments(driver, attachments, uploaded):
+    """Upload each not-yet-uploaded attachment onto Venice's hidden file input, ONE AT A TIME
+    with a settle pause (a rapid multi-file burst makes Venice's async processing reject some).
+    Waits for each card. `uploaded` is this thread's seen-id set (mutated). Returns count uploaded."""
+    if not attachments:
+        return 0
+    n = 0
+    for att in attachments:
+        aid = _aiexe_attachment_id(att)
+        if not aid or aid in uploaded:
+            continue
+        decoded = _aiexe_decode_attachment(att)
+        if not decoded:
+            uploaded.add(aid)  # can't decode → don't retry forever
+            continue
+        name, raw = decoded
+        inp = _aiexe_find_file_input(driver)
+        if inp is None:
+            print("AIEXE_ATTACH no file input found — skipping upload", flush=True)
+            return n
+        tmpdir = tempfile.mkdtemp(prefix="aiexe_att_")
+        path = os.path.join(tmpdir, name)
+        try:
+            with open(path, "wb") as fh:
+                fh.write(raw)
+            inp.send_keys(path)
+            # Wait for THIS file's card by name (generous — slow internet makes previews lag).
+            _card = VC_ATTACH_CARD_BY_NAME_XPATH.format(name, name)
+            try:
+                WebDriverWait(driver, 40).until(EC.presence_of_element_located((By.XPATH, _card)))
+            except Exception:
+                try:
+                    WebDriverWait(driver, 15).until(EC.presence_of_element_located((By.XPATH, VC_ATTACH_CARD_IMG_XPATH)))
+                except Exception:
+                    pass
+            uploaded.add(aid)
+            n += 1
+            print("AIEXE_ATTACH uploaded %r (id=%s)" % (name, aid), flush=True)
+            time.sleep(1.5)  # let Venice finish processing before the next upload / the submit
+        except Exception as exc:
+            print("AIEXE_ATTACH upload failed for %r: %s" % (name, exc), flush=True)
+        finally:
+            try:
+                os.remove(path)
+                os.rmdir(tmpdir)
+            except Exception:
+                pass
+    return n
+
+
+def _aiexe_clear_attachment_cards(driver):
+    """Remove any leftover attachment cards sitting in the composer (a failed prior send, or a
+    phantom upload) so this turn's message sends clean. Clicks each card's Remove button."""
+    try:
+        removed = 0
+        for _ in range(20):  # cap — each click drops one card
+            cards = driver.find_elements(By.XPATH, VC_ATTACH_CARD_REMOVE_XPATH)
+            btn = next((b for b in cards if b.is_displayed()), None)
+            if btn is None:
+                break
+            driver.execute_script("arguments[0].click();", btn)
+            removed += 1
+            time.sleep(0.2)
+        if removed:
+            print("AIEXE_ATTACH cleared %d stale composer card(s)" % removed, flush=True)
+    except Exception as exc:
+        print("AIEXE_ATTACH clear failed: %s" % exc, flush=True)
+
+
+def _aiexe_read_last_assistant_text(driver):
+    """Text of the last rendered assistant message, or '' if the last message is the user's.
+    Transport-agnostic reply capture for when the fetch interceptor is bypassed (worker)."""
+    try:
+        return driver.execute_script("""
+            var marker = arguments[0];
+            var blocks = document.querySelectorAll("div[data-message-id]");
+            if (!blocks.length) return "";
+            var last = blocks[blocks.length - 1];
+            if (last.querySelector(marker)) return "";   // last message is the user's
+            var body = last.querySelector("[data-message-content], .prose") || last;
+            var clone = body.cloneNode(true);
+            clone.querySelectorAll("button, [role='group']").forEach(function(n){ n.remove(); });
+            return (clone.innerText || clone.textContent || "").trim();
+        """, VC_USER_MESSAGE_MARKER_CSS) or ""
+    except Exception:
+        return ""
+
+
+# --- Sidebar: rename / delete / cleanup -------------------------------------
+def _aiexe_open_sidebar(driver):
+    try:
+        for b in driver.find_elements(By.XPATH, VC_SIDEBAR_TOGGLE_XPATH):
+            if b.is_displayed() and (b.get_attribute("aria-label") or "") == "Show Sidebar":
+                driver.execute_script("arguments[0].click();", b)
+                time.sleep(0.4)
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _aiexe_close_sidebar(driver):
+    try:
+        for b in driver.find_elements(By.XPATH, VC_SIDEBAR_TOGGLE_XPATH):
+            if b.is_displayed() and (b.get_attribute("aria-label") or "") == "Toggle sidebar":
+                driver.execute_script("arguments[0].click();", b)
+                time.sleep(0.3)
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _aiexe_sidebar_row(driver, slug, tries=12):
+    """Find the sidebar row for `slug`, retrying — the list is server-fetched and can lag on
+    slow internet, and a just-opened sidebar may still be rendering. Scrolls it into view."""
+    if not slug:
+        return None
+    for _ in range(max(1, tries)):
+        try:
+            row = driver.find_element(By.XPATH, VC_SIDEBAR_CHAT_ROW_XPATH.format(slug))
+            if row is not None:
+                try:
+                    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", row)
+                except Exception:
+                    pass
+                return row
+        except Exception:
+            pass
+        time.sleep(0.5)
+    return None
+
+
+def _aiexe_slug_from_url(url):
+    m = re.search(r"/chat/classic/([A-Za-z0-9_-]+)", str(url or ""))
+    return m.group(1) if m else ""
+
+
+def _aiexe_rename_chat(driver, slug, name):
+    """Rename a Venice conversation row to `name`. Best-effort, guarded, cleans up after."""
+    name = (name or "").strip()
+    if not name:
+        return False
+    opened = _aiexe_open_sidebar(driver)
+    ok = False
+    try:
+        row = _aiexe_sidebar_row(driver, slug)
+        if row is None:
+            return False
+        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", row)
+        try:
+            row.find_element(By.XPATH, VC_CHAT_RENAME_BUTTON_XPATH).click()
+        except Exception:
+            btn = row.find_element(By.XPATH, VC_CHAT_RENAME_BUTTON_XPATH)
+            driver.execute_script("arguments[0].click();", btn)
+        inp = WebDriverWait(driver, selenium_timeout).until(
+            EC.presence_of_element_located((By.XPATH, VC_CHAT_RENAME_INPUT_XPATH)))
+        _aiexe_set_native_value(driver, inp, name, proto="HTMLInputElement")
+        driver.find_element(By.XPATH, VC_CHAT_RENAME_CONFIRM_XPATH).click()
+        time.sleep(0.3)
+        ok = True
+        print("AIEXE_RENAME %s -> %r" % (slug, name), flush=True)
+    except Exception as exc:
+        print("AIEXE_RENAME failed for %s: %s" % (slug, exc), flush=True)
+        try:
+            driver.find_element(By.XPATH, VC_CHAT_RENAME_CANCEL_XPATH).click()
+        except Exception:
+            pass
+    finally:
+        if opened:
+            _aiexe_close_sidebar(driver)
+    return ok
+
+
+def _aiexe_delete_chat(driver, slug):
+    """Delete a Venice conversation (irreversible — only on an explicit AI.EXE chat delete)."""
+    if not slug:
+        return False
+    opened = _aiexe_open_sidebar(driver)
+    ok = False
+    try:
+        row = _aiexe_sidebar_row(driver, slug)
+        if row is None:
+            return False
+        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", row)
+        btn = row.find_element(By.XPATH, VC_CHAT_DELETE_BUTTON_XPATH)
+        driver.execute_script("arguments[0].click();", btn)
+        confirm = WebDriverWait(driver, selenium_timeout).until(
+            EC.element_to_be_clickable((By.XPATH, VC_CHAT_DELETE_CONFIRM_XPATH)))
+        driver.execute_script("arguments[0].click();", confirm)
+        time.sleep(0.4)
+        ok = True
+        print("AIEXE_DELETE %s" % slug, flush=True)
+    except Exception as exc:
+        print("AIEXE_DELETE failed for %s: %s" % (slug, exc), flush=True)
+        _aiexe_dismiss_modal(driver)
+    finally:
+        if opened:
+            _aiexe_close_sidebar(driver)
+    return ok
+
+
 def aiexe_scrape_models(driver):
     """Read Venice's real model list from the picker (title attrs). Best-effort; cached once."""
     import time as _t
@@ -1850,6 +2150,26 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
         # the textarea found before model selection; reacquire it right before typing.
         element = _aiexe_wait_composer(driver)
 
+        # Upload NEW attachments for this thread before typing. Dedupe: full history re-sends
+        # every turn, but Venice pins a file to the conversation — upload once, never again.
+        global AIEXE_LAST_TURN_HAD_UPLOAD
+        AIEXE_LAST_TURN_HAD_UPLOAD = False
+        try:
+            _atts = data.get('aiexe_attachments')
+            if not _atts and isinstance(data.get('options'), dict):
+                _atts = data['options'].get('aiexe_attachments')
+            # Always clear stale cards first — a prior send may have failed and left phantom
+            # attachments in the composer that would ride along with (or block) this message.
+            _aiexe_clear_attachment_cards(driver)
+            if _atts:
+                # The app only ever sends THIS turn's new attachments (old ones aren't re-sent),
+                # so upload them fresh every request. A per-request set only dedupes within one
+                # call; a network retry re-uploads correctly after the card-clear above.
+                if _aiexe_upload_attachments(driver, _atts, set()) > 0:
+                    AIEXE_LAST_TURN_HAD_UPLOAD = True
+        except Exception as _e:
+            print("AIEXE_ATTACH turn failed: %s" % _e, flush=True)
+
         # Type the REAL user prompt into the composer (was a placeholder " " that relied on a
         # network-body swap which no longer lands — Venice was answering the empty space). Use
         # the native value setter + input event so React/Chakra registers it.
@@ -1875,7 +2195,7 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
             _aiexe_set_composer_text(driver, " ")
 
 
-        inject_request_interceptor(driver, api_data_json)
+        inject_request_interceptor(driver, api_data_json, swap_body=not AIEXE_LAST_TURN_HAD_UPLOAD)
 
         _sent = _aiexe_submit_prompt(driver)
 
@@ -1974,6 +2294,12 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
 
             if driver.execute_script("return window.streamComplete;"):
                 break
+            # Attachment turns can stream through Venice's ConversationsWorker, which bypasses
+            # our main-thread fetch interceptor (receivedChunks never fills). Don't burn the
+            # full timeout — bail early to the DOM-read fallback below.
+            if AIEXE_LAST_TURN_HAD_UPLOAD and eval_count == 0 and time.time() - last_data_time > 12:
+                print("AIEXE_ATTACH no interceptor chunks after upload — DOM fallback", flush=True)
+                break
             if time.time() - last_data_time > timeout:
                 print(f"Timeout: No data received for {timeout} seconds. Exiting loop.")
                 try:
@@ -1983,6 +2309,35 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
                     pass
                 break
             time.sleep(0.1)
+
+        # DOM-read fallback: interceptor caught nothing but Venice rendered a reply (worker
+        # transport). Poll the last assistant bubble until it stabilizes, emit deltas.
+        if eval_count == 0 and not streamed_content:
+            _prev, _stable = "", 0
+            for _i in range(int(max(timeout, 30) / 0.8)):
+                _txt = _aiexe_read_last_assistant_text(driver)
+                if _txt and _txt == _prev:
+                    _stable += 1
+                    if _stable >= 3:
+                        break
+                else:
+                    _stable = 0
+                if _txt and len(_txt) > len(_prev):
+                    _delta = _txt[len(_prev):]
+                    eval_count += 1
+                    if response_format == ResponseFormat.CHAT_NON_STREAMED:
+                        streamed_content += _delta
+                    elif response_format == ResponseFormat.COMPLETION_AS_STRING:
+                        yield _delta
+                    else:
+                        _m = _emit(_delta)
+                        if _m: yield _m
+                    _prev = _txt
+                if driver.execute_script("return window.streamComplete;"):
+                    _stable += 1
+                time.sleep(0.8)
+            if eval_count:
+                print("AIEXE_ATTACH DOM fallback captured %d chars" % len(_prev), flush=True)
 
         if _reasoning_open:  # stream ended still inside a reasoning block — close it
             if response_format == ResponseFormat.CHAT_NON_STREAMED:
@@ -2024,6 +2379,10 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
                     time.sleep(0.5)
             except Exception:
                 pass
+
+        # NOTE: renaming the Venice conversation is NOT done here (the smart chat name isn't
+        # known until AFTER the first reply). The app calls /api/aiexe/rename_chat ONCE when it
+        # applies that name — see aiexe_rename_chat_route.
 
         capture_and_redirect_browser_logs(driver)
 
@@ -2105,6 +2464,53 @@ def chat():
     return Response(_aiexe_locked_stream(request_json, response_format,
                                          "browser session was closed before /api/chat"),
                     content_type=content_type)
+
+@app.route('/api/aiexe/delete_chat', methods=['POST'])
+def aiexe_delete_chat():
+    """Delete the Venice conversation for an AI.EXE chat (called on explicit chat delete).
+    Body: {aiexe_chat_id | chat_id, slug?}. Irreversible; guarded and best-effort."""
+    global driver
+    req = parse_json_request(request) or {}
+    key = _aiexe_chat_key(req)
+    slug = str(req.get('slug') or '').strip() or _aiexe_slug_from_url(AIEXE_CHAT_URLS.get(key, ''))
+    if not slug:
+        return Response(json.dumps({"ok": False, "reason": "no mapped Venice conversation"}),
+                        content_type='application/json; charset=utf-8')
+    with selenium_lock:
+        if not _aiexe_driver_alive(driver):
+            driver = _aiexe_reopen_driver("browser session was closed before delete_chat")
+        ok = _aiexe_delete_chat(driver, slug)
+        if ok:
+            AIEXE_CHAT_URLS.pop(key, None)
+            AIEXE_THREAD_ATTACHMENTS.pop(key, None)
+            AIEXE_THREAD_NAMED.pop(key, None)
+            _aiexe_save_chat_map()
+    return Response(json.dumps({"ok": bool(ok), "slug": slug}),
+                    content_type='application/json; charset=utf-8')
+
+@app.route('/api/aiexe/rename_chat', methods=['POST'])
+def aiexe_rename_chat_route():
+    """Rename the Venice conversation for an AI.EXE chat to `name`. The app calls this ONCE,
+    when it applies the smart chat title (the name isn't known until after the first reply)."""
+    global driver
+    req = parse_json_request(request) or {}
+    key = _aiexe_chat_key(req)
+    name = str(req.get('name') or req.get('aiexe_chat_name') or '').strip()
+    slug = str(req.get('slug') or '').strip() or _aiexe_slug_from_url(AIEXE_CHAT_URLS.get(key, ''))
+    if not name or not slug:
+        return Response(json.dumps({"ok": False, "reason": "missing name or mapped conversation"}),
+                        content_type='application/json; charset=utf-8')
+    if key and AIEXE_THREAD_NAMED.get(key) == name:
+        return Response(json.dumps({"ok": True, "slug": slug, "skipped": "already named"}),
+                        content_type='application/json; charset=utf-8')
+    with selenium_lock:
+        if not _aiexe_driver_alive(driver):
+            driver = _aiexe_reopen_driver("browser session was closed before rename_chat")
+        ok = _aiexe_rename_chat(driver, slug, name[:80])
+        if ok and key:
+            AIEXE_THREAD_NAMED[key] = name
+    return Response(json.dumps({"ok": bool(ok), "slug": slug}),
+                    content_type='application/json; charset=utf-8')
 
 @app.route('/api/generate', methods=['POST'])
 def generate():

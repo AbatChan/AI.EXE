@@ -1,5 +1,5 @@
 """Pydantic response models for the backend API."""
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel
 
@@ -76,6 +76,19 @@ class ProviderCompleteRequest(BaseModel):
     temperature: float = 0.2
     chat_id: str = ""   # AI.EXE chat id — the adapter maps it to one Venice conversation
     think: str = ""     # "on" | "off" — adapter normalizes Venice's per-chat Reasoning switch
+    chat_name: str = "" # AI.EXE chat name — adapter renames the Venice conversation to match
+    attachments: List[Dict[str, Any]] = []  # images the adapter uploads via Venice's file input
+
+
+class ProviderDeleteChatRequest(BaseModel):
+    chat_id: str = ""
+    slug: str = ""
+
+
+class ProviderRenameChatRequest(BaseModel):
+    chat_id: str = ""
+    slug: str = ""
+    name: str = ""
 
 
 class ProviderCompleteResponse(BaseModel):

@@ -74,6 +74,35 @@ CREDITS_TEXT_XPATH = "//p[contains(., 'Credits')]"
 # Row switch inside that dialog, keyed by the row's visible label text ({} = label).
 CHAT_SETTINGS_SWITCH_XPATH = "//p[normalize-space()='{}']/ancestor::div[contains(@class,'css-bngl5n')]//input[@type='checkbox']"
 
+# --- Attachments (image / file upload) --------------------------------------
+# Hidden <input type=file name=attachments> — Selenium send_keys(abs_path), no OS dialog.
+ATTACH_FILE_INPUT_XPATHS = [
+    "//input[@type='file' and @name='attachments']",
+    "//form//input[@type='file']",
+    "//input[@type='file']",
+]
+# Accepted-attachment cards (upload-landed signal). {} = file basename.
+ATTACH_CARD_IMG_XPATH = "//div[contains(@class,'chakra-card')]//img[starts-with(@src,'blob:')]"
+ATTACH_CARD_BY_NAME_XPATH = "//div[contains(@class,'chakra-card')][.//p[normalize-space()='{}'] or .//img[@alt='{}']]"
+ATTACH_CARD_REMOVE_XPATH = "//div[contains(@class,'chakra-card')]//button[@aria-label='Remove']"
+ATTACH_ACTIONS_BUTTON_XPATH = "//button[@aria-label='Actions']"
+
+# --- Sidebar chat rows: rename / delete / cleanup ---------------------------
+# A sidebar row is a <div role="group"> holding the <a href="/chat/classic/<slug>"> AND a
+# sibling actions <div> with the Rename/Delete/Export buttons. Anchor on the GROUP (not the
+# <a>) so the buttons are descendants; {} = the slug. Rename swaps in an <input>+confirm/Cancel.
+SIDEBAR_CHAT_ROW_XPATH = "//div[@role='group'][.//a[contains(@href,'/chat/classic/{}')]]"
+SIDEBAR_CHAT_ROW_ANY_XPATH = "//a[contains(@href,'/chat/classic/')]"
+CHAT_RENAME_BUTTON_XPATH = ".//button[@aria-label='Rename']"
+CHAT_RENAME_INPUT_XPATH = "//input[contains(@class,'chakra-input')]"
+CHAT_RENAME_CONFIRM_XPATH = "//button[@aria-label='confirm']"
+CHAT_RENAME_CANCEL_XPATH = "//button[@aria-label='Cancel']"
+CHAT_DELETE_BUTTON_XPATH = ".//button[@aria-label='Delete']"
+# Delete confirmation modal — the destructive button reads "Confirm".
+CHAT_DELETE_CONFIRM_XPATH = "//footer//button[normalize-space()='Confirm']"
+# Sidebar toggle (open to reach rows, close after for a clean UI). "Show Sidebar" = collapsed.
+SIDEBAR_TOGGLE_XPATH = "//button[@aria-label='Toggle sidebar' or @aria-label='Show Sidebar']"
+
 # --- Streaming API ----------------------------------------------------------
 # The internal endpoint Venice's frontend POSTs to for a completion; the fetch interceptor
 # watches for this substring in the request URL. If replies come back empty after a Venice

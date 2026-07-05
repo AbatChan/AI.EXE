@@ -9,6 +9,7 @@ const rootStyle = document.documentElement.style;
 const layoutStorageKey = 'ai_exe_layout_v1';
 const chatsStoragePrefix = 'ai_exe_chats_v3';
 const activeChatStoragePrefix = 'ai_exe_active_chat_v2';
+const pendingAttachmentsStoragePrefix = 'ai_exe_pending_attachments_v2';
 const artifactsStoragePrefix = 'ai_exe_artifacts_v1';
 const workspaceStoragePrefix = 'ai_exe_workspace_v1';
 const fileTabsStoragePrefix = 'ai_exe_file_tabs_v1';
@@ -1270,8 +1271,15 @@ const inferenceProviderModelPresets = {
 let debugTraceEntries = [];
 const debugTraceMaxEntries = 120;
 const maxArtifactContentChars = 12000;
-const maxPendingAttachments = 6;
+const maxPendingAttachments = 10;
 const maxAttachmentTextChars = 7000;
+// On the Venice adapter we own the history, so text/code files can be inlined in FULL (not the
+// 7000-char prompt-fold slice). Generous cap just to avoid a pathological multi-MB paste.
+const maxInlineAttachmentChars = 60000;
+// Persist small non-image attachments as data URLs so pending composer file cards
+// survive an accidental app/window close. Keep this conservative to avoid
+// exhausting localStorage quota; large files still persist as metadata cards.
+const maxPersistedAttachmentBytes = 700 * 1024;
 const AI_EXE_APP_CONFIG = (window.AI_EXE_UI_CONFIG && window.AI_EXE_UI_CONFIG.app) || {};
 const AI_EXE_VERSION = String(AI_EXE_APP_CONFIG.version || 'dev');
 const AI_EXE_BUILD = String(AI_EXE_APP_CONFIG.buildLabel || `v${AI_EXE_VERSION}`);
@@ -1501,7 +1509,124 @@ const chatAutoScrollThresholdPx = 56;
 const autoContinuationMaxPasses = 1;
 const continuationTailChars = 700;
 const autoContinuingChatIds = new Set();
-const attachAcceptTypes = '.txt,.md,.markdown,.json,.yaml,.yml,.csv,.tsv,.log,.js,.mjs,.cjs,.ts,.tsx,.jsx,.py,.cpp,.c,.h,.hpp,.java,.go,.rs,.rb,.php,.sql,.xml,.html,.css,.scss,.sass,.less,.sh,.bash,.zsh,.fish,.ini,.toml,.conf,.env,.dockerfile,.makefile,.cmake,.pdf,.doc,.docx,.rtf';
+const attachAcceptTypes = '.txt,.md,.markdown,.json,.yaml,.yml,.csv,.tsv,.xlsx,.xls,.ods,.log,.js,.mjs,.cjs,.ts,.tsx,.jsx,.py,.cpp,.cc,.cxx,.c,.h,.hpp,.java,.go,.rs,.rb,.php,.sql,.xml,.html,.htm,.css,.scss,.sass,.less,.sh,.bash,.zsh,.fish,.ini,.toml,.conf,.env,.dockerfile,.makefile,.cmake,.pdf,.doc,.docx,.rtf,.odt,.jpg,.jpeg,.png,.webp,.gif,.bmp,.tif,.tiff,.svg,.heic,.heif';
+const attachmentLimitBytes = {
+  image: 20 * 1024 * 1024,
+  spreadsheet: 50 * 1024 * 1024,
+  document: 100 * 1024 * 1024,
+  text: 30 * 1024 * 1024,
+  fallback: 30 * 1024 * 1024,
+};
+const blockedAttachmentExtensions = new Set([
+  'exe', 'dmg', 'pkg', 'deb', 'rpm', 'msi', 'bat', 'cmd', 'com', 'scr', 'app',
+  'dll', 'sys', 'iso', 'apk', 'jar', 'vbs', 'vbe', 'jscript', 'wsf', 'lnk',
+  'ttf', 'otf', 'woff', 'woff2', 'ai', 'eps',
+  'zip', 'tar', 'gz', 'tgz', 'rar', '7z',
+]);
+const blockedAttachmentMimePrefixes = ['video/'];
+const blockedAttachmentMimeTypes = new Set([
+  'application/x-msdownload',
+  'application/x-msdos-program',
+  'application/x-ms-installer',
+  'application/x-apple-diskimage',
+  'application/java-archive',
+  'application/zip',
+  'application/x-7z-compressed',
+  'application/x-rar-compressed',
+  'application/gzip',
+]);
+const archiveAttachmentExtensions = new Set(['zip', 'tar', 'gz', 'tgz', 'rar', '7z']);
+const audioAttachmentExtensions = new Set(['mp3', 'wav', 'm4a', 'aac', 'flac', 'ogg']);
+const videoAttachmentExtensions = new Set(['mp4', 'mov', 'avi', 'mkv', 'webm', 'wmv']);
+const dangerousAttachmentExtensions = new Set([
+  'exe', 'dmg', 'pkg', 'deb', 'rpm', 'msi', 'bat', 'cmd', 'com', 'scr', 'app',
+  'dll', 'sys', 'iso', 'apk', 'jar', 'vbs', 'vbe', 'jscript', 'wsf', 'lnk',
+]);
+const fontAttachmentExtensions = new Set(['ttf', 'otf', 'woff', 'woff2']);
+const designSourceAttachmentExtensions = new Set(['ai', 'eps']);
+
+function getFriendlyAttachmentTypeExamples() {
+  return 'Try an image, PDF/DOCX, TXT/MD, CSV/XLSX, JSON, HTML/CSS/JS, PHP, Python, or C++ file.';
+}
+
+function formatBytes(bytes) {
+  const value = Math.max(0, Number(bytes) || 0);
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(value < 10 * 1024 ? 1 : 0)} KB`;
+  if (value < 1024 * 1024 * 1024) return `${(value / (1024 * 1024)).toFixed(value < 10 * 1024 * 1024 ? 1 : 0)} MB`;
+  return `${(value / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+}
+
+function getAttachmentValidationBucket(file) {
+  const ext = getAttachmentExtension(file).toLowerCase();
+  const mime = String((file && file.type) || '').toLowerCase();
+  if (isLikelyImageAttachment(file)) return 'image';
+  if (/^(csv|tsv|xlsx|xls|ods)$/i.test(ext) || /spreadsheet|excel|csv/i.test(mime)) return 'spreadsheet';
+  if (isLikelyDocumentAttachment(file)) return 'document';
+  if (isLikelyTextAttachment(file)) return 'text';
+  return 'fallback';
+}
+
+function validateAttachmentFile(file) {
+  const name = String((file && (file.webkitRelativePath || file.relativePath || file.name)) || 'attachment').trim() || 'attachment';
+  const ext = getAttachmentExtension(file).toLowerCase();
+  const mime = String((file && file.type) || '').toLowerCase();
+  const size = Math.max(0, Number((file && file.size) || 0));
+
+  if (!file) return { ok: false, name, reason: 'We could not read this attachment. Please choose it again.' };
+  if (mime.startsWith('video/') || videoAttachmentExtensions.has(ext)) {
+    return { ok: false, name, reason: 'Video attachments are not supported in this chat yet. Please upload an image, document, spreadsheet, or code file instead.' };
+  }
+  if (mime.startsWith('audio/') || audioAttachmentExtensions.has(ext)) {
+    return { ok: false, name, reason: 'Audio attachments are not supported in this chat yet. Please upload an image, document, spreadsheet, or code file instead.' };
+  }
+  if (archiveAttachmentExtensions.has(ext) || /zip|rar|7z|gzip|tar/.test(mime)) {
+    return { ok: false, name, reason: 'Compressed folders are blocked for safety. Please extract it and attach the files individually.' };
+  }
+  if (dangerousAttachmentExtensions.has(ext) || blockedAttachmentMimeTypes.has(mime)) {
+    return { ok: false, name, reason: 'This type of app or system file is blocked for safety.' };
+  }
+  if (fontAttachmentExtensions.has(ext)) {
+    return { ok: false, name, reason: 'Font files are not supported here. Export a preview image or PDF instead.' };
+  }
+  if (designSourceAttachmentExtensions.has(ext)) {
+    return { ok: false, name, reason: 'Design source files are not supported here. Export it as PNG or PDF first.' };
+  }
+  const allowed = attachAcceptTypes.split(',').map((v) => v.trim().replace(/^\./, '').toLowerCase()).filter(Boolean);
+  if (ext && !allowed.includes(ext)) {
+    return { ok: false, name, reason: `This file type is not supported yet. ${getFriendlyAttachmentTypeExamples()}` };
+  }
+  if (!ext && !mime) {
+    return { ok: false, name, reason: `This file does not have a readable type. ${getFriendlyAttachmentTypeExamples()}` };
+  }
+  const bucket = getAttachmentValidationBucket(file);
+  const limit = attachmentLimitBytes[bucket] || attachmentLimitBytes.fallback;
+  if (size > limit) {
+    const bucketLabel = bucket === 'image'
+      ? 'Images'
+      : bucket === 'spreadsheet'
+        ? 'Spreadsheets and CSV files'
+        : bucket === 'document'
+          ? 'Documents'
+          : 'Files';
+    return { ok: false, name, reason: `${bucketLabel} can be up to ${formatBytes(limit)}. This one is ${formatBytes(size)}.` };
+  }
+  return { ok: true, name, bucket, limit };
+}
+
+function showAttachmentRejectedToast(rejected = []) {
+  const rows = Array.from(rejected || []).filter(Boolean);
+  if (!rows.length || typeof showAppNotification !== 'function') return;
+  const first = rows[0];
+  const more = rows.length > 1 ? ` ${rows.length - 1} more attachment${rows.length - 1 === 1 ? '' : 's'} were also blocked.` : '';
+  showAppNotification({
+    title: rows.length > 1 ? 'Some attachments were blocked' : 'Attachment blocked',
+    message: `${first.reason}${more}`,
+    kind: 'error',
+    durationMs: 8600,
+  });
+}
+
 
 function nowTs() {
   return Date.now();
@@ -3572,6 +3697,9 @@ function normalizePendingAttachmentMeta(item) {
   const previewDataUrl = kind === 'image' && /^data:image\//i.test(String(item.previewDataUrl || ''))
     ? String(item.previewDataUrl || '').slice(0, 180000)
     : '';
+  const thumbDataUrl = kind === 'image' && /^data:image\//i.test(String(item.thumbDataUrl || ''))
+    ? String(item.thumbDataUrl || '').slice(0, 60000)
+    : '';
   return {
     id,
     name,
@@ -3581,6 +3709,7 @@ function normalizePendingAttachmentMeta(item) {
     note,
     ...(kind === 'text' ? { content } : {}),
     ...(previewDataUrl ? { previewDataUrl } : {}),
+    ...(thumbDataUrl ? { thumbDataUrl } : {}),
   };
 }
 
@@ -3602,27 +3731,114 @@ function normalizeMessageAttachmentList(list) {
         mime: normalized.mime,
         size: normalized.size,
         ...(normalized.previewDataUrl ? { previewDataUrl: normalized.previewDataUrl } : {}),
+        ...(normalized.thumbDataUrl ? { thumbDataUrl: normalized.thumbDataUrl } : {}),
       };
     })
     .filter(Boolean)
     .slice(0, 10);
 }
 
+// Full text content of attached text/code/doc files (in-memory, id -> full text), so the prompt
+// can inline the WHOLE file instead of a 7000-char slice. Transient: cleared on send/clear; if
+// the app reloaded before send, we fall back to the (truncated) item.content.
+const attachmentFullText = new Map();
+function rememberAttachmentFullText(id, text) {
+  if (id && text) attachmentFullText.set(id, String(text));
+}
+
+// Only IMAGES take Venice's file-upload path (they can't be represented as prompt text).
+// Text/code/doc files keep their FULL content inline in the prompt (we own the history, so
+// there's no re-upload on later turns and no dependency on Venice's flaky text_parser).
+function collectAttachmentsForAdapter(list) {
+  return normalizePendingAttachmentList(list)
+    .filter((it) => it && it.kind === 'image' && it.previewDataUrl)
+    .map((it) => ({ id: it.id, name: it.name, mime: it.mime || 'image/png', data: it.previewDataUrl }))
+    .slice(0, maxPendingAttachments);
+}
+
+function getPendingAttachmentContextKey() {
+  return (inNewChatMode || !activeChatId) ? '__new__' : String(activeChatId || '__new__');
+}
+
+function getPendingAttachmentStoreKey() {
+  const key = scopedStorageKey(pendingAttachmentsStoragePrefix);
+  return key || '';
+}
+
+function readPendingAttachmentStore() {
+  const key = getPendingAttachmentStoreKey();
+  if (!key) return {};
+  try {
+    const raw = localStorage.getItem(key);
+    const parsed = raw ? JSON.parse(raw) : {};
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch (_) {
+    return {};
+  }
+}
+
+function writePendingAttachmentStore(store) {
+  const key = getPendingAttachmentStoreKey();
+  if (!key) return;
+  try {
+    localStorage.setItem(key, JSON.stringify(store && typeof store === 'object' ? store : {}));
+  } catch (_) {
+    // Never allow composer attachment restore data to break chat/message saving.
+    try {
+      const lightStore = {};
+      Object.entries(store && typeof store === 'object' ? store : {}).forEach(([ctx, list]) => {
+        lightStore[ctx] = normalizePendingAttachmentList(list).map((item) => {
+          const light = { ...item };
+          if (light.kind === 'image') delete light.previewDataUrl;
+          return light;
+        });
+      });
+      localStorage.setItem(key, JSON.stringify(lightStore));
+    } catch (__) { /* ignore */ }
+  }
+}
+
+function persistPendingAttachmentStoreForCurrentContext(clean) {
+  const contextKey = getPendingAttachmentContextKey();
+  const store = readPendingAttachmentStore();
+  if (Array.isArray(clean) && clean.length) {
+    store[contextKey] = normalizePendingAttachmentList(clean);
+  } else {
+    delete store[contextKey];
+  }
+  writePendingAttachmentStore(store);
+}
+
+function loadPendingAttachmentStoreForCurrentContext() {
+  const store = readPendingAttachmentStore();
+  return normalizePendingAttachmentList(store[getPendingAttachmentContextKey()] || []);
+}
+
 function persistPendingAttachmentsForCurrentContext() {
   const clean = normalizePendingAttachmentList(pendingAttachments);
   pendingAttachments = clean;
+  persistPendingAttachmentStoreForCurrentContext(clean);
   if (inNewChatMode || !activeChatId) {
     pendingNewChatAttachments = clean;
     return;
   }
   const chat = getActiveChat();
   if (!chat) return;
+  // Keep only lightweight metadata on the chat itself. Full file payloads do not
+  // belong in chat storage because one attachment can make localStorage reject
+  // the entire conversation save.
   chat.pendingAttachments = clean;
   chat.updatedAt = nowTs();
   saveChats();
 }
 
 function loadPendingAttachmentsForCurrentContext() {
+  const stored = loadPendingAttachmentStoreForCurrentContext();
+  if (stored.length) {
+    pendingAttachments = stored;
+    if (inNewChatMode || !activeChatId) pendingNewChatAttachments = stored;
+    return;
+  }
   if (inNewChatMode || !activeChatId) {
     pendingAttachments = normalizePendingAttachmentList(pendingNewChatAttachments);
     return;
@@ -3667,28 +3883,141 @@ function getAttachmentTypeLabel(item) {
   return 'FILE';
 }
 
-function buildAttachmentFileIcon() {
+function getAttachmentExtension(itemOrName) {
+  const source = typeof itemOrName === 'string'
+    ? itemOrName
+    : String((itemOrName && itemOrName.name) || '');
+  const base = source.split(/[\\/]/).pop() || '';
+  const lower = base.toLowerCase();
+  if (lower === 'dockerfile') return 'docker';
+  if (lower === 'makefile') return 'make';
+  if (lower === 'cmakelists.txt') return 'cmake';
+  if (!base.includes('.')) return '';
+  return base.split('.').pop().toLowerCase();
+}
+
+function getAttachmentFileIconMeta(itemOrName = {}) {
+  const ext = getAttachmentExtension(itemOrName);
+  const mime = typeof itemOrName === 'object' && itemOrName
+    ? String(itemOrName.mime || itemOrName.type || '').toLowerCase()
+    : '';
+  const map = {
+    html: ['HTML', '#f97316'], htm: ['HTML', '#f97316'],
+    css: ['CSS', '#38bdf8'], scss: ['SCSS', '#f472b6'], sass: ['SASS', '#f472b6'], less: ['LESS', '#60a5fa'],
+    js: ['JS', '#facc15'], mjs: ['JS', '#facc15'], cjs: ['JS', '#facc15'],
+    ts: ['TS', '#3b82f6'], tsx: ['TSX', '#3b82f6'], jsx: ['JSX', '#facc15'],
+    json: ['JSON', '#22c55e'], yaml: ['YML', '#a78bfa'], yml: ['YML', '#a78bfa'], xml: ['XML', '#fb923c'],
+    php: ['PHP', '#818cf8'], py: ['PY', '#60a5fa'], rb: ['RB', '#ef4444'], java: ['JAVA', '#f97316'],
+    cpp: ['C++', '#22d3ee'], cc: ['C++', '#22d3ee'], cxx: ['C++', '#22d3ee'], c: ['C', '#38bdf8'],
+    h: ['H', '#38bdf8'], hpp: ['H++', '#22d3ee'], cs: ['C#', '#a78bfa'], go: ['GO', '#22d3ee'],
+    rs: ['RS', '#fb923c'], swift: ['SWIFT', '#fb923c'], kt: ['KT', '#a78bfa'], lua: ['LUA', '#3b82f6'],
+    sh: ['SH', '#10b981'], bash: ['SH', '#10b981'], zsh: ['ZSH', '#10b981'], ps1: ['PS', '#60a5fa'],
+    sql: ['SQL', '#06b6d4'], db: ['DB', '#06b6d4'], sqlite: ['DB', '#06b6d4'],
+    md: ['MD', '#94a3b8'], markdown: ['MD', '#94a3b8'], txt: ['TXT', '#94a3b8'], log: ['LOG', '#64748b'],
+    pdf: ['PDF', '#ef4444'], doc: ['DOC', '#3b82f6'], docx: ['DOC', '#3b82f6'], rtf: ['RTF', '#60a5fa'],
+    xls: ['XLS', '#22c55e'], xlsx: ['XLS', '#22c55e'], ods: ['ODS', '#22c55e'], csv: ['CSV', '#22c55e'], tsv: ['TSV', '#22c55e'],
+    ppt: ['PPT', '#f97316'], pptx: ['PPT', '#f97316'], odp: ['PPT', '#f97316'],
+    zip: ['ZIP', '#f59e0b'], rar: ['RAR', '#f59e0b'], '7z': ['7Z', '#f59e0b'], tar: ['TAR', '#f59e0b'], gz: ['GZ', '#f59e0b'],
+    docker: ['DOCK', '#38bdf8'], make: ['MAKE', '#a3e635'], cmake: ['CMAKE', '#22d3ee'], env: ['ENV', '#10b981'],
+  };
+  if (map[ext]) return { label: map[ext][0], color: map[ext][1] };
+  if (/spreadsheet|excel|csv/.test(mime)) return { label: 'XLS', color: '#22c55e' };
+  if (/word|document/.test(mime)) return { label: 'DOC', color: '#3b82f6' };
+  if (/presentation|powerpoint/.test(mime)) return { label: 'PPT', color: '#f97316' };
+  if (/pdf/.test(mime)) return { label: 'PDF', color: '#ef4444' };
+  return null;
+}
+
+function buildAttachmentFallbackFileIcon() {
   return `
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
       <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
       <polyline points="14 2 14 8 20 8"></polyline>
     </svg>
   `;
 }
 
+function buildAttachmentFileIcon(itemOrName = {}) {
+  const meta = getAttachmentFileIconMeta(itemOrName);
+  if (!meta) return buildAttachmentFallbackFileIcon();
+  const label = escapeHtml(meta.label).slice(0, 5);
+  const color = escapeHtml(meta.color);
+  return `
+    <svg class="attach-file-type-icon" viewBox="0 0 40 40" aria-hidden="true">
+      <rect x="8" y="5" width="24" height="30" rx="5" fill="rgba(226, 241, 255, 0.96)"></rect>
+      <path d="M25 5v8h7" fill="rgba(148, 163, 184, 0.42)"></path>
+      <rect x="6" y="20" width="28" height="14" rx="4" fill="${color}"></rect>
+      <text x="20" y="29.8" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="7.4" font-weight="800" fill="#ffffff">${label}</text>
+    </svg>
+  `;
+}
+
+
+function openAttachmentImageOverlay(src, alt = 'Attachment image') {
+  const cleanSrc = String(src || '').trim();
+  if (!/^data:image\//i.test(cleanSrc) && !/^blob:/i.test(cleanSrc) && !/^https?:\/\//i.test(cleanSrc)) return;
+
+  let overlay = document.getElementById('attachmentLightbox');
+  if (!overlay) {
+    overlay = document.createElement('div');
+    overlay.id = 'attachmentLightbox';
+    overlay.className = 'attachment-lightbox';
+    overlay.hidden = true;
+    overlay.innerHTML = `
+      <button class="attachment-lightbox-close" type="button" aria-label="Close image preview">×</button>
+      <img class="attachment-lightbox-img" alt="">
+    `;
+    document.body.appendChild(overlay);
+
+    const close = () => {
+      overlay.hidden = true;
+      document.body.classList.remove('attachment-lightbox-open');
+      const img = overlay.querySelector('.attachment-lightbox-img');
+      if (img) img.removeAttribute('src');
+    };
+
+    overlay.addEventListener('click', (evt) => {
+      if (evt.target === overlay || evt.target.closest('.attachment-lightbox-close')) close();
+    });
+
+    window.addEventListener('keydown', (evt) => {
+      if (evt.key === 'Escape' && !overlay.hidden) close();
+    });
+  }
+
+  const img = overlay.querySelector('.attachment-lightbox-img');
+  if (!img) return;
+  img.src = cleanSrc;
+  img.alt = String(alt || 'Attachment image');
+  overlay.hidden = false;
+  document.body.classList.add('attachment-lightbox-open');
+}
+
+window.openAttachmentImageOverlay = openAttachmentImageOverlay;
+
 function renderInputAttachments() {
   if (!inputAttachments) return;
   inputAttachments.innerHTML = '';
+  const imageAttachmentCount = pendingAttachments.filter((item) => item && item.kind === 'image' && (item.previewDataUrl || item.thumbDataUrl)).length;
+  const hasOnlyOneImage = pendingAttachments.length === 1 && imageAttachmentCount === 1;
+  const hasManyAttachments = pendingAttachments.length > 1;
+  const hasMixedAttachments = imageAttachmentCount > 0 && imageAttachmentCount < pendingAttachments.length;
+  inputAttachments.classList.toggle('is-single-image-only', hasOnlyOneImage);
+  inputAttachments.classList.toggle('has-many-attachments', hasManyAttachments);
+  inputAttachments.classList.toggle('has-mixed-attachments', hasMixedAttachments);
   if (inputRow) {
     inputRow.classList.toggle('has-attachments', pendingAttachments.length > 0);
   }
   pendingAttachments.forEach((item) => {
     const chip = document.createElement('div');
-    chip.className = `attach-chip${item.kind === 'image' && item.previewDataUrl ? ' image' : ''}`;
+    const imageDisplayDataUrl = item.kind === 'image'
+      ? (String(item.previewDataUrl || '') || String(item.thumbDataUrl || ''))
+      : '';
+    chip.className = `attach-chip${imageDisplayDataUrl ? ' image' : ''}`;
     const typeLabel = getAttachmentTypeLabel(item);
-    const iconHtml = item.kind === 'image' && item.previewDataUrl
-      ? `<img class="attach-chip-thumb" src="${escapeHtml(item.previewDataUrl)}" alt="">`
-      : buildAttachmentFileIcon();
+    const iconHtml = imageDisplayDataUrl
+      ? `<img class="attach-chip-thumb" src="${escapeHtml(imageDisplayDataUrl)}" alt="">`
+      : buildAttachmentFileIcon(item);
     chip.innerHTML = `
         <span class="attach-chip-icon" aria-hidden="true">
           ${iconHtml}
@@ -3698,6 +4027,19 @@ function renderInputAttachments() {
           <span class="attach-chip-kind">${escapeHtml(typeLabel || 'FILE')}</span>
         </span>
       `;
+    if (imageDisplayDataUrl) {
+      chip.type = 'button';
+      chip.tabIndex = 0;
+      chip.setAttribute('role', 'button');
+      chip.setAttribute('aria-label', `Open ${item.name || 'image attachment'}`);
+      chip.addEventListener('click', () => openAttachmentImageOverlay(item.previewDataUrl || item.thumbDataUrl, item.name || 'Attachment image'));
+      chip.addEventListener('keydown', (evt) => {
+        if (evt.key === 'Enter' || evt.key === ' ') {
+          evt.preventDefault();
+          openAttachmentImageOverlay(item.previewDataUrl || item.thumbDataUrl, item.name || 'Attachment image');
+        }
+      });
+    }
     const removeBtn = document.createElement('button');
     removeBtn.type = 'button';
     removeBtn.className = 'attach-chip-remove';
@@ -3713,11 +4055,19 @@ function renderInputAttachments() {
     chip.appendChild(removeBtn);
     inputAttachments.appendChild(chip);
   });
+  if (pendingAttachments.length > 0) {
+    requestAnimationFrame(() => {
+      try {
+        inputAttachments.scrollLeft = inputAttachments.scrollWidth;
+      } catch (_) { /* ignore */ }
+    });
+  }
   updateAttachButtonState();
 }
 
 function clearPendingAttachments() {
   pendingAttachments = [];
+  attachmentFullText.clear();
   persistPendingAttachmentsForCurrentContext();
   renderInputAttachments();
 }
@@ -3789,9 +4139,86 @@ async function createImageAttachmentPreview(file) {
   }
 }
 
+
+function shouldPersistAttachmentDataUrl(file) {
+  const size = Number((file && file.size) || 0);
+  if (!file || !Number.isFinite(size) || size <= 0) return false;
+  return size <= maxPersistedAttachmentBytes;
+}
+
+async function createPersistedAttachmentDataUrl(file) {
+  if (!shouldPersistAttachmentDataUrl(file)) return '';
+  try {
+    return await new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const value = String(reader.result || '');
+        resolve(/^data:/i.test(value) ? value.slice(0, 2200000) : '');
+      };
+      reader.onerror = () => resolve('');
+      reader.readAsDataURL(file);
+    });
+  } catch (_) {
+    return '';
+  }
+}
+
+
+async function createImageAttachmentThumbnail(file) {
+  if (!file) return '';
+  const mime = String((file && file.type) || '').toLowerCase();
+  const isSvg = mime === 'image/svg+xml' || /\.svg$/i.test(String(file.name || ''));
+  if (isSvg) {
+    // SVG data URLs are already compact for small icons/diagrams. Keep them capped.
+    try {
+      if (Number(file.size || 0) <= 60000) {
+        return await new Promise((resolve) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(String(reader.result || '').slice(0, 60000));
+          reader.onerror = () => resolve('');
+          reader.readAsDataURL(file);
+        });
+      }
+    } catch (_) { /* ignore */ }
+    return '';
+  }
+  let objectUrl = '';
+  try {
+    objectUrl = URL.createObjectURL(file);
+    const img = await new Promise((resolve, reject) => {
+      const image = new Image();
+      image.onload = () => resolve(image);
+      image.onerror = reject;
+      image.src = objectUrl;
+    });
+    const maxSide = 180;
+    const width = Math.max(1, Number(img.naturalWidth || img.width) || 1);
+    const height = Math.max(1, Number(img.naturalHeight || img.height) || 1);
+    const scale = Math.min(1, maxSide / Math.max(width, height));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(width * scale));
+    canvas.height = Math.max(1, Math.round(height * scale));
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return '';
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    return canvas.toDataURL('image/jpeg', 0.64).slice(0, 60000);
+  } catch (_) {
+    return '';
+  } finally {
+    if (objectUrl) {
+      try { URL.revokeObjectURL(objectUrl); } catch (_) { }
+    }
+  }
+}
+
 async function parseAttachmentFile(file) {
+  const validation = validateAttachmentFile(file);
+  if (!validation.ok) {
+    return { rejected: true, name: validation.name, reason: validation.reason };
+  }
   const safeName = String((file && (file.webkitRelativePath || file.relativePath || file.name)) || 'attachment').trim() || 'attachment';
   const size = Number((file && file.size) || 0);
+  const persistSuffix = '';
   const base = {
     id: `att_${nowTs().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
     name: safeName,
@@ -3800,10 +4227,12 @@ async function parseAttachmentFile(file) {
   };
   if (isLikelyImageAttachment(file)) {
     const previewDataUrl = await createImageAttachmentPreview(file);
+    const thumbDataUrl = await createImageAttachmentThumbnail(file);
     return {
       ...base,
       kind: 'image',
       ...(previewDataUrl ? { previewDataUrl } : {}),
+      ...(thumbDataUrl || previewDataUrl ? { thumbDataUrl: thumbDataUrl || previewDataUrl.slice(0, 60000) } : {}),
       note: 'Image attached for visual reference.',
     };
   }
@@ -3813,7 +4242,7 @@ async function parseAttachmentFile(file) {
     return {
       ...base,
       kind: 'file',
-      note: 'Binary file attached as metadata reference.',
+      note: `Binary file attached as metadata reference.${persistSuffix}`,
     };
   }
   if (size > 1024 * 1024 * 2) {
@@ -3821,8 +4250,8 @@ async function parseAttachmentFile(file) {
       ...base,
       kind: isText ? 'text' : 'file',
       note: isText
-        ? 'Text file too large to inline; attached as metadata reference.'
-        : 'Document attached as metadata reference (too large for text extraction).',
+        ? `Text file too large to inline; attached as metadata reference.${persistSuffix}`
+        : `Document attached as metadata reference (too large for text extraction).${persistSuffix}`,
     };
   }
   if (isDoc) {
@@ -3836,13 +4265,14 @@ async function parseAttachmentFile(file) {
         const d = await resp.json();
         const extracted = String((d && d.text) || '').trim();
         if (extracted && extracted.length >= 20) {
+          rememberAttachmentFullText(base.id, extracted);
           return {
             ...base,
             kind: 'text',
             content: extracted.slice(0, maxAttachmentTextChars),
             note: extracted.length > maxAttachmentTextChars
-              ? 'Extracted document text truncated for prompt context.'
-              : 'Extracted text from document for prompt context.',
+              ? `Extracted document text truncated for prompt context.${persistSuffix}`
+              : `Extracted text from document for prompt context.${persistSuffix}`,
           };
         }
       }
@@ -3850,7 +4280,7 @@ async function parseAttachmentFile(file) {
     return {
       ...base,
       kind: 'file',
-      note: 'Document attached as metadata reference (text extraction unavailable — is the backend running?).',
+      note: `Document attached as metadata reference (text extraction unavailable — is the backend running?).${persistSuffix}`,
     };
   }
   let content = '';
@@ -3872,11 +4302,13 @@ async function parseAttachmentFile(file) {
   } catch (_) {
     content = '';
   }
+  // Keep the FULL content for the adapter's real file-upload path (no 7000-char truncation).
+  rememberAttachmentFullText(base.id, content);
   return {
     ...base,
     kind: 'text',
     content: content.slice(0, maxAttachmentTextChars),
-    note: content.length > maxAttachmentTextChars ? 'Text truncated for prompt context.' : '',
+    note: content.length > maxAttachmentTextChars ? `Text truncated for prompt context.${persistSuffix}` : persistSuffix.trim(),
   };
 }
 
@@ -3915,11 +4347,30 @@ function openAttachPicker() {
 
 async function handleAttachSelection(fileList) {
   if (!fileList || fileList.length === 0) return;
-  const files = Array.from(fileList).slice(0, maxPendingAttachments);
-  const parsed = [];
-  for (const file of files) {
-    parsed.push(await parseAttachmentFile(file));
+  const rawFiles = Array.from(fileList || []);
+  const availableSlots = Math.max(0, maxPendingAttachments - pendingAttachments.length);
+  if (availableSlots <= 0) {
+    showAttachmentRejectedToast([{ name: 'Attachment limit', reason: `You can attach up to ${maxPendingAttachments} items at once. Remove one to add another.` }]);
+    return;
   }
+  const overflow = rawFiles.length > availableSlots
+    ? rawFiles.slice(availableSlots).map((file) => ({
+        name: String((file && (file.webkitRelativePath || file.relativePath || file.name)) || 'attachment'),
+        reason: `Only ${availableSlots} attachment slot${availableSlots === 1 ? '' : 's'} left. Remove one item to add more.`,
+      }))
+    : [];
+  const files = rawFiles.slice(0, availableSlots);
+  const parsed = [];
+  const rejected = overflow.slice();
+  for (const file of files) {
+    const item = await parseAttachmentFile(file);
+    if (item && item.rejected) {
+      rejected.push({ name: item.name || 'attachment', reason: item.reason || 'This file is not supported.' });
+    } else if (item) {
+      parsed.push(item);
+    }
+  }
+  if (rejected.length) showAttachmentRejectedToast(rejected);
   const seen = new Set(
     pendingAttachments
       .map((item) => {
@@ -4512,6 +4963,23 @@ function applyAgentProjectChatName(chatId, planSpec = null) {
   return true;
 }
 
+// Rename the Venice conversation to the chat's real name ONCE (adapter only). Fires when the
+// smart name is applied — the name isn't known until after the first reply, so we can't do it
+// on the message send. Reset-on-failure lets a later turn retry if the slug wasn't mapped yet.
+function maybeRenameVeniceChat(chat) {
+  if (!chat || chat.veniceRenamed || !isVeniceAdapterSelected()) return;
+  const name = String(chat.name || '').trim();
+  if (!name || /^new chat$/i.test(name)) return;
+  chat.veniceRenamed = true;
+  try {
+    fetch(getAIExeBackendUrl() + '/api/provider/rename_chat', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: String(chat.id || ''), name }),
+    }).then((r) => r.json()).then((res) => { if (!res || !res.ok) chat.veniceRenamed = false; })
+      .catch(() => { chat.veniceRenamed = false; });
+  } catch (_) { chat.veniceRenamed = false; }
+}
+
 function applyInlineChatNameFromResponse(chatId, text) {
   const parsed = extractInlineChatNameMarker(text);
   const chat = findChatById(chatId);
@@ -4541,6 +5009,7 @@ function applyInlineChatNameFromResponse(chatId, text) {
     chat.updatedAt = nowTs();
     saveChats();
     renderHistory();
+    maybeRenameVeniceChat(chat);   // once — mirror the name onto the Venice conversation
   }
   return { text: parsed.cleaned || String(text || '') };
 }
@@ -4716,6 +5185,7 @@ function scheduleSmartChatRename(chatId) {
         latestChat.autoNamed = false;
         saveChats();
         renderHistory();
+        maybeRenameVeniceChat(latestChat);   // once — mirror onto the Venice conversation
         pushDebugTrace('smart_chat_title_applied', {
           chatId: key,
           title: latestChat.name,
@@ -4739,10 +5209,19 @@ function buildPromptWithInputAugments(basePrompt) {
   const base = String(basePrompt || '').trim();
   const sections = [];
   if (pendingAttachments.length > 0) {
+    // On the adapter, images upload to Venice as real cards (the model sees them) — don't fold
+    // them as text. Text/code/doc files are inlined in FULL here (we own the history).
+    const imagesUpload = isVeniceAdapterSelected();
     const chunks = pendingAttachments.map((item, index) => {
       const heading = `Attachment ${index + 1}: ${item.name} (${formatBytes(item.size || 0)})`;
-      if (item.kind === 'text' && item.content) {
-        return `${heading}\n${item.note ? `${item.note}\n` : ''}---\n${item.content}`;
+      if (item.kind === 'image' && imagesUpload && item.previewDataUrl) {
+        return `${heading}\n(image attached — you can see it directly)`;
+      }
+      const fullText = attachmentFullText.get(item.id) || (item.kind === 'text' ? item.content : '');
+      if (fullText) {
+        const capped = fullText.slice(0, maxInlineAttachmentChars);
+        const trailer = fullText.length > capped.length ? '\n[…content truncated]' : '';
+        return `${heading}\n---\n${capped}${trailer}`;
       }
       return `${heading}\n${item.note || 'File attached as metadata only.'}`;
     });
@@ -5242,7 +5721,17 @@ function getChatPromptContextBudgetChars() {
   // Local runs at a 32K-token window (see --ctx-size). Use a generous char budget so
   // chats remember a lot, while still leaving headroom so dense content can't exceed
   // the window — older turns are trimmed automatically rather than overflowing.
-  return getSelectedInferenceProvider() === 'local' ? 40000 : 24576;
+  if (getSelectedInferenceProvider() === 'local') return 40000;
+  // The Venice adapter drives large-context models (GLM 5.2 etc) — allow much more so full
+  // attached-file content survives across turns instead of being trimmed.
+  if (isVeniceAdapterSelected()) return 200000;
+  return 24576;
+}
+
+// Budget for the latest user message specifically — it carries attached-file content, so on the
+// adapter it needs to hold several full files without the default ~18%-of-window truncation.
+function getChatPromptLatestUserBudgetChars() {
+  return isVeniceAdapterSelected() ? 160000 : 0;   // 0 = use prompt-core's default ratio
 }
 
 function isRemoteInferenceProviderEnabled() {
@@ -7078,7 +7567,7 @@ async function streamAnthropicChatCompletion(prompt, handlers = {}, options = {}
 // Native Ollama (the Venice Pro adapter) — routed THROUGH the backend, because the adapter
 // sends no CORS header so the WebView can't call it directly. The backend (always running,
 // configured with the same provider) reaches the adapter server-side. No API key, no credits.
-async function requestOllamaChatCompletion(provider, prompt, maxTokens, systemPrompt = '', thinkActive = false) {
+async function requestOllamaChatCompletion(provider, prompt, maxTokens, systemPrompt = '', thinkActive = false, extra = {}) {
   const model = getProviderModel(provider);
   if (!model) return null;
   const messages = systemPrompt
@@ -7100,6 +7589,8 @@ async function requestOllamaChatCompletion(provider, prompt, maxTokens, systemPr
         temperature: 0.2,
         chat_id: chatId,
         think: thinkActive ? 'on' : 'off',   // adapter normalizes Venice's per-chat Reasoning switch
+        ...(Array.isArray(extra.attachments) && extra.attachments.length ? { attachments: extra.attachments } : {}),
+        ...(extra.chatName ? { chat_name: extra.chatName } : {}),
       }),
     });
     if (!response.ok) return { ok: false, output: '', status: response.status };
@@ -7134,6 +7625,8 @@ async function streamOllamaChatCompletion(provider, prompt, handlers = {}, optio
         temperature: 0.2,
         chat_id: chatId,
         think: options.thinkActive ? 'on' : 'off',
+        ...(Array.isArray(options.attachments) && options.attachments.length ? { attachments: options.attachments } : {}),
+        ...(options.chatName ? { chat_name: options.chatName } : {}),
       }),
     });
     if (!response.ok || !response.body) throw new Error('stream HTTP ' + response.status);
@@ -7173,7 +7666,7 @@ async function streamOllamaChatCompletion(provider, prompt, handlers = {}, optio
     if (err && err.name === 'AbortError') return { ok: false, cancelled: true, message: 'Cancelled by user.' };
     // fall through to the one-shot fallback
   }
-  const result = await requestOllamaChatCompletion(provider, prompt, options.maxTokens, options.systemPrompt || '', Boolean(options.thinkActive));
+  const result = await requestOllamaChatCompletion(provider, prompt, options.maxTokens, options.systemPrompt || '', Boolean(options.thinkActive), { attachments: options.attachments, chatName: options.chatName });
   if (result && result.ok && typeof handlers.onDelta === 'function' && result.output) {
     handlers.onDelta(String(result.output));
   }
@@ -9283,6 +9776,19 @@ function addCodeArtifacts(chatId, text, messageTs = 0) {
 }
 
 function commitAssistantMessage(chatId, text, rawTextForArtifacts = '', options = {}) {
+  // An agent run's final panel is committed as a real message here — tear down the LIVE panel
+  // (which consumeLiveAssistantText now keeps alive across steps) so it doesn't linger as a
+  // duplicate on top of the committed one.
+  if (options && Array.isArray(options.agentActivities)) {
+    if (activeStreamRow && activeStreamRow.isConnected) {
+      activeStreamRow.remove();
+    }
+    activeStreamRow = null;
+    activeStreamRawText = '';
+    activeStreamText = '';
+    cancelLiveStreamRender();
+    resetActiveAgentStreamState();
+  }
   const sourceForArtifacts = String(rawTextForArtifacts || text || '');
   const thinkingState = buildThinkingState(sourceForArtifacts);
   const parsed = extractCanvasBlocksFromReply(sourceForArtifacts);
@@ -11400,14 +11906,84 @@ function persistActiveChatId() {
   } catch (_) { }
 }
 
+function stripChatStorageHeavyFields(chat) {
+  if (!chat || typeof chat !== 'object') return chat;
+  const stripAttachmentList = (list) => normalizeMessageAttachmentList(list).map((item) => {
+    const next = { ...item };
+    // Keep metadata and small image previews only. Never store non-image data URLs
+    // in message/chat state.
+    delete next.persistedDataUrl;
+    delete next.persistedAt;
+    return next;
+  });
+  const stripMessages = (messages) => Array.isArray(messages)
+    ? messages.map((msg) => {
+      if (!msg || typeof msg !== 'object') return msg;
+      const next = { ...msg };
+      if (Array.isArray(next.attachments)) next.attachments = stripAttachmentList(next.attachments);
+      return next;
+    })
+    : [];
+  const next = { ...chat };
+  next.pendingAttachments = normalizePendingAttachmentList(next.pendingAttachments).map((item) => {
+    const light = { ...item };
+    delete light.persistedDataUrl;
+    delete light.persistedAt;
+    return light;
+  });
+  next.messages = stripMessages(next.messages);
+  if (Array.isArray(next.threads)) {
+    next.threads = next.threads.map((thread) => thread && typeof thread === 'object'
+      ? { ...thread, messages: stripMessages(thread.messages) }
+      : thread);
+  }
+  return next;
+}
+
 function saveChats() {
   const key = scopedStorageKey(chatsStoragePrefix);
   if (!key) return;
   chats.forEach((chat) => ensureChatThreadState(chat));
   sortChatsInPlace();
+  const payload = chats.slice(0, 60).map(stripChatStorageHeavyFields);
   try {
-    localStorage.setItem(key, JSON.stringify(chats.slice(0, 60)));
-  } catch (_) { }
+    localStorage.setItem(key, JSON.stringify(payload));
+  } catch (_) {
+    // Last-resort protection: keep the conversations even if attachment previews
+    // push localStorage over quota. Composer restore data must never wipe chat history.
+    try {
+      const ultraLight = payload.map((chat) => {
+        const copy = stripChatStorageHeavyFields(chat);
+        const stripPreviews = (messages) => Array.isArray(messages)
+          ? messages.map((msg) => {
+            if (!msg || typeof msg !== 'object') return msg;
+            const next = { ...msg };
+            if (Array.isArray(next.attachments)) {
+              next.attachments = next.attachments.map((att) => {
+                const light = { ...att };
+                delete light.previewDataUrl;
+                return light;
+              });
+            }
+            return next;
+          })
+          : [];
+        copy.pendingAttachments = normalizePendingAttachmentList(copy.pendingAttachments).map((att) => {
+          const light = { ...att };
+          delete light.previewDataUrl;
+          return light;
+        });
+        copy.messages = stripPreviews(copy.messages);
+        if (Array.isArray(copy.threads)) {
+          copy.threads = copy.threads.map((thread) => thread && typeof thread === 'object'
+            ? { ...thread, messages: stripPreviews(thread.messages) }
+            : thread);
+        }
+        return copy;
+      });
+      localStorage.setItem(key, JSON.stringify(ultraLight));
+    } catch (__) { /* ignore */ }
+  }
   persistActiveChatId();
 }
 
@@ -11653,6 +12229,16 @@ function deleteChatFromModal() {
     return;
   }
   const deletedChatId = String(modalChatId);
+  // Best-effort: also delete this chat's Venice conversation (adapter only). Fire-and-forget
+  // — a failure never blocks the local delete.
+  if (isVeniceAdapterSelected()) {
+    try {
+      fetch(getAIExeBackendUrl() + '/api/provider/delete_chat', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: deletedChatId }),
+      }).catch(() => {});
+    } catch (_) { /* noop */ }
+  }
   if (
     activeInferenceRequest
     && String(activeInferenceRequest.chatId || '') === deletedChatId
@@ -14353,16 +14939,23 @@ async function sendMessage() {
   // Capture the attached files' display info BEFORE clearing, so we can show a capsule on the
   // sent user message (the content is already folded into the prompt by buildPromptWithInputAugments).
   const sentAttachments = normalizeMessageAttachmentList(pendingAttachments);
+  // Hand uploadable files (images + full-content text/code) to the adapter for real Venice upload.
+  const adapterImages = collectAttachmentsForAdapter(pendingAttachments);
   clearPendingAttachments();
   const chat = (inNewChatMode || !getActiveChat()) ? createChat(userText) : getActiveChat();
   if (!chat) return;
   chatAutoScrollPinned = true;
   appendMessageToChat(chat.id, 'user', userText, 0, sentAttachments.length ? { attachments: sentAttachments } : {});
+  const replyOptions = {
+    thinkForced: Boolean(thinkControl.thinkForced),
+    attachments: adapterImages,
+    chatName: String((chat && (chat.name || chat.title)) || '').trim(),
+  };
   if (operationRunning) {
     queuedSends.push({
       chatId: chat.id,
       prompt: modelPrompt,
-      options: { thinkForced: Boolean(thinkControl.thinkForced) },
+      options: replyOptions,
     });
     showComposerNotice("Queued — I'll answer here as soon as the other chat finishes.");
     recordDebugTrace('send_queued', {
@@ -14372,7 +14965,7 @@ async function sendMessage() {
     return;
   }
   beginInferenceRequest();
-  void requestAssistantReply(chat.id, modelPrompt, true, { thinkForced: Boolean(thinkControl.thinkForced) });
+  void requestAssistantReply(chat.id, modelPrompt, true, replyOptions);
 }
 
 function sendChip(el) {
@@ -14756,7 +15349,14 @@ function renderLiveStreamNow() {
     && activeChatId
     && String(activeAgentStreamState.chatId) === String(activeChatId)
   );
-  if (agentStreamActive && agentProgressText) {
+  // Keep the activity panel up even when a step's raw output briefly overwrites the progress
+  // marker — as long as we have accumulated activities, so steps stack instead of flashing away.
+  const hasAgentActivities = Boolean(
+    agentStreamActive
+    && Array.isArray(activeAgentStreamState.activities)
+    && activeAgentStreamState.activities.length
+  );
+  if (agentStreamActive && (agentProgressText || hasAgentActivities)) {
     bubble.innerHTML = '';
     bubble.appendChild(buildAgentActivityPanel(
       activeAgentStreamState && activeAgentStreamState.chatId ? activeAgentStreamState.chatId : '',
@@ -14829,10 +15429,21 @@ function createLiveAssistantRow(chatId) {
   return row;
 }
 
+function isAgentRunActiveForChat(chatId) {
+  return Boolean(
+    activeInferenceRequest
+    && activeInferenceRequest.operationKind === 'agent'
+    && String(activeInferenceRequest.chatId || '') === String(chatId || '')
+  );
+}
+
 function appendLiveDelta(chatId, delta) {
   const raw = String(delta || '').replace(/\r/g, '');
   if (!raw) return;
-  if (activeAgentStreamState) {
+  // Only clear a leftover agent panel when a NON-agent reply starts streaming. During an active
+  // agent run the deltas are per-step model output — resetting here wiped the accumulated
+  // activities so earlier steps vanished (only the final commit showed them).
+  if (activeAgentStreamState && !isAgentRunActiveForChat(chatId)) {
     resetActiveAgentStreamState();
   }
   const nextRaw = `${activeStreamRawText}${raw}`;
@@ -14864,9 +15475,30 @@ function appendLiveDelta(chatId, delta) {
 }
 
 function consumeLiveAssistantText() {
+  // The agent calls this ~20x per run to discard each step's raw model text. Resetting the
+  // agent activity panel here (as it used to) wiped every accumulated step, so the live view
+  // flashed empty between steps and only the final commit showed the full log. Keep the panel
+  // alive while an agent run is actually running for its chat; the final commit clears it.
+  const runningToken = getRunningChatOperationToken();
+  const keepAgentPanel = Boolean(
+    activeAgentStreamState
+    && runningToken
+    && runningToken.operationKind === 'agent'
+    && String(runningToken.chatId || '') === String(activeAgentStreamState.chatId || '')
+  );
   // Clear status immediately so any pending render frame doesn't show stale text
   if (activeAgentStreamState) {
     activeAgentStreamState.statusText = '';
+  }
+  // Keep-panel path: drop the step's raw text but KEEP the row + panel state, then repaint the
+  // row as the accumulated activity panel (no teardown → no empty flash between steps).
+  if (keepAgentPanel) {
+    cancelLiveStreamRender();
+    const kept = String(activeStreamRawText || '').trim();
+    activeStreamRawText = '';
+    activeStreamText = '';
+    if (activeStreamRow && activeStreamRow.isConnected) scheduleLiveStreamRender();
+    return kept;
   }
   if (!activeStreamRow || !activeStreamRow.isConnected) {
     cancelLiveStreamRender();
@@ -14997,6 +15629,8 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
     approvedNewProject: Boolean(options && options.approvedNewProject),
     skipNewProjectConfirmation: Boolean(options && options.skipNewProjectConfirmation),
     forceCurrentWorkspace: Boolean(options && options.forceCurrentWorkspace),
+    attachments: Array.isArray(options && options.attachments) ? options.attachments : [],
+    chatName: String(options && options.chatName ? options.chatName : '').trim(),
   };
   // A new run must NEVER overlap a still-live one. Kill any orphaned in-flight streams
   // FIRST — e.g. a timed-out file-generation stream still running in the background. The
@@ -15372,6 +16006,7 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
         latestUserOverride: requestToken.latestUserOverride,
         suppressChatNameInstruction: requestToken.appendToLastAssistant || requestToken.suppressChatNameInstruction,
         contextWindowChars: getChatPromptContextBudgetChars(),
+        maxLatestUserChars: getChatPromptLatestUserBudgetChars(),
       });
       requestToken.promptPreview = debugPreview(fullPrompt, 1600);
       requestToken.abortController = new AbortController();
@@ -15460,6 +16095,8 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
         abortController: requestToken.abortController,
         maxTokens: requestToken.maxTokens,
         thinkActive: Boolean(thinkModeEnabled || requestToken.thinkForced),
+        attachments: requestToken.attachments,
+        chatName: requestToken.chatName,
       };
       // No token for 70s = dropped connection: abort, retry once, then fail cleanly.
       // EXCEPT the Venice adapter: it is non-streaming end-to-end (one delta with the
@@ -15553,6 +16190,7 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
               latestUserOverride: requestToken.latestUserOverride,
               suppressChatNameInstruction: requestToken.appendToLastAssistant || requestToken.suppressChatNameInstruction,
               contextWindowChars: getChatPromptContextBudgetChars(),
+              maxLatestUserChars: getChatPromptLatestUserBudgetChars(),
             });
           } finally {
             suppressEscalationInstruction = false;
@@ -15638,6 +16276,13 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
           return;
         }
         const displayText = stripCanvasBlocksForDisplay(finalText).trim();
+        // Retry the Venice rename now the turn is done: on a FAST first turn the smart name was
+        // applied mid-stream, before the adapter had mapped the conversation's slug — so the
+        // rename-at-naming call no-op'd. By finish the slug exists; the guard makes it fire once.
+        try {
+          const _rc = findChatById(requestToken.chatId);
+          if (_rc) setTimeout(() => maybeRenameVeniceChat(_rc), 900);
+        } catch (_) { /* noop */ }
         recordDebugTrace('request_finish_ok', {
           chatId: requestToken.chatId,
           streamId: requestToken.streamId,
@@ -15761,6 +16406,7 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
         latestUserOverride: requestToken.latestUserOverride,
         suppressChatNameInstruction: requestToken.appendToLastAssistant || requestToken.suppressChatNameInstruction,
         contextWindowChars: getChatPromptContextBudgetChars(),
+        maxLatestUserChars: getChatPromptLatestUserBudgetChars(),
       });
       requestToken.promptPreview = debugPreview(fullPrompt, 1600);
       recordDebugTrace('request_start', {

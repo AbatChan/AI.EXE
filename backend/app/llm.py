@@ -39,7 +39,7 @@ class LLMClient:
         self.kind = str(kind or "openai").lower()  # "openai" | "ollama"
 
     def complete(self, messages, temperature: float = 0.2, max_tokens: int = 8192,
-                 chat_id: str = "", think: str = "") -> str:
+                 chat_id: str = "", think: str = "", chat_name: str = "", attachments=None) -> str:
         if not self.base_url:
             raise LLMError("No LLM provider configured — set AIEXE_LLM_BASE_URL.", 400)
         if self.kind == "ollama":
@@ -51,6 +51,10 @@ class LLMClient:
                 payload["aiexe_chat_id"] = str(chat_id)
             if think in ("on", "off"):  # adapter extension: Venice per-chat Reasoning switch
                 payload["aiexe_think"] = think
+            if chat_name:  # adapter extension: rename the Venice conversation to match
+                payload["aiexe_chat_name"] = str(chat_name)
+            if attachments:  # adapter extension: images to upload via Venice's file input
+                payload["aiexe_attachments"] = attachments
             headers = {"Content-Type": "application/json"}
         else:
             if not self.api_key:

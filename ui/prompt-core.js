@@ -300,7 +300,11 @@
       const contextWindowChars = Number(options && options.contextWindowChars) || 24576;
       const historyBudgetChars = Math.max(3600, Math.floor(contextWindowChars * 0.72));
       const maxSingleHistoryMessageChars = Math.max(1200, Math.floor(historyBudgetChars * 0.45));
-      const maxLatestUserChars = Math.max(2400, Math.floor(contextWindowChars * 0.18));
+      // The latest user message carries attachment content (full file text) — let the caller
+      // raise this so big files aren't cut to the default ~18% slice ("...[truncated for context]").
+      const maxLatestUserChars = Math.max(
+        Number(options && options.maxLatestUserChars) || 0,
+        Math.max(2400, Math.floor(contextWindowChars * 0.18)));
       const compact = (value, maxChars = maxSingleHistoryMessageChars) => {
         const clean = String(value || '').trim();
         return clean.length > maxChars
