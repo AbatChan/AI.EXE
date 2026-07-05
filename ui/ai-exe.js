@@ -8936,6 +8936,10 @@ async function revertAgentMessageEdits(chatId, messageTs) {
     for (const file of revert.files) {
       try {
         if (file.existedBefore) {
+          // A pre-run snapshot whose content was shed under storage-quota pressure
+          // (see saveChats) must NOT be written back — that would truncate a real file
+          // to empty. Skip it rather than destroy the current contents.
+          if (!String(file.content || '')) continue;
           const res = await invokeWorkspaceAction('workspaceWriteFile', { path: file.path, content: file.content });
           if (res && res.ok) {
             touched.push(file.path);
@@ -11960,44 +11964,93 @@ function saveChats() {
   if (!key) return;
   chats.forEach((chat) => ensureChatThreadState(chat));
   sortChatsInPlace();
-  const payload = chats.slice(0, 60).map(stripChatStorageHeavyFields);
-  try {
-    localStorage.setItem(key, JSON.stringify(payload));
-  } catch (_) {
-    // Last-resort protection: keep the conversations even if attachment previews
-    // push localStorage over quota. Composer restore data must never wipe chat history.
-    try {
-      const ultraLight = payload.map((chat) => {
-        const copy = stripChatStorageHeavyFields(chat);
-        const stripPreviews = (messages) => Array.isArray(messages)
-          ? messages.map((msg) => {
-            if (!msg || typeof msg !== 'object') return msg;
-            const next = { ...msg };
-            if (Array.isArray(next.attachments)) {
-              next.attachments = next.attachments.map((att) => {
-                const light = { ...att };
-                delete light.previewDataUrl;
-                return light;
-              });
-            }
-            return next;
-          })
-          : [];
-        copy.pendingAttachments = normalizePendingAttachmentList(copy.pendingAttachments).map((att) => {
-          const light = { ...att };
-          delete light.previewDataUrl;
-          return light;
-        });
-        copy.messages = stripPreviews(copy.messages);
-        if (Array.isArray(copy.threads)) {
-          copy.threads = copy.threads.map((thread) => thread && typeof thread === 'object'
-            ? { ...thread, messages: stripPreviews(thread.messages) }
-            : thread);
+  const basePayload = chats.slice(0, 60).map(stripChatStorageHeavyFields);
+
+  // Fallback 1: drop small image previews (attachment restore data must never wipe history).
+  const stripAttachmentPreviews = (payload) => payload.map((chat) => {
+    const copy = stripChatStorageHeavyFields(chat);
+    const stripPreviews = (messages) => Array.isArray(messages)
+      ? messages.map((msg) => {
+        if (!msg || typeof msg !== 'object') return msg;
+        const next = { ...msg };
+        if (Array.isArray(next.attachments)) {
+          next.attachments = next.attachments.map((att) => {
+            const light = { ...att };
+            delete light.previewDataUrl;
+            return light;
+          });
         }
-        return copy;
-      });
-      localStorage.setItem(key, JSON.stringify(ultraLight));
-    } catch (__) { /* ignore */ }
+        return next;
+      })
+      : [];
+    copy.pendingAttachments = normalizePendingAttachmentList(copy.pendingAttachments).map((att) => {
+      const light = { ...att };
+      delete light.previewDataUrl;
+      return light;
+    });
+    copy.messages = stripPreviews(copy.messages);
+    if (Array.isArray(copy.threads)) {
+      copy.threads = copy.threads.map((thread) => thread && typeof thread === 'object'
+        ? { ...thread, messages: stripPreviews(thread.messages) }
+        : thread);
+    }
+    return copy;
+  });
+
+  // Fallback 2: shed the heaviest per-message weight — agent transcript stream bodies,
+  // diff previews, and (biggest) agentMeta.revert.files[].content, which hold FULL file
+  // snapshots for the revert feature. One agent run over large files can otherwise blow
+  // quota and, with the error swallowed, silently drop the newest reply on reload.
+  const shedAgentWeight = (payload) => payload.map((chat) => {
+    const lighten = (messages) => (Array.isArray(messages) ? messages.map((msg) => {
+      if (!msg || typeof msg !== 'object' || msg.role !== 'ai') return msg;
+      const next = { ...msg };
+      if (Array.isArray(next.agentActivities) && next.agentActivities.length) {
+        next.agentActivities = next.agentActivities.map((activity) => (activity && typeof activity === 'object'
+          ? { ...activity, streamContent: '', diffPreview: null }
+          : activity));
+      }
+      if (next.agentMeta && next.agentMeta.revert && Array.isArray(next.agentMeta.revert.files)) {
+        const dropContent = (files) => (Array.isArray(files)
+          ? files.map((file) => (file && typeof file === 'object' ? { ...file, content: '' } : file))
+          : files);
+        const revert = { ...next.agentMeta.revert, files: dropContent(next.agentMeta.revert.files) };
+        if (Array.isArray(next.agentMeta.revert.restored)) revert.restored = dropContent(next.agentMeta.revert.restored);
+        next.agentMeta = { ...next.agentMeta, revert };
+      }
+      return next;
+    }) : messages);
+    const copy = { ...chat };
+    copy.messages = lighten(copy.messages);
+    if (Array.isArray(copy.threads)) {
+      copy.threads = copy.threads.map((thread) => (thread && typeof thread === 'object'
+        ? { ...thread, messages: lighten(thread.messages) }
+        : thread));
+    }
+    return copy;
+  });
+
+  // Escalating attempts, lightest last. Never swallow into a total no-op: keeping the
+  // newest conversation matters more than keeping the full agent transcript/revert data.
+  const attempts = [
+    () => basePayload,
+    () => stripAttachmentPreviews(basePayload),
+    () => shedAgentWeight(stripAttachmentPreviews(basePayload)),
+    () => shedAgentWeight(stripAttachmentPreviews(basePayload)).slice(0, 30),
+    () => shedAgentWeight(stripAttachmentPreviews(basePayload)).slice(0, 12),
+  ];
+  let saved = false;
+  for (const build of attempts) {
+    try {
+      localStorage.setItem(key, JSON.stringify(build()));
+      saved = true;
+      break;
+    } catch (_) { /* over quota — escalate to a lighter payload */ }
+  }
+  if (!saved && typeof recordDebugTrace === 'function') {
+    try {
+      recordDebugTrace('save_chats_quota_exhausted', { chatCount: String(chats.length) }, { chatCount: chats.length });
+    } catch (__) { /* diagnostics only */ }
   }
   persistActiveChatId();
 }
