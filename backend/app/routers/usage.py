@@ -15,6 +15,7 @@ from ..llm import LLMClient, LLMError
 from ..models import (ApiKeySetRequest, ApiKeyStatusResponse, ProviderCompleteRequest,
                       ProviderCompleteResponse, ProviderDeleteChatRequest, ProviderHealthResponse,
                       ProviderInfo, ProviderRenameChatRequest, ProviderRequest,
+                      ProviderStopGenerationRequest,
                       ProviderUsageResponse, UsageResponse)
 from ..provider import is_local_provider
 from ..provider_usage import read_provider_balance, read_provider_health
@@ -120,6 +121,23 @@ def provider_rename_chat(payload: ProviderRenameChatRequest):
         resp = httpx.post(url, json={"aiexe_chat_id": payload.chat_id, "slug": payload.slug,
                                      "name": payload.name},
                           timeout=httpx.Timeout(connect=10.0, read=60.0, write=30.0, pool=10.0))
+        if resp.status_code == 200:
+            return resp.json()
+        return {"ok": False, "reason": f"adapter HTTP {resp.status_code}"}
+    except httpx.HTTPError as exc:
+        return {"ok": False, "reason": f"adapter error: {exc}"}
+
+
+@router.post("/provider/stop_generation")
+def provider_stop_generation(payload: ProviderStopGenerationRequest):
+    """Ask the Venice adapter to stop the active browser generation for this AI.EXE chat."""
+    base, _model = provider_store.resolve()
+    if not base or provider_store.kind() != "ollama":
+        return {"ok": False, "reason": "not an adapter provider"}
+    url = base.rstrip("/") + "/api/aiexe/stop_generation"
+    try:
+        resp = httpx.post(url, json={"aiexe_chat_id": payload.chat_id},
+                          timeout=httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=5.0))
         if resp.status_code == 200:
             return resp.json()
         return {"ok": False, "reason": f"adapter HTTP {resp.status_code}"}

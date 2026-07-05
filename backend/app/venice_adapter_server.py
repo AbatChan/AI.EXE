@@ -770,6 +770,9 @@ AIEXE_THREAD_ATTACHMENTS = {}
 AIEXE_LAST_TURN_HAD_UPLOAD = False
 # Last name we pushed to each Venice conversation (rename only when it actually changes).
 AIEXE_THREAD_NAMED = {}
+# Cancel requests from AI.EXE's pause/stop button. The running Selenium loop owns the driver
+# lock, so HTTP cancel routes set this flag and the loop clicks Venice's Stop button itself.
+AIEXE_CANCEL_KEYS = set()
 
 
 def _aiexe_stable_chat_url(url):
@@ -821,6 +824,66 @@ def _aiexe_chat_key(data):
         return "hist:" + hashlib.sha256(basis[:4000].encode("utf-8", "ignore")).hexdigest()[:24]
     except Exception:
         return ""
+
+
+def _aiexe_cancel_key_requested(key):
+    return bool(key and key in AIEXE_CANCEL_KEYS) or "__all__" in AIEXE_CANCEL_KEYS
+
+
+def _aiexe_clear_cancel_key(key):
+    if key:
+        AIEXE_CANCEL_KEYS.discard(key)
+    AIEXE_CANCEL_KEYS.discard("__all__")
+
+
+def _aiexe_request_cancel(key):
+    if key:
+        AIEXE_CANCEL_KEYS.add(key)
+    else:
+        AIEXE_CANCEL_KEYS.add("__all__")
+
+
+def _aiexe_stop_generation(driver, reason=""):
+    """Click Venice's active Stop control. Best-effort and safe when no generation is active."""
+    clicked = False
+    try:
+        for _b in driver.find_elements(By.XPATH, VC_STOP_GENERATING_XPATH):
+            try:
+                if _b.is_displayed():
+                    driver.execute_script("arguments[0].click();", _b)
+                    clicked = True
+                    break
+            except Exception:
+                pass
+    except Exception:
+        pass
+    if not clicked:
+        try:
+            clicked = bool(driver.execute_script("""
+              const visible = (el) => {
+                if (!el) return false;
+                const cs = getComputedStyle(el);
+                const r = el.getBoundingClientRect();
+                return cs.display !== 'none' && cs.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+              };
+              const buttons = Array.from(document.querySelectorAll('button')).filter(visible);
+              const stop = buttons.find((b) => {
+                const label = String(b.getAttribute('aria-label') || '').trim();
+                const text = String(b.innerText || b.textContent || '').trim();
+                return /(stop|cancel|generating)/i.test(label) || /^stop$/i.test(text);
+              });
+              if (!stop) return false;
+              stop.click();
+              return true;
+            """))
+        except Exception:
+            clicked = False
+    if clicked:
+        time.sleep(0.45)
+        print("AIEXE_CANCEL clicked Venice stop%s" % ((" (" + reason + ")") if reason else ""), flush=True)
+    else:
+        print("AIEXE_CANCEL no Venice stop button visible%s" % ((" (" + reason + ")") if reason else ""), flush=True)
+    return clicked
 
 
 AIEXE_TEXT_MODEL_CATALOG = [
@@ -1718,6 +1781,7 @@ def _aiexe_upload_attachments(driver, attachments, uploaded):
             uploaded.add(aid)
             n += 1
             print("AIEXE_ATTACH uploaded %r (id=%s)" % (name, aid), flush=True)
+            _aiexe_prune_blank_attachment_cards(driver)
             time.sleep(1.5)  # let Venice finish processing before the next upload / the submit
         except Exception as exc:
             print("AIEXE_ATTACH upload failed for %r: %s" % (name, exc), flush=True)
@@ -1747,6 +1811,67 @@ def _aiexe_clear_attachment_cards(driver):
             print("AIEXE_ATTACH cleared %d stale composer card(s)" % removed, flush=True)
     except Exception as exc:
         print("AIEXE_ATTACH clear failed: %s" % exc, flush=True)
+
+
+def _aiexe_prune_blank_attachment_cards(driver):
+    """Remove Venice attachment cards that have a remove button but no preview/name.
+
+    These blank cards keep the send button disabled. They can appear when Venice rejects an
+    async upload while still leaving a placeholder card in the composer.
+    """
+    try:
+        removed = int(driver.execute_script("""
+          const visible = (el) => {
+            if (!el) return false;
+            const cs = getComputedStyle(el);
+            const r = el.getBoundingClientRect();
+            return cs.display !== 'none' && cs.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+          };
+          const cards = Array.from(document.querySelectorAll('.chakra-card, [class*="chakra-card"]'))
+            .filter((card) => card.querySelector('button[aria-label="Remove"]'));
+          let removed = 0;
+          for (const card of cards) {
+            const hasPreview = !!card.querySelector('img[src^="blob:"], img[alt], video, canvas');
+            const clone = card.cloneNode(true);
+            clone.querySelectorAll('button, svg').forEach((n) => n.remove());
+            const label = String(clone.innerText || clone.textContent || '').trim();
+            if (!hasPreview && !label) {
+              const btn = card.querySelector('button[aria-label="Remove"]');
+              if (btn && visible(btn)) {
+                btn.click();
+                removed += 1;
+              }
+            }
+          }
+          return removed;
+        """) or 0)
+        if removed:
+            time.sleep(0.35)
+            print("AIEXE_ATTACH pruned %d blank composer card(s)" % removed, flush=True)
+        return removed
+    except Exception as exc:
+        print("AIEXE_ATTACH blank-card prune failed: %s" % exc, flush=True)
+        return 0
+
+
+def _aiexe_wait_send_ready(driver, timeout_s=45):
+    """Wait until the composer can submit, pruning blank upload cards while Venice settles."""
+    deadline = time.time() + max(1, float(timeout_s or 0))
+    while time.time() < deadline:
+        _aiexe_prune_blank_attachment_cards(driver)
+        try:
+            for xp in VC_SEND_BUTTON_XPATHS:
+                try:
+                    btn = driver.find_element(By.XPATH, xp)
+                    if btn.is_displayed() and btn.is_enabled():
+                        return True
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        time.sleep(0.5)
+    print("AIEXE_SEND button still disabled after attachment/prompt settle wait", flush=True)
+    return False
 
 
 def _aiexe_strip_reply_chrome(text):
@@ -2157,6 +2282,7 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
     api_data_json = json.dumps(api_data)
     _chat_key = _aiexe_chat_key(data)
     _wanted_chat_name = _aiexe_requested_chat_name(data)
+    _aiexe_clear_cancel_key(_chat_key)
     try:
         # ONE Venice conversation per AI.EXE chat (see the chat-map block up top). Nav policy:
         #   same chat + already on its conversation → no navigation at all (the common case);
@@ -2191,16 +2317,8 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
                 driver.get(VC_CHAT_URL)
         # else: already on a fresh composer page — just use it
         # A previous ABORTED request (client timeout/retry) can leave Venice still generating —
-        # the composer is unusable until it stops. Best-effort: click the stop control.
-        try:
-            for _b in driver.find_elements(By.XPATH, VC_STOP_GENERATING_XPATH):
-                if _b.is_displayed():
-                    driver.execute_script("arguments[0].click();", _b)
-                    time.sleep(0.6)
-                    print("AIEXE_NAV stopped an in-flight Venice generation", flush=True)
-                    break
-        except Exception:
-            pass
+        # the composer is unusable until it stops.
+        _aiexe_stop_generation(driver, "new request cleanup")
         # Hide the raw typed prompt in the (minimized) Venice window — model still receives it.
         # Toggle from AI.EXE Settings (passed as AIEXE_HIDE_PROMPT env on start; default OFF).
         try:
@@ -2267,6 +2385,10 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
             _atts = data.get('aiexe_attachments')
             if not _atts and isinstance(data.get('options'), dict):
                 _atts = data['options'].get('aiexe_attachments')
+            if _aiexe_cancel_key_requested(_chat_key):
+                _aiexe_stop_generation(driver, "cancel before upload")
+                _aiexe_clear_cancel_key(_chat_key)
+                return
             # Always clear stale cards first — a prior send may have failed and left phantom
             # attachments in the composer that would ride along with (or block) this message.
             _aiexe_clear_attachment_cards(driver)
@@ -2276,6 +2398,7 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
                 # call; a network retry re-uploads correctly after the card-clear above.
                 if _aiexe_upload_attachments(driver, _atts, set()) > 0:
                     AIEXE_LAST_TURN_HAD_UPLOAD = True
+                _aiexe_prune_blank_attachment_cards(driver)
         except Exception as _e:
             print("AIEXE_ATTACH turn failed: %s" % _e, flush=True)
 
@@ -2292,6 +2415,15 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
             _prompt_text = " "
         if not _aiexe_set_composer_text(driver, _prompt_text):
             _aiexe_wait_composer(driver).send_keys(_prompt_text)
+        if _aiexe_cancel_key_requested(_chat_key):
+            _aiexe_stop_generation(driver, "cancel before submit")
+            _aiexe_clear_cancel_key(_chat_key)
+            return
+        _aiexe_wait_send_ready(driver, 45 if AIEXE_LAST_TURN_HAD_UPLOAD else 8)
+        if _aiexe_cancel_key_requested(_chat_key):
+            _aiexe_stop_generation(driver, "cancel before send")
+            _aiexe_clear_cancel_key(_chat_key)
+            return
 
         current_url = driver.current_url
 
@@ -2307,6 +2439,10 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
         inject_request_interceptor(driver, api_data_json, swap_body=not AIEXE_LAST_TURN_HAD_UPLOAD)
 
         _sent = _aiexe_submit_prompt(driver)
+        if _aiexe_cancel_key_requested(_chat_key):
+            _aiexe_stop_generation(driver, "cancel after send")
+            _aiexe_clear_cancel_key(_chat_key)
+            return
 
         start_time = datetime.now(timezone.utc)
 
@@ -2326,6 +2462,10 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
             return None
 
         while True:
+            if _aiexe_cancel_key_requested(_chat_key):
+                _aiexe_stop_generation(driver, "cancel during stream")
+                _aiexe_clear_cancel_key(_chat_key)
+                return
             chunks = driver.execute_script("""
                 if (typeof window.receivedChunks !== 'undefined' && window.receivedChunks !== null) {
                     return window.receivedChunks.splice(0, window.receivedChunks.length);
@@ -2424,6 +2564,10 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
         if eval_count == 0 and not streamed_content:
             _prev, _stable = "", 0
             for _i in range(int(max(timeout, 30) / 0.8)):
+                if _aiexe_cancel_key_requested(_chat_key):
+                    _aiexe_stop_generation(driver, "cancel during DOM fallback")
+                    _aiexe_clear_cancel_key(_chat_key)
+                    return
                 _txt = _aiexe_read_last_assistant_text(driver)
                 if _txt and _txt == _prev:
                     _stable += 1
@@ -2561,7 +2705,13 @@ def _aiexe_locked_stream(request_json, response_format, reopen_context):
     with selenium_lock:
         if not _aiexe_driver_alive(driver):
             driver = _aiexe_reopen_driver(reopen_context)
-        yield from generate_selenium_streamed_response(request_json, driver, response_format=response_format)
+        try:
+            yield from generate_selenium_streamed_response(request_json, driver, response_format=response_format)
+        except GeneratorExit:
+            _aiexe_request_cancel(_aiexe_chat_key(request_json))
+            _aiexe_stop_generation(driver, "client disconnected")
+            _aiexe_clear_cancel_key(_aiexe_chat_key(request_json))
+            raise
 
 
 @app.route('/api/chat', methods=['POST'])
@@ -2626,6 +2776,38 @@ def aiexe_rename_chat_route():
         if ok and key:
             AIEXE_THREAD_NAMED[key] = name
     return Response(json.dumps({"ok": bool(ok), "slug": slug}),
+                    content_type='application/json; charset=utf-8')
+
+@app.route('/api/aiexe/stop_generation', methods=['POST'])
+def aiexe_stop_generation_route():
+    """Request cancellation of the active Venice browser generation.
+
+    If Selenium is idle, click Stop immediately. If a stream owns the lock, queue a cancel flag;
+    the running loop polls it and clicks Stop from inside the driver-owning section.
+    """
+    global driver
+    req = parse_json_request(request) or {}
+    key = _aiexe_chat_key(req)
+    _aiexe_request_cancel(key)
+    clicked = False
+    immediate = False
+    acquired = False
+    try:
+        acquired = selenium_lock.acquire(blocking=False)
+        if acquired:
+            immediate = True
+            if _aiexe_driver_alive(driver):
+                clicked = _aiexe_stop_generation(driver, "stop route")
+                _aiexe_clear_cancel_key(key)
+    except Exception as exc:
+        print("AIEXE_CANCEL stop route failed: %s" % exc, flush=True)
+    finally:
+        if acquired:
+            try:
+                selenium_lock.release()
+            except Exception:
+                pass
+    return Response(json.dumps({"ok": True, "queued": not immediate, "clicked": bool(clicked)}),
                     content_type='application/json; charset=utf-8')
 
 @app.route('/api/generate', methods=['POST'])

@@ -91,6 +91,10 @@ class ProviderRenameChatRequest(BaseModel):
     name: str = ""
 
 
+class ProviderStopGenerationRequest(BaseModel):
+    chat_id: str = ""
+
+
 class ProviderCompleteResponse(BaseModel):
     ok: bool
     content: str = ""

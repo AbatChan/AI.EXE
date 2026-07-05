@@ -7049,6 +7049,7 @@ function commitInterruptedAgentRun(chatId, reason = 'Agent was interrupted befor
 function abortInFlightInference(reason = 'abandoned') {
   const token = activeInferenceRequest;
   if (!token) return false;
+  stopVeniceAdapterGeneration(token.chatId);
   if (token.streamId) {
     try { nativeBridge.cancelStream(token.streamId); } catch (_) { }
   }
@@ -7077,6 +7078,7 @@ function awaitChatStreamWithStallGuard(streamPromise, requestToken, idleMs) {
       const c = Number(requestToken && requestToken.deltaCount) || 0;
       if (c > lastCount) { lastCount = c; lastActivityAt = Date.now(); }
       if (Date.now() - lastActivityAt >= idleMs) {
+        try { if (requestToken) stopVeniceAdapterGeneration(requestToken.chatId); } catch (_) { }
         try { if (requestToken && requestToken.streamId) nativeBridge.cancelStream(requestToken.streamId); } catch (_) { }
         try { if (requestToken && requestToken.abortController) requestToken.abortController.abort(); } catch (_) { }
         settle(resolve, { _stalled: true });
@@ -7091,6 +7093,7 @@ function cancelActiveInference() {
   if (!token || token.cancelled) return;
   token.cancelled = true;
   setChatAutoContinuing(String(token.chatId || ''), false);
+  stopVeniceAdapterGeneration(token.chatId);
   pushDebugTrace('request_cancelled', {
     chatId: String(token.chatId || ''),
     streamId: String(token.streamId || ''),
@@ -7599,21 +7602,6 @@ async function streamAnthropicChatCompletion(prompt, handlers = {}, options = {}
 // Native Ollama (the Venice Pro adapter) — routed THROUGH the backend, because the adapter
 // sends no CORS header so the WebView can't call it directly. The backend (always running,
 // configured with the same provider) reaches the adapter server-side. No API key, no credits.
-// Agent vision priming: the agent's planner/decision calls are text-only, so an attached image
-// is invisible to them. Upload it once + capture a description so the agent works from what's
-// actually in the image instead of guessing. Uses the same chat_id, so the image also pins to
-// the Venice conversation the agent's later steps share.
-async function describeImagesForAgent(images) {
-  if (!Array.isArray(images) || !images.length || !isVeniceAdapterSelected()) return '';
-  const prompt = 'Describe the attached image(s) in precise, concrete detail for a developer who will edit a web project from them. Cover: overall layout and sections, the specific component or area in focus, colors, text/labels, and anything that looks visually off or is clearly being pointed at. Be specific and under 200 words. Do not add commentary.';
-  try {
-    const res = await requestOllamaChatCompletion(VENICE_ADAPTER_PROVIDER_ID, prompt, 900, '', false, { attachments: images });
-    return (res && res.ok && String(res.output || '').trim()) ? String(res.output).trim() : '';
-  } catch (_) {
-    return '';
-  }
-}
-
 async function requestOllamaChatCompletion(provider, prompt, maxTokens, systemPrompt = '', thinkActive = false, extra = {}) {
   const model = getProviderModel(provider);
   if (!model) return null;
@@ -7647,6 +7635,17 @@ async function requestOllamaChatCompletion(provider, prompt, maxTokens, systemPr
   } catch (err) {
     return { ok: false, output: '', error: String(err && err.message ? err.message : err) };
   }
+}
+
+function stopVeniceAdapterGeneration(chatId = '') {
+  try {
+    fetch(getAIExeBackendUrl() + '/api/provider/stop_generation', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      keepalive: true,
+      body: JSON.stringify({ chat_id: String(chatId || '') }),
+    }).catch(() => {});
+  } catch (_) { /* best-effort */ }
 }
 
 // REAL-TIME streaming through the adapter: the backend re-streams the adapter's NDJSON
@@ -15931,19 +15930,8 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
     if (!isInferenceActive(requestToken)) {
       return;
     }
-    // Agent-mode vision priming: fold a description of any attached image into the task BEFORE
-    // routing, so the (text-only) planner/decision steps see it instead of a blind placeholder.
-    if (developerAgentEnabled && isVeniceAdapterSelected()
-        && Array.isArray(requestToken.attachments) && requestToken.attachments.length
-        && /\(image attached[^)]*\)/i.test(String(promptText || ''))) {
-      setThinkingStatus('Looking at your image…');
-      const imageDescription = await describeImagesForAgent(requestToken.attachments);
-      if (!isInferenceActive(requestToken)) return;
-      if (imageDescription) {
-        promptText = String(promptText).replace(/\(image attached[^)]*\)/gi,
-          `(attached image, described for you:\n${imageDescription})`);
-      }
-    }
+    // Do not do an adapter-side hidden vision preflight here. Venice is the real browser
+    // composer, so hidden prompts are visible there and can leave stale upload cards behind.
     const pendingConfirmationResolution = await resolvePendingPreflightConfirmation(chatId, promptText);
     if (pendingConfirmationResolution) {
       if (pendingConfirmationResolution.mode === 'cancelled') {
