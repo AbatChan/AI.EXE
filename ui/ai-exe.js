@@ -16954,6 +16954,23 @@ function showTypingIndicator(chatId, startedAtMs = 0) {
   }, 100);
 }
 
+// Loader watchdog: during an active run the visible chat must never sit blank.
+// Some commit/cleanup paths clear the indicator between steps — if inference is
+// still in flight for the chat on screen and neither the live stream card nor a
+// user-facing choice is showing, bring the thinking loader back.
+setInterval(() => {
+  try {
+    if (typeof pendingInferenceCount === 'undefined' || pendingInferenceCount <= 0) return;
+    const owner = activeInferenceRequest ? String(activeInferenceRequest.chatId || '') : '';
+    if (!owner || owner !== String(activeChatId || '')) return;
+    if (document.getElementById('typingIndicator')) return;
+    if (shouldSuppressTypingIndicatorForLiveAgent(owner)) return;
+    if (typeof getActiveComposerPermissionRequest === 'function' && getActiveComposerPermissionRequest()) return;
+    showTypingIndicator(owner);
+    recordDebugTrace('typing_indicator_watchdog_restored', { chatId: owner });
+  } catch (_) { }
+}, 1200);
+
 function setTypingIndicatorLoaderText(text) {
   const value = String(text || '').trim();
   if (!value) return false;

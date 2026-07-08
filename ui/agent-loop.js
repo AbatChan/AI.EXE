@@ -227,11 +227,11 @@
     const doneName = `Phase ${doneIdx + 1}${doneTitle ? ` (${doneTitle})` : ''}`;
     const nextName = `Phase ${nextIdx + 1}${nextTitle ? ` — ${nextTitle}` : ''}`;
     const variants = [
-      `${doneName} is done. Press Continue and I'll start ${nextName}.`,
-      `That wraps up ${doneName}. Hit Continue whenever you're ready for ${nextName}.`,
-      `${doneName} is built and in place. Continue will kick off ${nextName}.`,
-      `All of ${doneName} is finished — press Continue and I'll move on to ${nextName}.`,
-      `${doneName} is complete. Next up: ${nextName} — just press Continue.`,
+      `That's ${doneName} finished. Whenever you're ready, press Continue and I'll get started on ${nextName}.`,
+      `${doneName} is all built. Continue takes us into ${nextName} next.`,
+      `Just wrapped up ${doneName} — hit Continue and I'll dig into ${nextName}.`,
+      `${doneName} is done and in place. Next comes ${nextName}; just press Continue.`,
+      `Finished with ${doneName}. Press Continue when you want me to move on to ${nextName}.`,
     ];
     return variants[Math.abs(Number(doneIdx) || 0) % variants.length];
   }
