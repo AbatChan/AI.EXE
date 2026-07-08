@@ -13494,6 +13494,43 @@ function handleAgentCommandApprovalClick(event) {
 }
 
 document.addEventListener('click', handleAgentCommandApprovalClick);
+
+function handleDevServerCardClick(event) {
+  const target = event && event.target;
+  if (!target || !target.closest) return false;
+  const openBtn = target.closest('[data-dev-server-open-url]');
+  if (openBtn) {
+    event.preventDefault();
+    event.stopPropagation();
+    const url = String(openBtn.dataset.devServerOpenUrl || '').trim();
+    if (/^https?:\/\/(?:127\.0\.0\.1|localhost|0\.0\.0\.0)/i.test(url)) window.open(url, '_blank');
+    return true;
+  }
+  const stopBtn = target.closest('[data-dev-server-stop]');
+  if (!stopBtn || stopBtn.disabled) return false;
+  event.preventDefault();
+  event.stopPropagation();
+  const serverId = Number(stopBtn.dataset.devServerStop) || 0;
+  if (serverId <= 0) return false;
+  stopBtn.disabled = true;
+  stopBtn.textContent = 'Stopping…';
+  void (async () => {
+    let res = null;
+    try { res = await invokeWorkspaceAction('devServerStop', { serverId }); } catch (_) { }
+    stopBtn.textContent = 'Stopped';
+    recordDebugTrace('dev_server_stop_clicked', {
+      serverId: String(serverId),
+      ok: String(Boolean(res && res.ok)),
+    }, { serverId, res });
+    if (!(res && res.ok)) {
+      // Already gone (app restart / exited on its own) — "Stopped" is still the truth.
+      showComposerNotice('That dev server is no longer running.');
+    }
+  })();
+  return true;
+}
+
+document.addEventListener('click', handleDevServerCardClick);
 if (chatSaveBtn) chatSaveBtn.addEventListener('click', saveChatNameFromModal);
 if (chatCancelBtn) chatCancelBtn.addEventListener('click', closeChatActionModal);
 if (chatDeleteBtn) chatDeleteBtn.addEventListener('click', deleteChatFromModal);

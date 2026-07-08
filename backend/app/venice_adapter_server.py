@@ -13,6 +13,7 @@ from flask import Flask, request, Response
 import json
 import uuid
 from datetime import datetime, timezone
+import gevent
 from gevent.pywsgi import WSGIServer
 from gevent.lock import Semaphore
 import time
@@ -764,6 +765,7 @@ AIEXE_CURRENT_MODEL = ""   # last model name observed on Venice's composer butto
 # context in every prompt — so every step is best-effort.
 AIEXE_CHAT_MAP_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "aiexe_chat_map.json")
 AIEXE_CHAT_URLS = {}
+AIEXE_LAST_REQUEST_TS = time.time()
 # Attachment IDs already uploaded to each Venice thread (dedupe: full history re-sends every
 # turn, but an attachment stays pinned to the conversation — upload once, never again).
 AIEXE_THREAD_ATTACHMENTS = {}
@@ -2901,6 +2903,8 @@ def _aiexe_locked_stream(request_json, response_format, reopen_context):
 
 @app.route('/api/chat', methods=['POST'])
 def chat():
+    global AIEXE_LAST_REQUEST_TS
+    AIEXE_LAST_REQUEST_TS = time.time()
     request_json = parse_json_request(request)
     if request_json is None :
             return Response("Invalid JSON data received", status=400, content_type='text/plain')
@@ -3276,6 +3280,43 @@ try:  # startup done — ONE minimize, after all window-dependent work finished
     driver.minimize_window()
 except Exception:
     pass
+def _aiexe_internal_cleanup_loop():
+    """Idle-time sidebar hygiene: agent one-shot calls (planner, per-file gen, titles)
+    each open an isolated Venice thread by design — delete them in small batches when
+    the adapter has been idle, so the user's Venice sidebar isn't buried in them."""
+    global driver
+    while True:
+        gevent.sleep(45)
+        try:
+            internal = [k for k in list(AIEXE_CHAT_URLS.keys()) if k.startswith("id:internal:")]
+            if len(internal) < 6:
+                continue
+            if time.time() - AIEXE_LAST_REQUEST_TS < 90:
+                continue
+            if not selenium_lock.acquire(blocking=False):
+                continue
+            try:
+                batch = internal[:3]
+                print("AIEXE_CLEANUP deleting %d internal one-shot chats (%d tracked)" % (len(batch), len(internal)), flush=True)
+                for key in batch:
+                    slug = _aiexe_slug_from_url(AIEXE_CHAT_URLS.get(key, ""))
+                    deleted = False
+                    if slug:
+                        try:
+                            deleted = _aiexe_sidebar_op_with_restore(
+                                driver, lambda s=slug: _aiexe_delete_chat(driver, s), "DELETE")
+                        except Exception as exc:
+                            print("AIEXE_CLEANUP delete failed for %s: %s" % (slug, exc), flush=True)
+                    AIEXE_CHAT_URLS.pop(key, None)
+                    print("AIEXE_CLEANUP %s -> %s" % (slug or key[:36], "deleted" if deleted else "dropped from map"), flush=True)
+                _aiexe_save_chat_map()
+            finally:
+                selenium_lock.release()
+        except Exception as exc:
+            print("AIEXE_CLEANUP loop error: %s" % exc, flush=True)
+
+
 print(f"Starting server at port {args.host}:{args.port}")
+_aiexe_cleanup_greenlet = gevent.spawn(_aiexe_internal_cleanup_loop)
 http_server = WSGIServer((args.host, args.port), app)
 http_server.serve_forever()

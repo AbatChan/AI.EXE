@@ -7964,3 +7964,36 @@ mark.search-term-hit {
   opacity: 0.65;
   cursor: default;
 }
+
+.msg-agent-devserver-actions {
+  display: inline-flex;
+  gap: 6px;
+  margin-left: 8px;
+  flex: 0 0 auto;
+}
+
+.msg-agent-devserver-btn {
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  background: rgba(15, 23, 42, 0.34);
+  color: inherit;
+  border-radius: 999px;
+  padding: 2px 9px;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.msg-agent-devserver-btn:hover {
+  background: rgba(99, 102, 241, 0.18);
+  border-color: rgba(99, 102, 241, 0.45);
+}
+
+.msg-agent-devserver-btn.stop:hover {
+  background: rgba(239, 68, 68, 0.18);
+  border-color: rgba(239, 68, 68, 0.45);
+}
+
+.msg-agent-devserver-btn:disabled {
+  opacity: 0.65;
+  cursor: default;
+}

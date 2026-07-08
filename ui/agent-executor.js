@@ -617,6 +617,26 @@
         .filter(Boolean);
     }
 
+    // Long-running dev servers must not go through the blocking 60s runner —
+    // they get started tracked (pid/logs/Stop) and left running. Explicit
+    // unambiguous server invocations only; anything else keeps the normal path.
+    function isDevServerCommand(program, args) {
+      const a = (args || []).map((x) => String(x || '').toLowerCase());
+      if (program === 'npm') {
+        if (a[0] === 'start') return true;
+        if (a[0] === 'run' && ['dev', 'start', 'serve', 'preview'].includes(a[1])) return true;
+        return false;
+      }
+      if (program === 'python') {
+        if (a[0] === '-m' && a[1] === 'http.server') return true;
+        if (a[0] === '-m' && a[1] === 'flask' && a[2] === 'run') return true;
+        if ((a[0] || '').endsWith('manage.py') && a[1] === 'runserver') return true;
+        return false;
+      }
+      if (program === 'php') return a[0] === '-s';
+      return false;
+    }
+
     function hasBlockedShellSyntax(command) {
       const text = String(command || '');
       const blockedChars = new Set([';', '&', '|', '`', '<', '>']);
@@ -2742,6 +2762,67 @@
         }
         const program = classification.program;
         const args = classification.args;
+        if (isDevServerCommand(program, args)) {
+          deps.setActiveAgentStreamStatus(chatId, `Starting dev server: ${rawCommand}`);
+          // Piped python buffers its startup banner — force unbuffered so the
+          // URL/port shows up in the captured log.
+          const serverArgs = program === 'python' && args[0] !== '-u' ? ['-u', ...args] : args;
+          const startRes = await deps.invokeWorkspaceAction('devServerStart', {
+            program,
+            argsLine: serverArgs.join('\n'),
+            display: rawCommand,
+          });
+          if (!startRes || !startRes.ok) {
+            if (isMissingRuntimeMessage(startRes && startRes.message)) {
+              return buildMissingRuntimeResult(program, rawCommand, mutated, 'run_command');
+            }
+            return { ok: false, mutated, observation: `run_command \`${rawCommand}\` could not start: ${(startRes && startRes.message) || 'unknown error'}.` };
+          }
+          const serverId = Number(String(startRes.output || '').trim()) || 0;
+          let lastStatus = null;
+          let url = '';
+          for (let i = 0; i < 12; i += 1) {
+            await new Promise((resolve) => setTimeout(resolve, 1500));
+            const st = await deps.invokeWorkspaceAction('devServerStatus', { serverId });
+            if (!st || !st.ok) break;
+            lastStatus = st;
+            const log = String(st.output || '');
+            const urlMatch = log.match(/https?:\/\/(?:127\.0\.0\.1|localhost|0\.0\.0\.0)[^\s"']*/i);
+            if (urlMatch) { url = urlMatch[0].replace(/[),.;]+$/, ''); break; }
+            if (/^exited/.test(String(st.message || ''))) break;
+          }
+          const statusMsg = String((lastStatus && lastStatus.message) || 'running');
+          const running = /^running/.test(statusMsg);
+          const exitMatch = statusMsg.match(/exit_code=(-?\d+)/);
+          const exitCode = exitMatch ? Number(exitMatch[1]) : -1;
+          const rawLog = String((lastStatus && lastStatus.output) || '').trim();
+          const logTail = rawLog.length > 2500 ? `…(truncated)\n${rawLog.slice(-2500)}` : rawLog;
+          const terminalProof = {
+            command: rawCommand,
+            exitCode: running ? null : exitCode,
+            timedOut: false,
+            outputPreview: logTail,
+          };
+          if (!running) {
+            return {
+              ok: true,
+              mutated,
+              runErrorCount: exitCode === 0 ? 0 : 1,
+              terminalCommand: rawCommand,
+              terminalProof,
+              observation: `run_command \`${rawCommand}\`: the dev server exited during startup${exitCode === 0 ? ' (exit 0)' : ` with code ${exitCode}`}. Read the error below, fix its ROOT cause, then run_command again.\nOutput:\n${logTail || '(no output)'}`,
+            };
+          }
+          return {
+            ok: true,
+            mutated,
+            runErrorCount: 0,
+            terminalCommand: rawCommand,
+            terminalProof,
+            devServer: { id: serverId, url, running: true, command: rawCommand },
+            observation: `run_command \`${rawCommand}\`: dev server is RUNNING${url ? ` at ${url}` : ''} — tracked as server #${serverId}, left running in the background with a Stop button in the chat. Do NOT run this command again; continue with the next step or finalize.${logTail ? `\nStartup output:\n${logTail}` : ''}`,
+          };
+        }
         deps.setActiveAgentStreamStatus(chatId, `Running terminal command: ${rawCommand}`);
         const res = await deps.invokeWorkspaceAction('runCommand', { program, argsLine: args.join('\n') });
         if (!res || !res.ok) {

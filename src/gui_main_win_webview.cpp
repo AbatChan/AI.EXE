@@ -32,6 +32,7 @@
 #include <vector>
 
 #include "command_runner.h"
+#include "dev_server_manager.h"
 #include "local_app_server.h"
 #include "run_target.h"
 #include "ui_constants.h"
@@ -1409,6 +1410,7 @@ private:
       return 0;
     }
     case WM_DESTROY:
+      DevServerManager::Instance().StopAll();
       SaveWindowPlacementToIni(hwnd);
       PostQuitMessage(0);
       return 0;
@@ -1789,6 +1791,67 @@ private:
           message = cr.timed_out ? "timed_out" : ("exit_code=" + std::to_string(cr.exit_code));
         }
       }
+    } else if (action == "devServerStart") {
+      const std::filesystem::path root = WorkspaceRootOrEmpty();
+      const std::string program = ExtractJsonStringField(request_json, "program");
+      const std::string args_line = ExtractJsonStringField(request_json, "argsLine");
+      const std::string display = ExtractJsonStringField(request_json, "display");
+      if (root.empty()) {
+        ok = false;
+        message = "No project is open.";
+      } else {
+        std::vector<std::string> args;
+        std::string token;
+        std::istringstream iss(args_line);
+        while (std::getline(iss, token, '\n')) {
+          if (!token.empty()) args.push_back(token);
+        }
+        std::string resolve_err;
+        const std::filesystem::path exe = ResolveProjectProgramExe(root, program, &resolve_err);
+        if (exe.empty()) {
+          ok = false;
+          message = resolve_err;
+        } else {
+          std::string start_err;
+          const int sid = DevServerManager::Instance().Start(
+              exe, args, root, display.empty() ? program : display, &start_err);
+          if (sid <= 0) {
+            ok = false;
+            message = start_err.empty() ? "Could not start the dev server." : start_err;
+          } else {
+            output = std::to_string(sid);
+            message = "started";
+          }
+        }
+      }
+    } else if (action == "devServerStatus") {
+      const int sid = ExtractJsonIntField(request_json, "serverId", 0);
+      DevServerInfo info;
+      if (!DevServerManager::Instance().Status(sid, &info)) {
+        ok = false;
+        message = "No such dev server.";
+      } else {
+        output = info.log_tail;
+        message = std::string(info.running ? "running" : "exited")
+            + " pid=" + std::to_string(info.pid)
+            + " exit_code=" + std::to_string(info.exit_code);
+      }
+    } else if (action == "devServerStop") {
+      const int sid = ExtractJsonIntField(request_json, "serverId", 0);
+      if (sid <= 0 || !DevServerManager::Instance().Stop(sid)) {
+        ok = false;
+        message = "No such dev server.";
+      } else {
+        message = "stopped";
+      }
+    } else if (action == "devServerList") {
+      std::string lines;
+      for (const auto& info : DevServerManager::Instance().List()) {
+        lines += std::to_string(info.id) + "\t" + (info.running ? "running" : "exited")
+            + "\t" + std::to_string(info.pid) + "\t" + info.command + "\n";
+      }
+      output = lines;
+      message = "ok";
     } else if (action == "applyUpdate") {
       const std::string url = ExtractJsonStringField(request_json, "url");
       if (url.empty()) {

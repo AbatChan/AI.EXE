@@ -88,6 +88,33 @@ inline void SetHeadlessEnv(bool on) {
 
 }  // namespace command_runner_detail
 
+// Resolves the executable for an allowlisted program (venv-aware python).
+// Returns empty and sets err when missing or not allowed.
+inline std::filesystem::path ResolveProjectProgramExe(const std::filesystem::path& root,
+                                                      const std::string& program,
+                                                      std::string* err) {
+  using namespace command_runner_detail;
+  std::error_code ec;
+  if (program == "python" || program == "pip") {
+    std::filesystem::path venv = VenvPython(root);
+    std::filesystem::path exe = std::filesystem::exists(venv, ec) ? venv : SystemPython();
+    if (exe.empty() && err) *err = "Python is not installed. Install it from https://python.org";
+    return exe;
+  }
+  if (program == "node" || program == "npm" || program == "php" || program == "java" ||
+      program == "go" || program == "cargo" || program == "dotnet") {
+#ifdef _WIN32
+    std::filesystem::path exe = FindOnPath({program + ".exe", program + ".cmd", program + ".bat", program});
+#else
+    std::filesystem::path exe = FindOnPath({program});
+#endif
+    if (exe.empty() && err) *err = program + " is not installed or not on PATH.";
+    return exe;
+  }
+  if (err) *err = "Command not allowed: " + program;
+  return {};
+}
+
 // Runs `program args...` in `root`. program is allowlisted and argv-based.
 // pip is run as `<python> -m pip ...` inside the project venv (created if
 // needed) so installs never hit the system Python (PEP 668).

@@ -285,6 +285,11 @@
             hasIssues: item.hasIssues === true,
             items: checklistItems && checklistItems.length ? checklistItems : null,
             terminal,
+            devServer: item.devServer && typeof item.devServer === 'object' ? {
+              id: Math.max(0, Number(item.devServer.id) || 0),
+              url: String(item.devServer.url || '').slice(0, 300),
+              running: item.devServer.running !== false,
+            } : null,
             ts: Number(item.ts) || nowTs(),
           };
         })
@@ -763,6 +768,28 @@
             status: 'error',
           });
         }
+        const devServer = toolResult && toolResult.devServer && typeof toolResult.devServer === 'object'
+          ? toolResult.devServer
+          : null;
+        if (devServer && devServer.running) {
+          const devRows = String(terminal.outputPreview || '').trim()
+            ? buildObservationPreviewRows(terminal.outputPreview)
+            : null;
+          return buildInlineAgentActivityBase({
+            kind: 'command',
+            title: 'Dev server running',
+            detail: String(devServer.command || terminal.command || 'dev server'),
+            terminal,
+            devServer: {
+              id: Number(devServer.id) || 0,
+              url: String(devServer.url || ''),
+              running: true,
+            },
+            meta: String(devServer.url || `server #${devServer.id}`),
+            diffPreview: devRows && devRows.length ? devRows : null,
+            status: 'done',
+          });
+        }
         const runtimeMissing = Boolean(toolResult && toolResult.runtimeMissing);
         const exitLabel = runtimeMissing ? 'not installed' : (terminal.timedOut ? 'timed out' : (terminal.exitCode == null ? 'exit unknown' : `exit ${terminal.exitCode}`));
         const outputRows = String(terminal.outputPreview || '').trim()
@@ -1188,6 +1215,32 @@
         actions.appendChild(approveBtn);
         actions.appendChild(cancelBtn);
         item.appendChild(actions);
+      }
+
+      const devServerRow = activity && activity.kind === 'command'
+        && activity.devServer && typeof activity.devServer === 'object'
+        && Number(activity.devServer.id) > 0
+        ? activity.devServer : null;
+      if (devServerRow && inlineRow) {
+        const actions = document.createElement('span');
+        actions.className = 'msg-agent-devserver-actions';
+        const url = String(devServerRow.url || '').trim();
+        if (url) {
+          const openBtn = document.createElement('button');
+          openBtn.type = 'button';
+          openBtn.className = 'msg-agent-devserver-btn open';
+          openBtn.dataset.devServerOpenUrl = url;
+          openBtn.textContent = 'Open';
+          actions.appendChild(openBtn);
+        }
+        const stopBtn = document.createElement('button');
+        stopBtn.type = 'button';
+        stopBtn.className = 'msg-agent-devserver-btn stop';
+        stopBtn.dataset.devServerStop = String(Number(devServerRow.id) || 0);
+        stopBtn.textContent = devServerRow.running === false ? 'Stopped' : 'Stop';
+        stopBtn.disabled = devServerRow.running === false;
+        actions.appendChild(stopBtn);
+        inlineRow.appendChild(actions);
       }
 
       if (hasDiffDrawer) {
