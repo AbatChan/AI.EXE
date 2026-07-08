@@ -556,10 +556,16 @@ class AdapterManager:
         stage = "ready" if serving else ("starting" if proc_alive else ("stopped" if self.is_installed() else "not_installed"))
         detail = ""
         retry_hint = ""
-        if "AIEXE_INSTALL starting".lower() in lower and "AIEXE_INSTALL installed".lower() not in lower and not self.is_installed():
+        if serving:
+            # Port bound = login done + server up. The log-tail matchers below are
+            # STARTUP narration only — normal chats also emit AIEXE_MODEL/AIEXE_CREDITS
+            # lines, so matching them while serving pinned the status on "syncing"
+            # (or a stale "Waiting for Venice sign-in") forever.
+            detail = "Venice Pro is ready."
+        elif "AIEXE_INSTALL starting".lower() in lower and "AIEXE_INSTALL installed".lower() not in lower and not self.is_installed():
             stage = "installing"
             detail = "Downloading the adapter and dependencies."
-        if network_issue:
+        elif network_issue:
             stage = "network"
             detail = "Network looks slow or unavailable while reaching Venice or installing dependencies."
             retry_hint = "Try a stronger internet connection if this keeps retrying."
@@ -574,8 +580,6 @@ class AdapterManager:
             detail = "Reading models and credits from Venice."
         elif proc_alive and not serving:
             detail = "Chrome is opening and the adapter is getting ready."
-        elif serving:
-            detail = "Venice Pro is ready."
         return {"installed": self.is_installed(), "running": proc_alive or serving,
                 "serving": serving,
                 "pid": self._proc.pid if proc_alive else None,

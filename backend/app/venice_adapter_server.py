@@ -889,6 +889,20 @@ def _aiexe_stop_generation(driver, reason=""):
     return clicked
 
 
+def _aiexe_generation_running(driver):
+    """True while Venice shows an active Stop control (generation in progress). Read-only."""
+    try:
+        for _b in driver.find_elements(By.XPATH, VC_STOP_GENERATING_XPATH):
+            try:
+                if _b.is_displayed():
+                    return True
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return False
+
+
 AIEXE_TEXT_MODEL_CATALOG = [
     "Claude Sonnet 5", "GLM 5.2", "Kimi K2.7 Code", "MiniMax M3 Preview", "MiMo-V2.5",
     "Claude Fable 5", "NVIDIA Nemotron 3 Ultra", "Qwen 3.7 Plus", "Claude Opus 4.8",
@@ -2627,6 +2641,14 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
 
         inject_request_interceptor(driver, api_data_json, swap_body=not AIEXE_LAST_TURN_HAD_UPLOAD)
 
+        # Snapshot the last rendered reply BEFORE sending: during the wait loop the
+        # DOM's "last assistant bubble" is still the previous turn until the new
+        # reply renders, so an early DOM probe must only trust text that differs.
+        try:
+            _pre_send_reply = _aiexe_read_last_assistant_text(driver) or ""
+        except Exception:
+            _pre_send_reply = ""
+
         _sent = _aiexe_submit_prompt(driver)
         if _aiexe_cancel_key_requested(_chat_key):
             _aiexe_stop_generation(driver, "cancel after send")
@@ -2639,6 +2661,9 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
         last_data_time = time.time()
         streamed_content = ""
         _reasoning_open = False   # True while we're inside a <thinking>…</thinking> block
+        _dom_probe_prev = ""
+        _dom_probe_stable = 0
+        _dom_probe_ts = 0.0
 
         def _emit(txt):
             # Stream a piece of assistant text in the right shape for the response format.
@@ -2738,6 +2763,26 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
             if AIEXE_LAST_TURN_HAD_UPLOAD and eval_count == 0 and time.time() - last_data_time > 12:
                 print("AIEXE_ATTACH no interceptor chunks after upload — DOM fallback", flush=True)
                 break
+            # Worker-transport turns (ConversationsWorker) render the reply in the DOM
+            # while the interceptor stays silent. Once 10s pass with zero chunks, probe
+            # every 3s: a NEW reply (differs from pre-send), stable across two probes,
+            # with generation finished, means we can bail to the DOM fallback now
+            # instead of burning the full idle timeout (this was the 124s "thinking" stall).
+            if eval_count == 0 and time.time() - last_data_time > 10 and time.time() - _dom_probe_ts >= 3:
+                _dom_probe_ts = time.time()
+                try:
+                    _probe = _aiexe_read_last_assistant_text(driver) or ""
+                except Exception:
+                    _probe = ""
+                if _probe and _probe != _pre_send_reply:
+                    if _probe == _dom_probe_prev and not _aiexe_generation_running(driver):
+                        _dom_probe_stable += 1
+                        if _dom_probe_stable >= 2:
+                            print("AIEXE_STREAM worker transport detected — early DOM fallback", flush=True)
+                            break
+                    else:
+                        _dom_probe_stable = 0
+                    _dom_probe_prev = _probe
             if time.time() - last_data_time > timeout:
                 print(f"Timeout: No data received for {timeout} seconds. Exiting loop.")
                 try:
