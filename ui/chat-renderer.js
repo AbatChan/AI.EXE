@@ -631,9 +631,14 @@
       // Batched reads and searches used to fall through to the generic raw-observation
       // dump — render them as compact rows with the same collapsible drawer as edits.
       if (tool === 'read_files') {
-        const paths = Array.isArray(decision && decision.paths)
-          ? decision.paths.map((p) => normalizeWorkspacePath(p || '')).filter((p) => p && p !== '/')
-          : [];
+        // Models often send one comma-joined `path` instead of a `paths` array —
+        // parse both, else detail and meta both render "N files" ("Read 3 files 3 files").
+        const rawPathList = Array.isArray(decision && decision.paths)
+          ? decision.paths
+          : String((decision && decision.path) || '').split(',');
+        const paths = rawPathList
+          .map((p) => normalizeWorkspacePath(String(p || '').trim()))
+          .filter((p) => p && p !== '/');
         const countMatch = observation.match(/^read_files\s*\((\d+)\s*files?\)/i);
         const count = paths.length || Number(countMatch && countMatch[1]) || 0;
         return buildInlineAgentActivityBase({
@@ -642,7 +647,7 @@
           detail: paths.length
             ? paths.map((p) => formatAgentActivityPathLabel(p)).join(', ').slice(0, 120)
             : `${count || 'several'} files`,
-          meta: `${count || paths.length || '?'} files`,
+          meta: paths.length ? `${count} files` : '',
           diffPreview: buildObservationPreviewRows(observation),
           status: 'done',
         });
@@ -883,9 +888,12 @@
         });
       }
       if (tool === 'read_files') {
-        const paths = Array.isArray(decision && decision.paths)
-          ? decision.paths.map((p) => normalizeWorkspacePath(p || '')).filter((p) => p && p !== '/')
-          : [];
+        const rawPathList = Array.isArray(decision && decision.paths)
+          ? decision.paths
+          : String((decision && decision.path) || '').split(',');
+        const paths = rawPathList
+          .map((p) => normalizeWorkspacePath(String(p || '').trim()))
+          .filter((p) => p && p !== '/');
         return buildInlineAgentActivityBase({
           kind: 'read',
           title: 'Reading',
