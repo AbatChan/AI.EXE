@@ -1461,16 +1461,23 @@ function stripStreamDisplayFences(text) {
   if (!lead) return s;
   return s.slice(lead[0].length).replace(/\n?```\s*$/i, '');
 }
-function updateAgentStreamingFile(path, content) {
+function updateAgentStreamingFile(path, content, mode = 'file') {
   if (!activeAgentStreamState) return;
   const prev = activeAgentStreamState.streamingFile;
   if (!prev || prev.path !== String(path || '')) {
     recordDebugTrace('agent_stream_file_begin', {
       chatId: String(activeAgentStreamState.chatId || ''),
       path: String(path || ''),
+      mode: String(mode || 'file'),
     });
   }
-  activeAgentStreamState.streamingFile = { path: String(path || ''), content: stripStreamDisplayFences(content) };
+  activeAgentStreamState.streamingFile = {
+    path: String(path || ''),
+    content: stripStreamDisplayFences(content),
+    // 'edits' = a find/replace edit program is being generated, not file content —
+    // the live card must say so instead of rendering JSON as if it were the file.
+    mode: mode === 'edits' ? 'edits' : 'file',
+  };
   scheduleLiveStreamRender();
 }
 function clearAgentStreamingFile() {
@@ -1632,6 +1639,72 @@ function nowTs() {
   return Date.now();
 }
 
+
+function isPreflightDeferralReply(value) {
+  const text = String(value || '').trim().toLowerCase().replace(/[’]/g, "'");
+  if (!text) return false;
+  return Boolean(
+    /^(that's|thats|that is|it'?s|its)?\s*(up to you|your call|your choice|you choose|you decide)\.?$/.test(text)
+    || /^(anywhere|any one|any folder|any project|whatever|whichever|do what you think|do what is best|choose for me)\.?$/.test(text)
+    || /\b(up to you|your call|your choice|you decide|choose for me|whatever is best)\b/.test(text)
+  );
+}
+
+function isLowSignalPreflightReply(value) {
+  const text = String(value || '').trim().toLowerCase().replace(/[’]/g, "'");
+  if (!text) return true;
+  return Boolean(
+    isPreflightDeferralReply(text)
+    || /^(yes|yeah|yep|sure|ok|okay|alright|do it|go ahead|continue|proceed|here you go|here you go then|done|nice|good)\.?$/.test(text)
+  );
+}
+
+function scorePotentialPreflightOriginalTask(value) {
+  const text = String(value || '').trim();
+  const lower = text.toLowerCase();
+  if (!text || text.length < 8) return 0;
+  if (isLowSignalPreflightReply(text)) return 0;
+  if (/where would you like me to save|do you want me to keep using|create a new one|use existing workspace/i.test(text)) return 0;
+
+  let score = 0;
+  if (/\b(create|build|make|generate|scaffold|implement|code|write|design|develop|fix|debug|modify|add)\b/i.test(text)) score += 5;
+  if (/\b(landing\s*page|website|web\s*page|app|game|dashboard|portfolio|e-?commerce|html|css|javascript|js|react|python|pygame|file|project)\b/i.test(text)) score += 5;
+  if (/\b(hulk|avengers|spiderman|snake)\b/i.test(text)) score += 2;
+  if (text.length > 18) score += 1;
+  return score;
+}
+
+function derivePendingPreflightOriginalTask(chatId, latestTask = '') {
+  const latest = String(latestTask || '').trim();
+  if (scorePotentialPreflightOriginalTask(latest) >= 5) return latest;
+
+  const chat = findChatById(chatId);
+  const activeThread = getChatActiveThread(chat);
+  const messages = activeThread && Array.isArray(activeThread.messages)
+    ? activeThread.messages
+    : (chat && Array.isArray(chat.messages) ? chat.messages : []);
+
+  let best = '';
+  let bestScore = 0;
+
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const msg = messages[i];
+    if (!msg || msg.role !== 'user') continue;
+    const text = String(msg.text || '').trim();
+    if (!text || text === latest) continue;
+
+    const score = scorePotentialPreflightOriginalTask(text);
+    if (score > bestScore) {
+      best = text;
+      bestScore = score;
+    }
+    if (score >= 8) break;
+  }
+
+  return best || latest;
+}
+
+
 function getPendingPreflightConfirmation(chatId) {
   return pendingPreflightConfirmations.get(String(chatId || '')) || null;
 }
@@ -1676,8 +1749,36 @@ function setPendingPreflightConfirmation(chatId, payload) {
 async function resolvePendingPreflightConfirmation(chatId, latestUserMessage) {
   const pending = getPendingPreflightConfirmation(chatId);
   if (!pending) return null;
+
   const latest = String(latestUserMessage || '').trim();
   if (!latest) return null;
+
+  const originalTask = derivePendingPreflightOriginalTask(chatId, pending.originalTask || latest);
+  const pendingKind = String(pending.kind || '').trim().toLowerCase();
+
+  if (pendingKind === 'project_scope' && isPreflightDeferralReply(latest)) {
+    setPendingPreflightConfirmation(chatId, null);
+    const rewrittenPrompt = `${originalTask || latest}
+
+Create a new project for this request. The user deferred the project-scope choice to AI.EXE, and creating a fresh project is safest because the current workspace may be unrelated.`;
+    recordDebugTrace('preflight_confirmation_deferral_resolved', {
+      chatId: String(chatId || ''),
+      mode: 'create_new_project',
+      latestPreview: debugPreview(latest, 160),
+      originalTaskPreview: debugPreview(originalTask, 220),
+    }, {
+      chatId: String(chatId || ''),
+      latestUserMessage: latest,
+      pendingConfirmation: pending,
+      rewrittenPrompt,
+    });
+    return {
+      resolved: true,
+      mode: 'create_new_project',
+      rewrittenPrompt,
+    };
+  }
+
   const prompt = [
     'Return exactly one JSON object. No prose.',
     'Keys: resolution, rewrittenPrompt',
@@ -1687,11 +1788,12 @@ async function resolvePendingPreflightConfirmation(chatId, latestUserMessage) {
     'If the user wants to use or open an existing folder or workspace, return use_existing_workspace.',
     'If the user is declining or cancelling, return cancelled.',
     'If the user answer is still ambiguous, return unresolved.',
+    'If the user says it is up to you / your choice / you decide, choose create_new_project unless they explicitly mention using the current or existing workspace.',
     'When resolution is create_new_project or use_existing_workspace, provide a rewrittenPrompt that merges the original task with that resolved choice.',
     '',
     `Pending confirmation message:\n${String(pending.userMessage || '').trim()}`,
     '',
-    `Original task:\n${String(pending.originalTask || '').trim()}`,
+    `Original task:\n${String(originalTask || pending.originalTask || '').trim()}`,
     '',
     `Latest user reply:\n${latest}`,
     '',
@@ -1699,7 +1801,10 @@ async function resolvePendingPreflightConfirmation(chatId, latestUserMessage) {
   ].join('\n');
 
   let parsed = null;
-  const remote = await requestSelectedRemoteTextCompletion(prompt, 120);
+  const remote = await requestSelectedRemoteTextCompletion(prompt, 120, '', {
+    isolatedAdapterChat: true,
+    adapterChatScope: 'preflight-confirmation',
+  });
   parsed = extractFirstJsonObject(remote && remote.ok ? remote.output : '');
   if (!parsed && nativeBridge.available()) {
     const nativeRes = await nativeBridge.invoke('infer', {
@@ -1709,9 +1814,11 @@ async function resolvePendingPreflightConfirmation(chatId, latestUserMessage) {
     });
     parsed = extractFirstJsonObject(nativeRes && nativeRes.ok ? nativeRes.output : '');
   }
+
   const resolution = ['create_new_project', 'use_existing_workspace', 'cancelled', 'unresolved'].includes(String(parsed && parsed.resolution || '').toLowerCase())
     ? String(parsed.resolution).toLowerCase()
     : 'unresolved';
+
   if (resolution === 'unresolved') {
     const lower = latest.toLowerCase();
     if (/^(yes|yeah|yep|sure|ok|okay|absolutely|definitely|please do|go ahead|do it|yes sure|affirmative)\b/.test(lower)) {
@@ -1719,7 +1826,7 @@ async function resolvePendingPreflightConfirmation(chatId, latestUserMessage) {
       return {
         resolved: true,
         mode: 'create_new_project',
-        rewrittenPrompt: `${pending.originalTask || latest}\n\nCreate a new project for this request.`,
+        rewrittenPrompt: `${originalTask || latest}\n\nCreate a new project for this request.`,
       };
     }
     if (/\b(open|use)\b[\s\S]*\b(existing|current)\b[\s\S]*\b(folder|project|workspace)\b/.test(lower)) {
@@ -1727,7 +1834,7 @@ async function resolvePendingPreflightConfirmation(chatId, latestUserMessage) {
       return {
         resolved: true,
         mode: 'use_existing_workspace',
-        rewrittenPrompt: `${pending.originalTask || latest}\n\nUse the existing folder or workspace instead of creating a new project.`,
+        rewrittenPrompt: `${originalTask || latest}\n\nUse the existing folder or workspace instead of creating a new project.`,
       };
     }
     if (/^(no|nope|cancel|never mind|stop)\b/.test(lower)) {
@@ -1738,15 +1845,19 @@ async function resolvePendingPreflightConfirmation(chatId, latestUserMessage) {
       };
     }
   }
+
   if (resolution === 'unresolved') return null;
+
   setPendingPreflightConfirmation(chatId, null);
   if (resolution === 'cancelled') {
     return { resolved: true, mode: 'cancelled' };
   }
+
   const rewrittenPrompt = String(parsed && parsed.rewrittenPrompt ? parsed.rewrittenPrompt : '').trim()
     || (resolution === 'create_new_project'
-      ? `${pending.originalTask || latest}\n\nCreate a new project for this request.`
-      : `${pending.originalTask || latest}\n\nUse the existing folder or workspace instead of creating a new project.`);
+      ? `${originalTask || latest}\n\nCreate a new project for this request.`
+      : `${originalTask || latest}\n\nUse the existing folder or workspace instead of creating a new project.`);
+
   return {
     resolved: true,
     mode: resolution,
@@ -1761,11 +1872,13 @@ function submitPendingPreflightChoice(chatId, mode) {
   const normalizedMode = String(mode || '').trim().toLowerCase();
   if (!chat || !pending) return false;
 
+  const effectiveTask = derivePendingPreflightOriginalTask(chatId, pending.originalTask || '');
+
   let rewrittenPrompt = '';
   if (normalizedMode === 'create_new_project') {
-    rewrittenPrompt = `${pending.originalTask || ''}\n\nStart from a fresh workspace.`.trim();
+    rewrittenPrompt = `${effectiveTask || pending.originalTask || ''}\n\nStart from a fresh workspace.`.trim();
   } else if (normalizedMode === 'use_existing_workspace') {
-    rewrittenPrompt = `${pending.originalTask || ''}\n\n[System Note: The user chose to use the current open workspace. Do not call new_project. If this is a request to build an app, generate the expected files directly in this workspace.]`.trim();
+    rewrittenPrompt = `${effectiveTask || pending.originalTask || ''}\n\n[System Note: The user chose to use the current open workspace. Do not call new_project. If this is a request to build an app, generate the expected files directly in this workspace.]`.trim();
   } else {
     return false;
   }
@@ -1773,11 +1886,12 @@ function submitPendingPreflightChoice(chatId, mode) {
   recordDebugTrace('preflight_confirmation_choice_submitted', {
     chatId: String(chatId || ''),
     mode: normalizedMode,
-    taskPreview: debugPreview(String(pending.originalTask || ''), 220),
+    taskPreview: debugPreview(String(effectiveTask || pending.originalTask || ''), 220),
   }, {
     chatId: String(chatId || ''),
     mode: normalizedMode,
     pendingConfirmation: pending,
+    effectiveTask,
     workspace: getWorkspaceDebugSnapshot(),
   });
 
@@ -1789,8 +1903,8 @@ function submitPendingPreflightChoice(chatId, mode) {
   const isCreateNewProject = normalizedMode === 'create_new_project';
   const isUseExistingWorkspace = normalizedMode === 'use_existing_workspace';
   const startReply = () => {
-    void requestAssistantReply(chat.id, String(pending.originalTask || '').trim() || rewrittenPrompt, true, {
-      latestUserOverride: String(pending.originalTask || '').trim() || rewrittenPrompt,
+    void requestAssistantReply(chat.id, String(effectiveTask || pending.originalTask || '').trim() || rewrittenPrompt, true, {
+      latestUserOverride: String(effectiveTask || pending.originalTask || '').trim() || rewrittenPrompt,
       preflightChoiceResolved: normalizedMode,
       approvedNewProject: isCreateNewProject,
       skipNewProjectConfirmation: isCreateNewProject,
@@ -1798,21 +1912,13 @@ function submitPendingPreflightChoice(chatId, mode) {
     });
   };
 
-  // NOTE: read the live workspace via the accessor. There is no `workspace`
-  // variable in this scope — referencing one here used to throw ReferenceError
-  // right after beginInferenceRequest(), stranding the spinner forever (the close
-  // branch was never even reached).
   const currentWorkspaceSnapshot = getWorkspaceDebugSnapshot();
   if (isCreateNewProject && currentWorkspaceSnapshot && currentWorkspaceSnapshot.workspaceRootName) {
-    // Close the existing workspace before handing off to the agent so the
-    // planner sees a clean state from step 1 rather than wasting steps
-    // reading old workspace files before the new_project tool runs.
     recordDebugTrace('preflight_close_workspace_started', {
       chatId: String(chatId || ''),
       workspaceRootName: String(currentWorkspaceSnapshot.workspaceRootName || ''),
     }, { chatId: String(chatId || '') });
-    // Guard the native close with a timeout so a stalled bridge can never leave
-    // the UI stuck in an infinite "thinking" state.
+
     Promise.race([
       Promise.resolve(invokeWorkspaceAction('workspaceCloseRoot', {})),
       new Promise((resolve) => setTimeout(() => resolve({ ok: false, timedOut: true }), 10000)),
@@ -1826,9 +1932,6 @@ function submitPendingPreflightChoice(chatId, mode) {
         resetWorkspaceForNewProject();
         startReply();
       } else {
-        // Close failed/stalled — do not start the agent with a live workspace.
-        // The executor would retry close, but starting here risks the planner
-        // inspecting the wrong project. Surface the error and let the user retry.
         endInferenceRequest();
         showAppNotification({
           message: closeRes && closeRes.timedOut
@@ -1844,6 +1947,7 @@ function submitPendingPreflightChoice(chatId, mode) {
   } else {
     startReply();
   }
+
   return true;
 }
 
@@ -1856,6 +1960,31 @@ function dismissPendingPreflightChoice(chatId, options = {}) {
     activeProjectScopeResolve = null;
   }
   setPendingPreflightConfirmation(key, null);
+
+  // A composer confirmation is part of the active submit/preflight lifecycle. When
+  // the user cancels or presses Esc, fully resolve that lifecycle too; otherwise the
+  // UI can stay stuck on "Checking what needs confirmation..." even though the prompt
+  // has been dismissed.
+  try {
+    const token = activeInferenceRequest;
+    const ownsActiveInference = token && String(token.chatId || '') === key;
+    if (ownsActiveInference && !token.cancelled) {
+      cancelActiveInference();
+    } else if (pendingInferenceCount > 0 && String(activeChatId || '') === key) {
+      endInferenceRequest();
+    }
+    setThinkingStatus('');
+    clearTypingIndicator();
+    if (typeof setActiveAgentStreamStatus === 'function') setActiveAgentStreamStatus(key, '');
+    if (activeAgentStreamState && String(activeAgentStreamState.chatId || '') === key) {
+      activeStreamRawText = '';
+      activeStreamText = '';
+      if (typeof cancelLiveStreamRender === 'function') cancelLiveStreamRender();
+    }
+  } catch (_) { }
+  try { renderComposerConfirmationUi(); } catch (_) { }
+  try { updateContinueButtonVisibility(); } catch (_) { }
+
   resolveChatNamingFallback(key, 'New Chat');
   recordDebugTrace('preflight_confirmation_dismissed', {
     chatId: key,
@@ -2595,6 +2724,7 @@ function editUserMessage(chatId, messageTs) {
 }
 
 function saveEditedUserMessage(chatId, messageTs, nextText) {
+  try { resetStaleInferenceRuntime('saveEditedUserMessage:start'); } catch (_) { }
   if (pendingInferenceCount > 0) {
     if (typeof showComposerNotice === 'function' && !isCurrentViewInferenceChat()) {
       showComposerNotice('Another chat is still responding — wait for it to finish before editing.');
@@ -2700,6 +2830,7 @@ function removeArtifactsForChatAfter(chatId, minMessageTs) {
 }
 
 function retryAssistantMessage(chatId, messageTs) {
+  try { resetStaleInferenceRuntime('retryAssistantMessage:start'); } catch (_) { }
   if (pendingInferenceCount > 0) {
     if (typeof showComposerNotice === 'function' && !isCurrentViewInferenceChat()) {
       showComposerNotice('Another chat is still responding — wait for it to finish before retrying.');
@@ -3391,7 +3522,268 @@ function getComposerPreflightConfirmationChoices(pending = null) {
   ];
 }
 
+const pendingAgentCommandApprovals = new Map();
+const agentCommandApprovalSessionId = `approval_session_${nowTs().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+const scheduledInterruptedAgentCommandApprovals = new Set();
+
+function buildAgentCommandApprovalPayload(payload = {}) {
+  const command = String(payload.command || '').trim();
+  if (!command) return null;
+  return {
+    command,
+    userMessage: String(payload.userMessage || '').trim(),
+    createdAt: Number(payload.createdAt) || nowTs(),
+    sessionId: String(payload.sessionId || agentCommandApprovalSessionId),
+    active: payload.active === false ? false : true,
+  };
+}
+
+function getAgentCommandApprovalMessageList(chat) {
+  if (!chat || typeof chat !== 'object') return [];
+  try {
+    const thread = typeof getChatActiveThread === 'function' ? getChatActiveThread(chat) : null;
+    if (thread && Array.isArray(thread.messages)) return thread.messages;
+  } catch (_) { }
+  return Array.isArray(chat.messages) ? chat.messages : [];
+}
+
+function patchLatestAgentApprovalMessage(chatId, command, nextText, metaPatch = {}) {
+  const chat = findChatById(chatId);
+  if (!chat) return false;
+  const cleanCommand = String(command || '').trim();
+  const messages = getAgentCommandApprovalMessageList(chat);
+  let changed = false;
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const msg = messages[i];
+    if (!msg || msg.role !== 'ai') continue;
+    const text = String(msg.text || msg.content || '').trim();
+    const meta = msg.agentMeta && typeof msg.agentMeta === 'object' ? msg.agentMeta : {};
+    const looksLikeApproval = meta.waitingForApproval === true
+      || /Permission needed to run/i.test(text)
+      || (cleanCommand && text.includes(cleanCommand));
+    if (!looksLikeApproval) continue;
+    msg.text = String(nextText || '').trim();
+    if ('content' in msg) msg.content = msg.text;
+    msg.agentMeta = {
+      ...meta,
+      waitingForApproval: false,
+      completedAt: nowTs(),
+      collapsed: false,
+      ...metaPatch,
+    };
+    changed = true;
+    break;
+  }
+  if (changed) {
+    try {
+      const thread = typeof getChatActiveThread === 'function' ? getChatActiveThread(chat) : null;
+      if (thread && typeof thread === 'object') thread.needsContinue = true;
+    } catch (_) { }
+    chat.needsContinue = true;
+    chat.updatedAt = nowTs();
+    saveChats();
+    if (String(activeChatId || '') === String(chatId || '')) {
+      renderActiveChat();
+      try { updateContinueButtonVisibility(); } catch (_) { }
+    }
+  }
+  return changed;
+}
+
+function markAgentCommandApprovalInterrupted(chatId, approval = {}) {
+  const key = String(chatId || '').trim();
+  if (!key) return false;
+  const command = String((approval && approval.command) || '').trim();
+  pendingAgentCommandApprovals.delete(key);
+  const chat = findChatById(key);
+  if (chat) {
+    chat.pendingAgentCommandApproval = null;
+    chat.needsContinue = true;
+    try {
+      const thread = typeof getChatActiveThread === 'function' ? getChatActiveThread(chat) : null;
+      if (thread && typeof thread === 'object') thread.needsContinue = true;
+    } catch (_) { }
+    chat.updatedAt = nowTs();
+    saveChats();
+  }
+  const message = `Approval was interrupted before \`${command || 'the command'}\` ran.\n\nNo command was executed. The project files are still saved. Press Continue to request approval again and finish verification.`;
+  patchLatestAgentApprovalMessage(key, command, message, {
+    approvalInterrupted: true,
+  });
+  recordDebugTrace('agent_command_approval_interrupted', {
+    chatId: key,
+    command,
+  }, {
+    chatId: key,
+    approval,
+  });
+  return true;
+}
+
+function markAgentCommandApprovalCancelled(chatId, command) {
+  const key = String(chatId || '').trim();
+  const cleanCommand = String(command || '').trim();
+  if (!key) return false;
+  pendingAgentCommandApprovals.delete(key);
+  const chat = findChatById(key);
+  if (chat) {
+    chat.pendingAgentCommandApproval = null;
+    chat.needsContinue = true;
+    try {
+      const thread = typeof getChatActiveThread === 'function' ? getChatActiveThread(chat) : null;
+      if (thread && typeof thread === 'object') thread.needsContinue = true;
+    } catch (_) { }
+    chat.updatedAt = nowTs();
+    saveChats();
+  }
+  const message = `Approval cancelled. I did not run \`${cleanCommand || 'the command'}\`.\n\nAll project files are still saved. Press Continue when you want me to request approval again and verify the app.`;
+  patchLatestAgentApprovalMessage(key, cleanCommand, message, {
+    approvalCancelled: true,
+  });
+  recordDebugTrace('agent_command_approval_cancelled', {
+    chatId: key,
+    command: cleanCommand,
+  }, {
+    chatId: key,
+    command: cleanCommand,
+  });
+  return true;
+}
+
+function scheduleAgentCommandApprovalInterrupted(chatId, approval = {}) {
+  const key = String(chatId || '').trim();
+  if (!key || scheduledInterruptedAgentCommandApprovals.has(key)) return false;
+  scheduledInterruptedAgentCommandApprovals.add(key);
+  window.setTimeout(() => {
+    scheduledInterruptedAgentCommandApprovals.delete(key);
+    const chat = findChatById(key);
+    const latest = buildAgentCommandApprovalPayload(
+      chat && chat.pendingAgentCommandApproval ? chat.pendingAgentCommandApproval : null
+    );
+    if (!latest) return;
+    if (latest.sessionId === agentCommandApprovalSessionId && latest.active) return;
+    markAgentCommandApprovalInterrupted(key, latest || approval);
+  }, 0);
+  return true;
+}
+
+function getPendingAgentCommandApproval(chatId) {
+  const key = String(chatId || '').trim();
+  if (!key) return null;
+  const live = pendingAgentCommandApprovals.get(key) || null;
+  if (live) return live;
+
+  // On a fresh app session, any persisted approval is stale: never resurrect a
+  // command approval after restart, because that could make a network/install
+  // action look active without the original user context.
+  const chat = findChatById(key);
+  const persisted = buildAgentCommandApprovalPayload(chat && chat.pendingAgentCommandApproval ? chat.pendingAgentCommandApproval : null);
+  if (!persisted) return null;
+  if (persisted.sessionId === agentCommandApprovalSessionId && persisted.active) {
+    pendingAgentCommandApprovals.set(key, persisted);
+    return persisted;
+  }
+  // Do not mutate chats/render from a getter. This getter is called by composer
+  // rendering and keyboard handlers; synchronous recovery here can re-enter render
+  // and destabilize send/delete flows. Schedule stale approval cleanup instead.
+  scheduleAgentCommandApprovalInterrupted(key, persisted);
+  return null;
+}
+
+function setPendingAgentCommandApproval(chatId, payload) {
+  const key = String(chatId || '').trim();
+  if (!key) return false;
+  const chat = findChatById(key);
+  if (!payload) {
+    pendingAgentCommandApprovals.delete(key);
+    if (chat) {
+      chat.pendingAgentCommandApproval = null;
+      chat.updatedAt = nowTs();
+      saveChats();
+    }
+  } else {
+    const nextPayload = buildAgentCommandApprovalPayload(payload);
+    if (!nextPayload) return false;
+    pendingAgentCommandApprovals.set(key, nextPayload);
+    if (chat) {
+      chat.pendingAgentCommandApproval = { ...nextPayload };
+      chat.updatedAt = nowTs();
+      saveChats();
+    }
+  }
+  if (key === String(activeChatId || '')) {
+    composerConfirmSelectedIndex = 0;
+    renderComposerConfirmationUi();
+  }
+  return true;
+}
+
+function requestAgentCommandApproval(chatId, payload = {}) {
+  const command = String(payload.command || '').trim();
+  if (!command) return false;
+  const existing = getPendingAgentCommandApproval(chatId);
+  if (existing && existing.command === command) {
+    if (String(chatId || '') === String(activeChatId || '')) renderComposerConfirmationUi();
+    return true;
+  }
+  return setPendingAgentCommandApproval(chatId, {
+    command,
+    userMessage: payload.userMessage,
+  });
+}
+
+function getComposerCommandApprovalChoices() {
+  return [
+    { mode: 'approve_command', label: 'Approve once' },
+    { mode: 'cancel_command', label: 'Cancel' },
+  ];
+}
+
 function getActiveComposerPermissionRequest() {
+  const commandApproval = getPendingAgentCommandApproval(activeChatId);
+  if (commandApproval && activeChatId) {
+    const command = String(commandApproval.command || '').trim();
+    const title = String(commandApproval.userMessage || '').trim()
+      || `AI.EXE wants to run \`${command}\`. This may use the network or modify dependencies.`;
+    return {
+      kind: 'agent_command_approval',
+      title,
+      options: getComposerCommandApprovalChoices(),
+      onSelect: (mode) => {
+        const current = getPendingAgentCommandApproval(activeChatId);
+        const currentCommand = String((current && current.command) || command || '').trim();
+        setPendingAgentCommandApproval(activeChatId, null);
+        if (String(mode || '') === 'approve_command') {
+          recordDebugTrace('agent_command_approval_selected', {
+            chatId: String(activeChatId || ''),
+            command: currentCommand,
+            mode: 'approve_command',
+          }, { chatId: String(activeChatId || ''), command: currentCommand });
+          void runApprovedAgentCommandOnce(activeChatId, currentCommand);
+          return true;
+        }
+        recordDebugTrace('agent_command_approval_selected', {
+          chatId: String(activeChatId || ''),
+          command: currentCommand,
+          mode: 'cancel_command',
+        }, { chatId: String(activeChatId || ''), command: currentCommand });
+        markAgentCommandApprovalCancelled(activeChatId, currentCommand);
+        if (currentCommand) consumedAgentCommandApprovals.add(agentCommandApprovalKey(activeChatId, currentCommand));
+        return true;
+      },
+      onDismiss: () => {
+        const current = getPendingAgentCommandApproval(activeChatId);
+        const currentCommand = String((current && current.command) || command || '').trim();
+        setPendingAgentCommandApproval(activeChatId, null);
+        if (currentCommand) {
+          markAgentCommandApprovalCancelled(activeChatId, currentCommand);
+          if (currentCommand) consumedAgentCommandApprovals.add(agentCommandApprovalKey(activeChatId, currentCommand));
+        }
+        return true;
+      },
+    };
+  }
+
   const pending = getComposerPendingPreflightConfirmation();
   if (!pending || !activeChatId) return null;
   const title = pending.workspaceOpen === false
@@ -6918,6 +7310,107 @@ function isCurrentViewInferenceChat() {
   return Boolean(pendingInferenceCount > 0 && !inNewChatMode && middleViewMode === 'chat' && activeChatId);
 }
 
+
+function buildRuntimeStateSnapshot(reason = '') {
+  const token = activeInferenceRequest || null;
+  const activeChat = typeof getActiveChat === 'function' ? getActiveChat() : null;
+  return {
+    reason: String(reason || ''),
+    pendingInferenceCount: Number(pendingInferenceCount) || 0,
+    activeInferenceRequest: token ? {
+      chatId: String(token.chatId || ''),
+      cancelled: Boolean(token.cancelled),
+      done: Boolean(token.done),
+      finalizing: Boolean(token.finalizing),
+      startedAt: Number(token.startedAt) || 0,
+      hasAbortController: Boolean(token.abortController),
+      streamId: String(token.streamId || ''),
+    } : null,
+    activeChatId: String(activeChatId || ''),
+    activeChatExists: Boolean(activeChat),
+    inNewChatMode: Boolean(inNewChatMode),
+    middleViewMode: String(middleViewMode || ''),
+    agentRunChatId: String(typeof agentRunChatId !== 'undefined' ? (agentRunChatId || '') : ''),
+    agentElapsedActive: typeof isAgentElapsedTimerActive === 'function' ? Boolean(isAgentElapsedTimerActive()) : false,
+    queuedSends: Array.isArray(queuedSends) ? queuedSends.length : 0,
+    pendingPreflight: typeof getPendingPreflightConfirmation === 'function' ? Boolean(getPendingPreflightConfirmation(activeChatId)) : false,
+    pendingCommandApproval: typeof getPendingAgentCommandApproval === 'function' ? Boolean(getPendingAgentCommandApproval(activeChatId)) : false,
+    provider: typeof getSelectedInferenceProvider === 'function' ? String(getSelectedInferenceProvider() || '') : '',
+    sendButtonLoading: Boolean(sendBtn && sendBtn.classList && sendBtn.classList.contains('loading')),
+    hasTypingIndicator: Boolean(document.getElementById('typingIndicator')),
+  };
+}
+
+function hasLiveInferenceOwnerForRecovery() {
+  const token = activeInferenceRequest;
+  if (token && !token.cancelled && !token.done && !token.finalizing) {
+    return true;
+  }
+  if (typeof isAgentElapsedTimerActive === 'function' && isAgentElapsedTimerActive() && agentRunChatId) {
+    return true;
+  }
+  return false;
+}
+
+function resetStaleInferenceRuntime(reason = 'unknown') {
+  if ((Number(pendingInferenceCount) || 0) <= 0) return false;
+  if (hasLiveInferenceOwnerForRecovery()) return false;
+
+  const before = buildRuntimeStateSnapshot(reason);
+  pendingInferenceCount = 0;
+  activeInferenceRequest = null;
+  if (Array.isArray(queuedSends)) queuedSends.length = 0;
+  try { setThinkingStatus(''); } catch (_) { }
+  try { clearTypingIndicator(); } catch (_) { }
+  try { if (activeStreamRow && !activeStreamRow.isConnected) activeStreamRow = null; } catch (_) { }
+
+  if (typeof recordDebugTrace === 'function') {
+    recordDebugTrace('stale_inference_runtime_reset', {
+      reason: String(reason || ''),
+      previousPendingInferenceCount: String(before.pendingInferenceCount || 0),
+      queuedSends: String(before.queuedSends || 0),
+    }, before);
+  }
+
+  try { syncLiveInferenceUiState(); } catch (_) { }
+  showComposerNotice('Recovered a stale operation state — try sending again.', 4500);
+  return true;
+}
+
+if (!window.__aiExeRuntimeErrorMonitorInstalled) {
+  window.__aiExeRuntimeErrorMonitorInstalled = true;
+  window.addEventListener('error', (event) => {
+    try {
+      if (typeof recordDebugTrace === 'function') {
+        recordDebugTrace('window_error', {
+          message: String((event && event.message) || ''),
+          source: String((event && event.filename) || ''),
+          line: String((event && event.lineno) || ''),
+          column: String((event && event.colno) || ''),
+        }, {
+          error: String(event && event.error && event.error.stack ? event.error.stack : event && event.error ? event.error : ''),
+          state: buildRuntimeStateSnapshot('window_error'),
+        });
+      }
+    } catch (_) { }
+  });
+
+  window.addEventListener('unhandledrejection', (event) => {
+    try {
+      const reason = event && event.reason;
+      if (typeof recordDebugTrace === 'function') {
+        recordDebugTrace('window_unhandled_rejection', {
+          message: String(reason && reason.message ? reason.message : reason || ''),
+        }, {
+          error: String(reason && reason.stack ? reason.stack : reason || ''),
+          state: buildRuntimeStateSnapshot('window_unhandled_rejection'),
+        });
+      }
+    } catch (_) { }
+  });
+}
+
+
 function syncLiveInferenceUiState() {
   if (activeStreamRow && !activeStreamRow.isConnected) {
     activeStreamRow = null;
@@ -6998,6 +7491,9 @@ function completeInferenceRequest(token) {
   }
   endInferenceRequest();
   renderHistory();
+  recordComposerKeyboardDiagnostic('inference_complete_keyboard_state', null, {
+    chatId: String(token && token.chatId ? token.chatId : ''),
+  });
 }
 
 function commitInterruptedAgentRun(chatId, reason = 'Agent was interrupted before finishing.', snapshot = null) {
@@ -7613,7 +8109,13 @@ async function requestOllamaChatCompletion(provider, prompt, maxTokens, systemPr
   // Best-effort: switching chats mid-run maps cosmetically wrong, never incorrectly
   // (full context rides in every prompt).
   let chatId = '';
-  try { const c = getActiveChat(); chatId = (c && c.id) || ''; } catch (_) { /* noop */ }
+  if (extra && extra.adapterChatId) {
+    chatId = String(extra.adapterChatId || '').trim();
+  } else if (extra && extra.isolatedAdapterChat) {
+    chatId = buildIsolatedAdapterChatId((extra && extra.adapterChatScope) || 'internal');
+  } else {
+    try { const c = getActiveChat(); chatId = (c && c.id) || ''; } catch (_) { /* noop */ }
+  }
   try {
     const response = await fetch(getAIExeBackendUrl() + '/api/provider/complete', {
       method: 'POST',
@@ -7659,7 +8161,13 @@ async function streamOllamaChatCompletion(provider, prompt, handlers = {}, optio
     ? [{ role: 'system', content: String(options.systemPrompt) }, { role: 'user', content: String(prompt || '') }]
     : [{ role: 'user', content: String(prompt || '') }];
   let chatId = '';
-  try { const c = getActiveChat(); chatId = (c && c.id) || ''; } catch (_) { /* noop */ }
+  if (options && options.adapterChatId) {
+    chatId = String(options.adapterChatId || '').trim();
+  } else if (options && options.isolatedAdapterChat) {
+    chatId = buildIsolatedAdapterChatId((options && options.adapterChatScope) || 'internal-stream');
+  } else {
+    try { const c = getActiveChat(); chatId = (c && c.id) || ''; } catch (_) { /* noop */ }
+  }
   try {
     const response = await fetch(getAIExeBackendUrl() + '/api/provider/stream', {
       method: 'POST',
@@ -7712,7 +8220,13 @@ async function streamOllamaChatCompletion(provider, prompt, handlers = {}, optio
     if (err && err.name === 'AbortError') return { ok: false, cancelled: true, message: 'Cancelled by user.' };
     // fall through to the one-shot fallback
   }
-  const result = await requestOllamaChatCompletion(provider, prompt, options.maxTokens, options.systemPrompt || '', Boolean(options.thinkActive), { attachments: options.attachments, chatName: options.chatName });
+  const result = await requestOllamaChatCompletion(provider, prompt, options.maxTokens, options.systemPrompt || '', Boolean(options.thinkActive), {
+    attachments: options.attachments,
+    chatName: options.chatName,
+    isolatedAdapterChat: options.isolatedAdapterChat,
+    adapterChatScope: options.adapterChatScope,
+    adapterChatId: options.adapterChatId,
+  });
   if (result && result.ok && typeof handlers.onDelta === 'function' && result.output) {
     handlers.onDelta(String(result.output));
   }
@@ -7745,7 +8259,7 @@ const agentStepFunctionSchema = {
         path: { type: 'string' },
         paths: { type: 'array', items: { type: 'string' }, description: 'For read_files: the list of file paths to read together in one step.' },
         content: { type: 'string' },
-        command: { type: 'string', description: 'For run_command: the command to run (python/pip/node/npm only), e.g. "python main.py" or "pip install -r requirements.txt".' },
+        command: { type: 'string', description: 'For run_command: the command to run. Commands are policy-gated direct argv commands; installs/removes require approval. Examples: "python main.py", "node --check script.js", "php -l index.php", "go test -mod=readonly ./...".' },
         src_path: { type: 'string' },
         dst_path: { type: 'string' },
         scope: { type: 'string', description: 'Optional path prefix or specific file to restrict search_files to, e.g. /ui or /ui/agent-executor.js.' },
@@ -7849,6 +8363,39 @@ async function requestAnthropicTextCompletion(prompt, maxTokens) {
   }
 }
 
+function buildIsolatedAdapterChatId(scope = 'internal') {
+  const cleanScope = String(scope || 'internal')
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 40) || 'internal';
+  return `internal:${cleanScope}:${nowTs().toString(36)}:${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function inferInternalAdapterPromptScope(prompt = '') {
+  const text = String(prompt || '');
+  if (/Keys:\s*task_kind\s*,\s*project_name\s*,\s*primary_stack/i.test(text)) return 'agent-plan';
+  if (/Return exactly one JSON object/i.test(text) && /route\s*:/i.test(text)) return 'preflight-router';
+  if (/Return exactly one word/i.test(text)) return 'mode-router';
+  if (/Generate a complete, working software project in ONE response/i.test(text)) return 'project-files';
+  if (/FORMAT:\s*for EACH file/i.test(text)) return 'project-files';
+  if (/Return only valid JSON/i.test(text) && /"title"\s*:/i.test(text)) return 'chat-title';
+  return 'internal';
+}
+
+function shouldIsolateAdapterPrompt(prompt = '') {
+  const text = String(prompt || '').trim();
+  if (!text) return false;
+  return Boolean(
+    /^Return exactly one JSON object\b/i.test(text)
+    || /^Return exactly one word\b/i.test(text)
+    || /^Generate a complete, working software project in ONE response\b/i.test(text)
+    || /Keys:\s*task_kind\s*,\s*project_name\s*,\s*primary_stack/i.test(text)
+    || /FORMAT:\s*for EACH file/i.test(text)
+    || (/Return only valid JSON/i.test(text) && /"title"\s*:/i.test(text))
+  );
+}
+
 async function requestSelectedRemoteTextCompletion(prompt, maxTokens, systemPrompt = '', extra = {}) {
   // Don't start/retry an agent inference once the run was cancelled.
   if (activeInferenceRequest && activeInferenceRequest.cancelled) {
@@ -7857,11 +8404,22 @@ async function requestSelectedRemoteTextCompletion(prompt, maxTokens, systemProm
   const controller = (extra && extra.abortController instanceof AbortController)
     ? extra.abortController
     : new AbortController();
+  const requestExtra = { ...(extra || {}) };
+  if (
+    isVeniceAdapterSelected()
+    && !requestExtra.keepAdapterChatContext
+    && !requestExtra.adapterChatId
+    && !requestExtra.isolatedAdapterChat
+    && shouldIsolateAdapterPrompt(prompt)
+  ) {
+    requestExtra.isolatedAdapterChat = true;
+    requestExtra.adapterChatScope = requestExtra.adapterChatScope || inferInternalAdapterPromptScope(prompt);
+  }
   inFlightInferenceControllers.add(controller);
   noteAgentInferenceStart(String(prompt || '').length + String(systemPrompt || '').length);
   let result = null;
   try {
-    result = await requestRemoteTextCompletionForCapability('agent.writeFile', prompt, maxTokens, { systemPrompt, ...extra, abortController: controller });
+    result = await requestRemoteTextCompletionForCapability('agent.writeFile', prompt, maxTokens, { systemPrompt, ...requestExtra, abortController: controller });
   } finally {
     inFlightInferenceControllers.delete(controller);
     noteAgentInferenceEnd(result && result.ok ? String(result.output || '').length : 0);
@@ -7869,10 +8427,39 @@ async function requestSelectedRemoteTextCompletion(prompt, maxTokens, systemProm
   return result;
 }
 
+function takeAgentAdapterAttachmentsForPrompt(prompt, options = {}) {
+  if (Array.isArray(options && options.attachments) && options.attachments.length) {
+    return options.attachments;
+  }
+  const token = activeInferenceRequest;
+  if (!token || !isVeniceAdapterSelected()) return [];
+  if (!Array.isArray(token.attachments) || !token.attachments.length) return [];
+  if (token.agentAdapterAttachmentsSent) return [];
+  const text = String(prompt || '');
+  if (!/\[ATTACHMENTS\]|\(image attached/i.test(text)) return [];
+  token.agentAdapterAttachmentsSent = true;
+  pushDebugTrace('agent_adapter_attachments_forwarded', {
+    chatId: String(token.chatId || ''),
+    count: String(token.attachments.length),
+  });
+  return token.attachments;
+}
+
 async function requestRemoteTextCompletionForCapability(capability, prompt, maxTokens, options = {}) {
   const worker = selectWorkerForJob(capability || 'agent.writeFile', { allowLocal: false, allowRemote: true });
   if (!worker || worker.provider === 'local') return null;
   const provider = worker.provider;
+  const completionOptions = { ...(options || {}) };
+  if (
+    isVeniceAdapterSelected()
+    && !completionOptions.keepAdapterChatContext
+    && !completionOptions.adapterChatId
+    && !completionOptions.isolatedAdapterChat
+    && shouldIsolateAdapterPrompt(prompt)
+  ) {
+    completionOptions.isolatedAdapterChat = true;
+    completionOptions.adapterChatScope = completionOptions.adapterChatScope || inferInternalAdapterPromptScope(prompt);
+  }
   recordDebugTrace('worker_route_selected', {
     job: String(capability || 'agent.writeFile'),
     workerId: worker.id,
@@ -7886,27 +8473,46 @@ async function requestRemoteTextCompletionForCapability(capability, prompt, maxT
     promptLength: String(prompt || '').length,
     maxTokens: Number(maxTokens) || 0,
   });
-  if (options && options.preferStreaming) {
+  const adapterAttachments = takeAgentAdapterAttachmentsForPrompt(prompt, completionOptions);
+  const extraChatName = String((completionOptions && completionOptions.chatName) || '').trim();
+  if (completionOptions && completionOptions.preferStreaming) {
     const result = await streamRemoteChatCompletion(provider, prompt, {
       onDelta: typeof options.onDelta === 'function' ? options.onDelta : undefined,
     }, {
       maxTokens: Math.max(1, Number(maxTokens) || 64),
       // Wire the registered abortController into the actual stream so a timeout / new run
       // can cancel it (was dropped here, leaving file-gen streams un-killable = ghosts).
-      abortController: options.abortController instanceof AbortController ? options.abortController : undefined,
+      abortController: completionOptions.abortController instanceof AbortController ? completionOptions.abortController : undefined,
+      ...(adapterAttachments.length ? { attachments: adapterAttachments } : {}),
+      ...(extraChatName ? { chatName: extraChatName } : {}),
+      ...(completionOptions.isolatedAdapterChat ? { isolatedAdapterChat: true } : {}),
+      ...(completionOptions.adapterChatScope ? { adapterChatScope: completionOptions.adapterChatScope } : {}),
+      ...(completionOptions.adapterChatId ? { adapterChatId: completionOptions.adapterChatId } : {}),
     });
     return result ? { ...result, workerId: worker.id, provider, model: getProviderModel(provider) } : result;
   }
   if (getInferenceProviderDef(provider).protocol === 'ollama') {
-    const result = await requestOllamaChatCompletion(provider, prompt, maxTokens, options && options.systemPrompt ? options.systemPrompt : '');
+    const result = await requestOllamaChatCompletion(
+      provider,
+      prompt,
+      maxTokens,
+      completionOptions && completionOptions.systemPrompt ? completionOptions.systemPrompt : '',
+      Boolean(completionOptions && completionOptions.thinkActive),
+      {
+        ...(adapterAttachments.length ? { attachments: adapterAttachments } : {}),
+        ...(extraChatName ? { chatName: extraChatName } : {}),
+      },
+    );
     return result ? { ...result, workerId: worker.id } : result;
   }
   if (provider === 'anthropic') {
     const result = await requestAnthropicTextCompletion(prompt, maxTokens);
     return result ? { ...result, workerId: worker.id, provider, model: getProviderModel(provider) } : result;
   }
-  const abortSignal = options && options.abortController instanceof AbortController ? options.abortController.signal : null;
-  const result = await requestOpenAiCompatibleTextCompletion(provider, prompt, maxTokens, options && options.systemPrompt ? options.systemPrompt : '', abortSignal);
+  const abortSignal = completionOptions && completionOptions.abortController instanceof AbortController
+    ? completionOptions.abortController.signal
+    : null;
+  const result = await requestOpenAiCompatibleTextCompletion(provider, prompt, maxTokens, completionOptions && completionOptions.systemPrompt ? completionOptions.systemPrompt : '', abortSignal);
   return result ? { ...result, workerId: worker.id, provider, model: getProviderModel(provider) } : result;
 }
 
@@ -8535,8 +9141,15 @@ async function performWorkspaceInspectReply(chatId, promptText, requestToken, on
     const readResponse = await invokeWorkspaceBridgeAction('workspaceReadFile', { path });
     const readOk = Boolean(readResponse && readResponse.ok);
     activities.push({
-      kind: 'read', title: readOk ? 'Read' : 'Read failed', detail: path,
-      openPath: path, openKind: 'file', status: readOk ? 'done' : 'error', ts: Date.now(),
+      kind: 'read',
+      inlineMode: true,
+      title: readOk ? 'Read' : 'Read failed',
+      detail: path,
+      openPath: path,
+      openKind: 'file',
+      meta: readOk ? 'Open file' : '',
+      status: readOk ? 'done' : 'error',
+      ts: Date.now(),
     });
     if (!readOk) continue;
     inspectedFiles.push({
@@ -8641,7 +9254,170 @@ function showComposerNotice(text, ms = 4000) {
   }, ms);
 }
 
+
+
+
+
+
+function describeKeyboardDiagnosticElement(el) {
+  if (!el) return '';
+  try {
+    const tag = String(el.tagName || el.nodeName || '').toLowerCase();
+    const id = el.id ? `#${el.id}` : '';
+    const cls = el.className && typeof el.className === 'string'
+      ? `.${String(el.className).trim().replace(/\s+/g, '.')}`
+      : '';
+    const role = el.getAttribute && el.getAttribute('role') ? `[role=${el.getAttribute('role')}]` : '';
+    return `${tag}${id}${cls}${role}` || String(el);
+  } catch (_) {
+    return String(el);
+  }
+}
+
+function buildComposerKeyboardDiagnosticSnapshot(evt = null, extra = {}) {
+  const active = typeof document !== 'undefined' ? document.activeElement : null;
+  const target = evt && evt.target ? evt.target : null;
+  const input = typeof mainInput !== 'undefined' ? mainInput : null;
+  const confirm = typeof composerConfirm !== 'undefined' ? composerConfirm : null;
+
+  let pathPreview = '';
+  try {
+    if (evt && typeof evt.composedPath === 'function') {
+      pathPreview = evt.composedPath()
+        .slice(0, 8)
+        .map((item) => describeKeyboardDiagnosticElement(item))
+        .filter(Boolean)
+        .join(' > ');
+    }
+  } catch (_) { }
+
+  return {
+    key: evt && evt.key != null ? String(evt.key) : '',
+    code: evt && evt.code != null ? String(evt.code) : '',
+    type: evt && evt.type != null ? String(evt.type) : '',
+    inputType: evt && evt.inputType != null ? String(evt.inputType) : '',
+    shiftKey: evt ? String(Boolean(evt.shiftKey)) : '',
+    defaultPrevented: evt ? String(Boolean(evt.defaultPrevented)) : '',
+    eventPhase: evt && evt.eventPhase != null ? String(evt.eventPhase) : '',
+    target: describeKeyboardDiagnosticElement(target),
+    activeElement: describeKeyboardDiagnosticElement(active),
+    composedPath: pathPreview,
+    activeIsMainInput: String(Boolean(input && active === input)),
+    targetIsMainInput: String(Boolean(input && target === input)),
+    mainInputConnected: String(Boolean(input && document.body && document.body.contains(input))),
+    mainInputDisabled: String(Boolean(input && input.disabled)),
+    mainInputReadOnly: String(Boolean(input && input.readOnly)),
+    mainInputValueLength: String(input && typeof input.value === 'string' ? input.value.length : 0),
+    composerConfirmHidden: String(Boolean(confirm && confirm.classList && confirm.classList.contains('hidden'))),
+    composerConfirmAriaHidden: String(confirm ? confirm.getAttribute('aria-hidden') : ''),
+    pendingInferenceCount: String(typeof pendingInferenceCount !== 'undefined' ? pendingInferenceCount : ''),
+    activeInferenceChatId: String(activeInferenceRequest && activeInferenceRequest.chatId ? activeInferenceRequest.chatId : ''),
+    isCurrentViewInferenceChat: String(typeof isCurrentViewInferenceChat === 'function' ? Boolean(isCurrentViewInferenceChat()) : ''),
+    sendButtonLoading: String(Boolean(sendBtn && sendBtn.classList && sendBtn.classList.contains('loading'))),
+    hasTypingIndicator: String(Boolean(document.querySelector('.typing-indicator'))),
+    ...extra,
+  };
+}
+
+function recordComposerKeyboardDiagnostic(label, evt = null, extra = {}) {
+  try {
+    if (typeof recordDebugTrace !== 'function') return;
+    const snapshot = buildComposerKeyboardDiagnosticSnapshot(evt, extra);
+    recordDebugTrace(String(label || 'composer_keyboard_diagnostic'), snapshot, {
+      snapshot,
+      runtime: typeof buildRuntimeStateSnapshot === 'function'
+        ? buildRuntimeStateSnapshot(String(label || 'composer_keyboard_diagnostic'))
+        : null,
+    });
+  } catch (_) { }
+}
+
+function setupComposerKeyboardDiagnostics() {
+  if (typeof window === 'undefined' || typeof document === 'undefined') return;
+  if (window.__aiExeComposerKeyboardDiagnosticsBound) return;
+  window.__aiExeComposerKeyboardDiagnosticsBound = true;
+
+  document.addEventListener('keydown', (evt) => {
+    if (!evt || evt.key !== 'Enter') return;
+    recordComposerKeyboardDiagnostic('composer_keydown_capture_enter', evt);
+  }, true);
+
+  document.addEventListener('beforeinput', (evt) => {
+    if (!evt) return;
+    const inputType = String(evt.inputType || '');
+    if (inputType !== 'insertLineBreak' && inputType !== 'insertParagraph') return;
+    recordComposerKeyboardDiagnostic('composer_beforeinput_linebreak', evt);
+  }, true);
+
+  document.addEventListener('keyup', (evt) => {
+    if (!evt || evt.key !== 'Enter') return;
+    recordComposerKeyboardDiagnostic('composer_keyup_capture_enter', evt);
+  }, true);
+}
+
+
+
+function shouldComposerEnterCaptureSubmit(evt) {
+  if (!evt) return false;
+  if (evt.key !== 'Enter') return false;
+  if (evt.shiftKey || evt.altKey || evt.ctrlKey || evt.metaKey) return false;
+  if (evt.isComposing || evt.keyCode === 229) return false;
+
+  // If the approval UI owns Enter, let handleKey() keep handling approval.
+  try {
+    if (typeof getActiveComposerPermissionRequest === 'function' && getActiveComposerPermissionRequest()) {
+      return false;
+    }
+  } catch (_) { }
+
+  const liveInput = document.getElementById('mainInput');
+  if (!liveInput) return false;
+  if (liveInput.disabled || liveInput.readOnly) return false;
+
+  const target = evt.target;
+  const active = document.activeElement;
+
+  // Only intercept real composer Enter, not editor/file-viewer/modal textareas.
+  return Boolean(target === liveInput || active === liveInput);
+}
+
+function setupComposerEnterCaptureSubmitGuard() {
+  if (typeof window === 'undefined' || typeof document === 'undefined') return;
+  if (window.__aiExeComposerEnterCaptureSubmitGuardBound) return;
+  window.__aiExeComposerEnterCaptureSubmitGuardBound = true;
+
+  document.addEventListener('keydown', (evt) => {
+    if (!shouldComposerEnterCaptureSubmit(evt)) return;
+
+    evt.preventDefault();
+    evt.stopPropagation();
+    if (typeof evt.stopImmediatePropagation === 'function') {
+      evt.stopImmediatePropagation();
+    }
+
+    recordComposerKeyboardDiagnostic('composer_enter_capture_submit_guard', evt, {
+      delegatedTo: 'submitComposerMessage',
+    });
+
+    submitComposerMessage('capture_guard');
+  }, true);
+}
+
+
+// Enter path: SEND semantics only. When this chat owns a running op, Enter is
+// swallowed — stopping is reserved for Esc and for clicking the send button
+// while it shows the stop state. (Enter used to delegate to the button handler,
+// which made typing Enter mid-run silently kill the run.)
+function submitComposerMessage(source = 'enter') {
+  if (pendingInferenceCount > 0 && isCurrentViewInferenceChat()) {
+    recordComposerKeyboardDiagnostic('composer_enter_swallowed_while_running', null, { source });
+    return;
+  }
+  sendMessage();
+}
+
 function handleSendButtonClick() {
+  recordComposerKeyboardDiagnostic('composer_send_button_click', null);
   // Stop only the run the user is looking at; sends from other chats queue.
   if (pendingInferenceCount > 0 && isCurrentViewInferenceChat()) {
     cancelActiveInference();
@@ -10921,13 +11697,13 @@ async function requestAgentPlannerInferenceInner(prompt, maxTokens, grammar = ''
   }
   const remoteProvider = isRemoteInferenceProviderEnabled() ? getSelectedInferenceProvider() : null;
   if (remoteProvider) {
-    let remote = await requestSelectedRemoteTextCompletion(prompt, maxTokens, systemPrompt);
+    let remote = await requestSelectedRemoteTextCompletion(prompt, maxTokens, systemPrompt, { isolatedAdapterChat: true, adapterChatScope: 'agent-planner' });
     // Only retry for transient failures (rate limit / network). Skip retry for auth/credits errors.
     const hardFail = remote && !remote.ok && remote.httpStatus && (remote.httpStatus === 401 || remote.httpStatus === 402 || remote.httpStatus === 403);
     if (remote && remote.cancelled) return { ok: false, cancelled: true, message: 'Cancelled.' };
     if ((!remote || !remote.ok) && !hardFail) {
       await new Promise((resolve) => setTimeout(resolve, 2500));
-      remote = await requestSelectedRemoteTextCompletion(prompt, maxTokens, systemPrompt);
+      remote = await requestSelectedRemoteTextCompletion(prompt, maxTokens, systemPrompt, { isolatedAdapterChat: true, adapterChatScope: 'agent-planner' });
     }
     if (remote && remote.ok) {
       return {
@@ -11184,6 +11960,7 @@ const agentLoop = window.AIExeAgentLoop && typeof window.AIExeAgentLoop.createAg
     verifyAgentDoneCriteria,
     getChatManualContext: (chatId) => String((findChatById(chatId) || {}).manualContext || ''),
     requestProjectScopeConfirmation,
+    requestAgentCommandApproval,
     invokeWorkspaceAction,
     resetWorkspaceForNewProject,
     scheduleWorkspaceExplorerBackgroundRefresh,
@@ -11230,8 +12007,11 @@ const aiNativeAgentLoop = window.AIExeAiNativeAgentLoop && typeof window.AIExeAi
     consumeLiveAssistantText,
     sanitizeAssistantText,
     requestProjectScopeConfirmation,
+    requestAgentCommandApproval,
     invokeWorkspaceAction,
     deriveProjectNameFromTask,
+    generateAgentCompletionText,
+    getWorkspaceRootName: () => workspaceRootName,
     resetWorkspaceForNewProject,
     syncWorkspaceStateFromNative,
   })
@@ -11265,12 +12045,175 @@ function getExperimentalAgentTaskText(promptText = '') {
   return text.replace(/^\/ai-agent\b\s*/i, '').trim() || text;
 }
 
+
+function preflightRouteStatusText(decision) {
+  const route = String(decision && decision.route || '').toLowerCase();
+  const intent = String(decision && decision.intent || '').toLowerCase();
+
+  if (route === 'agent') {
+    if (intent === 'debug_existing_workspace') return 'Preparing to debug the workspace...';
+    if (intent === 'modify_existing_workspace') return 'Planning the workspace update...';
+    if (intent === 'create_or_build_deliverable') return 'Planning the build...';
+    return 'Preparing workspace work...';
+  }
+
+  if (route === 'inspect') {
+    if (intent === 'workspace_question') return 'Inspecting the workspace...';
+    return 'Checking the project files...';
+  }
+
+  if (route === 'confirm') {
+    return 'Checking what needs confirmation...';
+  }
+
+  if (route === 'chat') {
+    if (intent === 'casual_chat') return 'Thinking...';
+    if (intent === 'general_answer') return 'Writing the answer...';
+    return 'Preparing a response...';
+  }
+
+  return 'Thinking...';
+}
+
+function showPreflightRouteStatus(chatId, decision) {
+  const text = preflightRouteStatusText(decision);
+  if (!text) return;
+
+  const route = String(decision && decision.route || '').toLowerCase();
+
+  if (route === 'confirm') {
+    try {
+      recordDebugTrace('preflight_route_status_skipped_for_confirm', {
+        chatId: String(chatId || ''),
+        statusText: String(text || ''),
+      }, typeof buildRuntimeStateSnapshot === 'function'
+        ? buildRuntimeStateSnapshot('preflight_route_status_skipped_for_confirm')
+        : { chatId: String(chatId || ''), statusText: String(text || '') });
+    } catch (_) { }
+    return;
+  }
+
+  try {
+    setThinkingStatus(text);
+  } catch (_) {}
+
+  if (route === 'chat') {
+    setTypingIndicatorLoaderText(text);
+    return;
+  }
+
+  try {
+    if (typeof createLiveAssistantRow === 'function' && !hasConnectedLiveAssistantRow()) {
+      createLiveAssistantRow(chatId);
+    }
+  } catch (_) {}
+
+  try {
+    if (typeof setActiveAgentStreamStatus === 'function') {
+      setActiveAgentStreamStatus(chatId, text);
+    }
+  } catch (_) {}
+
+  try {
+    if (activeAgentStreamState) {
+      activeAgentStreamState.statusText = text;
+    }
+  } catch (_) {}
+
+  try {
+    activeStreamRawText = buildAgentProgressMarker(text);
+    activeStreamText = '';
+  } catch (_) {}
+
+  try {
+    updateTokenRing();
+  } catch (_) {}
+
+  try {
+    scheduleLiveStreamRender();
+  } catch (_) {}
+}
+
+
+
+function clearPreflightConfirmationLiveStatus(chatId, reason = '') {
+  const key = String(chatId || '');
+
+  try {
+    if (typingTimer) {
+      clearTimeout(typingTimer);
+      typingTimer = null;
+    }
+  } catch (_) { }
+
+  try { clearTypingIndicator(); } catch (_) { }
+  try { setThinkingStatus(''); } catch (_) { }
+
+  try {
+    if (typeof cancelLiveStreamRender === 'function') {
+      cancelLiveStreamRender();
+    }
+  } catch (_) { }
+
+  try {
+    activeStreamRawText = '';
+    activeStreamText = '';
+  } catch (_) { }
+
+  try {
+    if (activeStreamRow && activeStreamRow.isConnected) {
+      activeStreamRow.remove();
+    }
+    activeStreamRow = null;
+  } catch (_) { }
+
+  try {
+    if (
+      activeAgentStreamState
+      && (!key || String(activeAgentStreamState.chatId || '') === key)
+    ) {
+      if (typeof resetActiveAgentStreamState === 'function') {
+        resetActiveAgentStreamState();
+      } else {
+        activeAgentStreamState = null;
+      }
+    }
+  } catch (_) { }
+
+  try {
+    recordDebugTrace('preflight_confirmation_live_status_cleared', {
+      chatId: key,
+      reason: String(reason || ''),
+    }, typeof buildRuntimeStateSnapshot === 'function'
+      ? buildRuntimeStateSnapshot('preflight_confirmation_live_status_cleared')
+      : { chatId: key, reason: String(reason || '') });
+  } catch (_) { }
+}
+
+
+
 async function requestSelectedDeveloperAgentReply(requestToken, chatId, rawPromptText) {
   // Mark Continue/Retry/resume so a phased build resumes from plan.md even if the
   // re-planner drops phases this turn. Natural phrasing like "finish phase 1 then
   // ..." also resumes, but only when this chat already has an unfinished build.
   if (requestToken) requestToken.isAgentResume = shouldTreatAsAgentResumeRequest(chatId, rawPromptText);
   const promptText = resolveAgentResumeTaskText(chatId, rawPromptText);
+  // For existing-workspace edits/debugging, load the root listing before the
+  // planner locks file paths. This prevents stale guessed paths like /css/style.css
+  // when the real project is flat (/style.css, /script.js).
+  try {
+    await syncWorkspaceStateFromNative('before_agent_plan', { render: false, log: false });
+    const ctx = getWorkspaceContext();
+    const workspaceOpen = Boolean(
+      String(ctx && ctx.workspaceRootName || '').trim()
+      || Number(ctx && ctx.rootEntryCount) > 0
+      || Boolean(ctx && ctx.rootLoaded)
+      || normalizeWorkspacePath(ctx && ctx.currentPath ? ctx.currentPath : '/') !== '/'
+    );
+    if (workspaceOpen && !Boolean(ctx && ctx.rootLoaded)) {
+      await refreshWorkspaceTree(true);
+    }
+  } catch (_) { /* best-effort pre-plan workspace discovery */ }
   // Keep a live elapsed counter below the input for the whole agent run, and make
   // sure it is always torn down when the run ends (success, stop, or throw).
   startAgentElapsedTimer(0, chatId);
@@ -12359,16 +13302,182 @@ function deleteChatFromModal() {
   }
   artifactDetailKey = '';
   inNewChatMode = !activeChatId;
+  closeChatActionModal();
   saveChats();
   saveArtifacts();
-  renderArtifacts();
-  renderHistory();
-  renderSidebarCounts();
-  renderActiveChat();
-  syncSidebarNavState();
-  closeChatActionModal();
+
+  const refreshSteps = [
+    ['renderArtifacts', () => renderArtifacts()],
+    ['renderHistory', () => renderHistory()],
+    ['renderSidebarCounts', () => renderSidebarCounts()],
+    ['renderActiveChat', () => renderActiveChat()],
+    ['syncSidebarNavState', () => syncSidebarNavState()],
+  ];
+  const failedRefreshSteps = [];
+  refreshSteps.forEach(([name, fn]) => {
+    try {
+      fn();
+    } catch (err) {
+      failedRefreshSteps.push(name);
+      recordDebugTrace('chat_delete_refresh_step_failed', {
+        chatId: deletedChatId,
+        step: name,
+        message: String(err && err.message ? err.message : err),
+      }, {
+        chatId: deletedChatId,
+        step: name,
+        error: String(err && err.stack ? err.stack : err),
+        state: buildRuntimeStateSnapshot('chat_delete_refresh_step_failed'),
+      });
+    }
+  });
+
+  if (failedRefreshSteps.length) {
+    window.setTimeout(() => {
+      refreshSteps.forEach(([, fn]) => {
+        try { fn(); } catch (_) { }
+      });
+    }, 0);
+  }
 }
 
+
+const consumedAgentCommandApprovals = new Set();
+
+function agentCommandApprovalKey(chatId, command) {
+  return `${String(chatId || '').trim()}::${String(command || '').trim()}`;
+}
+
+function buildApprovedCommandActivity(command, title = 'Approved command', status = 'pending', meta = 'running once') {
+  const cleanCommand = String(command || '').trim();
+  return {
+    kind: 'command',
+    title,
+    detail: cleanCommand || 'command',
+    terminal: {
+      command: cleanCommand,
+      exitCode: null,
+      timedOut: false,
+      outputPreview: '',
+    },
+    meta,
+    status,
+  };
+}
+
+async function runApprovedAgentCommandOnce(chatId, command) {
+  const cleanCommand = String(command || '').trim();
+  const chat = findChatById(chatId) || findChatById(activeChatId);
+  if (!chat || !cleanCommand) return false;
+  const approvalKey = agentCommandApprovalKey(chat.id, cleanCommand);
+  if (consumedAgentCommandApprovals.has(approvalKey)) {
+    showComposerNotice('That command approval was already used.');
+    return false;
+  }
+  if (pendingInferenceCount > 0 && isCurrentViewInferenceChat()) {
+    showComposerNotice('Still responding in this chat — wait or stop it before approving a command.');
+    return false;
+  }
+  consumedAgentCommandApprovals.add(approvalKey);
+  if (typeof executeDeveloperToolCall !== 'function') {
+    appendErrorMessageToChat(chat.id, 'Cannot run the approved command because the agent executor is unavailable.');
+    return false;
+  }
+
+  const startedAt = Date.now();
+  const activities = [];
+  mergeAgentActivityIntoList(activities, buildApprovedCommandActivity(cleanCommand));
+
+  beginInferenceRequest();
+  setThinkingStatus(`Running approved command: ${cleanCommand}`);
+  try {
+    const decision = { action: 'tool', tool: 'run_command', command: cleanCommand };
+    const result = await executeDeveloperToolCall(
+      chat.id,
+      decision,
+      `Run approved command once: ${cleanCommand}`,
+      [],
+      null,
+      { approvedCommand: cleanCommand },
+    );
+    const activity = buildAgentActivityFromToolResult(decision, result, []);
+    if (activity) mergeAgentActivityIntoList(activities, activity);
+
+    const observation = String((result && result.observation) || '').trim()
+      || `Approved command \`${cleanCommand}\` finished.`;
+    commitAssistantMessage(chat.id, observation, observation, {
+      agentActivities: activities,
+      agentMeta: { startedAt, completedAt: Date.now(), collapsed: false },
+      // Approval commands are usually dependency/setup steps that unblock the
+      // previous agent action. Keep Continue available so the user can resume
+      // verification/fixing after the approved command finishes.
+      forceNeedsContinue: true,
+    });
+    return true;
+  } catch (err) {
+    const message = `Approved command \`${cleanCommand}\` failed to start: ${String((err && err.message) || err || 'unknown error')}`;
+    mergeAgentActivityIntoList(activities, buildApprovedCommandActivity(cleanCommand, 'Command approval failed', 'error', 'error'));
+    commitAssistantMessage(chat.id, message, message, {
+      agentActivities: activities,
+      agentMeta: { startedAt, completedAt: Date.now(), collapsed: false },
+      forceNeedsContinue: true,
+    });
+    return false;
+  } finally {
+    setThinkingStatus('');
+    endInferenceRequest();
+    renderHistory();
+  }
+}
+
+function cancelAgentCommandApproval(chatId, command) {
+  const cleanCommand = String(command || '').trim();
+  const chat = findChatById(chatId) || findChatById(activeChatId);
+  if (!chat || !cleanCommand) return false;
+  const approvalKey = agentCommandApprovalKey(chat.id, cleanCommand);
+  if (consumedAgentCommandApprovals.has(approvalKey)) {
+    showComposerNotice('That command approval was already handled.');
+    return false;
+  }
+  consumedAgentCommandApprovals.add(approvalKey);
+  const text = `Cancelled command approval for \`${cleanCommand}\`.`;
+  commitAssistantMessage(chat.id, text, text, {
+    agentActivities: [
+      buildApprovedCommandActivity(cleanCommand, 'Permission cancelled', 'error', 'cancelled'),
+    ],
+    agentMeta: { startedAt: Date.now(), completedAt: Date.now(), collapsed: false },
+    forceNeedsContinue: true,
+  });
+  return true;
+}
+
+function handleAgentCommandApprovalClick(event) {
+  const button = event && event.target && event.target.closest
+    ? event.target.closest('[data-agent-command-approval]')
+    : null;
+  if (!button) return false;
+  event.preventDefault();
+  event.stopPropagation();
+
+  const action = String(button.dataset.agentCommandApproval || '').trim();
+  const chatId = String(button.dataset.chatId || activeChatId || '').trim();
+  const command = String(button.dataset.command || '').trim();
+  if (!command) return false;
+
+  if (action === 'approve') {
+    button.disabled = true;
+    button.textContent = 'Running…';
+    void runApprovedAgentCommandOnce(chatId, command);
+    return true;
+  }
+  if (action === 'cancel') {
+    cancelAgentCommandApproval(chatId, command);
+    return true;
+  }
+  return false;
+}
+
+document.addEventListener('click', handleAgentCommandApprovalClick);
 if (chatSaveBtn) chatSaveBtn.addEventListener('click', saveChatNameFromModal);
 if (chatCancelBtn) chatCancelBtn.addEventListener('click', closeChatActionModal);
 if (chatDeleteBtn) chatDeleteBtn.addEventListener('click', deleteChatFromModal);
@@ -13706,6 +14815,20 @@ document.addEventListener('keydown', (e) => {
       if (fileViewerEditor) fileViewerEditor.focus();
       return;
     }
+    if (dismissComposerPermission()) {
+      e.preventDefault();
+      return;
+    }
+    // Snapshot BEFORE dismissing: Esc that closed something must not ALSO stop the run.
+    const escConsumedByUi = Boolean(
+      composerMenuOpen
+      || explorerImportMenuOpen
+      || explorerMoreMenuOpen
+      || speechRecognitionActive
+      || (chatActionBackdrop && chatActionBackdrop.classList.contains('open'))
+      || (authBackdrop && authBackdrop.classList.contains('open'))
+      || (settingsBackdrop && settingsBackdrop.classList.contains('open'))
+    );
     setComposerMenuOpen(false);
     closeExplorerMenus();
     stopDictationForEscape();
@@ -13715,6 +14838,13 @@ document.addEventListener('keydown', (e) => {
     cancelWorkspaceRenameDraft(false);
     cancelWorkspaceDraft();
     clearWorkspaceDragExpandTimers();
+    // Esc is the keyboard stop control: with nothing else to dismiss, stop the
+    // run the user is looking at (same rule as the stop-state send button).
+    if (!escConsumedByUi && pendingInferenceCount > 0 && isCurrentViewInferenceChat()) {
+      e.preventDefault();
+      recordComposerKeyboardDiagnostic('composer_escape_cancel_inference', e);
+      cancelActiveInference();
+    }
   }
   if (e.key === 'F2') {
     const tag = String((e.target && e.target.tagName) || '').toLowerCase();
@@ -14213,6 +15343,55 @@ function startNewChat() {
   return undefined;
 }
 
+
+function safePostMessageRefresh(chatId, reason = 'message_append') {
+  const failedSteps = [];
+  const steps = [
+    ['renderHistory', () => renderHistory()],
+    ['renderSidebarCounts', () => renderSidebarCounts()],
+    ['updateContinueButtonVisibility', () => updateContinueButtonVisibility()],
+    ['renderActiveChat', () => {
+      if (activeChatId === chatId) renderActiveChat();
+    }],
+    ['updateChatScrollDownButtonVisibility', () => updateChatScrollDownButtonVisibility()],
+  ];
+
+  steps.forEach(([name, fn]) => {
+    try {
+      fn();
+    } catch (err) {
+      failedSteps.push(name);
+      try {
+        recordDebugTrace('post_message_refresh_step_failed', {
+          chatId: String(chatId || ''),
+          reason: String(reason || ''),
+          step: name,
+          message: String(err && err.message ? err.message : err),
+        }, {
+          chatId: String(chatId || ''),
+          reason: String(reason || ''),
+          step: name,
+          error: String(err && err.stack ? err.stack : err),
+          state: typeof buildRuntimeStateSnapshot === 'function'
+            ? buildRuntimeStateSnapshot('post_message_refresh_step_failed')
+            : null,
+        });
+      } catch (_) { }
+    }
+  });
+
+  if (failedSteps.length) {
+    window.setTimeout(() => {
+      steps.forEach(([, fn]) => {
+        try { fn(); } catch (_) { }
+      });
+    }, 0);
+  }
+
+  return failedSteps.length === 0;
+}
+
+
 function appendErrorMessageToChat(chatId, text, forcedTs = 0) {
   // Adapter-down error: also offer the one-click start toast so recovery is one tap.
   if (/adapter (stream )?error/i.test(String(text || '')) && isVeniceAdapterSelected()) {
@@ -14293,13 +15472,7 @@ function appendMessageToChat(chatId, role, text, forcedTs = 0, options = {}) {
   }
   syncChatFromThread(chat, activeThread);
   saveChats();
-  renderHistory();
-  renderSidebarCounts();
-  updateContinueButtonVisibility();
-  if (activeChatId === chatId) {
-    renderActiveChat();
-  }
-  updateChatScrollDownButtonVisibility();
+  safePostMessageRefresh(chatId, `append:${role}`);
   if (shouldScheduleSmartRename) {
     scheduleSmartChatRename(chatId);
   }
@@ -14307,6 +15480,10 @@ function appendMessageToChat(chatId, role, text, forcedTs = 0, options = {}) {
 }
 
 function handleKey(e) {
+  if (e && e.key === 'Enter') {
+    recordComposerKeyboardDiagnostic('composer_handle_key_enter_start', e);
+  }
+
   if (getActiveComposerPermissionRequest()) {
     if (e.key === 'Escape') {
       e.preventDefault();
@@ -14327,19 +15504,18 @@ function handleKey(e) {
     }
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
+      recordComposerKeyboardDiagnostic('composer_handle_key_permission_submit', e);
       submitComposerPermissionSelection();
       return;
     }
   }
-  // Swallow Enter only in the chat that owns the running op; elsewhere
-  // sendMessage queues the message.
-  if (pendingInferenceCount > 0 && isCurrentViewInferenceChat()) {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-    }
+
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    recordComposerKeyboardDiagnostic('composer_handle_key_enter_send_button', e);
+    submitComposerMessage('handle_key');
     return;
   }
-  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
 }
 
 function autoResize(el) {
@@ -14751,8 +15927,35 @@ function emitLocalAssistantMessage(userText, assistantText) {
   const chat = (inNewChatMode || !getActiveChat()) ? createChat(userText) : getActiveChat();
   if (!chat) return;
   chatAutoScrollPinned = true;
-  appendMessageToChat(chat.id, 'user', userText);
-  appendMessageToChat(chat.id, 'ai', assistantText);
+  try {
+    appendMessageToChat(chat.id, 'user', userText);
+  } catch (err) {
+    recordDebugTrace('local_command_user_append_failed', {
+      chatId: String(chat.id || ''),
+      message: String(err && err.message ? err.message : err),
+    }, {
+      chatId: String(chat.id || ''),
+      error: String(err && err.stack ? err.stack : err),
+    });
+  }
+  try {
+    appendMessageToChat(chat.id, 'ai', assistantText);
+  } catch (err) {
+    recordDebugTrace('local_command_assistant_append_failed', {
+      chatId: String(chat.id || ''),
+      message: String(err && err.message ? err.message : err),
+    }, {
+      chatId: String(chat.id || ''),
+      error: String(err && err.stack ? err.stack : err),
+      assistantText: String(assistantText || ''),
+    });
+    showAppNotification({
+      title: 'Debug reply saved but render failed',
+      message: 'A UI refresh error blocked the debug reply from rendering. Check debug dump after the next fix.',
+      kind: 'warning',
+      durationMs: 7000,
+    });
+  }
 }
 
 function handleLocalCommand(rawValue) {
@@ -14790,7 +15993,17 @@ function handleLocalCommand(rawValue) {
     emitLocalAssistantMessage(input, `\`\`\`text\n${body}\n\`\`\``);
     return true;
   }
-  emitLocalAssistantMessage(input, 'Debug commands: :debug on | :debug off | :debug dump [N] [all] | :debug clear');
+  if (action === 'state') {
+    const state = buildRuntimeStateSnapshot(':debug state');
+    emitLocalAssistantMessage(input, `\`\`\`json\n${JSON.stringify(state, null, 2)}\n\`\`\``);
+    return true;
+  }
+  if (action === 'recover') {
+    const recovered = resetStaleInferenceRuntime(':debug recover');
+    emitLocalAssistantMessage(input, recovered ? 'Recovered stale inference state.' : 'No stale inference state detected.');
+    return true;
+  }
+  emitLocalAssistantMessage(input, 'Debug commands: :debug on | :debug off | :debug dump [N] [all] | :debug state | :debug recover | :debug clear');
   return true;
 }
 
@@ -15156,7 +16369,44 @@ async function startVeniceAdapterThenResend() {
   }
 }
 
+
+function requestTypingIndicatorAfterUserAppend(chatId, reason = '') {
+  const key = String(chatId || '').trim();
+  if (!key || typeof window === 'undefined') return;
+
+  window.setTimeout(() => {
+    try {
+      if (!findChatById(key)) return;
+      showTypingIndicator(key, Date.now());
+      recordDebugTrace('typing_indicator_requested_after_user_append', {
+        chatId: key,
+        reason: String(reason || ''),
+      }, typeof buildRuntimeStateSnapshot === 'function'
+        ? buildRuntimeStateSnapshot('typing_indicator_requested_after_user_append')
+        : {});
+    } catch (err) {
+      try {
+        recordDebugTrace('typing_indicator_after_user_append_failed', {
+          chatId: key,
+          reason: String(reason || ''),
+          message: String(err && err.message ? err.message : err),
+        }, {
+          chatId: key,
+          reason: String(reason || ''),
+          error: String(err && err.stack ? err.stack : err),
+          state: typeof buildRuntimeStateSnapshot === 'function'
+            ? buildRuntimeStateSnapshot('typing_indicator_after_user_append_failed')
+            : null,
+        });
+      } catch (_) { }
+    }
+  }, 0);
+}
+
+
 async function sendMessage() {
+  recordComposerKeyboardDiagnostic('send_message_start_keyboard_state', null);
+  resetStaleInferenceRuntime('sendMessage:start');
   const operationRunning = pendingInferenceCount > 0;
   if (operationRunning && isCurrentViewInferenceChat()) {
     showComposerNotice('Still responding in this chat — press stop to interrupt, or wait.');
@@ -15199,6 +16449,9 @@ async function sendMessage() {
   if (!chat) return;
   chatAutoScrollPinned = true;
   appendMessageToChat(chat.id, 'user', userText, 0, sentAttachments.length ? { attachments: sentAttachments } : {});
+  if (!operationRunning) {
+    requestTypingIndicatorAfterUserAppend(chat.id, 'sendMessage:user-appended');
+  }
   const replyOptions = {
     thinkForced: Boolean(thinkControl.thinkForced),
     attachments: adapterImages,
@@ -15218,7 +16471,18 @@ async function sendMessage() {
     return;
   }
   beginInferenceRequest();
-  void requestAssistantReply(chat.id, modelPrompt, true, replyOptions);
+  Promise.resolve(requestAssistantReply(chat.id, modelPrompt, true, replyOptions)).catch((err) => {
+    recordDebugTrace('send_request_failed', {
+      chatId: String(chat.id || ''),
+      message: String(err && err.message ? err.message : err),
+    }, {
+      chatId: String(chat.id || ''),
+      error: String(err && err.stack ? err.stack : err),
+      state: buildRuntimeStateSnapshot('send_request_failed'),
+    });
+    appendErrorMessageToChat(chat.id, `Message failed before the provider could respond: ${String(err && err.message ? err.message : err)}`);
+    endInferenceRequest();
+  });
 }
 
 function sendChip(el) {
@@ -15565,8 +16829,38 @@ function clearTypingIndicator() {
   setThinkingStatus('');
 }
 
+function shouldSuppressTypingIndicatorForLiveAgent(chatId) {
+  const key = String(chatId || '');
+  if (!key) return false;
+
+  if (
+    activeStreamRow
+    && activeStreamRow.isConnected
+    && (
+      activeAgentStreamState
+      && String(activeAgentStreamState.chatId || '') === key
+    )
+  ) {
+    return true;
+  }
+
+  if (
+    activeInferenceRequest
+    && String(activeInferenceRequest.chatId || '') === key
+    && ['agent', 'inspect'].includes(String(activeInferenceRequest.operationKind || '').toLowerCase())
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
 function showTypingIndicator(chatId, startedAtMs = 0) {
   if (!chatId) return;
+  if (shouldSuppressTypingIndicatorForLiveAgent(chatId)) {
+    clearTypingIndicator();
+    return;
+  }
   clearTypingIndicator();
   if (typingTimer) {
     clearTimeout(typingTimer);
@@ -15588,7 +16882,9 @@ function showTypingIndicator(chatId, startedAtMs = 0) {
   d.innerHTML = `
       <div class="msg-stack">
         <div class="msg-bubble">
-          <div class="typing"><span></span><span></span><span></span></div>
+          <div class="msg-thinking-loader msg-agent-progress-loader">
+            <span class="msg-thinking-loader-label">Thinking...</span>
+          </div>
         </div>
       </div>
     `;
@@ -15602,6 +16898,20 @@ function showTypingIndicator(chatId, startedAtMs = 0) {
     setThinkingStatus(`${elapsed}s`);
   }, 100);
 }
+
+function setTypingIndicatorLoaderText(text) {
+  const value = String(text || '').trim();
+  if (!value) return false;
+  const indicator = document.getElementById('typingIndicator');
+  if (!indicator) return false;
+  const label = indicator.querySelector('.msg-thinking-loader-label');
+  if (!label) return false;
+  label.textContent = value;
+  return true;
+}
+
+
+
 
 function cancelLiveStreamRender() {
   if (liveStreamRenderRaf) {
@@ -16101,6 +17411,7 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
           workspaceStatusSnapshot,
           chatHistory: getChatDebugSnapshot(chatId),
         });
+
         if (
           developerAgentEnabled
           &&
@@ -16126,17 +17437,74 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
           preflightDecision.reason = 'There is no open workspace, so the request can proceed directly as a new project.';
         }
         if (preflightDecision.route === 'confirm') {
-          setPendingPreflightConfirmation(chatId, {
-            kind: 'project_scope',
-            originalTask: String(promptText || ''),
-            userMessage: String(preflightDecision.userMessage || ''),
-            workspaceOpen: workspaceHasOpenProjectForLog,
-          });
-          clearTypingIndicator();
-          typingTimer = null;
+          let pendingOriginalTask = String(promptText || '');
+          // A silent throw anywhere in here used to kill the send with NO visible
+          // confirmation and no error — the run "just stopped". Never let that happen:
+          // record the failure and fall back to asking the question as a plain message.
+          try {
+            pendingOriginalTask = derivePendingPreflightOriginalTask(chatId, promptText);
+            setPendingPreflightConfirmation(chatId, {
+              kind: 'project_scope',
+              originalTask: pendingOriginalTask,
+              userMessage: String(preflightDecision.userMessage || ''),
+              workspaceOpen: workspaceHasOpenProjectForLog,
+            });
+          } catch (confirmErr) {
+            recordDebugTrace('preflight_confirmation_present_failed', {
+              chatId: requestToken.chatId,
+              error: debugPreview(String((confirmErr && confirmErr.message) || confirmErr || 'unknown'), 220),
+            }, {
+              chatId: requestToken.chatId,
+              latestUserInput: String(promptText || ''),
+              preflightDecision,
+              error: String((confirmErr && confirmErr.stack) || confirmErr || ''),
+            });
+            try { endInferenceRequest(); } catch (_) { }
+            const fallbackQuestion = String(preflightDecision.userMessage || '').trim()
+              || 'A project is already open. Should I use the current project for this, or create a new one? Reply "use current" or "new project".';
+            try {
+              commitAssistantMessage(chatId, fallbackQuestion, fallbackQuestion, {});
+            } catch (_) { }
+            return;
+          }
+
+          clearPreflightConfirmationLiveStatus(chatId, 'preflight_route_confirm');
+          try { endInferenceRequest(); } catch (_) { }
           syncInputAugmentState();
+          try { renderComposerConfirmationUi(); } catch (_) { }
+          try { updateContinueButtonVisibility(); } catch (_) { }
+
+          try {
+            recordDebugTrace('preflight_confirmation_presented', {
+              chatId: requestToken.chatId,
+              titlePreview: debugPreview(preflightDecision.userMessage || '', 220),
+              originalTaskPreview: debugPreview(pendingOriginalTask, 220),
+              workspaceOpen: String(workspaceHasOpenProjectForLog),
+              workspaceRootName: debugPreview(workspaceRootNameForLog, 120),
+            }, {
+              chatId: requestToken.chatId,
+              latestUserInput: String(promptText || ''),
+              pendingOriginalTask,
+              preflightDecision,
+              workspace: workspaceDebug,
+              state: typeof buildRuntimeStateSnapshot === 'function'
+                ? buildRuntimeStateSnapshot('preflight_confirmation_presented')
+                : null,
+            });
+          } catch (_) { }
+
+          if (typeof window !== 'undefined') {
+            window.requestAnimationFrame(() => {
+              try { clearPreflightConfirmationLiveStatus(chatId, 'preflight_route_confirm:raf'); } catch (_) { }
+              try { renderComposerConfirmationUi(); } catch (_) { }
+              try { updateContinueButtonVisibility(); } catch (_) { }
+            });
+          }
           return;
         }
+
+        showPreflightRouteStatus(chatId, preflightDecision);
+
         if (preflightDecision.route === 'inspect') {
           requestToken.operationKind = 'inspect';
           const setInspectProgress = (text) => {
@@ -17109,6 +18477,8 @@ loadAppSettings();
 startBackendProviderSync();  // push the saved provider/key to the backend on startup + retry
 moveGlobalControlsIntoSidebar();
 setupMacTopbarNativeDrag();
+setupComposerKeyboardDiagnostics();
+setupComposerEnterCaptureSubmitGuard();
 hydrateCustomTooltips(document);
 initGlobalTooltipSystem();
 refreshWorkspaceForCurrentUser();

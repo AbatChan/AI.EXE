@@ -228,8 +228,21 @@
         }
 
         if (parsed.action === 'final' || parsed.tool === 'none') {
-          const finalText = deps.sanitizeAssistantText(parsed.message || thought || 'Done.');
-          if (toolEvents.some((event) => event && event.ok && ['new_project', 'write_file', 'edit_file', 'mkdir', 'move', 'delete'].includes(String(event.tool || '').toLowerCase()))) {
+          const hasWorkspaceMutations = toolEvents.some((event) => event && event.ok && ['new_project', 'write_file', 'edit_file', 'mkdir', 'move', 'delete'].includes(String(event.tool || '').toLowerCase()));
+          const rawFinalText = deps.sanitizeAssistantText(parsed.message || thought || '').trim();
+          const isWeakFinalText = !rawFinalText || /^(?:done|completed|fixed|finished)\.?$/i.test(rawFinalText);
+          let finalText = rawFinalText;
+          const hasUsefulInspectionEvidence = toolEvents.some((event) => (
+            event
+            && event.ok
+            && ['read_file', 'read_files', 'search_files', 'validate_files', 'check_code', 'run_app', 'run_command']
+              .includes(String(event.tool || '').toLowerCase())
+          ));
+          if (isWeakFinalText && (hasWorkspaceMutations || hasUsefulInspectionEvidence) && typeof deps.generateAgentCompletionText === 'function') {
+            finalText = String(await deps.generateAgentCompletionText(taskText, toolEvents, (typeof deps.getWorkspaceRootName === 'function' && deps.getWorkspaceRootName()) || 'project', null) || '').trim();
+          }
+          finalText = finalText || (hasWorkspaceMutations ? 'Updated the project files.' : 'I checked the workspace and summarized what I found.');
+          if (hasWorkspaceMutations) {
             await deps.refreshWorkspaceTree(true);
           }
           deps.consumeLiveAssistantText();
@@ -264,6 +277,39 @@
         };
         toolEvents.push(event);
         pushActivity(deps.buildAgentActivityFromToolResult(parsed, result || {}, toolEvents));
+
+        if (result && result.permissionRequired) {
+          const permissionCommand = String(
+            (result && result.terminalCommand)
+            || (result && result.terminalProof && result.terminalProof.command)
+            || parsed.command
+            || parsed.content
+            || ''
+          ).trim();
+          const text = deps.sanitizeAssistantText(
+            `Permission needed to run \`${permissionCommand || 'this command'}\`. Approve once to run it, or cancel.`
+          );
+          if (typeof deps.requestAgentCommandApproval === 'function') {
+            deps.requestAgentCommandApproval(chatId, {
+              command: permissionCommand,
+              userMessage: text,
+            });
+          }
+          deps.consumeLiveAssistantText();
+          deps.commitAssistantMessage(chatId, text, text, {
+            agentActivities,
+            // Human approval is a paused state, not a final/completed response.
+            agentMeta: {
+              startedAt,
+              completedAt: 0,
+              collapsed: false,
+              experimental: true,
+              waitingForApproval: true,
+            },
+            forceNeedsContinue: false,
+          });
+          return true;
+        }
 
         if (result && (result.requiresUserInput || result.requiresProjectScopeConfirmation)) {
           if (result.requiresProjectScopeConfirmation && typeof deps.requestProjectScopeConfirmation === 'function') {
@@ -314,12 +360,24 @@
       const finalPrompt = `${finalNative.prompt}\n\nThe step budget or time budget is exhausted. Return a final JSON object only. Explain what was completed, what remains, and the real blocker if any.`;
       const finalResponse = await deps.requestAgentPlannerInference(finalPrompt, maxTokens, '', finalNative.systemPrompt);
       const finalParsed = normalizeDecision(extractJsonObject(String(finalResponse && finalResponse.output ? finalResponse.output : '')));
-      const finalText = deps.sanitizeAssistantText(
+      const hasWorkspaceMutations = toolEvents.some((event) => event && event.ok && ['new_project', 'write_file', 'edit_file', 'mkdir', 'move', 'delete'].includes(String(event.tool || '').toLowerCase()));
+      const rawLimitFinalText = deps.sanitizeAssistantText(
         finalParsed && finalParsed.message
           ? finalParsed.message
-          : 'I reached the experimental agent step limit before the task was complete.'
-      );
-      if (toolEvents.some((event) => event && event.ok && ['new_project', 'write_file', 'edit_file', 'mkdir', 'move', 'delete'].includes(String(event.tool || '').toLowerCase()))) {
+          : ''
+      ).trim();
+      let finalText = rawLimitFinalText;
+      const hasUsefulInspectionEvidence = toolEvents.some((event) => (
+        event
+        && event.ok
+        && ['read_file', 'read_files', 'search_files', 'validate_files', 'check_code', 'run_app', 'run_command']
+          .includes(String(event.tool || '').toLowerCase())
+      ));
+      if ((!finalText || /^(?:done|completed|fixed|finished)\.?$/i.test(finalText)) && (hasWorkspaceMutations || hasUsefulInspectionEvidence) && typeof deps.generateAgentCompletionText === 'function') {
+        finalText = String(await deps.generateAgentCompletionText(taskText, toolEvents, (typeof deps.getWorkspaceRootName === 'function' && deps.getWorkspaceRootName()) || 'project', null) || '').trim();
+      }
+      finalText = finalText || 'I reached the experimental agent step limit before the task was complete.';
+      if (hasWorkspaceMutations) {
         await deps.refreshWorkspaceTree(true);
       }
       deps.consumeLiveAssistantText();

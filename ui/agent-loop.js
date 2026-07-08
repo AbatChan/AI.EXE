@@ -497,6 +497,14 @@
         return revert ? { ...meta, revert } : meta;
       };
 
+      const getWorkspaceLabel = () => {
+        try {
+          return deps.getWorkspaceRootName() || deps.deriveProjectNameFromTask(taskText) || 'project';
+        } catch (_) {
+          return 'project';
+        }
+      };
+
       // When a guard stops the run after real work landed, the final message must
       // report that work (grounded in the diffs), not just the blocker.
       const buildStoppedWithWorkText = async (blockerNote) => {
@@ -513,8 +521,7 @@
           const remainingText = gaps.length ? `Still to do in Phase ${phaseState.activeIndex + 1}: ${gaps.map((g) => g.text || g.path).join('; ')}.` : `Phase ${phaseState.activeIndex + 1} still needs validation or review.`;
           return `Phase ${phaseState.activeIndex + 1}${activeP.title ? ` (${activeP.title})` : ''} is not complete yet. ${changedText} ${remainingText}\n\n${blockerNote}`;
         }
-        const workspaceLabel = deps.getWorkspaceRootName() || deps.deriveProjectNameFromTask(taskText) || 'project';
-        const base = String(await deps.generateAgentCompletionText(taskText, toolEvents, workspaceLabel, planSpec) || '').trim();
+        const base = String(await deps.generateAgentCompletionText(taskText, toolEvents, getWorkspaceLabel(), planSpec) || '').trim();
         return base ? `${base}\n\n${blockerNote}` : blockerNote;
       };
 
@@ -581,12 +588,58 @@
         && ['new_project', 'write_file', 'edit_file', 'mkdir', 'move', 'delete'].includes(String(event.tool || '').toLowerCase())
       ));
 
+      const agentHasUsefulInspectionEvidence = () => toolEvents.some((event) => (
+        event
+        && event.ok
+        && ['read_file', 'read_files', 'search_files', 'validate_files', 'check_code', 'run_app', 'run_command']
+          .includes(String(event.tool || '').toLowerCase())
+      ));
+
+      const isVerificationOnlyTask = () => /\b(?:are\s+you\s+sure|confirm|confirmed|verify|verified|check\s+(?:if|whether)|make\s+sure)\b/i
+        .test(String(taskText || ''));
+
+      const shouldSummarizeReadOnlyRun = () => agentHasUsefulInspectionEvidence()
+        && (isVerificationOnlyTask() || !agentHasWorkspaceMutations());
+
+      const getLastUsefulAgentNarration = () => {
+        for (let i = agentActivities.length - 1; i >= 0; i -= 1) {
+          const activity = agentActivities[i];
+          if (!activity) continue;
+          const kind = String(activity.kind || '').toLowerCase();
+          if (!['thought', 'message', 'summary'].includes(kind)) continue;
+          const raw = activity.detail || activity.message || activity.title || '';
+          const detail = deps.sanitizeAssistantText ? deps.sanitizeAssistantText(raw) : String(raw || '');
+          const clean = String(detail || '').trim();
+          if (!clean) continue;
+          if (/^(?:thinking|still thinking|still working|preparing|reviewing|done|completed|finished)\.?$/i.test(clean)) continue;
+          return clean;
+        }
+        return '';
+      };
+
       const isWeakEditPlan = () => {
         if (String(planSpec && planSpec.taskKind || '').toLowerCase() !== 'edit') return false;
         const affectedFiles = Array.isArray(planSpec && planSpec.affectedFiles) ? planSpec.affectedFiles.filter(Boolean) : [];
         const doneCriteria = Array.isArray(planSpec && planSpec.doneCriteria) ? planSpec.doneCriteria.filter(Boolean) : [];
         return affectedFiles.length === 0 && doneCriteria.length === 0;
       };
+
+      const planTextContainsRunRequirement = () => {
+        const parts = [
+          taskText,
+          planSpec && planSpec.summary,
+          planSpec && planSpec.validation,
+          ...(Array.isArray(planSpec && planSpec.doneCriteria) ? planSpec.doneCriteria : []),
+        ];
+        return parts.some((part) => /\b(?:run|launch|start|test|open|verify)\b[\s\S]{0,80}\b(?:app|project|site|dev\s+server|browser|localhost|npm\s+run\s+dev)\b|\bnpm\s+run\s+dev\b/i.test(String(part || '')));
+      };
+
+      const isExplicitRunAppTask = () => planTextContainsRunRequirement();
+
+      const hasRunAttempt = () => toolEvents.some((event) => (
+        event
+        && ['run_app', 'run_command'].includes(String(event.tool || '').toLowerCase())
+      ));
 
       const isMutationTool = (tool) => ['new_project', 'write_file', 'edit_file', 'mkdir', 'move', 'delete'].includes(String(tool || '').toLowerCase());
       const normalizeDecisionPath = (value) => deps.normalizeWorkspacePath ? deps.normalizeWorkspacePath(value || '') : String(value || '');
@@ -996,16 +1049,18 @@
         : [];
       let lastChecklistSignature = '';
       let reviewNarrated = false;
-      const refreshChecklist = (finalizing = false) => {
+      const refreshChecklist = (finalizing = false, acceptedFinal = false) => {
         if (!checklistItems.length || typeof deps.computeAgentChecklistProgress !== 'function') return null;
         let progress = deps.computeAgentChecklistProgress(checklistItems, toolEvents, planSpec);
         // On a successful finish where work shipped AND at least one criterion already matched
         // (proving the change is on-topic), tick the rest — descriptive criteria for a single
         // change often share no keyword with the diff, so keyword matching leaves them stuck.
+        // acceptedFinal is passed ONLY by the accepted-model-FINAL path; the out-of-steps /
+        // timeout fallback must never force-tick items that were not actually done.
         if (finalizing) {
           const shipped = toolEvents.some((e) => e && e.ok
             && ['write_file', 'edit_file'].includes(String(e.tool || '').toLowerCase()));
-          if (shipped && progress.some((p) => p && p.done)) {
+          if ((shipped && progress.some((p) => p && p.done)) || acceptedFinal) {
             progress = progress.map((p) => ({ ...p, done: true }));
           }
         }
@@ -1245,6 +1300,24 @@
           });
         } else {
           setAgentProgress('Thinking...');
+          let plannerHeartbeatTimer = 0;
+          const startPlannerHeartbeat = () => {
+            if (plannerHeartbeatTimer) return;
+            const started = Date.now();
+            plannerHeartbeatTimer = setInterval(() => {
+              const elapsed = Math.max(1, Math.round((Date.now() - started) / 1000));
+              if (elapsed >= 60) {
+                setAgentProgress('Still working...');
+              } else if (elapsed >= 20) {
+                setAgentProgress('Still thinking...');
+              }
+            }, 5000);
+          };
+          const stopPlannerHeartbeat = () => {
+            if (!plannerHeartbeatTimer) return;
+            clearInterval(plannerHeartbeatTimer);
+            plannerHeartbeatTimer = 0;
+          };
           const decisionPrompt = await deps.buildAgentDecisionPrompt(chatId, taskText, toolEvents, step, planSpec);
           agentPrompt = decisionPrompt && decisionPrompt.prompt ? decisionPrompt.prompt : decisionPrompt;
           const decisionSystemPrompt = (decisionPrompt && decisionPrompt.systemPrompt) || '';
@@ -1254,6 +1327,8 @@
           // We do NOT retry timeouts (the model was simply too slow — retrying
           // burns another full timeout) or user cancellations.
           let res = null;
+          startPlannerHeartbeat();
+          try {
           // Cap; rate-limits (429) use the full budget with exponential backoff,
           // other transient blips bail after a couple of quick retries.
           const maxInferenceRetries = 4;
@@ -1300,6 +1375,10 @@
               : `Reconnecting (retry ${attempt + 1})...`);
             await new Promise((resolve) => setTimeout(resolve, delayMs));
             if (!deps.isInferenceActive(requestToken)) return true;
+          }
+
+          } finally {
+            stopPlannerHeartbeat();
           }
 
           if (!deps.isInferenceActive(requestToken)) return true;
@@ -1550,8 +1629,7 @@
                 continue;
               }
               setAgentProgress('Preparing the summary...');
-              const workspaceLabel = deps.getWorkspaceRootName() || deps.deriveProjectNameFromTask(taskText) || 'project';
-              const finalText = await deps.generateAgentCompletionText(taskText, toolEvents, workspaceLabel, planSpec);
+              const finalText = await deps.generateAgentCompletionText(taskText, toolEvents, getWorkspaceLabel(), planSpec);
               if (agentHasWorkspaceMutations()) {
                 await deps.refreshWorkspaceTree(true);
               }
@@ -1747,7 +1825,12 @@
           // Advisory gate (not a veto): on the first finish attempt with planned
           // items still unmet, surface them as a tool observation and let the
           // model decide. We never override its decision or hard-stop on this.
-          if (!finalCheck.ok && finalNudges < 1) {
+          const skipStaleFinalAdvisory = Boolean(
+            agentHasWorkspaceMutations()
+            && hasValidationPassedSinceLatestMutation()
+            && isWeakEditPlan()
+          );
+          if (!finalCheck.ok && finalNudges < 1 && !skipStaleFinalAdvisory) {
             finalNudges += 1;
             const missingText = finalCheck.missing.join('; ');
             toolEvents.push({
@@ -1885,13 +1968,22 @@
           // Honor the model's final decision: requirements met, or it reaffirmed
           // finishing after the single advisory nudge.
           setAgentProgress('Preparing the summary...');
-          let finalText = deps.sanitizeAssistantText(decision.message || 'Done.') || 'Done.';
+          const rawFinalText = deps.sanitizeAssistantText(decision.message || '').trim();
+          const isWeakFinalText = !rawFinalText || /^(?:done|completed|fixed|finished)\.?$/i.test(rawFinalText);
+          let finalText = rawFinalText;
+          if (isWeakFinalText && (agentHasWorkspaceMutations() || shouldSummarizeReadOnlyRun())) {
+            finalText = String(await deps.generateAgentCompletionText(taskText, toolEvents, getWorkspaceLabel(), planSpec) || '').trim();
+          }
+          finalText = finalText || getLastUsefulAgentNarration() || (agentHasWorkspaceMutations()
+            ? 'Updated the project files.'
+            : 'I checked the workspace and summarized what I found.');
           // If run_app still reports errors after the repair attempts, never end on a
           // clean message — disclose it and force Continue.
           const stillBrokenRun = unresolvedRunAppError();
           if (stillBrokenRun) {
             finalText += ' Note: the app still shows a startup error — press Continue and I\'ll keep working on it.';
           }
+          refreshChecklist(true, !stillBrokenRun);
           if (agentHasWorkspaceMutations()) {
             await deps.refreshWorkspaceTree(true);
           }
@@ -1951,10 +2043,24 @@
         if (decision.action === 'tool' && String(decision.tool || '').toLowerCase() === 'read_file') {
           const readPath = deps.normalizeWorkspacePath(decision.path || '');
           if (readPath && lastWriteWithoutFailureSince(readPath)) {
+            // Serve the content we already have instead of dead-ending: blocking the
+            // read AND the rewrite AND (content-less) edit deadlocked stub recovery —
+            // final_check says the file is incomplete but no tool could touch it.
+            const writtenEvent = [...toolEvents].reverse().find((event) => (
+              event && event.ok && String(event.tool || '').toLowerCase() === 'write_file'
+              && deps.normalizeWorkspacePath(event.path || '') === readPath
+              && typeof event.writtenContent === 'string' && event.writtenContent
+            ));
             recordDebugTrace('agent_read_after_own_write_blocked', {
-              chatId: String(chatId || ''), step: String(step), path: readPath,
+              chatId: String(chatId || ''), step: String(step), path: readPath, served: String(Boolean(writtenEvent)),
             }, { chatId: String(chatId || ''), step, path: readPath });
-            toolEvents.push({
+            toolEvents.push(writtenEvent ? {
+              tool: 'read_file',
+              ok: true,
+              _guardBlock: true,
+              path: readPath,
+              observation: `read_file ${readPath} (served from this run — you wrote this content yourself and nothing changed it since):\n${String(writtenEvent.writtenContent).slice(0, deps.agentMaxToolOutputChars - 400)}\nIf this content is incomplete, replace it with ONE edit_file (or write_file if it is only a stub); otherwise run validate_files once and finalize.`,
+            } : {
               tool: 'read_file',
               ok: false,
               _guardBlock: true,
@@ -2255,6 +2361,56 @@
             tool: String(decision.tool || ''),
             path: deps.normalizeWorkspacePath(decision.path || decision.srcPath || '/'),
           }, { chatId: String(chatId || ''), step, decision });
+          return true;
+        }
+        if (toolResult && toolResult.permissionRequired) {
+          // Ask-first commands are a hard human-in-the-loop boundary. Do not feed the
+          // permission result back to the model and let it ask again; surface one
+          // approval card, commit the paused state, and stop this agent run.
+          setAgentProgress('Waiting for approval.');
+          appendAgentActivity(deps.buildAgentActivityFromToolResult(decision, toolResult, toolEvents));
+          const permissionCommand = String(
+            (toolResult && toolResult.terminalCommand)
+            || (toolResult && toolResult.terminalProof && toolResult.terminalProof.command)
+            || decision.command
+            || ''
+          ).trim();
+          const userFacingMessage = `Permission needed to run \`${permissionCommand || 'this command'}\`. Approve once to run it, or cancel.`;
+          if (typeof deps.requestAgentCommandApproval === 'function') {
+            deps.requestAgentCommandApproval(chatId, {
+              command: permissionCommand,
+              userMessage: userFacingMessage,
+            });
+          }
+          if (agentHasWorkspaceMutations()) {
+            await deps.refreshWorkspaceTree(true);
+          }
+          deps.consumeLiveAssistantText();
+          deps.commitAssistantMessage(chatId, userFacingMessage, userFacingMessage, {
+            agentActivities,
+            // Human approval is a paused state, not a final/completed response.
+            // Leaving completedAt unset keeps the activity panel contextual while
+            // the composer confirmation waits for Approve once / Cancel.
+            agentMeta: agentMetaWithRevert({
+              startedAt,
+              completedAt: 0,
+              collapsed: false,
+              waitingForApproval: true,
+            }),
+            forceNeedsContinue: false,
+          });
+          recordDebugTrace('agent_command_permission_requested', {
+            chatId: String(chatId || ''),
+            step: String(step),
+            tool: String(decision.tool || ''),
+            command: permissionCommand,
+          }, {
+            chatId: String(chatId || ''),
+            step,
+            decision,
+            toolResult,
+            command: permissionCommand,
+          });
           return true;
         }
         if (toolResult && toolResult.requiresDeleteConfirmation) {
@@ -2723,7 +2879,9 @@
             appendAgentActivity({
               kind: 'validate',
               title: 'Retrying',
-              detail: `${streakPath} didn't pass: ${shortReason}. Fixing it and trying again (attempt ${failureStreak.count + 1} of ${sameFailureLimit}).`,
+              // count is per distinct issue (a NEW issue restarts at 1) — label it as
+              // fix attempts so the first retry of each issue doesn't read "2 of 3".
+              detail: `${streakPath} didn't pass: ${shortReason}. Fixing it (fix attempt ${failureStreak.count} of ${Math.max(1, sameFailureLimit - 1)}).`,
               hasIssues: true,
               status: 'running',
               openPath: streakPath.startsWith('/') ? streakPath : '',
@@ -2748,8 +2906,7 @@
           // After one repair attempt, ship if only minor cross-file gaps remain.
           if (validationFailureCount >= 2 && onlyMinorGaps && allExpectedWritten) {
             setAgentProgress('Preparing the summary...');
-            const workspaceLabel = deps.getWorkspaceRootName() || deps.deriveProjectNameFromTask(taskText) || 'project';
-            const baseText = String(await deps.generateAgentCompletionText(taskText, toolEvents, workspaceLabel, planSpec) || '').trim();
+            const baseText = String(await deps.generateAgentCompletionText(taskText, toolEvents, getWorkspaceLabel(), planSpec) || '').trim();
             // Short summary only — gap details are in the steps above.
             const gapCount = issues.length;
             const gapNote = `\n\nIt runs, but ${gapCount} cross-file reference${gapCount === 1 ? '' : 's'} still need wiring (details in the steps above). Press Continue and I'll finish them.`;
@@ -2846,7 +3003,7 @@
           // model invented a file it never created. The model may still decide
           // its own final (which states honestly that nothing was changed).
           const isAnalysisRun = String(planSpec && planSpec.taskKind || '').toLowerCase() === 'analysis';
-          if (finalCheck.ok && !isWeakEditPlan() && (agentHasWorkspaceMutations() || isAnalysisRun)) {
+          if (finalCheck.ok && !isWeakEditPlan() && (agentHasWorkspaceMutations() || isAnalysisRun || shouldSummarizeReadOnlyRun())) {
             // Don't finish a browser-runnable project until a CLEAN run_app has run
             // since the last write — static validation can't see a crash-on-load.
             // Not-yet-run -> deriveFallbackAgentDecision sequences run_app next step;
@@ -2872,8 +3029,7 @@
               continue;
             }
             setAgentProgress('Preparing the summary...');
-            const workspaceLabel = deps.getWorkspaceRootName() || deps.deriveProjectNameFromTask(taskText) || 'project';
-            const finalText = await deps.generateAgentCompletionText(taskText, toolEvents, workspaceLabel, planSpec);
+            const finalText = await deps.generateAgentCompletionText(taskText, toolEvents, getWorkspaceLabel(), planSpec);
             if (agentHasWorkspaceMutations()) {
               await deps.refreshWorkspaceTree(true);
             }
@@ -2960,7 +3116,6 @@
         }
       }
       let fallback = '';
-      const workspaceLabel = deps.getWorkspaceRootName() || deps.deriveProjectNameFromTask(taskText) || 'project';
       // Let the model write the wrap-up naturally (grounded in the real diffs)
       // whenever there was progress — done OR out-of-steps — instead of a robotic
       // "N of M planned items / Still to do: ..." dump.
@@ -2973,7 +3128,7 @@
           if (gaps.length) fallback += ` Still to do: ${gaps.map((g) => g.text || g.path).join('; ')}.`;
           fallback += " Press Continue and I'll keep going from this phase.";
         } else {
-          fallback = String(await deps.generateAgentCompletionText(taskText, toolEvents, workspaceLabel, planSpec) || '').trim();
+          fallback = String(await deps.generateAgentCompletionText(taskText, toolEvents, getWorkspaceLabel(), planSpec) || '').trim();
         }
       }
       if (fallback && !phaseState && !(cl && cl.allDone)) {

@@ -1904,21 +1904,80 @@ def _aiexe_strip_reply_chrome(text):
 
 
 def _aiexe_read_last_assistant_text(driver):
-    """Text of the last rendered assistant message, or '' if the last message is the user's.
-    Transport-agnostic reply capture for when the fetch interceptor is bypassed (worker)."""
+    """Read only the latest Venice assistant message body.
+
+    This avoids page/header chrome leaks like model name + timing by targeting the
+    assistant message DOM node, then its inner prose/body node. It intentionally avoids
+    provider-name regex stripping because model names can appear legitimately in replies.
+    """
     try:
         text = driver.execute_script("""
-            var marker = arguments[0];
-            var blocks = document.querySelectorAll("div[data-message-id]");
-            if (!blocks.length) return "";
-            var last = blocks[blocks.length - 1];
-            if (last.querySelector(marker)) return "";   // last message is the user's
-            var body = last.querySelector("[data-message-content], .prose") || last;
-            var clone = body.cloneNode(true);
-            clone.querySelectorAll("button, [role='group']").forEach(function(n){ n.remove(); });
-            return (clone.innerText || clone.textContent || "").trim();
+          const clean = (s) => String(s || '').replace(/\\s+/g, ' ').trim();
+
+          const visible = (el) => {
+            if (!el || !(el instanceof Element)) return false;
+            const cs = getComputedStyle(el);
+            const r = el.getBoundingClientRect();
+            return cs.display !== 'none'
+              && cs.visibility !== 'hidden'
+              && r.width > 0
+              && r.height > 0;
+          };
+
+          const stripControls = (node) => {
+            const clone = node.cloneNode(true);
+            clone.querySelectorAll([
+              'button',
+              'svg',
+              '[role="button"]',
+              '[aria-label]',
+              '[data-testid*="copy" i]',
+              '[data-testid*="action" i]',
+              '[data-testid*="menu" i]',
+              '[data-testid*="toolbar" i]'
+            ].join(',')).forEach((n) => n.remove());
+            return clean(clone.innerText || clone.textContent || '');
+          };
+
+          const assistantSelector = [
+            'div.assistant[data-testid="text-chat-message"]',
+            '[data-testid="text-chat-message"].assistant'
+          ].join(',');
+
+          const latest =
+            document.querySelector('div.assistant[data-testid="text-chat-message"][data-latest-message="true"]')
+            || Array.from(document.querySelectorAll(assistantSelector)).filter(visible).at(-1);
+
+          if (latest) {
+            const body =
+              latest.querySelector('[class*="prose"], [class*="whitespace-normal"]')
+              || latest.querySelector('p, [data-message-content], [class*="markdown"]')
+              || latest;
+
+            const bodyText = stripControls(body);
+            if (bodyText) return bodyText;
+
+            const latestText = stripControls(latest);
+            if (latestText) return latestText;
+          }
+
+          // Last-resort structural fallback for older Venice markup.
+          // Still avoid document.body/main-page scraping.
+          const userMarker = arguments[0] || "[data-testid='user-message']";
+          const roots = Array.from(document.querySelectorAll('div[data-message-id], article'))
+            .filter(visible)
+            .filter((root) => !root.querySelector(userMarker));
+
+          const root = roots.at(-1);
+          if (!root) return '';
+
+          const fallbackBody =
+            root.querySelector('[class*="prose"], [class*="whitespace-normal"], p, [data-message-content], [class*="markdown"]')
+            || root;
+
+          return stripControls(fallbackBody);
         """, VC_USER_MESSAGE_MARKER_CSS) or ""
-        return _aiexe_strip_reply_chrome(text)
+        return str(text or "").strip()
     except Exception:
         return ""
 
@@ -2020,6 +2079,35 @@ def _aiexe_rename_chat(driver, slug, name):
     return ok
 
 
+def _aiexe_sidebar_op_with_restore(driver, op, label):
+    """Run a sidebar operation; if it fails, restore the window and retry once, then
+    re-minimize. A minimized Chrome often leaves the virtualized sidebar rowless
+    (same failure mode as the model picker), so rename/delete silently no-op'd in
+    the background until the window was restored."""
+    ok = False
+    try:
+        ok = bool(op())
+    except Exception:
+        ok = False
+    if ok:
+        return True
+    print("AIEXE_%s failed while minimized — restoring window for one retry" % label, flush=True)
+    if not _aiexe_restore_unobtrusive(driver):
+        return False
+    time.sleep(0.8)
+    try:
+        ok = bool(op())
+    except Exception:
+        ok = False
+    finally:
+        try:
+            driver.minimize_window()
+        except Exception:
+            pass
+    print("AIEXE_%s retry with restored window -> %s" % (label, ok), flush=True)
+    return ok
+
+
 def _aiexe_delete_chat(driver, slug):
     """Delete a Venice conversation (irreversible — only on an explicit AI.EXE chat delete)."""
     if not slug:
@@ -2087,10 +2175,12 @@ def aiexe_scrape_models(driver):
 
 def _aiexe_restore_unobtrusive(driver):
     """Un-minimize for reliable interaction WITHOUT popping a window in the user's face:
-    restore into a small window parked at the far bottom-right screen corner."""
+    restore into a small window parked at the bottom-right. Keep a REAL strip of the
+    window (incl. the title bar) on-screen: the old 80x60 sliver left users unable to
+    drag the window back whenever a code path failed to re-minimize it."""
     try:
         dims = driver.execute_script("return [screen.width || 1440, screen.height || 900];") or [1440, 900]
-        driver.set_window_rect(x=int(dims[0]) - 80, y=int(dims[1]) - 60, width=880, height=680)
+        driver.set_window_rect(x=int(dims[0]) - 320, y=int(dims[1]) - 140, width=880, height=680)
         return True
     except Exception:
         try:
@@ -2356,23 +2446,27 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
                 aiexe_select_model(driver, request_model_id)
         except Exception:
             pass
-        _aiexe_dismiss_modal(driver)  # never let a stray dialog block the composer
-        # Normalize Venice's per-chat settings once per chat (and again if Think flips):
-        # web search / URL scraping OFF, Reasoning follows AI.EXE's Think mode.
         try:
-            _think = 'on' if str(data.get('aiexe_think') or '') == 'on' else 'off'
-            _skey = "%s|%s" % (_chat_key or 'nokey', _think)
-            if _chat_key and _skey not in AIEXE_SETTINGS_DONE:
-                _aiexe_normalize_chat_settings(driver, keep_reasoning=(_think == 'on'))
-                AIEXE_SETTINGS_DONE.add(_skey)
-                AIEXE_SETTINGS_DONE.discard("%s|%s" % (_chat_key, 'on' if _think == 'off' else 'off'))
-        except Exception:
-            pass
-        if _restored_for_ui:
+            _aiexe_dismiss_modal(driver)  # never let a stray dialog block the composer
+            # Normalize Venice's per-chat settings once per chat (and again if Think flips):
+            # web search / URL scraping OFF, Reasoning follows AI.EXE's Think mode.
             try:
-                driver.minimize_window()
+                _think = 'on' if str(data.get('aiexe_think') or '') == 'on' else 'off'
+                _skey = "%s|%s" % (_chat_key or 'nokey', _think)
+                if _chat_key and _skey not in AIEXE_SETTINGS_DONE:
+                    _aiexe_normalize_chat_settings(driver, keep_reasoning=(_think == 'on'))
+                    AIEXE_SETTINGS_DONE.add(_skey)
+                    AIEXE_SETTINGS_DONE.discard("%s|%s" % (_chat_key, 'on' if _think == 'off' else 'off'))
             except Exception:
                 pass
+        finally:
+            # Re-minimize even if modal/settings handling throws — a skipped minimize
+            # strands the corner-parked window on the user's screen.
+            if _restored_for_ui:
+                try:
+                    driver.minimize_window()
+                except Exception:
+                    pass
         # Venice SPA navigation/model-picker changes can rerender the composer. Never reuse
         # the textarea found before model selection; reacquire it right before typing.
         element = _aiexe_wait_composer(driver)
@@ -2639,7 +2733,7 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
         try:
             _slug = _aiexe_slug_from_url(AIEXE_CHAT_URLS.get(_chat_key, "")) if _chat_key else ""
             if _chat_key and _slug and _wanted_chat_name and AIEXE_THREAD_NAMED.get(_chat_key) != _wanted_chat_name:
-                if _aiexe_rename_chat(driver, _slug, _wanted_chat_name):
+                if _aiexe_sidebar_op_with_restore(driver, lambda: _aiexe_rename_chat(driver, _slug, _wanted_chat_name), "RENAME"):
                     AIEXE_THREAD_NAMED[_chat_key] = _wanted_chat_name
         except Exception as _e:
             print("AIEXE_RENAME deferred path failed: %s" % _e, flush=True)
@@ -2745,7 +2839,7 @@ def aiexe_delete_chat():
     with selenium_lock:
         if not _aiexe_driver_alive(driver):
             driver = _aiexe_reopen_driver("browser session was closed before delete_chat")
-        ok = _aiexe_delete_chat(driver, slug)
+        ok = _aiexe_sidebar_op_with_restore(driver, lambda: _aiexe_delete_chat(driver, slug), "DELETE")
         if ok:
             AIEXE_CHAT_URLS.pop(key, None)
             AIEXE_THREAD_ATTACHMENTS.pop(key, None)
@@ -2772,7 +2866,7 @@ def aiexe_rename_chat_route():
     with selenium_lock:
         if not _aiexe_driver_alive(driver):
             driver = _aiexe_reopen_driver("browser session was closed before rename_chat")
-        ok = _aiexe_rename_chat(driver, slug, name[:80])
+        ok = _aiexe_sidebar_op_with_restore(driver, lambda: _aiexe_rename_chat(driver, slug, name[:80]), "RENAME")
         if ok and key:
             AIEXE_THREAD_NAMED[key] = name
     return Response(json.dumps({"ok": bool(ok), "slug": slug}),

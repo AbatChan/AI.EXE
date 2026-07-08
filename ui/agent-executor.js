@@ -599,9 +599,485 @@
       return { timedOut: false, exitCode: exitMatch ? Number(exitMatch[1]) : 0 };
     }
 
+    function buildTerminalProof(command, res, status = null, maxPreviewChars = 1600) {
+      const parsed = status || parseRunCommandExitStatus(res && res.message);
+      const output = String((res && res.output) || '').trim();
+      return {
+        command: String(command || '').trim(),
+        exitCode: parsed.exitCode == null ? null : Number(parsed.exitCode),
+        timedOut: Boolean(parsed.timedOut),
+        outputPreview: output.length > maxPreviewChars ? `...(truncated)\n${output.slice(-maxPreviewChars)}` : output,
+      };
+    }
+
+    function splitAgentCommand(rawCommand) {
+      return String(rawCommand || '')
+        .trim()
+        .split(/\s+/)
+        .filter(Boolean);
+    }
+
+    function hasBlockedShellSyntax(command) {
+      const text = String(command || '');
+      const blockedChars = new Set([';', '&', '|', '`', '<', '>']);
+      for (let i = 0; i < text.length; i += 1) {
+        const ch = text[i];
+        if (blockedChars.has(ch)) return true;
+        if (ch === '$' && text[i + 1] === '(') return true;
+      }
+      return false;
+    }
+
+    function classifyAgentCommand(rawCommand) {
+      const command = String(rawCommand || '').trim();
+      if (!command) {
+        return {
+          policy: 'blocked',
+          command,
+          program: '',
+          args: [],
+          reason: 'run_command needs a command.',
+        };
+      }
+
+      // This is a command safety boundary, not natural-language intent routing.
+      // User intent should be decided semantically by the LLM. Command execution
+      // must still be guarded deterministically because shell metacharacters can
+      // change the meaning of a command after the model has chosen it.
+      if (hasBlockedShellSyntax(command)) {
+        return {
+          policy: 'blocked',
+          command,
+          program: '',
+          args: [],
+          reason: 'shell operators, pipes, redirects, command substitution, and chained commands are blocked. Use one direct command with arguments instead.',
+        };
+      }
+
+      const parts = splitAgentCommand(command);
+      const head = String(parts[0] || '').toLowerCase();
+      const ALLOWED = {
+        python: 'python',
+        python3: 'python',
+        pip: 'pip',
+        pip3: 'pip',
+        node: 'node',
+        npm: 'npm',
+        php: 'php',
+        java: 'java',
+        javac: 'javac',
+        gcc: 'gcc',
+        'g++': 'g++',
+        clang: 'clang',
+        'clang++': 'clang++',
+        go: 'go',
+        rustc: 'rustc',
+        cargo: 'cargo',
+        dotnet: 'dotnet',
+      };
+      const program = ALLOWED[head];
+
+      if (!program) {
+        return {
+          policy: 'blocked',
+          command,
+          program: '',
+          args: [],
+          reason: `run_command only allows policy-gated direct project commands: python, pip, node, npm, php, java/javac, gcc/g++, clang/clang++, go, rustc/cargo, and dotnet (got "${head}"). Use one direct command with arguments — no raw shell.`,
+        };
+      }
+
+      const args = parts.slice(1);
+      const lowerArgs = args.map((arg) => String(arg || '').toLowerCase());
+      const first = lowerArgs[0] || '';
+      const second = lowerArgs[1] || '';
+      const third = lowerArgs[2] || '';
+
+      const npmAskFirst = program === 'npm' && (
+        // deps mutation + anything that fetches-and-RUNS remote code (exec/x/create/init)
+        // or publishes outward — none of these may run without the user seeing them.
+        ['install', 'i', 'add', 'ci', 'update', 'dedupe', 'uninstall', 'remove', 'rm', 'un', 'prune', 'link', 'exec', 'x', 'create', 'init', 'publish', 'unpublish'].includes(first)
+        || (first === 'audit' && second === 'fix')
+      );
+
+      const pipAskFirst = program === 'pip' && ['install', 'uninstall', 'download'].includes(first);
+
+      const pythonPipAskFirst = program === 'python'
+        && first === '-m'
+        && ['pip', 'pip3'].includes(second)
+        && ['install', 'uninstall', 'download'].includes(third);
+
+      const goAskFirst = program === 'go' && (
+        ['get', 'install'].includes(first)
+        || (first === 'mod' && ['tidy', 'download', 'vendor'].includes(second))
+      );
+
+      const cargoAskFirst = program === 'cargo' && ['add', 'install', 'update', 'fetch', 'generate-lockfile', 'publish', 'yank', 'login'].includes(first);
+
+      const dotnetAskFirst = program === 'dotnet' && (
+        ['restore', 'new'].includes(first)
+        || first === 'add'
+        || first === 'remove'
+        || first === 'nuget'
+        || first === 'tool'
+      );
+
+      if (npmAskFirst || pipAskFirst || pythonPipAskFirst || goAskFirst || cargoAskFirst || dotnetAskFirst) {
+        return {
+          policy: 'ask_first',
+          command,
+          program,
+          args,
+          reason: 'this command can install, remove, restore, or modify dependencies and may use the network or change many files.',
+        };
+      }
+
+      return {
+        policy: 'auto_safe',
+        command,
+        program,
+        args,
+        reason: 'safe direct interpreter/package command.',
+      };
+    }
+
+    // PDF §5: when a runtime/compiler is missing, surface WHAT is missing, WHY it
+    // was needed, and the official install source — never a bare "could not run".
+    const RUNTIME_INSTALL_GUIDES = {
+      python: { name: 'Python', url: 'https://www.python.org/downloads/' },
+      pip: { name: 'Python (pip ships with it)', url: 'https://www.python.org/downloads/' },
+      node: { name: 'Node.js', url: 'https://nodejs.org/en/download' },
+      npm: { name: 'Node.js (npm ships with it)', url: 'https://nodejs.org/en/download' },
+      php: { name: 'PHP', url: 'https://www.php.net/downloads' },
+      java: { name: 'Java (Temurin JDK)', url: 'https://adoptium.net/temurin/releases/' },
+      javac: { name: 'Java (Temurin JDK)', url: 'https://adoptium.net/temurin/releases/' },
+      gcc: { name: 'GCC (macOS: run `xcode-select --install`; Windows: MSYS2/MinGW)', url: 'https://gcc.gnu.org/install/' },
+      'g++': { name: 'GCC/G++ (macOS: run `xcode-select --install`; Windows: MSYS2/MinGW)', url: 'https://gcc.gnu.org/install/' },
+      clang: { name: 'Clang (macOS: run `xcode-select --install`)', url: 'https://releases.llvm.org/' },
+      'clang++': { name: 'Clang (macOS: run `xcode-select --install`)', url: 'https://releases.llvm.org/' },
+      go: { name: 'Go', url: 'https://go.dev/dl/' },
+      rustc: { name: 'Rust (rustup)', url: 'https://rustup.rs' },
+      cargo: { name: 'Rust (rustup)', url: 'https://rustup.rs' },
+      dotnet: { name: '.NET SDK', url: 'https://dotnet.microsoft.com/download' },
+    };
+
+    function isMissingRuntimeMessage(message) {
+      return /is not installed( or not on PATH)?\.?/i.test(String(message || ''));
+    }
+
+    function buildMissingRuntimeResult(program, rawCommand, mutated, sourceTool = 'run_command') {
+      const key = String(program || '').toLowerCase();
+      const guide = RUNTIME_INSTALL_GUIDES[key] || { name: program, url: '' };
+      const guidance = `\`${program}\` is not installed on this machine (needed to run \`${rawCommand}\`). Install ${guide.name}${guide.url ? ` from ${guide.url}` : ''}, then run this check again.`;
+      return {
+        ok: true,
+        mutated,
+        // Not a code error: editing files can't fix a missing runtime, so don't
+        // trip the unresolved-run-error finalize blocker. Disclose instead.
+        runErrorCount: 0,
+        runtimeMissing: true,
+        terminalCommand: String(rawCommand || '').trim(),
+        terminalProof: {
+          command: String(rawCommand || '').trim(),
+          exitCode: null,
+          timedOut: false,
+          outputPreview: guidance,
+        },
+        observation: `${sourceTool} could not run \`${rawCommand}\`: ${guidance} Do NOT retry the same command. Either ask the user to install it, or finish and clearly state that runtime verification was SKIPPED because ${program} is missing (static validation still applies).`,
+      };
+    }
+
+    function buildCommandPermissionRequiredResult(rawCommand, classification, mutated, sourceTool = 'run_command') {
+      const command = String(rawCommand || '').trim();
+      const reason = String((classification && classification.reason) || 'permission is required before running this command');
+      return {
+        ok: true,
+        mutated,
+        runErrorCount: 1,
+        permissionRequired: true,
+        commandPolicy: 'ask_first',
+        terminalCommand: command,
+        terminalProof: {
+          command,
+          exitCode: null,
+          timedOut: false,
+          outputPreview: '',
+        },
+        observation: `${sourceTool} needs permission before running \`${command}\`: ${reason} Ask the user to approve it, or choose a safe proof command that does not install/remove dependencies.`,
+      };
+    }
+
     function looksLikeMissingNodeDependencies(output) {
       const text = String(output || '');
       return /(?:vite|tsc|eslint):\s*(?:command not found|not recognized)|Cannot find module ['"][^'"]*(?:vite|typescript|@vitejs|eslint)|could not determine executable|missing script:\s*build|ENOENT/i.test(text);
+    }
+
+    function parseWorkspaceJsonObject(text) {
+      try {
+        const parsed = JSON.parse(String(text || ''));
+        return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+      } catch (_) {
+        return null;
+      }
+    }
+
+    function normalizeWorkspacePathList(list = []) {
+      const out = [];
+      const seen = new Set();
+      Array.from(list || []).forEach((item) => {
+        const normalized = deps.normalizeWorkspacePath(item || '');
+        if (!normalized || normalized === '/' || seen.has(normalized)) return;
+        seen.add(normalized);
+        out.push(normalized);
+      });
+      return out;
+    }
+
+    function plannedFilesFromContract(contract = {}) {
+      return normalizeWorkspacePathList([
+        ...(Array.isArray(contract && contract.expectedFiles) ? contract.expectedFiles : []),
+        ...(Array.isArray(contract && contract.affectedFiles) ? contract.affectedFiles : []),
+      ]);
+    }
+
+    function toCommandPath(workspacePath) {
+      return deps.normalizeWorkspacePath(workspacePath || '').replace(/^\//, '');
+    }
+
+    async function firstExistingWorkspaceText(paths = []) {
+      for (const path of paths) {
+        const text = await readWorkspaceText(path);
+        if (String(text || '').trim()) return { path, text };
+      }
+      return { path: '', text: '' };
+    }
+
+    async function detectWorkspaceStack(contract = {}) {
+      const plannedFiles = plannedFilesFromContract(contract);
+      const packageText = await readWorkspaceText('/package.json');
+      const packageJson = parseWorkspaceJsonObject(packageText);
+      const packageScripts = packageJson && packageJson.scripts && typeof packageJson.scripts === 'object'
+        ? packageJson.scripts
+        : {};
+      const packageBlob = packageText.toLowerCase();
+
+      const viteConfig = await firstExistingWorkspaceText([
+        '/vite.config.ts',
+        '/vite.config.js',
+        '/vite.config.mjs',
+        '/vite.config.cjs',
+      ]);
+
+      const hasVite = Boolean(
+        viteConfig.path
+        || packageBlob.includes('"vite"')
+        || packageBlob.includes('@vitejs/')
+        || String(packageScripts.dev || '').toLowerCase().includes('vite')
+        || String(packageScripts.build || '').toLowerCase().includes('vite')
+      );
+
+      if (packageText.trim() || packageJson) {
+        if (hasVite) {
+          return {
+            stack: 'vite',
+            label: 'Vite build',
+            passLabel: 'Vite build passed',
+            failLabel: 'Vite build failed',
+            proof: { kind: 'command', command: 'npm run build', installCommand: 'npm install' },
+          };
+        }
+
+        if (packageScripts.build) {
+          return {
+            stack: 'node',
+            label: 'Node build',
+            passLabel: 'Node build passed',
+            failLabel: 'Node build failed',
+            proof: { kind: 'command', command: 'npm run build', installCommand: 'npm install' },
+          };
+        }
+
+        if (packageScripts.test) {
+          return {
+            stack: 'node',
+            label: 'Node tests',
+            passLabel: 'Node tests passed',
+            failLabel: 'Node tests failed',
+            proof: { kind: 'command', command: 'npm test', installCommand: 'npm install' },
+          };
+        }
+
+        const jsEntry = plannedFiles.find((path) => /\.(?:js|mjs|cjs)$/i.test(path));
+        if (jsEntry) {
+          const rel = toCommandPath(jsEntry);
+          return {
+            stack: 'node',
+            label: 'Node syntax proof',
+            passLabel: 'Node syntax proof passed',
+            failLabel: 'Node syntax proof failed',
+            proof: { kind: 'command', command: `node --check ${rel}` },
+          };
+        }
+      }
+
+      const pythonCandidates = normalizeWorkspacePathList([
+        ...plannedFiles.filter((path) => /\.py$/i.test(path)),
+        '/main.py',
+        '/app.py',
+        '/src/main.py',
+      ]);
+
+      const pythonFiles = [];
+      for (const path of pythonCandidates) {
+        if (plannedFiles.includes(path)) {
+          pythonFiles.push(path);
+          continue;
+        }
+        const existing = await readWorkspaceText(path);
+        if (String(existing || '').trim()) pythonFiles.push(path);
+      }
+
+      if (pythonFiles.length > 0) {
+        const relFiles = normalizeWorkspacePathList(pythonFiles)
+          .map(toCommandPath)
+          .filter(Boolean);
+        return {
+          stack: 'python',
+          label: 'Python syntax proof',
+          passLabel: 'Python syntax proof passed',
+          failLabel: 'Python syntax proof failed',
+          proof: { kind: 'command', command: `python -m py_compile ${relFiles.join(' ')}` },
+        };
+      }
+
+      const phpFiles = normalizeWorkspacePathList([
+        ...plannedFiles.filter((path) => /\.php$/i.test(path)),
+        '/index.php',
+      ]);
+      for (const path of phpFiles) {
+        if (plannedFiles.includes(path) || String(await readWorkspaceText(path) || '').trim()) {
+          return {
+            stack: 'php',
+            label: 'PHP syntax proof',
+            passLabel: 'PHP syntax proof passed',
+            failLabel: 'PHP syntax proof failed',
+            proof: { kind: 'command', command: `php -l ${toCommandPath(path)}` },
+          };
+        }
+      }
+
+      const javaFiles = normalizeWorkspacePathList(plannedFiles.filter((path) => /\.java$/i.test(path)));
+      if (javaFiles.length > 0) {
+        return {
+          stack: 'java',
+          label: 'Java compile proof',
+          passLabel: 'Java compile proof passed',
+          failLabel: 'Java compile proof failed',
+          proof: { kind: 'command', command: `javac ${javaFiles.map(toCommandPath).join(' ')}` },
+        };
+      }
+
+      const cFiles = normalizeWorkspacePathList(plannedFiles.filter((path) => /\.(?:c|h)$/i.test(path)));
+      if (cFiles.some((path) => /\.c$/i.test(path))) {
+        return {
+          stack: 'c',
+          label: 'C syntax proof',
+          passLabel: 'C syntax proof passed',
+          failLabel: 'C syntax proof failed',
+          proof: { kind: 'command', command: `gcc -fsyntax-only ${cFiles.map(toCommandPath).join(' ')}` },
+        };
+      }
+
+      const cppFiles = normalizeWorkspacePathList(plannedFiles.filter((path) => /\.(?:cc|cpp|cxx|hpp|hh|hxx)$/i.test(path)));
+      if (cppFiles.some((path) => /\.(?:cc|cpp|cxx)$/i.test(path))) {
+        return {
+          stack: 'cpp',
+          label: 'C++ syntax proof',
+          passLabel: 'C++ syntax proof passed',
+          failLabel: 'C++ syntax proof failed',
+          proof: { kind: 'command', command: `g++ -fsyntax-only ${cppFiles.map(toCommandPath).join(' ')}` },
+        };
+      }
+
+      const goMod = await readWorkspaceText('/go.mod');
+      const goFiles = normalizeWorkspacePathList(plannedFiles.filter((path) => /\.go$/i.test(path)));
+      if (String(goMod || '').trim() || goFiles.length > 0) {
+        return {
+          stack: 'go',
+          label: 'Go test proof',
+          passLabel: 'Go test proof passed',
+          failLabel: 'Go test proof failed',
+          proof: { kind: 'command', command: 'go test -mod=readonly ./...' },
+        };
+      }
+
+      const cargoToml = await readWorkspaceText('/Cargo.toml');
+      const rustFiles = normalizeWorkspacePathList(plannedFiles.filter((path) => /\.rs$/i.test(path)));
+      if (String(cargoToml || '').trim()) {
+        return {
+          stack: 'rust',
+          label: 'Rust cargo proof',
+          passLabel: 'Rust cargo proof passed',
+          failLabel: 'Rust cargo proof failed',
+          proof: { kind: 'command', command: 'cargo check --offline --locked' },
+        };
+      }
+      if (rustFiles.length > 0) {
+        return {
+          stack: 'rust',
+          label: 'Rust syntax proof',
+          passLabel: 'Rust syntax proof passed',
+          failLabel: 'Rust syntax proof failed',
+          proof: { kind: 'command', command: `rustc --emit=metadata ${toCommandPath(rustFiles[0])}` },
+        };
+      }
+
+      const dotnetFiles = normalizeWorkspacePathList(plannedFiles.filter((path) => /\.(?:csproj|sln)$/i.test(path)));
+      const existingDotnet = await firstExistingWorkspaceText(['/app.csproj', '/App.csproj']);
+      if (dotnetFiles.length > 0 || existingDotnet.path) {
+        const target = dotnetFiles[0] || existingDotnet.path || '';
+        return {
+          stack: 'dotnet',
+          label: '.NET build proof',
+          passLabel: '.NET build proof passed',
+          failLabel: '.NET build proof failed',
+          proof: { kind: 'command', command: `dotnet build --no-restore${target ? ` ${toCommandPath(target)}` : ''}` },
+        };
+      }
+
+      const htmlCandidates = normalizeWorkspacePathList([
+        ...plannedFiles.filter((path) => /\.html?$/i.test(path)),
+        '/index.html',
+      ]);
+      for (const path of htmlCandidates) {
+        if (plannedFiles.includes(path)) {
+          return {
+            stack: 'html',
+            label: 'HTML smoke run',
+            passLabel: 'HTML smoke run passed',
+            failLabel: 'HTML smoke run failed',
+            proof: { kind: 'smoke', path },
+          };
+        }
+        const existing = await readWorkspaceText(path);
+        if (String(existing || '').trim()) {
+          return {
+            stack: 'html',
+            label: 'HTML smoke run',
+            passLabel: 'HTML smoke run passed',
+            failLabel: 'HTML smoke run failed',
+            proof: { kind: 'smoke', path },
+          };
+        }
+      }
+
+      return {
+        stack: 'unknown',
+        label: 'workspace',
+        passLabel: 'Workspace check passed',
+        failLabel: 'Workspace check failed',
+        proof: null,
+      };
     }
 
     function getCssSyntaxIssue(css) {
@@ -787,6 +1263,10 @@
         declCount[name] = (declCount[name] || 0) + 1;
         if (firstDeclIndex[name] == null) firstDeclIndex[name] = m.index;
       }
+      // Collect EVERY offending variable in one pass: reporting only the first made
+      // each repair reveal the next const, burning a full read+edit+validate cycle
+      // per variable (row -> castling -> nc treadmill).
+      const offenders = [];
       for (const name of Object.keys(firstDeclIndex)) {
         if (declCount[name] > 1) continue;
         // A bare assignment `name =` (not ==, ===, =>, JSX `prop={...}`, or a
@@ -805,8 +1285,15 @@
           if (lastLt > lastGt && /<[A-Za-z][\w:.-]*(?:\s+[A-Za-z_$][\w$:.:-]*(?:\s*=\s*(?:""|''|\{\}|[^\s>]+))?)*\s*$/s.test(jsxContext.slice(lastLt))) {
             continue;
           }
-          return `reassigns the const variable \`${name}\` (declared with const but later assigned — this throws "Assignment to constant variable" at runtime)`;
+          offenders.push(name);
+          break;
         }
+      }
+      if (offenders.length === 1) {
+        return `reassigns the const variable \`${offenders[0]}\` (declared with const but later assigned — this throws "Assignment to constant variable" at runtime)`;
+      }
+      if (offenders.length > 1) {
+        return `reassigns ${offenders.length} const variables that are later assigned: ${offenders.map((n) => `\`${n}\``).join(', ')} — declare EACH of them with \`let\` instead (const reassignment throws "Assignment to constant variable" at runtime). Fix ALL of them in one edit.`;
       }
       return '';
     }
@@ -1325,7 +1812,7 @@
         deps.resetWorkspaceForNewProject();
         mutated = true;
         observation = `new_project ok: workspace root is ${deps.getWorkspaceRootName() || 'new project'}`;
-        return { ok: true, mutated, observation };
+        return { ok: true, mutated, observation, projectName: deps.getWorkspaceRootName() || projectName || 'new project' };
       }
 
       if (!hasOpenWorkspace && !workspaceCreatedThisTurn && existingProjectMutationRequest) {
@@ -1610,13 +2097,27 @@
         const creatingNewFile = deps.isLikelyNewAgentFileTarget(toolEvents, path) && !listedExistingFiles.has(path);
         let originalContent = '';
         if (!creatingNewFile) {
+          // Replacing a tiny stub this run wrote with substantially more content is
+          // legitimate expansion (e.g. a 1-line README that final_check flagged
+          // incomplete), not a blind rewrite — blocking it deadlocked stub recovery.
+          const lastOwnWrite = Array.isArray(toolEvents)
+            ? [...toolEvents].reverse().find((e) => (
+              e && e.ok && String(e.tool || '').toLowerCase() === 'write_file'
+              && deps.normalizeWorkspacePath(e.path || '') === path
+            ))
+            : null;
+          const stubLen = lastOwnWrite && typeof lastOwnWrite.writtenContent === 'string'
+            ? lastOwnWrite.writtenContent.length
+            : Number((String((lastOwnWrite && lastOwnWrite.observation) || '').match(/\((\d+)\s*chars\)/) || [])[1] ?? -1);
+          const newLen = String(decision.content || '').length;
+          const expandingOwnStub = stubLen >= 0 && stubLen < 200 && (newLen === 0 || newLen > Math.max(200, stubLen * 2));
           const alreadyReadThisFile = Array.isArray(toolEvents) && toolEvents.some((event) => (
             event
             && event.ok
             && String(event.tool || '').toLowerCase() === 'read_file'
             && deps.normalizeWorkspacePath(event.path || '') === path
           ));
-          if (!alreadyReadThisFile) {
+          if (!alreadyReadThisFile && !expandingOwnStub) {
             return {
               ok: false,
               mutated,
@@ -1632,7 +2133,7 @@
           // failed, or when the file's current content is structurally broken.
           const knownContent = getLatestKnownContentForPath(toolEvents, path);
           const currentlyBroken = Boolean(knownContent && getStructuralIssueForPath(path, knownContent));
-          if (editFailCount < 1 && !currentlyBroken) {
+          if (editFailCount < 1 && !currentlyBroken && !expandingOwnStub) {
             return {
               ok: false,
               mutated,
@@ -2091,73 +2592,101 @@
         };
       }
 
-      // For framework projects, run the real build command so the agent sees
-      // missing imports, TS/JS parse errors, and bundler diagnostics. Plain HTML
-      // still uses the hidden browser smoke test below.
+      // Detect the workspace stack and choose the strongest safe proof available.
+      // Natural-language routing stays semantic; this detector only reads project
+      // files/configs and maps them to deterministic proof commands.
       if (tool === 'run_app') {
-        const viteProject = await isViteWorkspaceProject();
-        if (viteProject) {
+        const stackInfo = await detectWorkspaceStack(planSpec || {});
+        const proof = stackInfo && stackInfo.proof ? stackInfo.proof : null;
+
+        if (proof && proof.kind === 'command') {
           if (typeof deps.invokeWorkspaceAction !== 'function') {
-            return { ok: false, mutated, observation: 'run_app cannot build this Vite project because the native command runner is not available in this build.' };
+            return { ok: false, mutated, observation: `run_app cannot run ${stackInfo.label || 'the proof command'} because the native command runner is not available in this build.` };
           }
-          deps.setActiveAgentStreamStatus(chatId, 'Building the Vite app...');
-          const res = await deps.invokeWorkspaceAction('runCommand', { program: 'npm', argsLine: ['run', 'build'].join('\n') });
+
+          const proofCommand = String(proof.command || '').trim();
+          const classification = classifyAgentCommand(proofCommand);
+          if (classification.policy === 'blocked') {
+            return {
+              ok: false,
+              mutated,
+              commandPolicy: 'blocked',
+              terminalCommand: proofCommand,
+              observation: `run_app proof command blocked: ${classification.reason}`,
+            };
+          }
+          if (classification.policy === 'ask_first') {
+            return buildCommandPermissionRequiredResult(proofCommand, classification, mutated, 'run_app');
+          }
+
+          deps.setActiveAgentStreamStatus(chatId, `Running terminal proof: ${proofCommand}`);
+          const res = await deps.invokeWorkspaceAction('runCommand', {
+            program: classification.program,
+            argsLine: classification.args.join('\n'),
+          });
           if (!res || !res.ok) {
-            return { ok: false, mutated, observation: `run_app could not start the Vite build: ${(res && res.message) || 'unknown error'}.` };
+            if (isMissingRuntimeMessage(res && res.message)) {
+              return buildMissingRuntimeResult(classification.program, proofCommand, mutated, 'run_app');
+            }
+            return { ok: false, mutated, observation: `run_app could not start ${stackInfo.label || 'the proof command'}: ${(res && res.message) || 'unknown error'}.` };
           }
+
           const status = parseRunCommandExitStatus(res.message);
           const tail = commandOutputTail(res.output);
+          const terminalProof = buildTerminalProof(proofCommand, res, status);
+
           if (status.timedOut) {
             return {
               ok: true,
               mutated,
               runErrorCount: 1,
-              observation: `run_app Vite build timed out before completion. This usually means the build command hung or dependency setup is still incomplete.${tail ? `\nOutput:\n${tail}` : ''}`,
+              terminalCommand: proofCommand,
+              terminalProof,
+              observation: `run_app ${stackInfo.failLabel || 'proof'} timed out before completion. This usually means the command hung or dependency setup is incomplete.${tail ? `\nOutput:\n${tail}` : ''}`,
             };
           }
+
           if (status.exitCode === 0) {
             return {
               ok: true,
               mutated,
               runErrorCount: 0,
-              observation: `run_app Vite build passed (npm run build exited 0).${tail ? `\nOutput:\n${tail}` : ''}`,
+              terminalCommand: proofCommand,
+              terminalProof,
+              observation: `run_app ${stackInfo.passLabel || 'proof passed'} (${proofCommand} exited 0).${tail ? `\nOutput:\n${tail}` : ''}`,
             };
           }
-          const missingDeps = looksLikeMissingNodeDependencies(`${res.message || ''}\n${res.output || ''}`);
+
+          const missingDeps = proof.installCommand && looksLikeMissingNodeDependencies(`${res.message || ''}\n${res.output || ''}`);
           if (missingDeps) {
-            // Deps missing (tsc/vite not found) → install them here and retry the
-            // build in-step, instead of dead-ending on an "environment limitation".
-            deps.setActiveAgentStreamStatus(chatId, 'Installing npm dependencies...');
-            const inst = await deps.invokeWorkspaceAction('runCommand', { program: 'npm', argsLine: 'install' });
-            const instStatus = parseRunCommandExitStatus(inst && inst.message);
-            if (!inst || !inst.ok || (instStatus.exitCode !== 0 && !instStatus.timedOut)) {
-              const instTail = commandOutputTail(inst && inst.output);
-              return {
-                ok: true,
-                mutated,
-                runErrorCount: 1,
-                observation: `run_app: tried to install project dependencies (npm install) but it did not complete cleanly. Run run_command \`npm install\` and read the error, or install deps outside the app, then run_app again.${instTail ? `\nOutput:\n${instTail}` : ''}`,
-              };
-            }
-            deps.setActiveAgentStreamStatus(chatId, 'Re-running the Vite build...');
-            const res2 = await deps.invokeWorkspaceAction('runCommand', { program: 'npm', argsLine: ['run', 'build'].join('\n') });
-            const status2 = parseRunCommandExitStatus(res2 && res2.message);
-            const tail2 = commandOutputTail(res2 && res2.output);
-            if (res2 && res2.ok && status2.exitCode === 0) {
-              return { ok: true, mutated, runErrorCount: 0, observation: `run_app: installed dependencies (npm install) and the Vite build then passed (npm run build exited 0).${tail2 ? `\nOutput:\n${tail2}` : ''}` };
-            }
+            const installCommand = String(proof.installCommand || '').trim();
+            const installProofPreview = tail
+              ? `Required because \`${proofCommand}\` reported:\n${tail}`
+              : `Required because ${proofCommand} reported missing local dependencies.`;
             return {
               ok: true,
               mutated,
               runErrorCount: 1,
-              observation: `run_app: installed dependencies, but the Vite build still failed${status2.exitCode != null ? ` (exit ${status2.exitCode})` : ''}. Read these real build errors, fix the root cause in the referenced files, then run_app again.\nOutput:\n${tail2 || '(no output)'}`,
+              permissionRequired: true,
+              commandPolicy: 'ask_first',
+              terminalCommand: installCommand,
+              terminalProof: {
+                command: installCommand,
+                exitCode: null,
+                timedOut: false,
+                outputPreview: installProofPreview.length > 1600 ? `...(truncated)\n${installProofPreview.slice(-1600)}` : installProofPreview,
+              },
+              observation: `run_app detected missing dependencies while running \`${proofCommand}\`. Permission is required before AI.EXE can run \`${installCommand}\` because it can use the network and modify dependency files. Approve \`${installCommand}\`, or install dependencies outside AI.EXE, then run_app again.${tail ? `\nBuild output:\n${tail}` : ''}`,
             };
           }
+
           return {
             ok: true,
             mutated,
             runErrorCount: 1,
-            observation: `run_app Vite build failed (npm run build exited ${status.exitCode}). Read these real build errors, fix the root cause in the referenced files, then run_app again.\nOutput:\n${tail || '(no output)'}`,
+            terminalCommand: proofCommand,
+            terminalProof,
+            observation: `run_app ${stackInfo.failLabel || 'proof failed'} (${proofCommand} exited ${status.exitCode}). Read these real errors, fix the root cause in the referenced files, then run_app again.\nOutput:\n${tail || '(no output)'}`,
           };
         }
 
@@ -2165,7 +2694,9 @@
           return { ok: false, mutated, observation: 'run_app is not available in this build.' };
         }
         const requestedHtml = deps.normalizeWorkspacePath(decision.path || '');
-        const htmlTarget = /\.html?$/i.test(requestedHtml) ? requestedHtml : '/index.html';
+        const htmlTarget = proof && proof.kind === 'smoke'
+          ? deps.normalizeWorkspacePath(proof.path || '/index.html')
+          : (/\.html?$/i.test(requestedHtml) ? requestedHtml : '/index.html');
         deps.setActiveAgentStreamStatus(chatId, `Running ${htmlTarget} in the offline preview...`);
         const result = await deps.runWorkspaceAppSmokeTest(htmlTarget);
         if (!result || !result.ok) {
@@ -2188,20 +2719,35 @@
         if (!rawCommand) {
           return { ok: false, mutated, observation: 'run_command needs a command, e.g. {"action":"tool","tool":"run_command","command":"python main.py"}.' };
         }
-        const parts = rawCommand.split(/\s+/).filter(Boolean);
-        const head = parts[0].toLowerCase();
-        const ALLOWED = { python: 'python', python3: 'python', pip: 'pip', pip3: 'pip', node: 'node', npm: 'npm' };
-        const program = ALLOWED[head];
-        if (!program) {
-          return { ok: false, mutated, observation: `run_command only allows: python, pip, node, npm (got "${head}"). Use one of those to run or test the project — no other shell commands.` };
+        const classification = classifyAgentCommand(rawCommand);
+        if (classification.policy === 'blocked') {
+          return {
+            ok: false,
+            mutated,
+            commandPolicy: 'blocked',
+            observation: `run_command blocked: ${classification.reason}`,
+          };
+        }
+        const approvedCommand = String((runOptions && runOptions.approvedCommand) || '').trim();
+        const hasExactApproval = Boolean(approvedCommand && approvedCommand === rawCommand);
+        if (classification.policy === 'ask_first' && !hasExactApproval) {
+          return buildCommandPermissionRequiredResult(rawCommand, classification, mutated, 'run_command');
+        }
+        if (classification.policy === 'ask_first' && hasExactApproval) {
+          classification.policy = 'auto_safe';
+          classification.reason = 'approved ask-first command';
         }
         if (typeof deps.invokeWorkspaceAction !== 'function') {
           return { ok: false, mutated, observation: 'run_command is not available in this build.' };
         }
-        const args = parts.slice(1);
-        deps.setActiveAgentStreamStatus(chatId, `Running \`${rawCommand}\`...`);
+        const program = classification.program;
+        const args = classification.args;
+        deps.setActiveAgentStreamStatus(chatId, `Running terminal command: ${rawCommand}`);
         const res = await deps.invokeWorkspaceAction('runCommand', { program, argsLine: args.join('\n') });
         if (!res || !res.ok) {
+          if (isMissingRuntimeMessage(res && res.message)) {
+            return buildMissingRuntimeResult(program, rawCommand, mutated, 'run_command');
+          }
           return { ok: false, mutated, observation: `run_command \`${rawCommand}\` could not run: ${(res && res.message) || 'unknown error'}.` };
         }
         const status = String(res.message || '');
@@ -2210,13 +2756,14 @@
         const timedOut = status === 'timed_out';
         const exitMatch = status.match(/exit_code=(-?\d+)/);
         const exitCode = exitMatch ? Number(exitMatch[1]) : (timedOut ? null : 0);
+        const terminalProof = buildTerminalProof(rawCommand, res, { timedOut, exitCode });
         if (timedOut) {
-          return { ok: true, mutated, runErrorCount: 0, observation: `run_command \`${rawCommand}\`: still running at the timeout with no crash — the program started cleanly (a GUI/game loop or server keeps running, which is expected).${tail ? `\nOutput:\n${tail}` : ''}` };
+          return { ok: true, mutated, runErrorCount: 0, terminalCommand: rawCommand, terminalProof, observation: `run_command \`${rawCommand}\`: still running at the timeout with no crash — the program started cleanly (a GUI/game loop or server keeps running, which is expected).${tail ? `\nOutput:\n${tail}` : ''}` };
         }
         if (exitCode === 0) {
-          return { ok: true, mutated, runErrorCount: 0, observation: `run_command \`${rawCommand}\`: finished cleanly (exit 0).${tail ? `\nOutput:\n${tail}` : ''}` };
+          return { ok: true, mutated, runErrorCount: 0, terminalCommand: rawCommand, terminalProof, observation: `run_command \`${rawCommand}\`: finished cleanly (exit 0).${tail ? `\nOutput:\n${tail}` : ''}` };
         }
-        return { ok: true, mutated, runErrorCount: 1, observation: `run_command \`${rawCommand}\`: exited with code ${exitCode}. Read the error below, fix its ROOT cause in the code, then run_command again to verify.\nOutput:\n${tail || '(no output)'}` };
+        return { ok: true, mutated, runErrorCount: 1, terminalCommand: rawCommand, terminalProof, observation: `run_command \`${rawCommand}\`: exited with code ${exitCode}. Read the error below, fix its ROOT cause in the code, then run_command again to verify.\nOutput:\n${tail || '(no output)'}` };
       }
 
       // Parse code files and report exact syntax errors with line/column — the
@@ -2510,6 +3057,7 @@
         if (name === 'validate_files') return 'Checking written files';
         if (name === 'check_code') return 'Checking syntax';
         if (name === 'run_app') return 'Running the app';
+        if (name === 'run_command') return withTarget('Running command');
         if (name === 'mkdir') return withTarget('Creating folder');
         if (name === 'move') return withTarget('Moving');
         if (name === 'delete') return withTarget('Deleting');

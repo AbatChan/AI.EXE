@@ -177,8 +177,17 @@ function testAgentCanvasGuard() {
 function testPerViewSendGating() {
   const keydownSource = extractFunctionSource(aiExeJs, 'handleKey');
   assert.ok(
-    keydownSource.includes('pendingInferenceCount > 0 && isCurrentViewInferenceChat()'),
-    'composer Enter must be swallowed only in the chat that owns the running op',
+    keydownSource.includes('submitComposerMessage('),
+    'composer Enter must delegate to the send-only path (never the cancel-capable button handler)',
+  );
+  const submitSource = extractFunctionSource(aiExeJs, 'submitComposerMessage');
+  assert.ok(
+    submitSource.includes('pendingInferenceCount > 0 && isCurrentViewInferenceChat()'),
+    'the Enter path swallows only in the chat that owns the running op',
+  );
+  assert.ok(
+    !submitSource.includes('cancelActiveInference'),
+    'the Enter path must never cancel a run',
   );
   assert.ok(
     !/if \(pendingInferenceCount > 0\) \{\s*\n\s*if \(e\.key === 'Enter'/.test(keydownSource),

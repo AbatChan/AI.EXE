@@ -126,6 +126,86 @@
       return seconds > 0 ? `${minutes} minutes ${seconds}s` : `${minutes} minutes`;
     }
 
+    function formatPlanItemText(value) {
+      const text = String(value || '').trim().replace(/\s+/g, ' ');
+      if (!text) return '';
+      const capitalized = text.charAt(0).toUpperCase() + text.slice(1);
+      return /[.!?]$/.test(capitalized) ? capitalized : `${capitalized}.`;
+    }
+
+    function stripActivityMarkdown(value) {
+      return String(value || '')
+        .replace(/\r\n?/g, '\n')
+        .replace(/\*\*([^*]+)\*\*/g, '$1')
+        .replace(/__([^_]+)__/g, '$1')
+        .replace(/`([^`]+)`/g, '$1')
+        .replace(/^\s*[-*]\s+/gm, '• ')
+        .replace(/^\s*#{1,6}\s+/gm, '')
+        .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1')
+        .replace(/[ \t]+/g, ' ')
+        .trim();
+    }
+
+    function clipActivityText(value, max = 640) {
+      const text = stripActivityMarkdown(value);
+      if (text.length <= max) return text;
+      return `${text.slice(0, max).replace(/\s+\S*$/, '')}…`;
+    }
+
+    function appendCompactActivityText(element, text) {
+      const lines = clipActivityText(text)
+        .split('\n')
+        .map((line) => line.trim())
+        .filter(Boolean);
+      const compact = lines.join('\n');
+      if (!compact) return;
+      const node = document.createElement('div');
+      node.className = 'msg-agent-activity-plain-text';
+      node.textContent = compact;
+      element.appendChild(node);
+    }
+
+    function renderActivityMarkdownInto(element, text) {
+      const source = String(text || '').trim();
+      if (!source) return;
+
+      // Agent worked/thought panels should stay compact and readable. Full markdown
+      // rendering is still used for normal assistant messages; inside collapsibles we
+      // render narration as plain text and only keep fenced code blocks as code.
+      const fenceRegex = /```([a-z0-9_-]*)?\n?([\s\S]*?)```/gi;
+      let cursor = 0;
+      let match = null;
+      while ((match = fenceRegex.exec(source))) {
+        appendCompactActivityText(element, source.slice(cursor, match.index));
+        const pre = document.createElement('pre');
+        pre.className = 'msg-agent-activity-code';
+        const code = document.createElement('code');
+        const lang = String(match[1] || '').trim();
+        if (lang) code.className = `language-${lang}`;
+        code.textContent = String(match[2] || '').replace(/\n+$/g, '');
+        pre.appendChild(code);
+        element.appendChild(pre);
+        cursor = fenceRegex.lastIndex;
+      }
+      appendCompactActivityText(element, source.slice(cursor));
+    }
+
+    // Tool observation text -> plain context rows for the collapsible drawer
+    // (same drawer the edit diff uses; no +/- markers, no line numbers).
+    function buildObservationPreviewRows(text, maxRows = 100) {
+      const lines = String(text || '').replace(/\r/g, '').split('\n');
+      const rows = [];
+      for (const line of lines) {
+        if (rows.length >= maxRows) {
+          rows.push({ type: 'spacer' });
+          break;
+        }
+        rows.push({ type: 'context', oldLine: 0, newLine: 0, text: String(line).slice(0, 400) });
+      }
+      while (rows.length && !String(rows[rows.length - 1].text || '').trim() && rows[rows.length - 1].type !== 'spacer') rows.pop();
+      return rows;
+    }
+
     function normalizeAgentActivities(list) {
       return Array.from(list || [])
         .map((item) => {
@@ -138,8 +218,8 @@
             .replace(/^Edited$/i, 'Edited')
             .replace(/^Reading$/i, 'Reading')
             .replace(/^Read$/i, 'Read');
-          const detail = String(item.detail || '').trim().slice(0, 420);
-          const meta = String(item.meta || '').trim().slice(0, 120);
+          const detail = clipActivityText(item.detail || '', 640);
+          const meta = clipActivityText(item.meta || '', 140);
           if (!title && !detail && !meta) return null;
           const status = String(item.status || '').trim().toLowerCase();
           // Structured checklist rows (for kind:'checklist') survive normalization
@@ -175,6 +255,16 @@
                 .filter(Boolean)
             : null;
           const streamContent = String(item.streamContent || item.content || '').trim().slice(0, 30000);
+          const rawTerminal = item.terminal && typeof item.terminal === 'object'
+            ? item.terminal
+            : (item.terminalProof && typeof item.terminalProof === 'object' ? item.terminalProof : null);
+          const terminalCommand = String((rawTerminal && rawTerminal.command) || item.terminalCommand || item.command || '').trim();
+          const terminal = terminalCommand || rawTerminal ? {
+            command: terminalCommand,
+            exitCode: rawTerminal && rawTerminal.exitCode != null ? Number(rawTerminal.exitCode) : null,
+            timedOut: Boolean(rawTerminal && rawTerminal.timedOut),
+            outputPreview: String((rawTerminal && rawTerminal.outputPreview) || '').trim().slice(0, 3000),
+          } : null;
           return {
             kind: String(item.kind || '').trim().toLowerCase(),
             title: title.slice(0, 160),
@@ -184,12 +274,17 @@
             diff: added > 0 || removed > 0 ? { added, removed } : null,
             diffPreview: diffPreview && diffPreview.length ? diffPreview : null,
             streamContent,
+            streamMode: item.streamMode === 'edits' ? 'edits' : 'file',
             openPath: openPath && openPath !== '/' ? openPath : '',
             openKind: String(item.openKind || '').trim().toLowerCase() === 'folder' ? 'folder' : 'file',
             openStartLine: Math.max(0, Number(item.openStartLine) || 0),
             openEndLine: Math.max(0, Number(item.openEndLine) || 0),
             status: status === 'error' ? 'error' : (status === 'pending' ? 'pending' : 'done'),
+            // Structured outcome flag (validate/run cards) — group headers key off it;
+            // dropping it here made "Checked files — no issues found" wrap failed checks.
+            hasIssues: item.hasIssues === true,
             items: checklistItems && checklistItems.length ? checklistItems : null,
+            terminal,
             ts: Number(item.ts) || nowTs(),
           };
         })
@@ -204,6 +299,9 @@
       const collapsed = meta.collapsed !== false;
       if (!startedAt && !completedAt) return null;
       const normalized = { startedAt, completedAt, collapsed };
+      if (meta.waitingForApproval === true) normalized.waitingForApproval = true;
+      if (meta.approvalCancelled === true) normalized.approvalCancelled = true;
+      if (meta.approvalInterrupted === true) normalized.approvalInterrupted = true;
       // Per-response revert snapshot: pre-run file states (+ post-run states once
       // a revert captured them) so the message can restore either direction.
       const normalizeSnapshotFiles = (list) => (Array.isArray(list) ? list : [])
@@ -256,6 +354,9 @@
       const previous = target.length > 0 ? target[target.length - 1] : null;
       const sameTarget = previous && (
         (previous.openPath && normalized.openPath && previous.openPath === normalized.openPath)
+        || (previous.kind === 'command' && normalized.kind === 'command'
+          && previous.terminal && normalized.terminal
+          && previous.terminal.command === normalized.terminal.command)
         || (previous.kind === 'project' && normalized.kind === 'project')
         || (previous.kind === 'scan' && normalized.kind === 'scan' && previous.detail === normalized.detail)
       );
@@ -276,6 +377,9 @@
         if (!candidate || candidate.status !== 'pending') continue;
         const candidateSameTarget = (
           (candidate.openPath && normalized.openPath && candidate.openPath === normalized.openPath)
+          || (candidate.kind === 'command' && normalized.kind === 'command'
+            && candidate.terminal && normalized.terminal
+            && candidate.terminal.command === normalized.terminal.command)
           || (candidate.kind === 'project' && normalized.kind === 'project')
           || (candidate.kind === 'scan' && normalized.kind === 'scan' && candidate.detail === normalized.detail)
         );
@@ -293,6 +397,7 @@
           diffPreview: normalized.diffPreview || candidate.diffPreview || null,
           openPath: normalized.openPath || candidate.openPath || '',
           openKind: normalized.openKind || candidate.openKind || 'file',
+          terminal: normalized.terminal || candidate.terminal || null,
         };
         return target;
       }
@@ -482,10 +587,11 @@
       const observation = String((toolResult && toolResult.observation) || '').trim();
       if (!ok) return null;
       if (tool === 'new_project') {
+        const projectName = String((toolResult && toolResult.projectName) || (typeof d.getWorkspaceRootName === 'function' && d.getWorkspaceRootName()) || 'New project').trim();
         return buildInlineAgentActivityBase({
           kind: 'project',
           title: 'Created project',
-          detail: (typeof d.getWorkspaceRootName === 'function' && d.getWorkspaceRootName()) || 'New project',
+          detail: projectName || 'New project',
           status: 'done',
         });
       }
@@ -522,6 +628,36 @@
           status: 'done',
         });
       }
+      // Batched reads and searches used to fall through to the generic raw-observation
+      // dump — render them as compact rows with the same collapsible drawer as edits.
+      if (tool === 'read_files') {
+        const paths = Array.isArray(decision && decision.paths)
+          ? decision.paths.map((p) => normalizeWorkspacePath(p || '')).filter((p) => p && p !== '/')
+          : [];
+        const countMatch = observation.match(/^read_files\s*\((\d+)\s*files?\)/i);
+        const count = paths.length || Number(countMatch && countMatch[1]) || 0;
+        return buildInlineAgentActivityBase({
+          kind: 'read',
+          title: 'Read',
+          detail: paths.length
+            ? paths.map((p) => formatAgentActivityPathLabel(p)).join(', ').slice(0, 120)
+            : `${count || 'several'} files`,
+          meta: `${count || paths.length || '?'} files`,
+          diffPreview: buildObservationPreviewRows(observation),
+          status: 'done',
+        });
+      }
+      if (tool === 'search_files') {
+        const matchCount = (observation.match(/^-\s/gm) || []).length;
+        return buildInlineAgentActivityBase({
+          kind: 'search',
+          title: 'Searched',
+          detail: formatAgentActivityPathLabel(targetInfo || 'workspace'),
+          meta: matchCount ? `${matchCount} match${matchCount === 1 ? '' : 'es'}` : 'no matches',
+          diffPreview: buildObservationPreviewRows(observation),
+          status: 'done',
+        });
+      }
       if (tool === 'write_file') {
         const writtenPath = normalizeWorkspacePath(toolResult && toolResult.writtenPath ? toolResult.writtenPath : targetInfo);
         const diffStats = countLineDiffStats(toolResult && toolResult.originalContent, toolResult && toolResult.writtenContent);
@@ -554,6 +690,41 @@
       }
       if (tool === 'run_app') {
         const runErrors = Number(toolResult && toolResult.runErrorCount) || 0;
+        const terminal = toolResult && toolResult.terminalProof ? toolResult.terminalProof : null;
+        if (toolResult && toolResult.permissionRequired) {
+          const permTerminal = terminal || {
+            command: String((toolResult && toolResult.terminalCommand) || 'command').trim(),
+            exitCode: null,
+            timedOut: false,
+            outputPreview: '',
+          };
+          return buildInlineAgentActivityBase({
+            kind: 'command',
+            title: 'Permission needed',
+            detail: permTerminal.command || 'command',
+            terminal: permTerminal,
+            hasIssues: true,
+            meta: 'ask first',
+            status: 'error',
+          });
+        }
+        if (terminal && terminal.command) {
+          const runtimeMissing = Boolean(toolResult && toolResult.runtimeMissing);
+          const exitLabel = runtimeMissing ? 'not installed' : (terminal.timedOut ? 'timed out' : (terminal.exitCode == null ? 'exit unknown' : `exit ${terminal.exitCode}`));
+          const outputRows = String(terminal.outputPreview || '').trim()
+            ? buildObservationPreviewRows(terminal.outputPreview)
+            : null;
+          return buildInlineAgentActivityBase({
+            kind: 'command',
+            title: runtimeMissing ? 'Runtime missing' : (runErrors ? 'Build failed' : 'Build passed'),
+            detail: terminal.command,
+            terminal,
+            hasIssues: runtimeMissing || runErrors > 0,
+            meta: exitLabel,
+            diffPreview: outputRows && outputRows.length ? outputRows : null,
+            status: runtimeMissing || runErrors ? 'error' : 'done',
+          });
+        }
         return buildInlineAgentActivityBase({
           kind: 'validate',
           title: 'Ran the app',
@@ -563,6 +734,44 @@
           hasIssues: runErrors > 0,
           meta: '',
           status: 'done',
+        });
+      }
+      if (tool === 'run_command') {
+        const runErrors = Number(toolResult && toolResult.runErrorCount) || 0;
+        const terminal = toolResult && toolResult.terminalProof
+          ? toolResult.terminalProof
+          : { command: String((toolResult && toolResult.terminalCommand) || (decision && decision.command) || '').trim() };
+        if (toolResult && toolResult.permissionRequired) {
+          const permTerminal = terminal || {
+            command: String((toolResult && toolResult.terminalCommand) || (decision && decision.command) || 'command').trim(),
+            exitCode: null,
+            timedOut: false,
+            outputPreview: '',
+          };
+          return buildInlineAgentActivityBase({
+            kind: 'command',
+            title: 'Permission needed',
+            detail: permTerminal.command || String((decision && decision.command) || '').trim() || 'command',
+            terminal: permTerminal,
+            hasIssues: true,
+            meta: 'ask first',
+            status: 'error',
+          });
+        }
+        const runtimeMissing = Boolean(toolResult && toolResult.runtimeMissing);
+        const exitLabel = runtimeMissing ? 'not installed' : (terminal.timedOut ? 'timed out' : (terminal.exitCode == null ? 'exit unknown' : `exit ${terminal.exitCode}`));
+        const outputRows = String(terminal.outputPreview || '').trim()
+          ? buildObservationPreviewRows(terminal.outputPreview)
+          : null;
+        return buildInlineAgentActivityBase({
+          kind: 'command',
+          title: runtimeMissing ? 'Runtime missing' : (runErrors ? 'Command failed' : 'Ran command'),
+          detail: terminal.command || String((decision && decision.command) || '').trim() || 'command',
+          terminal,
+          hasIssues: runtimeMissing || runErrors > 0,
+          meta: exitLabel,
+          diffPreview: outputRows && outputRows.length ? outputRows : null,
+          status: runtimeMissing || runErrors ? 'error' : 'done',
         });
       }
       if (tool === 'check_code') {
@@ -673,6 +882,27 @@
           status: 'pending',
         });
       }
+      if (tool === 'read_files') {
+        const paths = Array.isArray(decision && decision.paths)
+          ? decision.paths.map((p) => normalizeWorkspacePath(p || '')).filter((p) => p && p !== '/')
+          : [];
+        return buildInlineAgentActivityBase({
+          kind: 'read',
+          title: 'Reading',
+          detail: paths.length
+            ? paths.map((p) => formatAgentActivityPathLabel(p)).join(', ').slice(0, 120)
+            : 'several files',
+          status: 'pending',
+        });
+      }
+      if (tool === 'search_files') {
+        return buildInlineAgentActivityBase({
+          kind: 'search',
+          title: 'Searching',
+          detail: formatAgentActivityPathLabel(targetInfo || 'workspace'),
+          status: 'pending',
+        });
+      }
       if (tool === 'write_file') {
         const isNewFile = d.isLikelyNewAgentFileTarget ? d.isLikelyNewAgentFileTarget(toolEvents, targetInfo) : true;
         return buildInlineAgentActivityBase({
@@ -701,6 +931,32 @@
           detail: 'Looking for syntax, file-role, and MVP issues.',
           status: 'pending',
         };
+      }
+      if (tool === 'check_code') {
+        return buildInlineAgentActivityBase({
+          kind: 'validate',
+          title: 'Checking syntax',
+          detail: targetInfo && targetInfo !== '/' ? formatAgentActivityPathLabel(targetInfo) : 'known code files',
+          status: 'pending',
+        });
+      }
+      if (tool === 'run_app') {
+        return buildInlineAgentActivityBase({
+          kind: 'validate',
+          title: 'Running app',
+          detail: 'Preview/build check',
+          status: 'pending',
+        });
+      }
+      if (tool === 'run_command') {
+        const command = String((decision && decision.command) || (decision && decision.content) || '').trim();
+        return buildInlineAgentActivityBase({
+          kind: 'command',
+          title: 'Running command',
+          detail: command || 'command',
+          terminal: { command: command || 'command', exitCode: null, timedOut: false, outputPreview: '' },
+          status: 'pending',
+        });
       }
       if (tool === 'mkdir') {
         return buildInlineAgentActivityBase({
@@ -789,16 +1045,13 @@
         return buildAgentStreamingFileView({
           path: activity.openPath || activity.detail || 'partial file',
           content: activity.streamContent,
+          mode: activity.streamMode === 'edits' ? 'edits' : 'file',
         });
       }
       if (activity && activity.kind === 'thought') {
         const item = document.createElement('div');
         item.className = 'msg-agent-activity-thought';
-        if (typeof d.marked === 'function') {
-          item.innerHTML = d.marked(String(activity.detail || '').trim());
-        } else {
-          item.textContent = String(activity.detail || '').trim();
-        }
+        renderActivityMarkdownInto(item, activity.detail);
         return item;
       }
       if (activity && activity.kind === 'checklist' && Array.isArray(activity.items) && activity.items.length) {
@@ -825,7 +1078,7 @@
           box.textContent = row && row.done ? '✓' : '';
           const text = document.createElement('span');
           text.className = 'msg-agent-checklist-text';
-          text.textContent = String(row && row.text ? row.text : '').trim();
+          text.textContent = formatPlanItemText(row && row.text ? row.text : '');
           li.appendChild(box);
           li.appendChild(text);
           wrap.appendChild(li);
@@ -863,7 +1116,8 @@
             && activity.openPath
             && normalizeWorkspacePath(activity.openPath) !== '/'
           );
-          pathEl.className = `msg-agent-activity-inline-path${fileLikeTarget ? ' file-target' : ''}`;
+          const commandLikeTarget = String(activity && activity.kind || '').toLowerCase() === 'command';
+          pathEl.className = `msg-agent-activity-inline-path${fileLikeTarget ? ' file-target' : ''}${commandLikeTarget ? ' command-target' : ''}`;
           pathEl.textContent = detail;
           inlineRow.appendChild(pathEl);
         }
@@ -892,7 +1146,43 @@
         }
 
         let chevron = null;
-        if (hasDiffDrawer) {
+        const permissionCommand = String(
+        activity && activity.kind === 'command' && activity.terminal && activity.terminal.command
+          ? activity.terminal.command
+          : ''
+      ).trim();
+      const needsCommandPermission = Boolean(
+        permissionCommand
+        && activity
+        && activity.kind === 'command'
+        && String(activity.title || '').trim().toLowerCase() === 'permission needed'
+      );
+      if (needsCommandPermission) {
+        const actions = document.createElement('div');
+        actions.className = 'msg-agent-permission-actions';
+
+        const approveBtn = document.createElement('button');
+        approveBtn.type = 'button';
+        approveBtn.className = 'msg-agent-permission-btn approve';
+        approveBtn.dataset.agentCommandApproval = 'approve';
+        approveBtn.dataset.chatId = String(chatId || '');
+        approveBtn.dataset.command = permissionCommand;
+        approveBtn.textContent = 'Approve once';
+
+        const cancelBtn = document.createElement('button');
+        cancelBtn.type = 'button';
+        cancelBtn.className = 'msg-agent-permission-btn cancel';
+        cancelBtn.dataset.agentCommandApproval = 'cancel';
+        cancelBtn.dataset.chatId = String(chatId || '');
+        cancelBtn.dataset.command = permissionCommand;
+        cancelBtn.textContent = 'Cancel';
+
+        actions.appendChild(approveBtn);
+        actions.appendChild(cancelBtn);
+        item.appendChild(actions);
+      }
+
+      if (hasDiffDrawer) {
           chevron = document.createElement('span');
           chevron.className = 'msg-agent-summary-chevron';
           chevron.innerHTML = `
@@ -1039,7 +1329,8 @@
           };
           traceDiffDrawer('diff_drawer_toggle_click', traceBase);
           item.setAttribute('aria-expanded', nextExpanded ? 'true' : 'false');
-          if (titleEl) titleEl.textContent = nextExpanded
+          const editLikeDrawer = ['edit', 'write'].includes(String(activity && activity.kind || '').toLowerCase());
+          if (titleEl) titleEl.textContent = nextExpanded && editLikeDrawer
             ? `${String(activity && activity.title ? activity.title : 'Edited')} file`
             : String(activity && activity.title ? activity.title : 'Edited');
           if (pathEl) pathEl.hidden = nextExpanded;
@@ -1356,7 +1647,7 @@
       if (text) {
         const body = document.createElement('div');
         body.className = 'msg-agent-activity-thought';
-        body.textContent = text;
+        renderActivityMarkdownInto(body, text);
         drawer.appendChild(body);
       }
       wrapper.appendChild(drawer);
@@ -1527,24 +1818,15 @@
         openKind: 'file',
         status: 'done',
         streamContent: content,
+        streamMode: streamingFile.mode === 'edits' ? 'edits' : 'file',
         ts: nowTs(),
       };
 
-      let insertAfter = -1;
-      for (let i = liveRows.length - 1; i >= 0; i -= 1) {
-        const activity = liveRows[i];
-        if (!activity) continue;
-        const activityPath = normalizeWorkspacePath(activity.openPath || '');
-        if (streamPath && activityPath === streamPath) {
-          insertAfter = i;
-          break;
-        }
-      }
-      if (insertAfter >= 0) {
-        liveRows.splice(insertAfter + 1, 0, streamActivity);
-      } else {
-        liveRows.push(streamActivity);
-      }
+      // Always the LAST row: the stream card is the work happening right now, so it
+      // sits directly above the loader. Anchoring it next to an earlier row for the
+      // same path split the live view — the card jumped up beside an old "Read"
+      // entry while the "Editing file..." loader stayed at the bottom.
+      liveRows.push(streamActivity);
       return liveRows;
     }
 
@@ -1603,6 +1885,7 @@
     function buildAgentStreamingFileView(streamingFile) {
       const path = String(streamingFile.path || '').replace(/^\//, '') || 'file';
       const content = String(streamingFile.content || '');
+      const isEditProgram = streamingFile.mode === 'edits';
       const lineCount = content ? content.split('\n').length : 0;
       const box = document.createElement('div');
       box.className = 'msg-agent-stream-file';
@@ -1610,13 +1893,15 @@
       head.className = 'msg-agent-stream-file-head';
       const name = document.createElement('span');
       name.className = 'msg-agent-stream-file-name';
-      name.textContent = path;
+      // An edit program is instructions FOR the file, not the file — say so, or the
+      // card reads as the file's content having turned into JSON.
+      name.textContent = isEditProgram ? `Preparing edits · ${path}` : path;
       // Neutral live line count — NOT a green "+N", because while generating an
       // edit/rewrite this is the size of the content, not the real diff. The
       // accurate +A/-B animates on the committed row once the change is known.
       const meter = document.createElement('span');
       meter.className = 'msg-agent-activity-inline-meta';
-      meter.textContent = `${lineCount} line${lineCount === 1 ? '' : 's'}`;
+      meter.textContent = isEditProgram ? 'edit program' : `${lineCount} line${lineCount === 1 ? '' : 's'}`;
       head.appendChild(name);
       head.appendChild(meter);
       const pre = document.createElement('pre');
@@ -1864,13 +2149,20 @@
       const contentText = String(displayText || '').trim();
       if (!contentText) return;
       const normalizedAgentMeta = normalizeAgentMeta(options.agentMeta);
-      if (normalizedAgentMeta && normalizedAgentMeta.completedAt) {
+      if (normalizedAgentMeta && (normalizedAgentMeta.completedAt || normalizedAgentMeta.waitingForApproval)) {
         const divider = document.createElement('div');
         divider.className = 'msg-agent-final-divider';
         divider.hidden = normalizedAgentMeta.collapsed !== false;
+        const dividerLabel = normalizedAgentMeta.approvalCancelled
+          ? 'Approval cancelled'
+          : normalizedAgentMeta.approvalInterrupted
+          ? 'Approval interrupted'
+          : normalizedAgentMeta.waitingForApproval && !normalizedAgentMeta.completedAt
+          ? 'Waiting for approval'
+          : 'Final message';
         divider.innerHTML = `
           <span class="msg-agent-final-divider-line"></span>
-          <span class="msg-agent-final-divider-label">Final message</span>
+          <span class="msg-agent-final-divider-label">${dividerLabel}</span>
           <span class="msg-agent-final-divider-line"></span>
         `;
         bubble.appendChild(divider);

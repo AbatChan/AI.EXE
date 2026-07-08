@@ -357,6 +357,8 @@
       let streamed = '';
       const remote = await deps.requestSelectedRemoteTextCompletion(prompt, budget, '', {
         preferStreaming: true,
+        isolatedAdapterChat: true,
+        adapterChatScope: 'agent-project-files',
         onDelta: (delta) => { beat(); if (delta) streamed += String(delta); },
       });
       let raw = (remote && remote.ok && String(remote.output || '').trim()) ? String(remote.output || '') : streamed;
@@ -385,6 +387,8 @@
       let streamed = '';
       const remote = await deps.requestSelectedRemoteTextCompletion(prompt, agentDecisionMaxTokens * 3, '', {
         preferStreaming: true,
+        isolatedAdapterChat: true,
+        adapterChatScope: 'agent-edit-file',
         onDelta: (delta) => {
           beatToolProgress();
           if (delta && typeof deps.updateAgentStreamingFile === 'function') {
@@ -392,7 +396,7 @@
             const preview = typeof deps.sanitizeAgentGeneratedEditProgram === 'function'
               ? deps.sanitizeAgentGeneratedEditProgram(streamed)
               : streamed;
-            deps.updateAgentStreamingFile(path, preview);
+            deps.updateAgentStreamingFile(path, preview, 'edits');
           }
         },
       });
@@ -663,6 +667,7 @@
         'Mention changed files when they help the user understand what happened.',
         'For multi-file app work, short bullets are allowed.',
         'Keep it concise and specific to the actual work. Prefer under 120 words.',
+        'Never mention internal tool names (write_file, edit_file, validate_files, run_app, run_command, read_file) — say it plainly: "edited", "checked the files", "ran the app".',
         'CHANGES below lists the only real modifications made this run. Describe an outcome ONLY if those diffs actually implement it; if part of the request has no supporting change there, say plainly that it was not changed.',
         `Workspace name: ${workspaceLabel || deps.deriveProjectNameFromTask(taskText) || 'project'}`,
         `Task: ${String(taskText || '').trim()}`,
@@ -740,6 +745,7 @@
       const srcPath = deps.normalizeWorkspacePath(decision && (decision.srcPath || decision.src_path) ? (decision.srcPath || decision.src_path) : '');
       const dstPath = deps.normalizeWorkspacePath(decision && (decision.dstPath || decision.dst_path) ? (decision.dstPath || decision.dst_path) : '');
       if (tool === 'new_project') return 'new project';
+      if (tool === 'run_command') return String((decision && decision.command) || '').trim();
       if (tool === 'read_files' && Array.isArray(decision && decision.paths) && decision.paths.length) {
         const n = decision.paths.length;
         return n === 1 ? deps.normalizeWorkspacePath(decision.paths[0]) : `${n} files`;

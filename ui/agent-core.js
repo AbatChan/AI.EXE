@@ -61,6 +61,10 @@
     function deriveProjectNameFromTask(taskText) {
       const source = String(taskText || '').toLowerCase();
       if (!source) return '';
+      const landingSubjectMatch = source.match(/\blanding\s+page\s+(?:for|about|of)\s+([a-z0-9][a-z0-9\s_-]{1,44}?)(?=\s+(?:with|featuring|that|which|using|including)\b|[,.!?]|$)/i);
+      if (landingSubjectMatch && landingSubjectMatch[1]) {
+        return sanitizeProjectSlug(`${landingSubjectMatch[1]} landing`);
+      }
       if (/\bdesktop[-\s]?style\b[\s\S]*\b(?:operating system|os|home screen|desktop ui|desktop interface)\b/i.test(source)
         || /\bmodern operating system home screen\b/i.test(source)) {
         return 'desktop-os-interface';
@@ -1139,13 +1143,18 @@
         if (op === 'insert' || op === 'add') op = 'insert_after';
         const find = pick(edit, ['find', 'anchor', 'search', 'old', 'from', 'target', 'match']);
         const replace = pick(edit, ['replace', 'replacement', 'new', 'to', 'with', 'newText']);
-        const text = pick(edit, ['text', 'content', 'value', 'insert', 'add', 'snippet']);
+        let text = pick(edit, ['text', 'content', 'value', 'insert', 'add', 'snippet']);
+        // Insert-family content that arrived under a replace-family key must not
+        // degrade to inserting "" (an applied-but-empty insert silently drops the block).
+        if (['insert_before', 'insert_after', 'prepend', 'append'].includes(op) && !text && replace) text = replace;
         // Default the op when the shape is unambiguous.
         if (!op && find && replace) op = 'replace';
         if (!op && !find && !replace && text) op = 'append';
         if (!op && find && !replace && text) op = 'insert_after';
         return { op, find, replace, text };
-      }).filter((edit) => ['replace', 'replace_all', 'insert_before', 'insert_after', 'prepend', 'append'].includes(edit.op));
+      }).filter((edit) => ['replace', 'replace_all', 'insert_before', 'insert_after', 'prepend', 'append'].includes(edit.op))
+        // An insert with no content is a broken edit, not a no-op success.
+        .filter((edit) => !(['insert_before', 'insert_after', 'prepend', 'append'].includes(edit.op) && !edit.text));
       if (!normalizedEdits.length) return null;
       return { edits: normalizedEdits };
     }
@@ -1328,6 +1337,7 @@
           continue;
         }
         if (edit.op === 'insert_before') {
+          if (!String(edit.text || '')) continue; // empty insert = broken edit, don't count it applied
           const anchor = findEditAnchor(output, find);
           if (!anchor) continue;
           output = `${output.slice(0, anchor.start)}${String(edit.text || '')}${output.slice(anchor.start)}`;
@@ -1335,6 +1345,7 @@
           continue;
         }
         if (edit.op === 'insert_after') {
+          if (!String(edit.text || '')) continue;
           const anchor = findEditAnchor(output, find);
           if (!anchor) continue;
           output = `${output.slice(0, anchor.end)}${String(edit.text || '')}${output.slice(anchor.end)}`;
@@ -1405,7 +1416,7 @@
       const rows = Array.isArray(progress) ? progress : [];
       if (!rows.length) return '';
       const doneCount = rows.filter((r) => r && r.done).length;
-      const lines = rows.map((r) => `- [${r && r.done ? 'x' : ' '}] ${String(r && r.text ? r.text : '').trim()}`);
+      const lines = rows.map((r) => `- [${r && r.done ? 'x' : ' '}] ${formatAgentPlanSentence(r && r.text ? r.text : '')}`);
       return `**Plan (${doneCount}/${rows.length})**\n${lines.join('\n')}`;
     }
 
@@ -1426,6 +1437,13 @@
         .slice(0, 12);
     }
 
+    function formatAgentPlanSentence(value) {
+      const text = String(value || '').trim().replace(/\s+/g, ' ');
+      if (!text) return '';
+      const capitalized = text.charAt(0).toUpperCase() + text.slice(1);
+      return /[.!?]$/.test(capitalized) ? capitalized : `${capitalized}.`;
+    }
+
     function parseAgentPlanTextList(raw, maxItems = 8) {
       let items = String(raw || '')
         .split('|')
@@ -1440,7 +1458,7 @@
         const split = items[0].split(/,(?=[A-Z])/).map((s) => s.trim()).filter((s) => s.length >= 8);
         if (split.length >= 2) items = split;
       }
-      return items.slice(0, maxItems);
+      return items.slice(0, maxItems).map(formatAgentPlanSentence).filter(Boolean);
     }
 
     // Phases carry sub-tasks: "Title :: task ; task ; task | Title2 :: ...".
@@ -1451,7 +1469,7 @@
         .map((t) => String(t || '').trim())
         .filter(Boolean)
         .slice(0, maxTasks)
-        .map((text) => ({ text, done: false }));
+        .map((text) => ({ text: formatAgentPlanSentence(text), done: false }));
       if (Array.isArray(raw)) {
         return raw.map((p) => {
           if (p && typeof p === 'object') {
@@ -1493,7 +1511,7 @@
           lines.push(`- [${phase && phase.done ? 'x' : ' '}] ${title}`);
         }
         tasks.forEach((task) => {
-          const txt = String((task && task.text) || task || '').trim();
+          const txt = formatAgentPlanSentence((task && task.text) || task || '');
           if (txt) lines.push(`- [${task && task.done ? 'x' : ' '}] ${txt}`);
         });
         lines.push('');
@@ -1556,6 +1574,26 @@
         return ['/index.html'];
       }
       return base ? [`/${base}.txt`] : ['/main.txt'];
+    }
+
+    // File names the user literally typed in the task ("index.html + style.css +
+    // app.js") — used only when the model plan is missing/empty, so a lost planner
+    // response degrades to the user's own file list instead of one index.html.
+    function extractExplicitTaskFilePaths(taskText = '', maxFiles = 12) {
+      const libraryNames = new Set(['node.js', 'three.js', 'vue.js', 'next.js', 'express.js', 'd3.js', 'chart.js', 'p5.js', 'react.js', 'jquery.js']);
+      const out = [];
+      const seen = new Set();
+      const re = /(?:^|[\s"'`(,:+])((?:\/?[a-z0-9_-]+\/)*[a-z0-9._-]+\.(?:html?|css|scss|sass|less|js|mjs|cjs|ts|jsx|tsx|json|md|txt|py|php|java|go|rs|c|cpp|cs))\b/gi;
+      let match;
+      while ((match = re.exec(String(taskText || ''))) && out.length < maxFiles) {
+        const raw = String(match[1] || '');
+        if (libraryNames.has(raw.toLowerCase())) continue;
+        const path = normalizeWorkspacePath(raw);
+        if (!path || path === '/' || seen.has(path)) continue;
+        seen.add(path);
+        out.push(path);
+      }
+      return out;
     }
 
     function isSingleHtmlFileRequest(taskText = '') {
@@ -1631,6 +1669,8 @@
       const normalized = [];
       const first = Object.assign({}, list[0], { tasks: foundation.map(phaseTaskForPath) });
       normalized.push(first);
+
+      const assigned = new Set(foundation);
       list.slice(1).forEach((phase) => {
         const tasks = (Array.isArray(phase.tasks) ? phase.tasks : [])
           .map((task) => {
@@ -1638,12 +1678,40 @@
             return path && expectedSet.has(path) && !foundationSet.has(path) ? phaseTaskForPath(path) : null;
           })
           .filter(Boolean);
+
+        tasks.forEach((task) => {
+          const path = extractPlannedPathFromPhaseTask(task);
+          if (path) assigned.add(path);
+        });
+
         if (tasks.length > 0) {
           normalized.push(Object.assign({}, phase, { tasks }));
         } else if (docs.length > 0 && /\b(brand|design|identity|typography|motion|style|strategy|seo|cro|guide|docs?|readme|notes?)\b/i.test(`${phase.title} ${(phase.tasks || []).map((task) => String((task && task.text) || task || '')).join(' ')}`)) {
-          normalized.push(Object.assign({}, phase, { tasks: [phaseTaskForPath(docs[0])] }));
+          const docTask = phaseTaskForPath(docs[0]);
+          assigned.add(docs[0]);
+          normalized.push(Object.assign({}, phase, { tasks: [docTask] }));
         }
       });
+
+      // Safety net: model phase text can be semantic ("Product pages") or capped
+      // docs can remove noisy HTML tasks before this normalizer runs. For a real
+      // multi-page web project, every non-entry HTML page must still land in a
+      // later phase so Continue builds the remaining pages instead of orphaning them.
+      const remainingHtml = htmlFiles
+        .filter((path) => path && path !== primaryHtml && !assigned.has(path))
+        .map(phaseTaskForPath);
+      if (remainingHtml.length > 0) {
+        const pagePhaseIndex = normalized.findIndex((phase, index) => index > 0 && /\b(page|route|screen|view)s?\b/i.test(String(phase && phase.title || '')));
+        if (pagePhaseIndex >= 0) {
+          const existingTasks = Array.isArray(normalized[pagePhaseIndex].tasks) ? normalized[pagePhaseIndex].tasks : [];
+          normalized[pagePhaseIndex] = Object.assign({}, normalized[pagePhaseIndex], {
+            tasks: existingTasks.concat(remainingHtml),
+          });
+        } else {
+          normalized.push({ title: 'Additional pages', tasks: remainingHtml });
+        }
+      }
+
       return normalized;
     }
 
@@ -1781,6 +1849,13 @@
 
     function normalizeAgentPlanSpec(parsed, taskText = '', options = {}) {
       const lower = String(taskText || '').toLowerCase();
+      const explicitViteReactTask = isExplicitViteReactTask(taskText);
+      const parsedObj = parsed && typeof parsed === 'object' ? parsed : {};
+      const hasAgentPlanShape = ['task_kind', 'project_name', 'primary_stack', 'expected_files', 'affected_files', 'done_criteria', 'validation', 'summary']
+        .some((key) => Object.prototype.hasOwnProperty.call(parsedObj, key));
+      if (!hasAgentPlanShape && (Object.prototype.hasOwnProperty.call(parsedObj, 'route') || Object.prototype.hasOwnProperty.call(parsedObj, 'intent'))) {
+        return buildFallbackAgentPlanSpec(taskText, options);
+      }
       const explicitFreshWorkspaceIntent = /\b(new project|new workspace|fresh workspace|from scratch|start from scratch|separate project|brand new)\b/.test(lower);
       const sameChatWorkspaceFollowup = chatOwnsOpenWorkspace(options && options.chatId);
       const projectLikeFallback = (
@@ -1846,11 +1921,15 @@
       expectedFiles = expectedFiles.map(mapBinaryDocPath);
       let affectedFiles = parseAgentPlanPathList(parsed && parsed.affected_files ? parsed.affected_files : '').map(mapBinaryDocPath);
       let filesToInspect = parseAgentPlanPathList(parsed && parsed.files_to_inspect ? parsed.files_to_inspect : '');
-      const doneCriteria = parseAgentPlanTextList(parsed && parsed.done_criteria ? parsed.done_criteria : '', 5); // cap 5
+      let doneCriteria = parseAgentPlanTextList(parsed && parsed.done_criteria ? parsed.done_criteria : '', 5); // cap 5
       let phases = parseAgentPlanPhases(parsed && parsed.phases ? parsed.phases : ''); // [{title,tasks}]
       const validationSteps = parseAgentPlanTextList(parsed && parsed.validation ? parsed.validation : '', 6);
       const looksLikeWebProjectTask = taskKind === 'project' && (WEB_TASK_HINT_REGEX.test(lower) || /\bcalculator\b/.test(lower));
-      const singleHtmlFileProject = taskKind === 'project' && isSingleHtmlFileRequest(taskText);
+      // Trust the model's multi-file plan over the "single html file" keyword match:
+      // collapsing a parsed /index.html|/style.css|/app.js plan to one file mutated
+      // the project contract after the planner had already honored the user's files.
+      const modelPlannedMultiFile = expectedFiles.filter((path) => /\.(?:html?|css|scss|sass|less|js|mjs|cjs|ts|jsx|tsx)$/i.test(String(path || ''))).length > 1;
+      const singleHtmlFileProject = taskKind === 'project' && isSingleHtmlFileRequest(taskText) && !modelPlannedMultiFile;
       if (singleHtmlFileProject) {
         primaryStack = 'web';
         expectedFiles = ['/index.html'];
@@ -1863,19 +1942,36 @@
         .map((entry) => normalizeWorkspacePath((entry && entry.path) || (entry && entry.name ? `/${entry.name}` : '')))
         .filter(Boolean);
       const findRootFile = (regex) => rootFilePaths.find((path) => regex.test(path)) || '';
-      if (sameChatWorkspaceFollowup && taskKind === 'edit' && rootFilePaths.length > 0) {
-        const existingExpectedFiles = expectedFiles.filter((path) => rootFilePaths.includes(normalizeWorkspacePath(path || '')));
-        const existingAffectedFiles = affectedFiles.filter((path) => rootFilePaths.includes(normalizeWorkspacePath(path || '')));
+      const rootFileByBasename = new Map(rootFilePaths.map((path) => {
+        const name = String(path || '').split('/').filter(Boolean).pop() || '';
+        return [name.toLowerCase(), path];
+      }));
+      const remapToExistingWorkspaceFile = (path) => {
+        const normalized = normalizeWorkspacePath(path || '');
+        if (!normalized || normalized === '/') return '';
+        if (rootFilePaths.includes(normalized)) return normalized;
+        const basename = normalized.split('/').filter(Boolean).pop() || '';
+        return rootFileByBasename.get(basename.toLowerCase()) || normalized;
+      };
+      const currentWorkspaceEdit = taskKind === 'edit' && rootFilePaths.length > 0 && (
+        sameChatWorkspaceFollowup || workspaceScopedMutation || openWorkspaceFollowupMutation || hasOpenWorkspaceContext()
+      );
+      if (currentWorkspaceEdit) {
+        const dedupe = (list) => Array.from(new Set(list));
+        // The real workspace layout wins over conventional guessed folders
+        // (/css/style.css remaps onto an existing root /style.css), but model-named
+        // paths with no existing match are planned NEW files (e.g. "split into
+        // style.css + app.js") and must survive — dropping them collapsed multi-file
+        // edit plans down to the one file that already existed.
+        expectedFiles = dedupe(expectedFiles.map(remapToExistingWorkspaceFile).filter(Boolean));
+        affectedFiles = dedupe(affectedFiles.map(remapToExistingWorkspaceFile).filter(Boolean));
+        filesToInspect = dedupe(filesToInspect.map(remapToExistingWorkspaceFile).filter(Boolean));
+        // Only inspection targets must already exist (can't read a planned file).
         const existingInspectFiles = filesToInspect.filter((path) => rootFilePaths.includes(normalizeWorkspacePath(path || '')));
-        // Only trust files the model actually named as mutation targets. Do NOT
-        // fabricate affected/expected files from the root listing — that turns a
-        // vague edit (or a misclassified question) into "update <file>" demands the
-        // user never made. Root files are still fine to READ for context.
-        affectedFiles = existingAffectedFiles;
-        expectedFiles = existingExpectedFiles;
+        const existingAffectedFiles = affectedFiles.filter((path) => rootFilePaths.includes(normalizeWorkspacePath(path || '')));
         filesToInspect = existingInspectFiles.length > 0
           ? existingInspectFiles
-          : (affectedFiles.length > 0 ? affectedFiles.slice() : rootFilePaths.slice());
+          : (existingAffectedFiles.length > 0 ? existingAffectedFiles : rootFilePaths.slice());
       }
       const webEditNeedsCoordinatedFiles = taskKind === 'edit'
         && hasOpenWorkspaceContext()
@@ -1952,7 +2048,15 @@
         || taskKind === 'project'
       );
       if (taskKind === 'project' && expectedFiles.length === 0) {
-        expectedFiles = buildFallbackExpectedFiles(taskKind, primaryStack, projectName || deriveProjectNameFromTask(taskText));
+        const explicitTaskFiles = singleHtmlFileProject ? [] : extractExplicitTaskFilePaths(taskText);
+        expectedFiles = explicitViteReactTask
+          ? buildViteReactExpectedFiles()
+          : explicitTaskFiles.length > 0
+          ? explicitTaskFiles
+          : buildFallbackExpectedFiles(taskKind, primaryStack, projectName || deriveProjectNameFromTask(taskText));
+      }
+      if (taskKind === 'project' && doneCriteria.length === 0) {
+        doneCriteria = buildFallbackDoneCriteria(taskText, expectedFiles);
       }
       if (taskKind === 'project' && !singleHtmlFileProject && !simpleSingleFileProject && (primaryStack === 'web' || looksLikeWebProjectTask)) {
         // Ensure the project has an HTML entry point. Default is a single self-contained
@@ -1985,8 +2089,40 @@
       };
     }
 
+    function isExplicitViteReactTask(taskText = '') {
+      const lower = String(taskText || '').toLowerCase();
+      return /\bvite\b/.test(lower) && /\breact\b/.test(lower);
+    }
+
+    function buildViteReactExpectedFiles() {
+      return [
+        '/package.json',
+        '/index.html',
+        '/vite.config.ts',
+        '/tsconfig.json',
+        '/tsconfig.app.json',
+        '/src/main.tsx',
+        '/src/App.tsx',
+        '/src/App.css',
+        '/src/vite-env.d.ts',
+      ];
+    }
+
+    function buildFallbackDoneCriteria(taskText = '', expectedFiles = []) {
+      const lower = String(taskText || '').toLowerCase();
+      const out = [];
+      if (/\bhero\b/.test(lower)) out.push('Hero section with the requested theme and CTA.');
+      if (/\bfeatures?\b/.test(lower)) out.push('Features section with clear highlight cards.');
+      if (/\bgallery\b/.test(lower)) out.push('Gallery section with responsive visual cards or placeholders.');
+      if (/\bcta\b|call[-\s]?to[-\s]?action/.test(lower)) out.push('Call-to-action section with a working button.');
+      if (isExplicitViteReactTask(taskText)) out.push('Vite React project structure is runnable and verifiable.');
+      if (!out.length && Array.isArray(expectedFiles) && expectedFiles.length) out.push('All planned project files are created.');
+      return out.slice(0, 5);
+    }
+
     function buildFallbackAgentPlanSpec(taskText = '', options = {}) {
       const lower = String(taskText || '').toLowerCase();
+      const explicitViteReactTask = isExplicitViteReactTask(taskText);
       const explicitDocsTask = isExplicitReadmeOrDocsTask(taskText);
       const docsOnlyTask = isDocsOnlyTask(taskText);
       const workspaceScopedMutation = hasOpenWorkspaceContext() && isExistingProjectMutationRequest(taskText);
@@ -2030,12 +2166,17 @@
         .filter((entry) => String(entry && entry.kind || '').toLowerCase() !== 'folder')
         .map((entry) => normalizeWorkspacePath((entry && entry.path) || (entry && entry.name ? `/${entry.name}` : '')))
         .filter(Boolean);
+      const explicitTaskFiles = extractExplicitTaskFilePaths(taskText);
       const fallbackExpectedFiles = docsOnlyTask
         ? ['/README.md']
         : sameChatWorkspaceFollowup && taskKind === 'edit' && rootFilePaths.length > 0
         ? rootFilePaths.slice()
         : singleHtmlFileProject
         ? ['/index.html']
+        : explicitViteReactTask
+        ? buildViteReactExpectedFiles()
+        : taskKind === 'project' && explicitTaskFiles.length > 0
+        ? explicitTaskFiles
         : buildFallbackExpectedFiles(taskKind, primaryStack, projectName);
       if (taskKind === 'project' && needsReadme && !fallbackExpectedFiles.includes('/README.md')) {
         fallbackExpectedFiles.push('/README.md');
@@ -2052,9 +2193,9 @@
         // the root files are for inspection context only, not forced "update" demands.
         affectedFiles: taskKind === 'edit' ? [] : fallbackExpectedFiles.slice(),
         filesToInspect: taskKind === 'edit' ? fallbackExpectedFiles.slice() : [],
-        doneCriteria: [],
+        doneCriteria: taskKind === 'project' ? buildFallbackDoneCriteria(taskText, fallbackExpectedFiles) : [],
         phases: [],
-        validationSteps: taskKind === 'project' ? ['validate_files'] : [],
+        validationSteps: taskKind === 'project' ? (explicitViteReactTask ? ['validate_files', 'run_app'] : ['validate_files']) : [],
         projectContract: buildAgentProjectContract(taskText, taskKind, primaryStack, fallbackExpectedFiles),
         summary: fallbackSummary,
       };

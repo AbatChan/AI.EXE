@@ -360,36 +360,36 @@
       normalizeWorkspacePath: args.normalizeWorkspacePath,
       chatOwnsWorkspace: Boolean(args.chatOwnsWorkspace),
     });
-    // Prefer the model's intent classification when present and reasonably
-    // confident; fall back to the regex features otherwise. Low-confidence model
-    // outputs are ignored so a shaky guess never overrides the deterministic path.
+    // Primary routing is semantic: when the LLM router returns a valid,
+    // reasonably confident route, use that route directly. The keyword/regex
+    // feature scorer below is kept only as a fallback when the model route is
+    // missing, invalid, or too low-confidence. Hard-state validation still runs
+    // after either path because agent-off, workspace ownership, and scope
+    // confirmation are deterministic product rules, not natural-language intent.
     const modelDecision = normalizeModelRouteDecision(args.modelDecision);
     const usedModelDecision = Boolean(
       modelDecision
       && (modelDecision.confidence == null || modelDecision.confidence >= 0.35),
     );
-    if (usedModelDecision) {
-      applyModelIntentToFeatures(features, modelDecision);
-    }
+    const semanticRoute = usedModelDecision
+      ? applyModelIntentToFeatures(features, modelDecision)
+      : '';
     const scores = computeScores(features, advisoryDecision, Boolean(args.agentEnabled));
-    // Model-primary: give a confident model route weight proportional to its
-    // confidence so the model's judgment LEADS the decision. Deterministic scoring
-    // then only breaks genuine ties and applies hard-state rules (agent-off
-    // downgrades, new-project-in-a-foreign-workspace -> confirm), which carry larger
-    // weights and still win when they should.
-    if (usedModelDecision && modelDecision.route && scores[modelDecision.route] != null) {
-      const conf = Number(modelDecision.confidence);
-      scores[modelDecision.route] += Number.isFinite(conf) ? Math.max(0, Math.min(1, conf)) * 4 : 2;
-    }
-    const initialRoute = chooseTopRoute(scores);
+    const fallbackRoute = chooseTopRoute(scores);
+    const initialRoute = usedModelDecision && semanticRoute && scores[semanticRoute] != null
+      ? semanticRoute
+      : fallbackRoute;
     const validated = validateRoute(initialRoute, features, Boolean(args.agentEnabled));
     const finalDecision = buildDecision(validated.route, advisoryDecision, features);
     if (validated.overrideReason) {
       finalDecision.reason = validated.overrideReason;
     }
-    const advisoryRejected = advisoryDecision.route !== finalDecision.route;
+    const routeSource = usedModelDecision ? 'model' : 'fallback';
+    const modelRouteAdjusted = usedModelDecision && initialRoute !== finalDecision.route;
+    const advisoryRejected = !usedModelDecision && advisoryDecision.route !== finalDecision.route;
     const overrideReason = validated.overrideReason
-      || (advisoryRejected ? `Advisory model route "${advisoryDecision.route}" was replaced by deterministic preflight scoring.` : '');
+      || (modelRouteAdjusted ? `Semantic model route "${initialRoute}" was adjusted by deterministic preflight validation.` : '')
+      || (advisoryRejected ? `Advisory model route "${advisoryDecision.route}" was replaced by fallback preflight scoring.` : '');
 
     const sortedScores = Object.values(scores).sort((a, b) => b - a);
     const confidence = sortedScores.length >= 2
@@ -403,10 +403,14 @@
       decision: finalDecision,
       debug: {
         advisoryRoute: advisoryDecision.route,
+        routeSource,
         usedModelDecision,
+        usedFallbackDecision: !usedModelDecision,
         modelRoute: modelDecision ? (modelDecision.route || '') : '',
         modelIntent: modelDecision ? (modelDecision.intent || '') : '',
         modelConfidence: modelDecision ? modelDecision.confidence : null,
+        semanticRoute,
+        fallbackRoute,
         initialRoute,
         finalRoute: finalDecision.route,
         overridden: Boolean(overrideReason),

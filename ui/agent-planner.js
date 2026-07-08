@@ -185,10 +185,23 @@
         && event.ok === false
         && normalizeWorkspacePath(event.path || '') === targetPath
         && /already contains that exact text/i.test(String(event.observation || '')));
+      // "Check/verify X and fix IF broken" that found nothing broken is complete:
+      // a zero-mutation run with a clean validate pass must not keep demanding
+      // "update /x" (that forces the model to argue with the harness or invent
+      // no-op edits). Scoped to verification-worded tasks so a plain edit request
+      // can't lazily "verify" its way past the gate.
+      const verificationConditionalTask = /\b(?:are\s+you\s+sure|confirm|verify|check\s+(?:if|whether|that)|make\s+sure|analy[sz]e|review|audit)\b/i.test(text);
+      const anyWorkspaceMutation = hasSuccessfulAgentTool(toolEvents, (event) => (
+        ['write_file', 'edit_file', 'mkdir', 'move', 'delete'].includes(String(event.tool || '').toLowerCase())
+      ));
+      const cleanValidatePassed = hasSuccessfulAgentTool(toolEvents, (event) => (
+        String(event.tool || '').toLowerCase() === 'validate_files' && event.validationPassed === true
+      ));
+      const verifiedNoDefects = verificationConditionalTask && !anyWorkspaceMutation && cleanValidatePassed;
       const affectedFileSatisfied = (targetPath) => hasSuccessfulAgentTool(
         toolEvents,
         (event) => ['write_file', 'edit_file'].includes(String(event.tool || '').toLowerCase()) && normalizeWorkspacePath(event.path || '') === targetPath,
-      ) || hasNoOpEditAttempt(targetPath);
+      ) || hasNoOpEditAttempt(targetPath) || verifiedNoDefects;
 
       const readmeWrite = getLatestSuccessfulAgentWrite(toolEvents, (event) => normalizeWorkspacePath(event.path || '') === '/README.md');
       const primarySourceWrite = getLatestSuccessfulAgentSourceWrite(toolEvents, (event, normalized) => {

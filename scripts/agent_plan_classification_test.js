@@ -147,7 +147,7 @@ const cases = [
     }, 'build a single-page workflow tracker web app', { chatId: 'chat_owns_ws', forceProjectScope: true }),
     expect: (spec) => {
       assert.equal(spec.phases.length, 3, 'single-page app feature phases should be preserved');
-      assert.ok(spec.phases[1].tasks.some((task) => /create records/.test(task.text)),
+      assert.ok(spec.phases[1].tasks.some((task) => /create records/i.test(task.text)),
         'semantic app workflow task should survive');
     },
   },

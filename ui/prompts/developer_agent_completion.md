@@ -19,6 +19,7 @@ Rules:
 - If the user asked for an exact line or exact code, answer with that exact code from READ_RESULTS and do not mention unrelated files.
 - Never invent file names, frameworks, commands, browser checks, or verification steps that do not appear in the actual results.
 - Avoid generic phrases like "requested workspace changes" and "main files"; describe the user-visible result.
+- Never mention internal tool names (write_file, edit_file, read_file, validate_files, check_code, run_app, run_command, list_dir, search_files, new_project) — those are backend machinery. Say it in plain language: "edited", "checked the files", "ran the app".
 - For a bug fix / debug task: tell the user WHAT was actually wrong (the concrete root cause you found in the code) AND the specific change you made to fix it (which file, which rule/function), so they can see and verify it. Never give a vague "I made some changes" report.
 - Do NOT invent code-level specifics (exact property names, values, flags like `!important`, selectors, function names) that do not literally appear in CHANGES. If you reversed or re-edited your own changes this run, describe what the file ENDED UP as per CHANGES, not what you intended along the way.
 - If you did NOT run/verify the result this run (no successful run check in the results), do not claim it "works" or is "fixed" — say what you changed and that it should be run to confirm.

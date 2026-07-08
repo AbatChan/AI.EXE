@@ -3801,22 +3801,27 @@ html.platform-mac .settings-sidebar {
   margin: 0;
 }
 
-/* Inline code in agent narration — same chip look as the final chat reply
-   (.msg-bubble code), so `<details>`, `.faq-a`, `max-height` read as code, not raw backticks. */
-.msg-agent-activity-thought code {
-  font-family: var(--font-mono);
-  font-size: 12px;
-  border-radius: 5px;
-  background: rgba(0, 229, 255, 0.08);
-  border: 1px solid rgba(0, 229, 255, 0.14);
-  padding: 1px 5px;
-  white-space: normal;
+/* Compact plain text in agent narration; fenced code blocks keep code formatting. */
+.msg-agent-activity-plain-text {
+  margin: 0;
+  white-space: pre-wrap;
 }
 
-.msg-agent-activity-thought pre {
+.msg-agent-activity-code {
   white-space: pre-wrap;
   word-break: break-word;
   margin: 6px 0;
+  padding: 8px 10px;
+  border-radius: 9px;
+  background: rgba(2, 6, 23, 0.36);
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  overflow: auto;
+}
+
+.msg-agent-activity-code code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  white-space: pre-wrap;
 }
 
 .msg-thought-panel .msg-agent-activity-thought {
@@ -3935,6 +3940,17 @@ html.platform-mac .settings-sidebar {
 .msg-agent-activity-inline-path.file-target {
   color: var(--accent);
   font-weight: 600;
+}
+
+.msg-agent-activity-inline-path.command-target {
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: rgba(120, 140, 170, 0.12);
+  color: rgba(218, 226, 240, 0.9);
+  font-family: var(--mono-font, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 12.5px;
+  font-weight: 600;
+  word-break: break-word;
 }
 
 .msg-agent-activity-inline-meta {
@@ -7912,4 +7928,39 @@ mark.search-term-hit {
   font-size: 11px;
   color: var(--text3);
   line-height: 1.4;
+}
+
+.msg-agent-permission-actions {
+  /* Legacy inline buttons remain in old message markup for compatibility, but
+     active command approval now uses the shared composer confirmation UI. */
+  display: none;
+  gap: 8px;
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+
+.msg-agent-permission-btn {
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  background: rgba(15, 23, 42, 0.34);
+  color: inherit;
+  border-radius: 999px;
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.msg-agent-permission-btn:hover {
+  background: rgba(99, 102, 241, 0.18);
+  border-color: rgba(99, 102, 241, 0.45);
+}
+
+.msg-agent-permission-btn.approve {
+  background: rgba(99, 102, 241, 0.22);
+  border-color: rgba(99, 102, 241, 0.55);
+}
+
+.msg-agent-permission-btn:disabled {
+  opacity: 0.65;
+  cursor: default;
 }

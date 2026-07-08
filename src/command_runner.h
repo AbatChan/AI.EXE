@@ -11,7 +11,7 @@
 #include <windows.h>
 #endif
 
-// Lets the agent run an allowlisted project command (python / pip / node / npm)
+// Lets the agent run an allowlisted project command family
 // inside the project root and capture its output — the "run it, see the real
 // error, fix, re-run" loop that Codex/Claude Code have. Reuses the hardened
 // ProcessRunner (timeout + output/cpu/mem caps + restricted token). No raw shell.
@@ -88,7 +88,7 @@ inline void SetHeadlessEnv(bool on) {
 
 }  // namespace command_runner_detail
 
-// Runs `program args...` in `root`. program ∈ {python, pip, node, npm}.
+// Runs `program args...` in `root`. program is allowlisted and argv-based.
 // pip is run as `<python> -m pip ...` inside the project venv (created if
 // needed) so installs never hit the system Python (PEP 668).
 inline CommandRunResult RunProjectCommand(const std::filesystem::path& root,
@@ -136,9 +136,14 @@ inline CommandRunResult RunProjectCommand(const std::filesystem::path& root,
     } else {
       full_args = args;
     }
-  } else if (program == "node" || program == "npm") {
+  } else if (program == "node" || program == "npm" ||
+             program == "php" || program == "java" || program == "javac" ||
+             program == "gcc" || program == "g++" ||
+             program == "clang" || program == "clang++" ||
+             program == "go" || program == "rustc" || program == "cargo" ||
+             program == "dotnet") {
 #ifdef _WIN32
-    exe = FindOnPath({program + ".exe", program + ".cmd"});
+    exe = FindOnPath({program + ".exe", program + ".cmd", program + ".bat", program});
 #else
     exe = FindOnPath({program});
 #endif

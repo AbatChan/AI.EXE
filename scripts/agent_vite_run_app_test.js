@@ -56,6 +56,10 @@ function createExecutor(reads, commandResult) {
 
   assert.equal(result.ok, true);
   assert.equal(result.runErrorCount, 1);
+  assert.equal(result.terminalCommand, 'npm run build');
+  assert.equal(result.terminalProof.command, 'npm run build');
+  assert.equal(result.terminalProof.exitCode, 1);
+  assert.equal(result.terminalProof.timedOut, false);
   assert.match(result.observation, /Vite build failed/);
   assert.match(result.observation, /Failed to resolve import "\.\/App"/);
   assert.equal(getSmokeCalled(), false, 'Vite projects should use native build verification, not offline HTML smoke test');
@@ -64,5 +68,41 @@ function createExecutor(reads, commandResult) {
     { program: 'npm', argsLine: 'run\nbuild' }
   );
 
-  console.log('PASS: run_app verifies Vite projects with captured npm build output');
+  const missingDepsCase = createExecutor({
+    '/package.json': JSON.stringify({
+      scripts: { dev: 'vite', build: 'vite build' },
+      dependencies: { vite: '^5.4.3', react: '^18.3.1' },
+    }),
+    '/vite.config.ts': 'import { defineConfig } from "vite"; export default defineConfig({});',
+  }, {
+    ok: true,
+    message: 'exit_code=127',
+    output: 'sh: vite: command not found',
+  });
+
+  const missingDepsResult = await missingDepsCase.executor.executeDeveloperToolCall(
+    'chat_vite_missing_deps',
+    { action: 'tool', tool: 'run_app', path: '/index.html' },
+    'Create a Vite React app.',
+    [],
+    { expectedFiles: ['/package.json', '/index.html', '/vite.config.ts', '/src/main.tsx'] }
+  );
+
+  assert.equal(missingDepsResult.ok, true);
+  assert.equal(missingDepsResult.permissionRequired, true);
+  assert.equal(missingDepsResult.commandPolicy, 'ask_first');
+  assert.equal(missingDepsResult.runErrorCount, 1);
+  assert.equal(missingDepsResult.terminalCommand, 'npm install');
+  assert.equal(missingDepsResult.terminalProof.command, 'npm install');
+  assert.match(missingDepsResult.observation, /Permission is required/i);
+  assert.match(missingDepsResult.observation, /npm install/);
+
+  const missingRunCalls = missingDepsCase.calls.filter((call) => call.action === 'runCommand');
+  assert.equal(missingRunCalls.length, 1, 'run_app must not auto-run npm install after missing dependency output');
+  assert.deepEqual(
+    missingRunCalls[0].data,
+    { program: 'npm', argsLine: 'run\nbuild' }
+  );
+
+  console.log('PASS: run_app verifies Vite projects with captured npm build output and asks before dependency install');
 })();

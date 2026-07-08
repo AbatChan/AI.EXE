@@ -17,7 +17,25 @@
     "test:agent-write-repair": "node scripts/agent_write_file_repair_test.js",
     "test:agent-planner-diagnostics": "node scripts/agent_planner_diagnostics_test.js",
     "test:agent-grounding": "node scripts/agent_change_grounding_test.js",
-    "test:agent-foundation-vocab": "node scripts/agent_foundation_vocab_test.js"
+    "test:agent-terminal-command-state": "node scripts/agent_terminal_command_state_test.js",
+    "test:agent-foundation-vocab": "node scripts/agent_foundation_vocab_test.js",
+    "test:preflight-semantic-router": "node scripts/preflight_semantic_router_test.js",
+    "test:agent-stack-proof-planner": "node scripts/agent_stack_proof_planner_test.js",
+    "test:agent-command-approval-ui": "node scripts/agent_command_approval_ui_static_test.js",
+    "test:confirmation-flow": "node scripts/confirmation_flow_static_test.js",
+    "test:planner-isolation-fallback": "node scripts/planner_isolation_fallback_static_test.js",
+    "test:approval-waiting-ui": "node scripts/approval_waiting_ui_static_test.js",
+    "test:approval-cancel-interrupted": "node scripts/approval_cancel_interrupted_static_test.js",
+    "test:frontend-state-reentrancy": "node scripts/frontend_state_reentrancy_static_test.js",
+    "test:stale-send-state-recovery": "node scripts/stale_send_state_recovery_static_test.js",
+    "test:message-append-refresh": "node scripts/message_append_refresh_static_test.js",
+    "test:provider-completion-options": "node scripts/provider_completion_options_static_test.js",
+    "test:safe-immediate-loader": "node scripts/safe_immediate_loader_static_test.js",
+    "test:enter-delegates-to-send-button": "node scripts/enter_delegates_to_send_button_static_test.js",
+    "test:enter-key-diagnostics": "node scripts/enter_key_diagnostics_static_test.js",
+    "test:enter-capture-submit-guard": "node scripts/enter_capture_submit_guard_static_test.js",
+    "test:preflight-confirm-ui": "node scripts/preflight_confirm_ui_static_test.js",
+    "test:preflight-confirm-resolution-edit-retry": "node scripts/preflight_confirm_resolution_edit_retry_static_test.js"
   },
   "dependencies": {
     "@codemirror/commands": "^6.10.2",
@@ -42,5 +60,6 @@
     "markdown-it": "^14.1.1",
     "markdown-it-texmath": "^1.0.0",
     "rollup": "^4.59.0"
-  }
+  },
+  "version": "6.8.8"
 }

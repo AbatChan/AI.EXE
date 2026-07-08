@@ -71,7 +71,9 @@ const items = ['resize search close icon', 'redesign movie cards', 'no class/id 
   ]);
   const md = renderAgentChecklist(p);
   ok('render shows the progress count header', md.includes('**Plan (2/3)**'));
-  ok('render uses checked + unchecked boxes', md.includes('- [x] resize search close icon') && md.includes('- [ ] no class/id mismatches'));
+  ok('render uses checked + unchecked boxes',
+    /- \[x\]\s+resize search close icon\.?/i.test(md)
+    && /- \[ \]\s+no class\/id mismatches\.?/i.test(md));
   ok('empty checklist renders empty string', renderAgentChecklist([]) === '');
 }
 

@@ -547,13 +547,15 @@
       const existingTree = deps.folderArea.querySelector('.workspace-tree');
       if (!deps.currentAuthUser()) {
         deps.folderArea.querySelectorAll('.workspace-tree').forEach((el) => el.remove());
-        updateFolderEmptyState();
+        // No project open in these states — show the Open-project card, not the
+        // "create files from the toolbar" empty state (that reads as a broken tree).
+        updateFolderEmptyState(deps.getWorkspaceRootName() ? undefined : 'no-project');
         if (deps.emptyFolder) deps.emptyFolder.style.display = 'flex';
         return;
       }
       if (!deps.nativeBridge.available()) {
         deps.folderArea.querySelectorAll('.workspace-tree').forEach((el) => el.remove());
-        updateFolderEmptyState();
+        updateFolderEmptyState(deps.getWorkspaceRootName() ? undefined : 'no-project');
         if (deps.emptyFolder) deps.emptyFolder.style.display = 'flex';
         return;
       }
