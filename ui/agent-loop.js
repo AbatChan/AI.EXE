@@ -220,6 +220,22 @@
     return paths;
   }
 
+  // Natural phase-handoff line: rotate phrasings by phase index so back-to-back
+  // handoffs don't read like the same canned template, while keeping the phase
+  // names and the literal "Continue" cue.
+  function buildPhaseHandoffMessage(doneIdx, doneTitle, nextIdx, nextTitle) {
+    const doneName = `Phase ${doneIdx + 1}${doneTitle ? ` (${doneTitle})` : ''}`;
+    const nextName = `Phase ${nextIdx + 1}${nextTitle ? ` — ${nextTitle}` : ''}`;
+    const variants = [
+      `${doneName} is done. Press Continue and I'll start ${nextName}.`,
+      `That wraps up ${doneName}. Hit Continue whenever you're ready for ${nextName}.`,
+      `${doneName} is built and in place. Continue will kick off ${nextName}.`,
+      `All of ${doneName} is finished — press Continue and I'll move on to ${nextName}.`,
+      `${doneName} is complete. Next up: ${nextName} — just press Continue.`,
+    ];
+    return variants[Math.abs(Number(doneIdx) || 0) % variants.length];
+  }
+
   function createAgentLoop(deps) {
     const recordDebugTrace = typeof deps.recordDebugTrace === 'function'
       ? deps.recordDebugTrace
@@ -925,14 +941,19 @@
       });
       deps.resetActiveAgentStreamState();
       // .aiexe/plan.md is the cross-run source of truth; resume at first unfinished phase.
-      const projectDisplayName = String(planSpec && planSpec.projectName || '');
+      let projectDisplayName = String(planSpec && planSpec.projectName || '');
+      let planFileParsed = null;
       const readAgentPlanFilePhases = async () => {
         if (typeof deps.parseAgentPlanMarkdown !== 'function') return null;
         try {
           const res = await deps.invokeWorkspaceAction('workspaceReadFile', { path: '/.aiexe/plan.md' });
           if (!res || !res.ok) return null;
           const parsed = deps.parseAgentPlanMarkdown(String(res.output || ''));
-          return parsed && Array.isArray(parsed.phases) && parsed.phases.length ? parsed.phases : null;
+          if (parsed && Array.isArray(parsed.phases) && parsed.phases.length) {
+            planFileParsed = parsed;
+            return parsed.phases;
+          }
+          return null;
         } catch (_) { return null; }
       };
       // Decide phased from plan.md (authoritative on a Continue/resume, even if the
@@ -955,6 +976,34 @@
       const fileHasUnfinished = filePhases && filePhases.length >= 2
         && typeof deps.firstUnfinishedPhaseIndex === 'function'
         && deps.firstUnfinishedPhaseIndex(filePhases) >= 0;
+      // Plan inference failed outright (provider unreachable/timed out). Without a
+      // phased plan.md to resume, running on the heuristic fallback plan silently
+      // builds the wrong thing — stop and tell the user instead. With a resumable
+      // plan.md the run proceeds on it (fields restored below).
+      const planInferFailed = /^fallback:(?:infer_fail|timeout)$/.test(String(planSpec && planSpec._planSource || ''));
+      if (planInferFailed && !fileHasUnfinished) {
+        const reason = String(planSpec && planSpec._planRaw || '').trim() || 'the inference provider did not respond';
+        deps.setThinkingStatus('');
+        setAgentProgress('Stopped.');
+        appendAgentActivity({
+          kind: 'error',
+          title: 'Inference unavailable',
+          detail: reason,
+          status: 'error',
+        });
+        deps.consumeLiveAssistantText();
+        const msg = `I couldn't plan this build — ${reason} Once the provider is reachable, send the request again.`;
+        deps.commitAssistantMessage(chatId, msg, msg, {
+          agentActivities,
+          agentMeta: agentMetaWithRevert({ startedAt, completedAt: Date.now(), collapsed: false }),
+          forceNeedsContinue: true,
+        });
+        recordDebugTrace('agent_plan_infer_failed_stop', {
+          chatId: String(chatId || ''),
+          reason: deps.debugPreview(reason, 240),
+        }, { chatId: String(chatId || ''), planSpec });
+        return true;
+      }
       // plan.md wins when it has unfinished phases and we're still phased (resume OR the
       // fresh decompose is phased) — stops each Continue re-partitioning the plan.
       const preferPlanFile = Boolean(fileHasUnfinished && (isResume || planPhases.length >= 2));
@@ -972,6 +1021,21 @@
       if (phasedProjectRun) {
         const phases = preferPlanFile ? filePhases : (planPhases.length ? planPhases : filePhases);
         planSpec.phases = phases;
+        // Resuming over a fallback plan: its heuristic file list/name would poison
+        // pending-requirements and get force-rewritten into plan.md's title. Restore
+        // both from plan.md, the source of truth.
+        if (preferPlanFile && /^fallback/.test(String(planSpec._planSource || ''))) {
+          const phaseFiles = allPhaseFilePaths({ phases }, deps.normalizeWorkspacePath);
+          if (phaseFiles.length) {
+            planSpec.expectedFiles = phaseFiles.slice();
+            planSpec.affectedFiles = phaseFiles.slice();
+          }
+          const fileProjectName = String((planFileParsed && planFileParsed.projectName) || '').trim();
+          if (fileProjectName) {
+            planSpec.projectName = fileProjectName;
+            projectDisplayName = fileProjectName;
+          }
+        }
         let activeIndex = typeof deps.firstUnfinishedPhaseIndex === 'function'
           ? deps.firstUnfinishedPhaseIndex(phases) : 0;
         if (activeIndex < 0) activeIndex = phases.length - 1;
@@ -1944,7 +2008,7 @@
               const nextPhase = phaseState.phases[res.nextIdx] || {};
               setAgentProgress('Phase complete.');
               let phaseMsg = deps.sanitizeAssistantText(decision.message || '') || '';
-              const handoff = `Phase ${res.idx + 1}${res.donePhase.title ? ` (${res.donePhase.title})` : ''} is done — press Continue to build Phase ${res.nextIdx + 1}${nextPhase.title ? ` — ${nextPhase.title}` : ''}.`;
+              const handoff = buildPhaseHandoffMessage(res.idx, res.donePhase.title, res.nextIdx, nextPhase.title);
               phaseMsg = phaseMsg ? `${phaseMsg}\n\n${handoff}` : handoff;
               if (agentHasWorkspaceMutations()) {
                 await deps.refreshWorkspaceTree(true);
@@ -2750,7 +2814,7 @@
             const res = await completeActivePhase();
             const nextPhase = phaseState.phases[res.nextIdx] || {};
             setAgentProgress('Phase complete.');
-            const phaseMsg = `Phase ${res.idx + 1}${res.donePhase.title ? ` (${res.donePhase.title})` : ''} is done — press Continue to build Phase ${res.nextIdx + 1}${nextPhase.title ? ` — ${nextPhase.title}` : ''}.`;
+            const phaseMsg = buildPhaseHandoffMessage(res.idx, res.donePhase.title, res.nextIdx, nextPhase.title);
             deps.commitAssistantMessage(chatId, phaseMsg, phaseMsg, {
               agentActivities,
               agentMeta: agentMetaWithRevert({ startedAt, completedAt: Date.now(), collapsed: true }),

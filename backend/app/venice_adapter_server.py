@@ -7,6 +7,7 @@ from webdriver_manager.core.os_manager import ChromeType
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.desired_capabilities import DesiredCapabilities
 from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.common.action_chains import ActionChains
 from selenium.common.exceptions import ElementClickInterceptedException, TimeoutException, WebDriverException, StaleElementReferenceException, NoSuchWindowException, InvalidSessionIdException
 from flask import Flask, request, Response
 import json
@@ -2032,6 +2033,75 @@ def _aiexe_slug_from_url(url):
     return m.group(1) if m else ""
 
 
+def _aiexe_sidebar_diag(driver, slug, label):
+    """One log line answering WHY a sidebar row lookup failed: rowless list vs
+    missing toggle vs unexpected page/window state."""
+    try:
+        anchors = len(driver.find_elements(By.XPATH, VC_SIDEBAR_CHAT_ROW_ANY_XPATH))
+        toggles = [(b.get_attribute("aria-label") or "") for b in
+                   driver.find_elements(By.XPATH, VC_SIDEBAR_TOGGLE_XPATH) if b.is_displayed()]
+        rect = driver.get_window_rect()
+        print("AIEXE_%s row-miss slug=%s url=%s rect=%s rows=%d toggles=%s" % (
+            label, slug, driver.current_url, rect, anchors, toggles), flush=True)
+        detail = driver.execute_script("""
+          return Array.from(document.querySelectorAll("a[href*='/chat/classic/']")).slice(0, 6).map(a => {
+            const chain = []; let e = a;
+            for (let i = 0; i < 5 && e; i += 1) {
+              e = e.parentElement;
+              if (e) chain.push(e.tagName + (e.getAttribute('role') ? '[role=' + e.getAttribute('role') + ']' : ''));
+            }
+            return { href: a.getAttribute('href'), chain: chain.join('>') };
+          });
+        """) or []
+        for d in detail:
+            print("AIEXE_%s row-miss anchor href=%s chain=%s" % (label, d.get('href'), d.get('chain')), flush=True)
+    except Exception as exc:
+        print("AIEXE_%s row-miss diag failed: %s" % (label, exc), flush=True)
+
+
+def _aiexe_row_action_button(driver, row, xpath):
+    """Row action buttons (Rename/Delete) are only rendered on the hovered or active
+    row; hover first, then look."""
+    try:
+        ActionChains(driver).move_to_element(row).perform()
+        time.sleep(0.3)
+    except Exception:
+        pass
+    try:
+        return row.find_element(By.XPATH, xpath)
+    except Exception:
+        return None
+
+
+def _aiexe_row_via_thread_nav(driver, slug, label):
+    """Virtualized sidebar can omit a row entirely; opening the thread itself makes it
+    the active conversation, which Venice always renders in the list."""
+    if not slug:
+        return None
+    try:
+        if driver.execute_script("return document.hidden === true"):
+            print("AIEXE_%s thread-nav skipped (window hidden, paint throttled)" % label, flush=True)
+            return None
+    except Exception:
+        pass
+    try:
+        driver.get("%s/%s" % (VC_CHAT_URL, slug))
+        try:
+            WebDriverWait(driver, selenium_timeout).until(
+                lambda d: d.find_elements(By.XPATH, VC_SIDEBAR_TOGGLE_XPATH)
+                or d.find_elements(By.XPATH, VC_SIDEBAR_CHAT_ROW_ANY_XPATH))
+        except Exception:
+            pass
+        time.sleep(1.0)
+        _aiexe_open_sidebar(driver)
+        row = _aiexe_sidebar_row(driver, slug, tries=10)
+        print("AIEXE_%s thread-nav fallback -> %s" % (label, bool(row)), flush=True)
+        return row
+    except Exception as exc:
+        print("AIEXE_%s thread-nav fallback failed: %s" % (label, exc), flush=True)
+        return None
+
+
 def _aiexe_requested_chat_name(data):
     if not isinstance(data, dict):
         return ""
@@ -2053,13 +2123,22 @@ def _aiexe_rename_chat(driver, slug, name):
     try:
         row = _aiexe_sidebar_row(driver, slug)
         if row is None:
+            _aiexe_sidebar_diag(driver, slug, "RENAME")
+            row = _aiexe_row_via_thread_nav(driver, slug, "RENAME")
+        if row is None:
             return False
         driver.execute_script("arguments[0].scrollIntoView({block:'center'});", row)
-        try:
-            row.find_element(By.XPATH, VC_CHAT_RENAME_BUTTON_XPATH).click()
-        except Exception:
-            btn = row.find_element(By.XPATH, VC_CHAT_RENAME_BUTTON_XPATH)
-            driver.execute_script("arguments[0].click();", btn)
+        btn = _aiexe_row_action_button(driver, row, VC_CHAT_RENAME_BUTTON_XPATH)
+        if btn is None and _aiexe_slug_from_url(driver.current_url) != slug:
+            # Inactive rows can stay buttonless even hovered; opening the thread
+            # makes it the active row, which always carries its action buttons.
+            row = _aiexe_row_via_thread_nav(driver, slug, "RENAME")
+            if row is not None:
+                btn = _aiexe_row_action_button(driver, row, VC_CHAT_RENAME_BUTTON_XPATH)
+        if btn is None:
+            print("AIEXE_RENAME no Rename button on row %s" % slug, flush=True)
+            return False
+        driver.execute_script("arguments[0].click();", btn)
         inp = WebDriverWait(driver, selenium_timeout).until(
             EC.presence_of_element_located((By.XPATH, VC_CHAT_RENAME_INPUT_XPATH)))
         _aiexe_set_native_value(driver, inp, name, proto="HTMLInputElement")
@@ -2117,9 +2196,19 @@ def _aiexe_delete_chat(driver, slug):
     try:
         row = _aiexe_sidebar_row(driver, slug)
         if row is None:
+            _aiexe_sidebar_diag(driver, slug, "DELETE")
+            row = _aiexe_row_via_thread_nav(driver, slug, "DELETE")
+        if row is None:
             return False
         driver.execute_script("arguments[0].scrollIntoView({block:'center'});", row)
-        btn = row.find_element(By.XPATH, VC_CHAT_DELETE_BUTTON_XPATH)
+        btn = _aiexe_row_action_button(driver, row, VC_CHAT_DELETE_BUTTON_XPATH)
+        if btn is None and _aiexe_slug_from_url(driver.current_url) != slug:
+            row = _aiexe_row_via_thread_nav(driver, slug, "DELETE")
+            if row is not None:
+                btn = _aiexe_row_action_button(driver, row, VC_CHAT_DELETE_BUTTON_XPATH)
+        if btn is None:
+            print("AIEXE_DELETE no Delete button on row %s" % slug, flush=True)
+            return False
         driver.execute_script("arguments[0].click();", btn)
         confirm = WebDriverWait(driver, selenium_timeout).until(
             EC.element_to_be_clickable((By.XPATH, VC_CHAT_DELETE_CONFIRM_XPATH)))
@@ -2180,7 +2269,9 @@ def _aiexe_restore_unobtrusive(driver):
     drag the window back whenever a code path failed to re-minimize it."""
     try:
         dims = driver.execute_script("return [screen.width || 1440, screen.height || 900];") or [1440, 900]
-        driver.set_window_rect(x=int(dims[0]) - 320, y=int(dims[1]) - 140, width=880, height=680)
+        # >=1180 wide keeps Venice on desktop layout (sidebar inline, not a drawer);
+        # only a 320x140 strip stays on-screen so it doesn't pop in the user's face.
+        driver.set_window_rect(x=int(dims[0]) - 320, y=int(dims[1]) - 140, width=1180, height=760)
         return True
     except Exception:
         try:
@@ -2989,6 +3080,51 @@ def aiexe_state():
         "credits": AIEXE_CREDITS,
         "priced_models": sorted(AIEXE_PRICED_MODELS),
     }), content_type='application/json')
+
+@app.route('/api/aiexe/sidebar_debug', methods=['GET'])
+def aiexe_sidebar_debug_route():
+    """Diagnostic: what does Venice's sidebar actually contain right now? Optional ?slug=
+    navigates to that thread first (answers 'does this conversation still exist?')."""
+    global driver
+    slug = str(request.args.get('slug') or '').strip()
+    out = {}
+    with selenium_lock:
+        try:
+            _aiexe_restore_unobtrusive(driver)
+            time.sleep(0.8)
+            if slug:
+                driver.get("%s/%s" % (VC_CHAT_URL, slug))
+                try:
+                    WebDriverWait(driver, selenium_timeout).until(
+                        lambda d: d.find_elements(By.XPATH, VC_SIDEBAR_TOGGLE_XPATH))
+                except Exception:
+                    pass
+                time.sleep(1.5)
+            _aiexe_open_sidebar(driver)
+            out['url'] = driver.current_url
+            out['timeline'] = []
+            for _ in range(10):
+                sample = driver.execute_script("""
+                  return Array.from(document.querySelectorAll("a[href*='/chat/classic/']")).map(a => ({
+                    href: a.getAttribute('href'), text: (a.textContent || '').trim().slice(0, 60) }));
+                """) or []
+                out['timeline'].append({'t': time.time(), 'count': len(sample)})
+                out['rows'] = sample
+                if len(sample) > 2:
+                    break
+                time.sleep(2.0)
+            out['toggles'] = [(b.get_attribute('aria-label') or '') for b in
+                              driver.find_elements(By.XPATH, VC_SIDEBAR_TOGGLE_XPATH) if b.is_displayed()]
+            out['bodyPreview'] = driver.execute_script("return (document.body.innerText || '').slice(0, 400);")
+        except Exception as exc:
+            out['error'] = str(exc)
+        finally:
+            try:
+                driver.minimize_window()
+            except Exception:
+                pass
+    return Response(json.dumps(out), content_type='application/json; charset=utf-8')
+
 
 def get_mock_model(name, parameter_size):
     return {

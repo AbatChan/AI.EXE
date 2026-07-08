@@ -16,6 +16,9 @@ assert.match(aiExe, /runApprovedAgentCommandOnce\(activeChatId, currentCommand\)
 assert.match(aiExe, /markAgentCommandApprovalCancelled\(activeChatId, currentCommand\)/);
 assert.match(aiExe, /consumedAgentCommandApprovals\.add\(agentCommandApprovalKey\(activeChatId, currentCommand\)\)/);
 assert.match(aiExe, /requestAgentCommandApproval,/);
+// Regression: getter passes explicit null; a `payload = {}` default doesn't cover null
+// and the throw killed the preflight confirm card (fell back to plain chat question).
+assert.match(aiExe, /function buildAgentCommandApprovalPayload\(payload\) \{\s*\n\s*if \(!payload \|\| typeof payload !== 'object'\) return null;/);
 
 assert.match(agentLoop, /deps\.requestAgentCommandApproval\(chatId,/);
 assert.match(aiNativeLoop, /result && result\.permissionRequired/);

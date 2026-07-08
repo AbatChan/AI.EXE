@@ -1525,10 +1525,15 @@
       const text = String(markdown || '');
       const phases = [];
       let summary = '';
+      let projectName = '';
       let current = null;
       text.split(/\r?\n/).forEach((rawLine) => {
         const line = rawLine.trim();
         if (!line) return;
+        if (!projectName) {
+          const title = line.match(/^#\s+Build plan\s*[—:-]\s*(.+)$/i);
+          if (title) { projectName = title[1].trim(); return; }
+        }
         if (!summary && /^>\s+/.test(line)) { summary = line.replace(/^>\s+/, '').trim(); return; }
         const head = line.match(/^##\s+Phase\s+\d+\s*[·:.\-]?\s*(.*)$/i);
         if (head) {
@@ -1541,7 +1546,7 @@
           current.tasks.push({ text: box[2].trim(), done: box[1].toLowerCase() === 'x' });
         }
       });
-      return { phases, summary };
+      return { phases, summary, projectName };
     }
 
     // First phase whose tasks aren't all checked — the one resume rule.

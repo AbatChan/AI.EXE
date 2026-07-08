@@ -277,9 +277,21 @@
         });
       }
 
-      plan.expectedFiles
+      // Phased run: pending "write X" must track THIS phase's files. Slicing the head
+      // of the whole-project list pins phase-1's config files as forever-"unmet" noise
+      // in every later phase (they were written in an earlier run, not this one).
+      const activePhasePaths = [];
+      if (plan._activePhase && Array.isArray(plan._activePhase.tasks)) {
+        plan._activePhase.tasks.forEach((task) => {
+          (String(task || '').match(/\/[^\s"'`|,;]+/g) || []).forEach((raw) => {
+            const p = normalizeWorkspacePath(String(raw).replace(/[.,;:]+$/, ''));
+            if (p && /\.[A-Za-z0-9]+$/.test(p) && !activePhasePaths.includes(p)) activePhasePaths.push(p);
+          });
+        });
+      }
+      (activePhasePaths.length ? activePhasePaths : plan.expectedFiles)
         .filter((path) => isSoftwareProject && !isDocsTask && path && path !== '/README.md' && path !== '/src')
-        .slice(0, 6)
+        .slice(0, activePhasePaths.length ? 8 : 6)
         .forEach((path) => {
           requirements.push({
             id: `expected_${path}`,

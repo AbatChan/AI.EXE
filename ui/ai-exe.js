@@ -1883,6 +1883,21 @@ function submitPendingPreflightChoice(chatId, mode) {
     return false;
   }
 
+  // This dispatch bypasses sendMessage, so it needs its own adapter gate — otherwise a
+  // confirm click while the Venice adapter is still starting launches a run whose plan
+  // inference fails and silently degrades to the heuristic fallback plan. Keep the
+  // pending choice so the user can re-click once the adapter is ready.
+  if (typeof isVeniceAdapterSelected === 'function' && isVeniceAdapterSelected()) {
+    let adapterReadyNow = false;
+    try { adapterReadyNow = veniceAdapterLastKnownServing === true; } catch (_) { }
+    if (!adapterReadyNow) {
+      void ensureVeniceAdapterReady().then((ready) => {
+        if (ready) submitPendingPreflightChoice(chatId, normalizedMode);
+      });
+      return true;
+    }
+  }
+
   recordDebugTrace('preflight_confirmation_choice_submitted', {
     chatId: String(chatId || ''),
     mode: normalizedMode,
@@ -3526,7 +3541,8 @@ const pendingAgentCommandApprovals = new Map();
 const agentCommandApprovalSessionId = `approval_session_${nowTs().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
 const scheduledInterruptedAgentCommandApprovals = new Set();
 
-function buildAgentCommandApprovalPayload(payload = {}) {
+function buildAgentCommandApprovalPayload(payload) {
+  if (!payload || typeof payload !== 'object') return null;
   const command = String(payload.command || '').trim();
   if (!command) return null;
   return {
@@ -16079,6 +16095,7 @@ function dispatchNextQueuedSend() {
 // auto-start). Returns true only when it's already serving; otherwise shows a click-to-start
 // prompt and returns false. The clicked prompt starts it, waits, then resends the message.
 let _adapterStartingForSend = false;
+let veniceAdapterLastKnownServing = false; // sync-readable cache for dispatch paths that can't await
 async function ensureVeniceAdapterReady() {
   const backend = getAIExeBackendUrl();
   let status = null;
@@ -16088,6 +16105,7 @@ async function ensureVeniceAdapterReady() {
     showAppNotification({ title: 'Backend offline', message: "AI.EXE's backend isn't reachable — reopen the app and try again.", kind: 'error' });
     return false;
   }
+  veniceAdapterLastKnownServing = Boolean(status && status.serving);
   if (status && status.serving) return true;
   if (_adapterStartingForSend) {
     showComposerNotice('Venice adapter is still starting — one moment…');
