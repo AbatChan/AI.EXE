@@ -1083,6 +1083,7 @@ let authStore = {
 let appSettings = {
   inferenceProvider: 'local',
   workMode: 'coding',
+  alwaysAllowedAgentCommands: [],
   huggingFaceToken: '',
   huggingFaceModel: 'Qwen/Qwen2.5-Coder-32B-Instruct:fastest',
   customOpenAiApiKey: '',
@@ -3751,8 +3752,19 @@ function requestAgentCommandApproval(chatId, payload = {}) {
 function getComposerCommandApprovalChoices() {
   return [
     { mode: 'approve_command', label: 'Approve once' },
+    { mode: 'approve_always', label: 'Always allow' },
     { mode: 'cancel_command', label: 'Cancel' },
   ];
+}
+
+function rememberAlwaysAllowedAgentCommand(command) {
+  const clean = String(command || '').trim();
+  if (!clean) return;
+  if (!Array.isArray(appSettings.alwaysAllowedAgentCommands)) appSettings.alwaysAllowedAgentCommands = [];
+  if (!appSettings.alwaysAllowedAgentCommands.includes(clean)) {
+    appSettings.alwaysAllowedAgentCommands.push(clean);
+    saveAppSettings();
+  }
 }
 
 function getActiveComposerPermissionRequest() {
@@ -3769,11 +3781,12 @@ function getActiveComposerPermissionRequest() {
         const current = getPendingAgentCommandApproval(activeChatId);
         const currentCommand = String((current && current.command) || command || '').trim();
         setPendingAgentCommandApproval(activeChatId, null);
-        if (String(mode || '') === 'approve_command') {
+        if (String(mode || '') === 'approve_command' || String(mode || '') === 'approve_always') {
+          if (String(mode || '') === 'approve_always') rememberAlwaysAllowedAgentCommand(currentCommand);
           recordDebugTrace('agent_command_approval_selected', {
             chatId: String(activeChatId || ''),
             command: currentCommand,
-            mode: 'approve_command',
+            mode: String(mode || ''),
           }, { chatId: String(activeChatId || ''), command: currentCommand });
           void runApprovedAgentCommandOnce(activeChatId, currentCommand);
           return true;
@@ -5986,6 +5999,7 @@ function formatBytes(bytes) {
 function loadAppSettings() {
   appSettings = {
     inferenceProvider: 'local',
+    alwaysAllowedAgentCommands: [],
     huggingFaceToken: '',
     huggingFaceModel: 'Qwen/Qwen2.5-Coder-32B-Instruct:fastest',
     customOpenAiApiKey: '',
@@ -6025,6 +6039,10 @@ function loadAppSettings() {
     if (typeof parsed.workMode === 'string') {
       const workMode = parsed.workMode.trim().toLowerCase();
       appSettings.workMode = workMode === 'everyday' ? 'everyday' : 'coding';
+    }
+    if (Array.isArray(parsed.alwaysAllowedAgentCommands)) {
+      appSettings.alwaysAllowedAgentCommands = parsed.alwaysAllowedAgentCommands
+        .map((c) => String(c || '').trim()).filter(Boolean).slice(0, 100);
     }
     if (typeof parsed.huggingFaceToken === 'string') appSettings.huggingFaceToken = parsed.huggingFaceToken.trim();
     if (typeof parsed.huggingFaceModel === 'string' && parsed.huggingFaceModel.trim()) {
@@ -11885,6 +11903,7 @@ const {
 const agentExecutor = window.AIExeAgentExecutor && typeof window.AIExeAgentExecutor.createAgentExecutor === 'function'
   ? window.AIExeAgentExecutor.createAgentExecutor({
     normalizeWorkspacePath,
+    getAlwaysAllowedAgentCommands: () => (Array.isArray(appSettings.alwaysAllowedAgentCommands) ? appSettings.alwaysAllowedAgentCommands : []),
     mapWorkspaceEntry,
     isIgnoredWorkspaceEntryName,
     deriveProjectNameFromTask,
@@ -13529,7 +13548,8 @@ function handleAgentCommandApprovalClick(event) {
   const command = String(button.dataset.command || '').trim();
   if (!command) return false;
 
-  if (action === 'approve') {
+  if (action === 'approve' || action === 'always') {
+    if (action === 'always') rememberAlwaysAllowedAgentCommand(command);
     button.disabled = true;
     button.textContent = 'Running…';
     void runApprovedAgentCommandOnce(chatId, command);
@@ -16786,9 +16806,10 @@ function sanitizeAssistantText(text) {
   clean = clean.replace(/\bDONE_CRITERIA\b/g, 'the plan');
   clean = clean.replace(/\b(?:AGENT_ENVIRONMENT|PROJECT_CONTRACT|PROJECT_STATE)\b/g, 'the project setup');
   // Orphaned code-fence language labels: when the ```json fence is stripped, its
-  // label survives as a lone "json" line or a sentence-trailing " json" token.
-  clean = clean.replace(/^\s*json\s*$/gim, '');
-  clean = clean.replace(/([.!?:])\s+json\s*$/i, '$1');
+  // label survives at the very END of the narration. Only trailing forms are
+  // touched — a lone "json" line mid-text or "format is: json" stays intact.
+  clean = clean.replace(/\n\s*json\s*$/i, '');
+  clean = clean.replace(/([.!?])\s+json\s*$/, '$1');
   clean = clean
     .replace(/^\s*assistant\s*$/gim, '')
     .replace(/^\s*user\s*$/gim, '')

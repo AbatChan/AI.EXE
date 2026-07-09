@@ -743,6 +743,18 @@
       );
 
       if (npmAskFirst || pipAskFirst || pythonPipAskFirst || goAskFirst || cargoAskFirst || dotnetAskFirst) {
+        // "Always allow" — the user promoted this exact command from ask-first.
+        const alwaysAllowed = typeof deps.getAlwaysAllowedAgentCommands === 'function'
+          ? deps.getAlwaysAllowedAgentCommands() : [];
+        if (Array.isArray(alwaysAllowed) && alwaysAllowed.includes(command)) {
+          return {
+            policy: 'auto_safe',
+            command,
+            program,
+            args,
+            reason: 'user chose Always allow for this command.',
+          };
+        }
         return {
           policy: 'ask_first',
           command,

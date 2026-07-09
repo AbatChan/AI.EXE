@@ -1204,6 +1204,14 @@
         approveBtn.dataset.command = permissionCommand;
         approveBtn.textContent = 'Approve once';
 
+        const alwaysBtn = document.createElement('button');
+        alwaysBtn.type = 'button';
+        alwaysBtn.className = 'msg-agent-permission-btn';
+        alwaysBtn.dataset.agentCommandApproval = 'always';
+        alwaysBtn.dataset.chatId = String(chatId || '');
+        alwaysBtn.dataset.command = permissionCommand;
+        alwaysBtn.textContent = 'Always allow';
+
         const cancelBtn = document.createElement('button');
         cancelBtn.type = 'button';
         cancelBtn.className = 'msg-agent-permission-btn cancel';
@@ -1213,6 +1221,7 @@
         cancelBtn.textContent = 'Cancel';
 
         actions.appendChild(approveBtn);
+        actions.appendChild(alwaysBtn);
         actions.appendChild(cancelBtn);
         item.appendChild(actions);
       }
