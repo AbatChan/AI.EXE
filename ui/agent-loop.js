@@ -676,7 +676,12 @@
         const start = Math.max(-1, Number(index));
         for (let i = start + 1; i < toolEvents.length; i += 1) {
           const event = toolEvents[i];
-          if (event && event.ok && isMutationTool(event.tool)) return true;
+          if (!event || !event.ok) continue;
+          if (isMutationTool(event.tool)) return true;
+          // A successful terminal command changes the environment (npm install
+          // creates node_modules/lockfile) — a run_app retry after it is NOT a
+          // no-change duplicate (this exact case force-finalized a healthy run).
+          if (String(event.tool || '').toLowerCase() === 'run_command') return true;
         }
         return false;
       };
@@ -1758,8 +1763,15 @@
               && /same tool\/target already failed|already read and no workspace changes|already listed|already ran this exact search|nothing changed since/i.test(String(event.observation || ''))
             )).length;
             if (duplicateBlockedCount >= 2) {
-              const targetLabel = duplicatePath || normalizeDecisionPath(decision.dstPath || '') || normalizeDecisionPath(decision.srcPath || '') || 'that target';
-              const blockerNote = `Note: I stopped because ${duplicateTool} kept hitting the same blocker for ${targetLabel}. I did not keep retrying the same action.`;
+              const targetLabel = (duplicatePath && duplicatePath !== '/')
+                ? ` for ${duplicatePath}`
+                : (normalizeDecisionPath(decision.dstPath || '') || normalizeDecisionPath(decision.srcPath || '')
+                  ? ` for ${normalizeDecisionPath(decision.dstPath || '') || normalizeDecisionPath(decision.srcPath || '')}` : '');
+              const stepLabel = duplicateTool === 'run_app' ? 'running the app'
+                : duplicateTool === 'run_command' ? 'the terminal command'
+                : duplicateTool === 'validate_files' ? 'validation'
+                : 'that step';
+              const blockerNote = `Note: I stopped because ${stepLabel}${targetLabel} kept hitting the same blocker, and repeating it without a change would not help.`;
               const blockedText = await buildStoppedWithWorkText(blockerNote);
               setAgentProgress('Stopped.');
               deps.consumeLiveAssistantText();

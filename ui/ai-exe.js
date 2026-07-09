@@ -16836,6 +16836,20 @@ function sanitizeAssistantText(text) {
   clean = clean.replace(/<[^A-Za-z0-9\s]{1,3}\s*tool[▁_\s-]*calls?[▁_\s-]*(?:begin|end)[\s\S]*$/i, '');
   // Strip hallucinated <*_file> rewrite directives chat models emit as raw text.
   clean = clean.replace(/<\s*(?:rewrite|write|edit|create|update|new|replace)_file\b[\s\S]*$/i, '');
+  // Humanize internal tool names the model parrots into narration ("The
+  // run_app blocker..."). Display-only; observations/prompts keep real names.
+  clean = clean
+    .replace(/`?\brun_app\b`?/g, 'the app run')
+    .replace(/`?\brun_command\b`?/g, 'the terminal command')
+    .replace(/`?\bvalidate_files\b`?/g, 'validation')
+    .replace(/`?\bcheck_code\b`?/g, 'the code check')
+    .replace(/`?\bread_files\b`?/g, 'the file reads')
+    .replace(/`?\bread_file\b`?/g, 'the file read')
+    .replace(/`?\bwrite_file\b`?/g, 'the file write')
+    .replace(/`?\bedit_file\b`?/g, 'the file edit')
+    .replace(/`?\blist_dir\b`?/g, 'the folder scan')
+    .replace(/`?\bsearch_files\b`?/g, 'the file search')
+    .replace(/`?\bnew_project\b`?/g, 'the project setup');
   // Reword internal planner section labels a model parrots into user-facing text.
   clean = clean.replace(/\bPENDING_REQUIREMENTS\b/g, 'the remaining checklist');
   clean = clean.replace(/\b(?:RECENT_)?TOOL_RESULTS\b/g, 'the tool results');
