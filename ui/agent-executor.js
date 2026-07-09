@@ -1937,9 +1937,25 @@
       // separate planner round-trip per file. Each path also registers as an individual
       // read_file event (loop side) so the read/write guards still see them.
       if (tool === 'read_files') {
+        // Lenient arg shapes: models put the list in `paths` (array or string),
+        // `path`, or `content` — a hard "needs paths" failure poisons the
+        // duplicate guard for the whole run, so parse what we can.
         let paths = Array.isArray(decision.paths) ? decision.paths.slice() : [];
+        if (!paths.length && typeof decision.paths === 'string' && decision.paths.trim()) {
+          paths = decision.paths.split(/[|,\n]+/);
+        }
         if (!paths.length && typeof decision.path === 'string' && decision.path.trim()) {
           paths = decision.path.split(/[|,\n]+/);
+        }
+        if (!paths.length && typeof decision.content === 'string' && decision.content.trim()) {
+          const rawList = decision.content.trim();
+          try {
+            const parsed = JSON.parse(rawList);
+            if (Array.isArray(parsed)) paths = parsed;
+          } catch (_) { /* not JSON — try list split below */ }
+          if (!paths.length && /[/.]/.test(rawList) && rawList.length < 2000) {
+            paths = rawList.replace(/^\[|\]$/g, '').split(/[|,\n"']+/);
+          }
         }
         paths = Array.from(new Set(paths
           .map((p) => deps.normalizeWorkspacePath(String(p || '').trim()))

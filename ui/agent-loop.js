@@ -760,6 +760,16 @@
 
       const isMutationTool = (tool) => ['new_project', 'write_file', 'edit_file', 'mkdir', 'move', 'delete'].includes(String(tool || '').toLowerCase());
       const normalizeDecisionPath = (value) => deps.normalizeWorkspacePath ? deps.normalizeWorkspacePath(value || '') : String(value || '');
+      // read_files carries no `path`, so without a paths signature every call
+      // shares one guard bucket — one malformed call blocked all later (valid,
+      // different-target) batch reads and force-stopped a live run.
+      const decisionPathsSignature = (decision) => {
+        if (String(decision && decision.tool ? decision.tool : '').toLowerCase() !== 'read_files') return '';
+        const raw = Array.isArray(decision && decision.paths)
+          ? decision.paths.join(',')
+          : String((decision && (decision.paths || decision.path || decision.content)) || '');
+        return raw.toLowerCase().replace(/\s+/g, '').slice(0, 500);
+      };
       const buildDecisionSignature = (decision) => ({
         tool: String(decision && decision.tool ? decision.tool : '').toLowerCase(),
         path: normalizeDecisionPath(decision && decision.path),
@@ -768,6 +778,7 @@
         offset: Number(decision && decision.offset || 0),
         startLine: Number(decision && decision.start_line || 0),
         endLine: Number(decision && decision.end_line || 0),
+        pathsSig: decisionPathsSignature(decision),
       });
       const hasWorkspaceMutationSince = (index) => {
         const start = Math.max(-1, Number(index));
@@ -799,7 +810,8 @@
             && normalizeDecisionPath(event.dstPath || '') === signature.dstPath
             && Number(event.offset || 0) === signature.offset
             && Number(event.startLine || 0) === signature.startLine
-            && Number(event.endLine || 0) === signature.endLine;
+            && Number(event.endLine || 0) === signature.endLine
+            && String(event.pathsSig || '') === signature.pathsSig;
         });
         if (lastIndex < 0) return '';
         const lastEvent = toolEvents[lastIndex];
@@ -1799,6 +1811,7 @@
             offset: Number(decision.offset || 0),
             startLine: Number(decision.start_line || 0),
             endLine: Number(decision.end_line || 0),
+            pathsSig: decisionPathsSignature(decision),
             observation: duplicateDecisionObservation.slice(0, deps.agentMaxToolOutputChars),
           });
           recordDebugTrace('agent_tool_result', {
@@ -1860,6 +1873,8 @@
               && !event.ok
               && String(event.tool || '').toLowerCase() === duplicateTool
               && normalizeDecisionPath(event.path || '') === duplicatePath
+              // Different read_files path sets are different attempts, not a streak.
+              && String(event.pathsSig || '') === decisionPathsSignature(decision)
               && /same tool\/target already failed|already read and no workspace changes|already listed|already ran this exact search|nothing changed since/i.test(String(event.observation || ''))
             )).length;
             if (duplicateBlockedCount >= 2) {
@@ -2880,6 +2895,7 @@
           endLine: Number(decision.end_line) || 0,
           offset: Number(decision.offset) || 0,
           searchQuery: String(decision.tool || '').toLowerCase() === 'search_files' ? String(decision.content || '') : '',
+          pathsSig: decisionPathsSignature(decision),
           observation: clippedObservation,
         });
         // Track the run's dev server + staleness (source mutated after start).
