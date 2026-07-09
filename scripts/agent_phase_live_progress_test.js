@@ -27,6 +27,16 @@ assert.deepEqual(
   ['/css/style.css', '/js/components.js'],
   'extracts slashless nested file task paths',
 );
+assert.deepEqual(
+  loop.extractFileLikeTaskPaths('/src/pages/DashboardPage.tsx.', normalizeWorkspacePath),
+  ['/src/pages/DashboardPage.tsx'],
+  'sentence-ending period after the extension does not defeat the match',
+);
+assert.deepEqual(
+  loop.extractFileLikeTaskPaths('backup at file.tsx.bak stays whole', normalizeWorkspacePath),
+  [],
+  'mid-word dots are untouched — no false /file.tsx match out of file.tsx.bak',
+);
 
 const phaseState = {
   activeIndex: 0,

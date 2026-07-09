@@ -138,7 +138,11 @@
   function extractFileLikeTaskPaths(text, normalizeWorkspacePath) {
     const norm = typeof normalizeWorkspacePath === 'function' ? normalizeWorkspacePath : (p) => String(p || '');
     const out = [];
-    const raw = String(text || '');
+    // Plan tasks read like sentences ("/src/pages/DashboardPage.tsx.") — a period
+    // straight after the extension made the lookahead reject the whole path, so
+    // live task ticking never matched. A dot before whitespace/end is punctuation,
+    // never part of a filename.
+    const raw = String(text || '').replace(/\.(?=\s|$)/g, ' ');
     const rx = /(^|[\s"'`(])((?:\/|\.\/)?[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*\.(?:html?|css|js|mjs|cjs|ts|tsx|jsx|json|md|txt|py|php|java|c|cpp|h|hpp|cs|go|rs|rb|swift|kt|sql|xml|svg|csv|yml|yaml))(?![A-Za-z0-9_.-])/g;
     let m;
     while ((m = rx.exec(raw))) {
