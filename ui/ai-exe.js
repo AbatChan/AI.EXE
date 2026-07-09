@@ -1731,6 +1731,7 @@ function setPendingPreflightConfirmation(chatId, payload) {
     kind: String(payload.kind || 'confirm').trim() || 'confirm',
     originalTask: String(payload.originalTask || '').trim(),
     userMessage: String(payload.userMessage || '').trim(),
+    command: String(payload.command || '').trim(),
     workspaceOpen: payload.workspaceOpen === false ? false : Boolean(payload.workspaceOpen),
     midFlightAgentResume: Boolean(payload.midFlightAgentResume),
     createdAt: nowTs(),
@@ -1872,6 +1873,23 @@ function submitPendingPreflightChoice(chatId, mode) {
   const pending = getPendingPreflightConfirmation(chatId);
   const normalizedMode = String(mode || '').trim().toLowerCase();
   if (!chat || !pending) return false;
+
+  // Command approval resolved WITHOUT a live run (app restarted / resolver lost):
+  // run it via the standalone approved-command path, which auto-resumes after.
+  if (String(pending.kind || '') === 'command_approval') {
+    const pendingCommand = String(pending.command || '').trim();
+    setPendingPreflightConfirmation(chatId, null);
+    if (normalizedMode === 'approve_command' || normalizedMode === 'approve_always') {
+      if (normalizedMode === 'approve_always') rememberAlwaysAllowedAgentCommand(pendingCommand);
+      if (pendingCommand) void runApprovedAgentCommandOnce(chatId, pendingCommand);
+      return true;
+    }
+    if (normalizedMode === 'cancel_command') {
+      if (pendingCommand) cancelAgentCommandApproval(chatId, pendingCommand);
+      return true;
+    }
+    return false;
+  }
 
   const effectiveTask = derivePendingPreflightOriginalTask(chatId, pending.originalTask || '');
 

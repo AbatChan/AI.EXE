@@ -2492,7 +2492,9 @@
                 deps.rememberAlwaysAllowedAgentCommand(permissionCommand);
               }
               setAgentProgress('Running approved command...');
-              toolResult = await deps.executeDeveloperToolCall(chatId, decision, taskText, toolEvents, toolPlanSpec, {
+              // planSpec, not toolPlanSpec — that const lives inside the tool-call try
+              // block (the validate_files-only shape is irrelevant for commands).
+              toolResult = await deps.executeDeveloperToolCall(chatId, decision, taskText, toolEvents, planSpec, {
                 approvedNewProject: Boolean(requestToken && requestToken.approvedNewProject),
                 skipNewProjectConfirmation: Boolean(requestToken && requestToken.skipNewProjectConfirmation),
                 forceCurrentWorkspace: Boolean(requestToken && requestToken.forceCurrentWorkspace),
