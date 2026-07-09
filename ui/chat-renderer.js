@@ -327,6 +327,13 @@
         }
       }
       if (meta.reverted === true) normalized.reverted = true;
+      // Finish-time run surface: which "open the result" action the final bubble offers.
+      if (meta.runHint && typeof meta.runHint === 'object') {
+        const hintKind = String(meta.runHint.kind || '').trim().toLowerCase();
+        if (hintKind === 'run' || hintKind === 'devserver') {
+          normalized.runHint = { kind: hintKind, url: String(meta.runHint.url || '').slice(0, 300) };
+        }
+      }
       return normalized;
     }
 
@@ -2269,6 +2276,39 @@
           ));
         }
       }
+      // Run card: one-click way to open the finished result (dev-server URL or
+      // native Smart Run). Reverted responses lose it — the result is gone.
+      if (normalizedAgentMeta && normalizedAgentMeta.completedAt && normalizedAgentMeta.runHint
+        && normalizedAgentMeta.reverted !== true) {
+        bubble.appendChild(buildAgentRunCard(normalizedAgentMeta.runHint));
+      }
+    }
+
+    function buildAgentRunCard(runHint) {
+      const card = document.createElement('div');
+      card.className = 'msg-agent-runcard';
+      const isDevServer = runHint.kind === 'devserver' && runHint.url;
+      const label = document.createElement('span');
+      label.className = 'msg-agent-runcard-label';
+      label.textContent = isDevServer ? runHint.url : 'Open the app to check the result';
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'msg-agent-runcard-btn';
+      if (isDevServer) {
+        btn.dataset.devServerOpenUrl = runHint.url;
+      } else {
+        // Smart Run re-serves and reopens even if the local server stopped.
+        btn.dataset.agentRunProject = '1';
+      }
+      btn.innerHTML = `
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true">
+          <path d="M7 5l12 7-12 7z"></path>
+        </svg>
+        <span>${isDevServer ? 'Open' : 'Run'}</span>
+      `;
+      card.appendChild(label);
+      card.appendChild(btn);
+      return card;
     }
 
     function populateUserBubble(bubble, text) {

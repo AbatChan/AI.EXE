@@ -13608,6 +13608,13 @@ document.addEventListener('click', handleAgentCommandApprovalClick);
 function handleDevServerCardClick(event) {
   const target = event && event.target;
   if (!target || !target.closest) return false;
+  const runProjectBtn = target.closest('[data-agent-run-project]');
+  if (runProjectBtn) {
+    event.preventDefault();
+    event.stopPropagation();
+    void runWorkspaceApp();
+    return true;
+  }
   const openBtn = target.closest('[data-dev-server-open-url]');
   if (openBtn) {
     event.preventDefault();

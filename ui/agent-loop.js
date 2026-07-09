@@ -288,6 +288,10 @@
       };
       // One evidence-based finish audit per run (diffs vs done criteria); advisory.
       let criteriaNudgeUsed = false;
+      // Latest dev server this run started (from run_command); stale = source
+      // mutated after it started, so a non-hot-reload server serves old code.
+      let runDevServer = null;
+      const devServerHotReloads = (command) => /\b(?:vite|next dev|nuxt|astro|webpack serve|react-scripts|(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?dev|nodemon|--reload|--watch|http\.server|flask)\b/i.test(String(command || ''));
       const startedAt = Date.now();
       const deadlineAt = startedAt + deps.agentTotalTimeoutMs;
       let planSpec = null;
@@ -614,6 +618,97 @@
         && ['read_file', 'read_files', 'search_files', 'validate_files', 'check_code', 'run_app', 'run_command']
           .includes(String(event.tool || '').toLowerCase())
       ));
+
+      // Finish-time run surfacing: verify (and if stale, restart) the run's dev
+      // server, auto-open fresh builds, else offer a Run button in the final
+      // bubble — the user should always know WHERE to check the result.
+      const buildFinishRunSurface = async ({ autoOpen = true } = {}) => {
+        if (runDevServer && runDevServer.id > 0) {
+          let statusMsg = '';
+          try {
+            const st = await deps.invokeWorkspaceAction('devServerStatus', { serverId: runDevServer.id });
+            statusMsg = String((st && st.ok && st.message) || '');
+          } catch (_) { }
+          if (/^running/.test(statusMsg)) {
+            let restarted = false;
+            if (runDevServer.stale && runDevServer.command && !devServerHotReloads(runDevServer.command)) {
+              // No hot reload + edits after start = serving pre-edit code.
+              // Restart the same (already-approved) command so the user's check
+              // sees the latest changes.
+              try { await deps.invokeWorkspaceAction('devServerStop', { serverId: runDevServer.id }); } catch (_) { }
+              agentActivities.forEach((activity) => {
+                if (activity && activity.devServer && Number(activity.devServer.id) === runDevServer.id) activity.devServer.running = false;
+              });
+              const restartDecision = { action: 'tool', tool: 'run_command', command: runDevServer.command };
+              let res = null;
+              try {
+                res = await deps.executeDeveloperToolCall(chatId, restartDecision, taskText, toolEvents, planSpec, {
+                  approvedCommand: runDevServer.command,
+                  forceCurrentWorkspace: true,
+                  skipNewProjectConfirmation: true,
+                });
+              } catch (_) { }
+              if (res && res.devServer && res.devServer.running) {
+                appendAgentActivity(deps.buildAgentActivityFromToolResult(restartDecision, res, toolEvents));
+                runDevServer = {
+                  id: Number(res.devServer.id) || 0,
+                  url: String(res.devServer.url || runDevServer.url || '').trim(),
+                  command: runDevServer.command,
+                  stale: false,
+                };
+                restarted = true;
+              } else {
+                runDevServer = null;
+                return {
+                  note: ' The dev server was still serving the pre-edit code, so I stopped it — click Run below to relaunch it with the latest changes.',
+                  runHint: { kind: 'run' },
+                };
+              }
+            }
+            const url = runDevServer.url;
+            if (url && autoOpen) {
+              try { window.open(url, '_blank'); } catch (_) { }
+            }
+            const restartNote = restarted ? ' I restarted the dev server so it serves your latest changes.' : '';
+            if (url) {
+              return {
+                note: `${restartNote} The app is running at ${url} — I opened it in your browser (the dev-server card above also has Open and Stop buttons).`,
+                runHint: { kind: 'devserver', url },
+              };
+            }
+            return {
+              note: `${restartNote} The dev server is running — its card above has the startup log and a Stop button.`,
+              runHint: { kind: 'run' },
+            };
+          }
+          runDevServer = null;
+        }
+        const runnableMutation = toolEvents.some((e) => e && e.ok
+          && ['write_file', 'edit_file'].includes(String(e.tool || '').toLowerCase())
+          && /\.(html?|js|mjs|cjs|ts|tsx|jsx|css|py)$/i.test(String(e.path || '')));
+        if (!runnableMutation) return { note: '', runHint: null };
+        // Fresh build (new entry page written this run) → launch it now; native
+        // Smart Run serves web projects over http:// and opens the browser.
+        const wroteEntryHtml = toolEvents.some((e) => e && e.ok && e.createdNewFile
+          && String(e.tool || '').toLowerCase() === 'write_file'
+          && /(?:^|\/)index\.html?$/i.test(String(e.path || '')));
+        if (wroteEntryHtml && autoOpen) {
+          let res = null;
+          try { res = await deps.invokeWorkspaceAction('runWorkspaceApp', {}); } catch (_) { }
+          if (res && res.ok) {
+            const url = String(res.output || '').trim();
+            const where = /^https?:/i.test(url) ? `at ${url} in your browser` : (String(res.message || '').trim() || 'now');
+            return {
+              note: ` I opened the app for you — it's running ${where}. Use the Run button below (or ▶ above the file explorer) to open it again anytime.`,
+              runHint: { kind: 'run', url: /^https?:/i.test(url) ? url : '' },
+            };
+          }
+        }
+        return {
+          note: ' Click Run below (or the ▶ button above the file explorer) to open the app and check it.',
+          runHint: { kind: 'run' },
+        };
+      };
 
       const isVerificationOnlyTask = () => /\b(?:are\s+you\s+sure|confirm|confirmed|verify|verified|check\s+(?:if|whether)|make\s+sure)\b/i
         .test(String(taskText || ''));
@@ -2087,6 +2182,14 @@
           if (stillBrokenRun) {
             finalText += ' Note: the app still shows a startup error — press Continue and I\'ll keep working on it.';
           }
+          // Tell the user WHERE to check the result (auto-open / Run button);
+          // never auto-open an app that still crashes on startup.
+          let finishRunHint = null;
+          if (!stillBrokenRun) {
+            const surface = await buildFinishRunSurface({ autoOpen: true });
+            if (surface.note) finalText += surface.note;
+            finishRunHint = surface.runHint;
+          }
           refreshChecklist(true, !stillBrokenRun);
           if (agentHasWorkspaceMutations()) {
             await deps.refreshWorkspaceTree(true);
@@ -2094,7 +2197,7 @@
           deps.consumeLiveAssistantText();
           deps.commitAssistantMessage(chatId, finalText, finalText, {
             agentActivities,
-            agentMeta: agentMetaWithRevert({ startedAt, completedAt: Date.now(), collapsed: true }),
+            agentMeta: agentMetaWithRevert({ startedAt, completedAt: Date.now(), collapsed: true, runHint: finishRunHint }),
             forceNeedsContinue: Boolean(stillBrokenRun),
           });
           recordDebugTrace('agent_done', {
@@ -2747,6 +2850,18 @@
           searchQuery: String(decision.tool || '').toLowerCase() === 'search_files' ? String(decision.content || '') : '',
           observation: clippedObservation,
         });
+        // Track the run's dev server + staleness (source mutated after start).
+        if (toolResult && toolResult.devServer && toolResult.devServer.running && Number(toolResult.devServer.id) > 0) {
+          runDevServer = {
+            id: Number(toolResult.devServer.id),
+            url: String(toolResult.devServer.url || '').trim(),
+            command: String(toolResult.devServer.command || toolResult.terminalCommand || '').trim(),
+            stale: false,
+          };
+        } else if (runDevServer && toolResult && toolResult.ok && toolResult.mutated
+          && ['write_file', 'edit_file', 'delete', 'move'].includes(String(decision.tool || '').toLowerCase())) {
+          runDevServer.stale = true;
+        }
         // read_files batched several files in one step — register each as an individual
         // read_file event so the read/write guards treat every path as already read.
         if (String(decision.tool || '').toLowerCase() === 'read_files' && Array.isArray(toolResult && toolResult.readFilesResult)) {
@@ -3181,14 +3296,16 @@
             if (phaseState && phaseState.activeIndex >= phaseState.phases.length - 1) {
               try { await completeActivePhase(); } catch (_) { }
             }
-            const finalText = await deps.generateAgentCompletionText(taskText, toolEvents, getWorkspaceLabel(), planSpec);
+            let finalText = String(await deps.generateAgentCompletionText(taskText, toolEvents, getWorkspaceLabel(), planSpec) || '');
+            const surface = await buildFinishRunSurface({ autoOpen: true });
+            if (surface.note) finalText += surface.note;
             if (agentHasWorkspaceMutations()) {
               await deps.refreshWorkspaceTree(true);
             }
             deps.consumeLiveAssistantText();
             deps.commitAssistantMessage(chatId, finalText, finalText, {
               agentActivities,
-              agentMeta: agentMetaWithRevert({ startedAt, completedAt: Date.now(), collapsed: true }),
+              agentMeta: agentMetaWithRevert({ startedAt, completedAt: Date.now(), collapsed: true, runHint: surface.runHint }),
               forceNeedsContinue: false,
             });
             recordDebugTrace('agent_done', {
@@ -3301,6 +3418,14 @@
           : '';
         fallback = `I caught myself editing the same file back and forth, so I stopped instead of going in circles.${changed} I might be misreading exactly what you want — tell me the specific part or the exact result you're after and I'll make just that change.`;
       }
+      // Out-of-steps end: only offer the Run surface when the work actually
+      // completed cleanly, and never auto-open here.
+      let fallbackRunHint = null;
+      if (cl && cl.allDone && !unresolvedValidationClause && oscillationBlocks < 2) {
+        const surface = await buildFinishRunSurface({ autoOpen: false });
+        if (surface.note) fallback += surface.note;
+        fallbackRunHint = surface.runHint;
+      }
       deps.setThinkingStatus('');
       setAgentProgress('Stopped.');
       deps.consumeLiveAssistantText();
@@ -3309,7 +3434,7 @@
       }
       deps.commitAssistantMessage(chatId, fallback, fallback, {
         agentActivities,
-        agentMeta: agentMetaWithRevert({ startedAt, completedAt: Date.now(), collapsed: true }),
+        agentMeta: agentMetaWithRevert({ startedAt, completedAt: Date.now(), collapsed: true, runHint: fallbackRunHint }),
         forceNeedsContinue: !(cl && cl.allDone) || Boolean(unresolvedValidationClause) || oscillationBlocks >= 2,
       });
       recordDebugTrace('agent_done', {

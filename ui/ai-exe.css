@@ -4256,6 +4256,54 @@ html.platform-mac .settings-sidebar {
   overflow: hidden;
 }
 
+/* Finish-time run card: one-click open of the built app. */
+.msg-agent-runcard {
+  margin-top: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  border: 1px solid rgba(167, 178, 197, 0.16);
+  border-radius: 14px;
+  background: rgba(13, 16, 22, 0.55);
+}
+
+.msg-agent-runcard-label {
+  font-size: 13px;
+  color: rgba(225, 232, 244, 0.78);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.msg-agent-runcard-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  border: 1px solid rgba(74, 222, 128, 0.35);
+  border-radius: 10px;
+  background: rgba(74, 222, 128, 0.1);
+  color: #4ade80;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.msg-agent-runcard-btn:hover {
+  background: rgba(74, 222, 128, 0.18);
+  border-color: rgba(74, 222, 128, 0.55);
+}
+
+.msg-agent-runcard-btn svg {
+  width: 14px;
+  height: 14px;
+}
+
 .msg-agent-editcard.reverted {
   opacity: 0.78;
 }
