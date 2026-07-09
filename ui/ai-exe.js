@@ -3840,9 +3840,14 @@ function getActiveComposerPermissionRequest() {
 
   const pending = getComposerPendingPreflightConfirmation();
   if (!pending || !activeChatId) return null;
-  const title = pending.workspaceOpen === false
-    ? 'Create a new project for this request?'
-    : String(pending.userMessage || 'Choose how I should continue.').trim();
+  // Title must match the card's kind: delete/command cards carry their own
+  // userMessage. workspaceOpen defaults to false in normalization, so checking
+  // it FIRST mislabeled delete confirmations as "Create a new project?".
+  const title = (pending.kind === 'delete' || pending.kind === 'command_approval')
+    ? String(pending.userMessage || 'Confirm to proceed.').trim()
+    : pending.workspaceOpen === false
+      ? 'Create a new project for this request?'
+      : String(pending.userMessage || 'Choose how I should continue.').trim();
   return {
     kind: 'preflight_project_scope',
     title,
