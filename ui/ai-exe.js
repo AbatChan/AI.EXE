@@ -4860,7 +4860,21 @@ function openAttachPicker() {
   picker.click();
 }
 
+// >0 while picked files are still parsing (image decode/full-data read) —
+// send waits for this so the attachment goes WITH the message.
+let attachmentsProcessingCount = 0;
+
 async function handleAttachSelection(fileList) {
+  if (!fileList || fileList.length === 0) return;
+  attachmentsProcessingCount += 1;
+  try {
+    await handleAttachSelectionInner(fileList);
+  } finally {
+    attachmentsProcessingCount -= 1;
+  }
+}
+
+async function handleAttachSelectionInner(fileList) {
   if (!fileList || fileList.length === 0) return;
   const rawFiles = Array.from(fileList || []);
   const availableSlots = Math.max(0, maxPendingAttachments - pendingAttachments.length);
@@ -8562,13 +8576,20 @@ function takeAgentAdapterAttachmentsForPrompt(prompt, options = {}) {
   const token = activeInferenceRequest;
   if (!token || !isVeniceAdapterSelected()) return [];
   if (!Array.isArray(token.attachments) || !token.attachments.length) return [];
-  if (token.agentAdapterAttachmentsSent) return [];
+  // Agent-mode adapter calls each run in an ISOLATED one-shot Venice thread, so
+  // a single "sent once" upload only ever reached the plan call — every later
+  // step was blind. Forward to the first few marker-bearing calls (plan +
+  // project generation + first decision) instead; capped so a 24-step run
+  // doesn't re-upload on every step.
+  const sentCount = Number(token.agentAdapterAttachmentsSentCount) || 0;
+  if (sentCount >= 3) return [];
   const text = String(prompt || '');
   if (!/\[ATTACHMENTS\]|\(image attached/i.test(text)) return [];
-  token.agentAdapterAttachmentsSent = true;
+  token.agentAdapterAttachmentsSentCount = sentCount + 1;
   pushDebugTrace('agent_adapter_attachments_forwarded', {
     chatId: String(token.chatId || ''),
     count: String(token.attachments.length),
+    forwardIndex: String(sentCount + 1),
   });
   return token.attachments;
 }
@@ -16667,6 +16688,12 @@ async function sendMessage() {
   if (isVeniceAdapterSelected()) {
     const ready = await ensureVeniceAdapterReady();
     if (!ready) return;
+  }
+  // A file picked moments before Send may still be parsing (image decode /
+  // full-quality read) — wait briefly so it sends WITH this message instead
+  // of silently missing from it.
+  for (let waited = 0; attachmentsProcessingCount > 0 && waited < 10000; waited += 120) {
+    await new Promise((resolve) => setTimeout(resolve, 120));
   }
   enterChatView();
   const modelPrompt = buildPromptWithInputAugments(thinkControl.modelText || userText);

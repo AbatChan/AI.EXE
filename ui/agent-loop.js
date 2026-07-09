@@ -295,6 +295,8 @@
       const startedAt = Date.now();
       const deadlineAt = startedAt + deps.agentTotalTimeoutMs;
       let planSpec = null;
+      // Total-deadline hit: the wrap-up must not make more slow model calls.
+      let totalTimedOut = false;
       // Phased state (out here so the finally can keep the tracker pinned).
       let phaseState = null;
       let keepPhaseTrackerPinned = false;
@@ -1464,7 +1466,10 @@
             detail: 'Agent timed out before finishing.',
             status: 'error',
           });
-          setAgentProgress('Stopped.');
+          totalTimedOut = true;
+          // Keep a live status through the wrap-up — "Stopped." with a hidden
+          // 2-minute completion call behind it reads as a frozen app.
+          setAgentProgress('Out of time — writing the wrap-up...');
           deps.setThinkingStatus('');
           deps.consumeLiveAssistantText();
           break;
@@ -2444,7 +2449,28 @@
               && /mangled dependency versions/i.test(String(e.observation || ''))
               && /Nothing was saved/i.test(String(e.observation || '')));
             const existedBeforeRun = (existsInWorkspace || readSuccessfullyThisRun) && !createdThisRun;
-            if (existedBeforeRun && !priorRejectedFreshWrite) {
+            // Escape hatch: a file that demonstrably broke since its last good
+            // write (failed check/run/validate, or an edit that damaged it), or
+            // a model that read the file and INSISTS after one block, is doing
+            // a deliberate full regeneration — blocking it forever burned 3
+            // identical 2-minute steps in a live run. Revert snapshots cover it.
+            const priorWriteBlocks = toolEvents.filter((e) => e
+              && e._guardBlock
+              && String(e.tool || '').toLowerCase() === 'write_file'
+              && deps.normalizeWorkspacePath(e.path || '') === wPath).length;
+            const brokenSinceLastWrite = (() => {
+              for (let i = toolEvents.length - 1; i >= 0; i -= 1) {
+                const e = toolEvents[i];
+                if (!e || deps.normalizeWorkspacePath(e.path || '') !== wPath) continue;
+                const t = String(e.tool || '').toLowerCase();
+                if (t === 'write_file' && e.ok && !e._guardBlock) return false;
+                if ((t === 'check_code' || t === 'run_app' || t === 'validate_files')
+                  && (e.ok === false || Number(e.runErrorCount) > 0 || Number(e.checkErrorCount) > 0 || e.validationPassed === false)) return true;
+              }
+              return false;
+            })();
+            const allowDeliberateRewrite = readSuccessfullyThisRun && (priorWriteBlocks >= 1 || brokenSinceLastWrite);
+            if (existedBeforeRun && !priorRejectedFreshWrite && !allowDeliberateRewrite) {
               recordDebugTrace('agent_write_over_existing_blocked', {
                 chatId: String(chatId || ''), step: String(step), path: wPath,
                 afterRead: String(Boolean(touchedThisRun)),
@@ -2455,10 +2481,16 @@
                 _guardBlock: true,
                 path: wPath,
                 observation: readSuccessfullyThisRun
-                  ? `${wPath} already exists and was read successfully — do NOT overwrite it from scratch. Use edit_file with a targeted find/replace edit for ONLY the requested change. Never rebuild files that are already here.`
+                  ? `${wPath} already exists and was read successfully — do NOT overwrite it from scratch. Use edit_file with a targeted find/replace edit for ONLY the requested change. ONLY if the file is genuinely broken/corrupted and targeted edits cannot fix it: send the same complete write_file again and it will be accepted as a deliberate full regeneration.`
                   : `${wPath} already exists in this project — do NOT overwrite it from scratch (write_file would erase the existing work). First read_file ${wPath}, then make ONLY the requested changes with edit_file. Do the same for every other existing file you need to change: read it, then edit it — never rebuild files that are already here.`,
               });
               continue;
+            }
+            if (existedBeforeRun && allowDeliberateRewrite) {
+              recordDebugTrace('agent_write_over_existing_allowed', {
+                chatId: String(chatId || ''), step: String(step), path: wPath,
+                reason: brokenSinceLastWrite ? 'broken_since_last_write' : 'insisted_after_block',
+              }, { chatId: String(chatId || ''), step, path: wPath });
             }
           }
         }
@@ -3396,6 +3428,10 @@
           if (fallbackChanged.length) fallback += ` Changed: ${fallbackChanged.slice(0, 6).join(', ')}.`;
           if (gaps.length) fallback += ` Still to do: ${gaps.map((g) => g.text || g.path).join('; ')}.`;
           fallback += " Press Continue and I'll keep going from this phase.";
+        } else if (totalTimedOut) {
+          // After a total timeout, another slow completion call just extends the
+          // hang — report deterministically and hand the user Continue.
+          fallback = `I ran out of time before finishing.${changedClause} Press Continue and I'll pick up where I left off.`;
         } else {
           fallback = String(await deps.generateAgentCompletionText(taskText, toolEvents, getWorkspaceLabel(), planSpec) || '').trim();
         }
