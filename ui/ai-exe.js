@@ -4201,13 +4201,61 @@ function rememberAttachmentFullText(id, text) {
   if (id && text) attachmentFullText.set(id, String(text));
 }
 
+// Full-quality image data (in-memory, id -> data URL) for the adapter upload so
+// the MODEL sees the real image, not the small chat preview. Transient like
+// attachmentFullText; after an app reload the preview is the fallback.
+const attachmentFullImage = new Map();
+async function createImageAttachmentFullData(file) {
+  const size = Number((file && file.size) || 0);
+  if (size > 0 && size <= 3.5 * 1024 * 1024) {
+    // Original bytes untouched — no recompression, no quality loss.
+    try {
+      const raw = await new Promise((resolve) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ''));
+        reader.onerror = () => resolve('');
+        reader.readAsDataURL(file);
+      });
+      if (/^data:image\//i.test(raw)) return raw;
+    } catch (_) { /* fall through to downscale */ }
+  }
+  // Very large originals: 2048px JPEG — still far above the chat preview.
+  let objectUrl = '';
+  try {
+    objectUrl = URL.createObjectURL(file);
+    const img = await new Promise((resolve, reject) => {
+      const image = new Image();
+      image.onload = () => resolve(image);
+      image.onerror = reject;
+      image.src = objectUrl;
+    });
+    const maxSide = 2048;
+    const width = Math.max(1, Number(img.naturalWidth || img.width) || 1);
+    const height = Math.max(1, Number(img.naturalHeight || img.height) || 1);
+    const scale = Math.min(1, maxSide / Math.max(width, height));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(width * scale));
+    canvas.height = Math.max(1, Math.round(height * scale));
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return '';
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    return canvas.toDataURL('image/jpeg', 0.92);
+  } catch (_) {
+    return '';
+  } finally {
+    if (objectUrl) { try { URL.revokeObjectURL(objectUrl); } catch (_) { } }
+  }
+}
+
 // Only IMAGES take Venice's file-upload path (they can't be represented as prompt text).
 // Text/code/doc files keep their FULL content inline in the prompt (we own the history, so
 // there's no re-upload on later turns and no dependency on Venice's flaky text_parser).
 function collectAttachmentsForAdapter(list) {
   return normalizePendingAttachmentList(list)
-    .filter((it) => it && it.kind === 'image' && it.previewDataUrl)
-    .map((it) => ({ id: it.id, name: it.name, mime: it.mime || 'image/png', data: it.previewDataUrl }))
+    .filter((it) => it && it.kind === 'image' && (attachmentFullImage.get(it.id) || it.previewDataUrl))
+    // Upload the full-quality original when we still have it; the preview is a
+    // small recompressed JPEG and blurs what the model sees.
+    .map((it) => ({ id: it.id, name: it.name, mime: it.mime || 'image/png', data: attachmentFullImage.get(it.id) || it.previewDataUrl }))
     .slice(0, maxPendingAttachments);
 }
 
@@ -4523,6 +4571,7 @@ function renderInputAttachments() {
 function clearPendingAttachments() {
   pendingAttachments = [];
   attachmentFullText.clear();
+  attachmentFullImage.clear();
   persistPendingAttachmentsForCurrentContext();
   renderInputAttachments();
 }
@@ -4564,17 +4613,26 @@ async function createImageAttachmentPreview(file) {
       image.onerror = reject;
       image.src = objectUrl;
     });
-    const maxSide = 520;
     const width = Math.max(1, Number(img.naturalWidth || img.width) || 1);
     const height = Math.max(1, Number(img.naturalHeight || img.height) || 1);
-    const scale = Math.min(1, maxSide / Math.max(width, height));
-    const canvas = document.createElement('canvas');
-    canvas.width = Math.max(1, Math.round(width * scale));
-    canvas.height = Math.max(1, Math.round(height * scale));
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return '';
-    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-    return canvas.toDataURL('image/jpeg', 0.78);
+    const encodeAt = (maxSide, quality) => {
+      const scale = Math.min(1, maxSide / Math.max(width, height));
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.max(1, Math.round(width * scale));
+      canvas.height = Math.max(1, Math.round(height * scale));
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return '';
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      return canvas.toDataURL('image/jpeg', quality);
+    };
+    // Largest preview that fits the 180K normalizer cap — an over-cap data URL
+    // would be truncated into a corrupt image, so step down until it fits.
+    const attempts = [[900, 0.82], [640, 0.78], [520, 0.72], [420, 0.6]];
+    for (const [side, quality] of attempts) {
+      const encoded = encodeAt(side, quality);
+      if (encoded && encoded.length <= 175000) return encoded;
+    }
+    return '';
   } catch (_) {
     if (Number(file && file.size || 0) <= 220000) {
       try {
@@ -4683,6 +4741,8 @@ async function parseAttachmentFile(file) {
   if (isLikelyImageAttachment(file)) {
     const previewDataUrl = await createImageAttachmentPreview(file);
     const thumbDataUrl = await createImageAttachmentThumbnail(file);
+    const fullDataUrl = await createImageAttachmentFullData(file);
+    if (fullDataUrl) attachmentFullImage.set(base.id, fullDataUrl);
     return {
       ...base,
       kind: 'image',
@@ -16862,6 +16922,9 @@ function sanitizeAssistantText(text) {
     .replace(/`?\blist_dir\b`?/g, 'the folder scan')
     .replace(/`?\bsearch_files\b`?/g, 'the file search')
     .replace(/`?\bnew_project\b`?/g, 'the project setup');
+  // The replacements above carry their own "the"; when the model already wrote
+  // an article ("the write_file") that produced "the the file write" — collapse.
+  clean = clean.replace(/\b(the|a|an|this|that|these|those|its|our|your|my)\s+the\s+(app run|terminal command|code check|file reads|file read|file write|file edit|folder scan|file search|project setup)\b/gi, '$1 $2');
   // Reword internal planner section labels a model parrots into user-facing text.
   clean = clean.replace(/\bPENDING_REQUIREMENTS\b/g, 'the remaining checklist');
   clean = clean.replace(/\b(?:RECENT_)?TOOL_RESULTS\b/g, 'the tool results');

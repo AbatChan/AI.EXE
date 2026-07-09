@@ -1107,9 +1107,13 @@
       let currentWorkspaceRoot = workspace.workspaceRootName ? `/${workspace.workspaceRootName}` : '(none)';
       // Always give the model the LIVE project structure (system files excluded) —
       // stops each phase burning steps on list_dir re-discovery and grounds paths.
+      let liveTreeText = '';
       try {
         const tree = typeof getWorkspaceFileTreeSummary === 'function' ? await getWorkspaceFileTreeSummary() : '';
-        if (tree) currentWorkspaceRoot += `\nCurrent project file structure (live):\n${tree}`;
+        if (tree) {
+          liveTreeText = String(tree);
+          currentWorkspaceRoot += `\nCurrent project file structure (live):\n${tree}`;
+        }
       } catch (_) { }
       const allEvents = toolEvents || [];
       const recentEvents = allEvents.slice(-10);
@@ -1131,16 +1135,6 @@
       const olderInspected = Array.from(inspectedMap.entries()).filter(([, meta]) => {
         return meta.eventIndex < allEvents.length - recentEvents.length;
       });
-      const inspectedNote = olderInspected.length
-        ? `Files already in context (do not re-read unless noted):\n${olderInspected.map(([path, meta]) => {
-          const flags = meta.wasTruncated
-            ? '[TRUNCATED — re-read allowed]'
-            : meta.modifiedAfter
-            ? '[updated by your own edit — the edit result in TOOL_RESULTS is the current content; do not re-read]'
-            : '[available — use cached content]';
-          return `- ${path}  ${flags}`;
-        }).join('\n')}\n\n`
-        : '';
       const relevantOlder = selectRelevantOlderEvents(olderEvents, taskText, planSpec, 3);
       const diagnosticsLog = buildAgentDiagnosticsLog(allEvents);
       const expandedReadCap = Math.max(0, Number(getAgentExpandedReadChars()) || 0);
@@ -1177,9 +1171,36 @@
         : '';
       const relevantOlderLog = relevantOlder.length
         ? `RELEVANT EARLIER RESULTS (carried forward because they match this task — prefer these over re-reading):\n${relevantOlder.map((event, index) => {
-          const observation = String(event && event.observation ? event.observation : '').slice(0, agentMaxToolOutputChars);
-          return `EarlierResult ${index + 1}: ${String(event && event.tool ? event.tool : 'unknown')} ${String(event && event.path ? event.path : '')}\n${observation}`;
+          // A batch-read pointer references a result that may no longer be in
+          // this prompt — carry the real content instead of a dangling pointer.
+          const body = event && event._fromBatchRead && String(event.content || '').trim()
+            ? `Content of ${String(event.path || '')}:\n${String(event.content)}`
+            : String(event && event.observation ? event.observation : '');
+          return `EarlierResult ${index + 1}: ${String(event && event.tool ? event.tool : 'unknown')} ${String(event && event.path ? event.path : '')}\n${body.slice(0, agentMaxToolOutputChars)}`;
         }).join('\n\n')}\n\n`
+        : '';
+      // Only claim "use cached content" for paths whose content this prompt
+      // actually still carries — a false claim makes the model hallucinate the
+      // file when editing instead of re-reading it.
+      const contentCarriedPaths = new Set();
+      if (expandedReadEvent) contentCarriedPaths.add(normalizeWorkspacePath(expandedReadEvent.path || ''));
+      relevantOlder.forEach((event) => {
+        if (!event || String(event.tool || '').toLowerCase() !== 'read_file') return;
+        const carried = (event._fromBatchRead && String(event.content || '').trim())
+          || (!event._fromBatchRead && String(event.observation || '').trim());
+        if (carried) contentCarriedPaths.add(normalizeWorkspacePath(event.path || ''));
+      });
+      const inspectedNote = olderInspected.length
+        ? `Files already inspected this run:\n${olderInspected.map(([path, meta]) => {
+          const flags = meta.wasTruncated
+            ? '[TRUNCATED — re-read allowed]'
+            : meta.modifiedAfter
+            ? '[updated by your own edit — the edit result in TOOL_RESULTS is the current content; do not re-read]'
+            : contentCarriedPaths.has(normalizeWorkspacePath(path))
+            ? '[available — use cached content above/below; do not re-read]'
+            : '[inspected earlier; its content is NOT in this prompt — if you must edit it and need exact lines, ONE search_files or read_file is allowed]';
+          return `- ${path}  ${flags}`;
+        }).join('\n')}\n\n`
         : '';
       // Keep only the last few tool results in full; compact older large read/list
       // dumps to a pointer (re-read on demand) so the prompt doesn't balloon with
@@ -1189,24 +1210,56 @@
         const tool = String(event && event.tool ? event.tool : 'unknown');
         const obs = String(event && event.observation ? event.observation : '');
         const isTail = index >= recentEvents.length - FULL_TOOL_TAIL;
+        // Aged batch-read pointers claim "full content is in that result" after
+        // the batch result itself was compacted away — restate honestly.
+        if (!isTail && event && event._fromBatchRead) {
+          const p = String(event.path || '');
+          return `ToolResult ${index + 1}: read_file ${p} — read earlier in a read_files batch; if that content is no longer shown in this prompt, re-reading it is allowed.`;
+        }
         if (!isTail && obs.length > 1200 && ['read_file', 'list_dir', 'search_files'].includes(tool.toLowerCase())) {
           const p = String(event && event.path ? event.path : '');
           return `ToolResult ${index + 1}: ${tool} ${p} — ${obs.length} chars (omitted to save context; read_file again if you need it)`;
         }
         return `ToolResult ${index + 1}: ${tool}\n${obs.slice(0, agentMaxToolOutputChars)}`;
       }).join('\n\n');
+      // Scope this run to the current phase only.
+      const activePhase = planSpec && planSpec._activePhase;
+      const phaseTasksText = activePhase && Array.isArray(activePhase.tasks) ? activePhase.tasks.join(' ') : '';
+      const isFinalPhase = Boolean(activePhase && Number(activePhase.number) >= Number(activePhase.total));
+      const readmeScheduledThisPhase = /(?:^|[\s/])readme\.md/i.test(phaseTasksText);
+      // On the FINAL phase, plan entries no phase ever scheduled (and that don't
+      // exist) are unbuildable contract noise — split them out so they can't
+      // block the finish or pull the model out of scope.
+      const partitionByContract = (paths) => {
+        const kept = [];
+        const dropped = [];
+        (Array.isArray(paths) ? paths : []).forEach((p) => {
+          const base = String(p || '').split('/').pop();
+          if (!base) return;
+          if ((phaseTasksText && phaseTasksText.includes(base)) || (liveTreeText && liveTreeText.includes(base))) kept.push(p);
+          else dropped.push(p);
+        });
+        return { kept, dropped };
+      };
+      const expectedSplit = isFinalPhase ? partitionByContract(planSpec && planSpec.expectedFiles) : null;
+      const affectedSplit = isFinalPhase ? partitionByContract(planSpec && planSpec.affectedFiles) : null;
+      const renderFileList = (label, list, split) => {
+        if (split) {
+          const parts = [];
+          if (split.kept.length) parts.push(`${label}: ${split.kept.join(', ')}`);
+          if (split.dropped.length) parts.push(`Out-of-contract plan files (no phase ever scheduled these — do NOT create them and do NOT let them block finishing): ${split.dropped.join(', ')}`);
+          return parts.join('\n');
+        }
+        return Array.isArray(list) && list.length ? `${label}: ${list.join(', ')}` : '';
+      };
       const planSummary = planSpec
         ? [
           planSpec.summary ? `Goal: ${planSpec.summary}` : '',
           `Task kind: ${planSpec.taskKind || 'unknown'}`,
           `Primary stack: ${planSpec.primaryStack || 'generic'}`,
           planSpec.projectName ? `Project name: ${planSpec.projectName}` : '',
-          Array.isArray(planSpec.expectedFiles) && planSpec.expectedFiles.length
-            ? `Expected files: ${planSpec.expectedFiles.join(', ')}`
-            : '',
-          Array.isArray(planSpec.affectedFiles) && planSpec.affectedFiles.length
-            ? `Affected files: ${planSpec.affectedFiles.join(', ')}`
-            : '',
+          renderFileList('Expected files', planSpec.expectedFiles, expectedSplit),
+          renderFileList('Affected files', planSpec.affectedFiles, affectedSplit),
           Array.isArray(planSpec.filesToInspect) && planSpec.filesToInspect.length
             ? `Inspect first: ${planSpec.filesToInspect.join(', ')}`
             : '',
@@ -1217,29 +1270,48 @@
             ? `Validation: ${planSpec.validationSteps.join(' | ')}`
             : '',
           planSpec.projectContract ? `Project contract:\n${planSpec.projectContract}` : '',
-          planSpec.needsReadme ? 'README required: yes' : 'README required: no',
+          // Keep the README flag consistent with the phase schedule — a "no"
+          // next to a /README.md sub-task forces the model to pick a side.
+          readmeScheduledThisPhase
+            ? 'README required: yes (it is a sub-task of this phase)'
+            : (planSpec.needsReadme
+              ? (activePhase && !isFinalPhase ? 'README required: yes (written in the FINAL phase, not this one)' : 'README required: yes')
+              : 'README required: no'),
         ].filter(Boolean).join('\n')
         : '(none)';
-
-      // Scope this run to the current phase only.
-      const activePhase = planSpec && planSpec._activePhase;
+      // Component/bundler projects (React/Vite/Vue/...) get component-stack
+      // guidance; the HTML shared-CSS/data-site-header wording only fits static
+      // multi-page sites and reads as noise (or worse, misdirection) in a SPA.
+      const componentStack = /\.(?:tsx|jsx|vue|svelte)\b|vite\.config|next\.config/i.test(
+        `${liveTreeText} ${planSpec && Array.isArray(planSpec.expectedFiles) ? planSpec.expectedFiles.join(' ') : ''}`
+      );
       // Later phases already have the shared design as FOUNDATION VOCABULARY (cross-phase
       // memory) — re-reading index.html/the stylesheet just burns this run's steps.
       const laterPhaseReuseLine = (planSpec && planSpec._foundationVocab)
-        ? 'Do NOT re-read index.html or the shared stylesheet to "match the design" — the FOUNDATION VOCABULARY below already lists the shared classes, tokens, and components built in earlier phases (it is your memory of them). Go straight to writing the new page(s): link the shared CSS/JS, reuse those exact names, and use <div data-site-header></div>/<div data-site-footer></div>. Re-reading existing files just wastes this run\'s limited steps.'
-        : 'You may read ONE existing page first to match its design/header/footer/source-of-truth files, but reading is not the work.';
+        ? (componentStack
+          ? 'Do NOT re-read existing pages/components to "match the design" — the FOUNDATION VOCABULARY below already lists the shared tokens and components built in earlier phases (it is your memory of them). Import the shared components and write the new files directly; re-reading existing files just wastes this run\'s limited steps.'
+          : 'Do NOT re-read index.html or the shared stylesheet to "match the design" — the FOUNDATION VOCABULARY below already lists the shared classes, tokens, and components built in earlier phases (it is your memory of them). Go straight to writing the new page(s): link the shared CSS/JS, reuse those exact names, and use <div data-site-header></div>/<div data-site-footer></div>. Re-reading existing files just wastes this run\'s limited steps.')
+        : (componentStack
+          ? 'You may read ONE existing page/component first to match conventions, but reading is not the work.'
+          : 'You may read ONE existing page first to match its design/header/footer/source-of-truth files, but reading is not the work.');
+      const laterPhaseBuildLine = componentStack
+        ? 'Build only this phase\'s named deliverables. If a sub-task names a new file/component/page from Expected files, create it with write_file. IMPORT and reuse the existing shared pieces — layout components, ui components, stores, data modules, and the shared stylesheet/design tokens; do NOT re-implement page-local copies of the navbar/footer/buttons and do NOT paste a duplicate style system into each new file. If the shared components/stores/styles need additions for this phase, edit those existing shared files as support work in this same phase. Wire new pages into the existing router/layout (e.g. App routes) so nothing is orphaned. ' + laterPhaseReuseLine
+        : 'Build only this phase\'s named deliverables. If a sub-task names a new file/page from Expected files, create it with write_file. If a new page needs styles, tokens, scripts, header/nav/footer markup, or repeated sections that are not already in the shared source-of-truth files, edit the existing shared CSS/JS/component files as support work in this same phase; do NOT solve it with inline CSS or a redesigned page-local shell. If a sub-task is shared styling, components, behavior, README, or design/brand/strategy guidance, update that existing source-of-truth file instead of inventing a new public HTML page. ' + laterPhaseReuseLine + ' Later HTML pages must link the existing shared CSS and shared components/scripts; do NOT paste a new inline theme, nav, logo, footer, or button system into each page. Public HTML pages must stay within the planned page count/scope unless the user explicitly asked for additional navigable documentation pages.';
       const phaseScope = activePhase && activePhase.title
         ? [
           '',
           '=== PHASED BUILD — THIS RUN BUILDS ONE PHASE ONLY ===',
           `You are on Phase ${activePhase.number} of ${activePhase.total}: ${activePhase.title}`,
           activePhase.tasks && activePhase.tasks.length
-            ? `Remaining sub-tasks for THIS phase:\n${activePhase.tasks.map((t) => `  - ${t}`).join('\n')}`
+            // Trailing sentence periods on path sub-tasks break exact path
+            // matching and teach the model to echo "file.tsx." — strip them.
+            ? `Remaining sub-tasks for THIS phase:\n${activePhase.tasks.map((t) => `  - ${String(t).trim().replace(/(\.[A-Za-z0-9]{1,5})\.$/, '$1')}`).join('\n')}`
             : '',
           activePhase.number === 1
             ? 'Phase 1 must be a COMPLETE, RUNNABLE vertical slice with real user-visible behavior, not an empty shell. Keep it focused on the sub-tasks listed above; do NOT build later phases\' pages/screens/features now. The workspace was just created and is empty — start writing files immediately; do NOT read_file or list_dir the root or the project name.'
-            : 'Build only this phase\'s named deliverables. If a sub-task names a new file/page from Expected files, create it with write_file. If a new page needs styles, tokens, scripts, header/nav/footer markup, or repeated sections that are not already in the shared source-of-truth files, edit the existing shared CSS/JS/component files as support work in this same phase; do NOT solve it with inline CSS or a redesigned page-local shell. If a sub-task is shared styling, components, behavior, README, or design/brand/strategy guidance, update that existing source-of-truth file instead of inventing a new public HTML page. ' + laterPhaseReuseLine + ' Later HTML pages must link the existing shared CSS and shared components/scripts; do NOT paste a new inline theme, nav, logo, footer, or button system into each page. Public HTML pages must stay within the planned page count/scope unless the user explicitly asked for additional navigable documentation pages.',
+            : laterPhaseBuildLine,
           `STRICT SCOPE: build ONLY the files needed for the ${activePhase.tasks && activePhase.tasks.length ? activePhase.tasks.length : 'few'} sub-task(s) above (roughly that many files) — NOT the whole project. Do not create pages or screens that belong to later phases.`,
+          'The sub-task list above is the authoritative contract for THIS run. Any PLAN Expected file or Done criterion that no phase sub-task covers is out of contract — do not build it now and do not let it block finalizing this phase.',
           activePhase.number < activePhase.total
             ? 'Do NOT write README.md or other documentation in this phase — docs come in the FINAL phase only. Build the actual app/page files for this phase first.'
             : '',

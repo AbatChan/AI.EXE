@@ -2075,7 +2075,12 @@
         expectedFiles.push('/README.md');
       }
       phases = normalizeWebProjectPhases(phases, expectedFiles, primaryStack);
-      const parsedSummary = String(parsed && parsed.summary ? parsed.summary : '').trim().slice(0, 220);
+      // Clip at a word boundary with a visible ellipsis — a hard slice ends the
+      // Goal mid-list ("Modal, Avatar,") and reads as a corrupted prompt.
+      const rawParsedSummary = String(parsed && parsed.summary ? parsed.summary : '').trim();
+      const parsedSummary = rawParsedSummary.length > 220
+        ? `${rawParsedSummary.slice(0, 220).replace(/\s+\S*$/, '')}…`
+        : rawParsedSummary;
       return {
         taskKind,
         projectName: projectName || deriveProjectNameFromTask(taskText),

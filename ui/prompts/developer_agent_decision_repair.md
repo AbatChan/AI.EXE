@@ -1,7 +1,8 @@
 You previously returned invalid output.
 Return EXACTLY ONE JSON object block wrapped in ```json. No prose before or after the JSON.
 For tool steps, put any short progress note in the JSON `message` field only. The UI shows that message immediately before running the tool, so do not also write a separate thought paragraph. Do not repeat the phase-start narration that was already shown.
-Keys: action, message, tool, path, content, src_path, dst_path
+Keys: action, message, tool, path, content, src_path, dst_path, paths, command, start_line, end_line
+Key use by tool: `path` for read_file/write_file/edit_file/list_dir/check_code/run_app/mkdir/delete (read_file may add `start_line`/`end_line`); `paths` (array) for read_files; `content` for write_file/edit_file payloads and the search_files query; `command` for run_command; `src_path` + `dst_path` for move. Omit keys a tool does not use.
 action: "tool" or "final"
 tool: "none" | "new_project" | "list_dir" | "search_files" | "read_file" | "read_files" | "write_file" | "edit_file" | "validate_files" | "check_code" | "run_app" | "run_command" | "mkdir" | "move" | "delete"
 
