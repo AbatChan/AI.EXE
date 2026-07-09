@@ -2998,6 +2998,15 @@ def aiexe_delete_chat():
     return Response(json.dumps({"ok": bool(ok), "slug": slug}),
                     content_type='application/json; charset=utf-8')
 
+@app.route('/api/aiexe/cleanup_internal', methods=['POST'])
+def aiexe_cleanup_internal_route():
+    """On-demand sweep of the internal one-shot threads — AI.EXE calls this when an
+    agent run ends so they vanish in ONE restore/park pass instead of dribbling out
+    of the idle loop for the next ten minutes."""
+    result = _aiexe_cleanup_internal_batch(min_count=1)
+    return Response(json.dumps({"ok": result >= 0, "deleted": max(0, result)}),
+                    content_type='application/json; charset=utf-8')
+
 @app.route('/api/aiexe/rename_chat', methods=['POST'])
 def aiexe_rename_chat_route():
     """Rename the Venice conversation for an AI.EXE chat to `name`. The app calls this ONCE,
@@ -3335,59 +3344,67 @@ try:  # startup done — ONE minimize, after all window-dependent work finished
     driver.minimize_window()
 except Exception:
     pass
+def _aiexe_cleanup_internal_batch(min_count=1, respect_user_window=True, cap=20):
+    """Delete tracked internal one-shot threads in ONE restore/park pass.
+    Returns deleted count, or -1 when skipped (busy/user has the window)."""
+    global driver
+    internal = [k for k in list(AIEXE_CHAT_URLS.keys()) if k.startswith("id:internal:")]
+    if len(internal) < max(1, int(min_count)):
+        return 0
+    if not selenium_lock.acquire(blocking=False):
+        return -1
+    try:
+        if respect_user_window:
+            try:
+                if driver.execute_script("return document.hidden === false") is True:
+                    return -1  # the user is looking at / using the Chrome window — stay out
+            except Exception:
+                pass
+        batch = internal[:cap]
+        print("AIEXE_CLEANUP deleting %d internal one-shot chats (%d tracked)" % (len(batch), len(internal)), flush=True)
+        _aiexe_restore_unobtrusive(driver)
+        time.sleep(0.8)
+        done = 0
+        try:
+            for key in batch:
+                slug = _aiexe_slug_from_url(AIEXE_CHAT_URLS.get(key, ""))
+                deleted = False
+                if slug:
+                    try:
+                        deleted = _aiexe_delete_chat(driver, slug, nav_fallback=False)
+                    except Exception as exc:
+                        print("AIEXE_CLEANUP delete failed for %s: %s" % (slug, exc), flush=True)
+                AIEXE_CHAT_URLS.pop(key, None)
+                done += 1
+                print("AIEXE_CLEANUP %s -> %s" % (slug or key[:36], "deleted" if deleted else "dropped from map"), flush=True)
+            _aiexe_save_chat_map()
+        finally:
+            try:
+                driver.minimize_window()
+            except Exception:
+                pass
+        return done
+    finally:
+        selenium_lock.release()
+
+
 def _aiexe_internal_cleanup_loop():
     """Idle-time sidebar hygiene: agent one-shot calls (planner, per-file gen, titles)
     each open an isolated Venice thread by design — delete them when the adapter has
     been idle, so the user's Venice sidebar isn't buried in them. Manners matter:
     never touch the window while the user has it restored (document.hidden False),
-    do ONE restore per batch, no per-thread navigation, then a long cooldown —
-    otherwise Chrome visibly 'has a mind of its own' every 45 seconds."""
-    global driver
+    do ONE restore per batch, no per-thread navigation, then a cooldown —
+    otherwise Chrome visibly 'has a mind of its own' every 45 seconds. AI.EXE also
+    triggers /api/aiexe/cleanup_internal the moment an agent run ends, so this loop
+    is only the backstop."""
     while True:
         gevent.sleep(60)
         try:
-            internal = [k for k in list(AIEXE_CHAT_URLS.keys()) if k.startswith("id:internal:")]
-            if len(internal) < 6:
-                continue
             if time.time() - AIEXE_LAST_REQUEST_TS < 120:
                 continue
-            if not selenium_lock.acquire(blocking=False):
-                continue
-            did_batch = False
-            try:
-                user_has_window = False
-                try:
-                    user_has_window = driver.execute_script("return document.hidden === false") is True
-                except Exception:
-                    pass
-                if user_has_window:
-                    continue  # the user is looking at / using the Chrome window — stay out
-                did_batch = True
-                batch = internal[:8]
-                print("AIEXE_CLEANUP deleting %d internal one-shot chats (%d tracked)" % (len(batch), len(internal)), flush=True)
-                _aiexe_restore_unobtrusive(driver)
-                time.sleep(0.8)
-                try:
-                    for key in batch:
-                        slug = _aiexe_slug_from_url(AIEXE_CHAT_URLS.get(key, ""))
-                        deleted = False
-                        if slug:
-                            try:
-                                deleted = _aiexe_delete_chat(driver, slug, nav_fallback=False)
-                            except Exception as exc:
-                                print("AIEXE_CLEANUP delete failed for %s: %s" % (slug, exc), flush=True)
-                        AIEXE_CHAT_URLS.pop(key, None)
-                        print("AIEXE_CLEANUP %s -> %s" % (slug or key[:36], "deleted" if deleted else "dropped from map"), flush=True)
-                    _aiexe_save_chat_map()
-                finally:
-                    try:
-                        driver.minimize_window()
-                    except Exception:
-                        pass
-            finally:
-                selenium_lock.release()
-            if did_batch:
-                gevent.sleep(540)  # long cooldown between batches — hygiene, not a show
+            result = _aiexe_cleanup_internal_batch(min_count=6)
+            if result > 0:
+                gevent.sleep(240)  # cooldown between batches — hygiene, not a show
         except Exception as exc:
             print("AIEXE_CLEANUP loop error: %s" % exc, flush=True)
 

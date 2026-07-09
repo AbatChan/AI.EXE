@@ -1445,7 +1445,9 @@ function currentAgentStepTimeoutMs() {
 function currentAgentToolTimeoutMs() { return isVeniceAdapterSelected() ? 300000 : 150000; }
 function currentAgentToolIdleTimeoutMs() { return isVeniceAdapterSelected() ? 300000 : 130000; }
 function currentAgentToolHardCapMs() { return isVeniceAdapterSelected() ? 900000 : 420000; }
-const agentTotalTimeoutMs = 600000;
+// Adapter planner rounds run 30-120s each — a 10min total cap died mid-repair on
+// a healthy build→fix→rebuild loop twice in one live session.
+function currentAgentTotalTimeoutMs() { return isVeniceAdapterSelected() ? 1080000 : 600000; }
 // Heartbeat for in-progress tool generation (loop's idle watchdog reads this).
 let lastAgentToolProgressAt = 0;
 function markAgentToolProgress() { lastAgentToolProgressAt = Date.now(); }
@@ -12075,7 +12077,7 @@ const {
 const agentLoop = window.AIExeAgentLoop && typeof window.AIExeAgentLoop.createAgentLoop === 'function'
   ? window.AIExeAgentLoop.createAgentLoop({
     nativeBridge,
-    agentTotalTimeoutMs,
+    get agentTotalTimeoutMs() { return currentAgentTotalTimeoutMs(); },
     get agentToolTimeoutMs() { return currentAgentToolTimeoutMs(); },
     get agentToolIdleTimeoutMs() { return currentAgentToolIdleTimeoutMs(); },
     get agentToolHardCapMs() { return currentAgentToolHardCapMs(); },
@@ -12168,7 +12170,7 @@ const {
 const aiNativeAgentLoop = window.AIExeAiNativeAgentLoop && typeof window.AIExeAiNativeAgentLoop.createAiNativeAgentLoop === 'function'
   ? window.AIExeAiNativeAgentLoop.createAiNativeAgentLoop({
     nativeBridge,
-    agentTotalTimeoutMs,
+    get agentTotalTimeoutMs() { return currentAgentTotalTimeoutMs(); },
     agentMaxSteps,
     agentDecisionMaxTokens,
     agentMaxToolOutputChars,
@@ -12428,6 +12430,19 @@ async function requestSelectedDeveloperAgentReply(requestToken, chatId, rawPromp
     return await requestDeveloperAgentReply(requestToken, chatId, devTaskText);
   } finally {
     stopAgentElapsedTimer();
+    // Agent one-shot calls each opened an isolated Venice thread — sweep them NOW
+    // (one restore/park pass) instead of letting the idle loop dribble them out
+    // for the next ten minutes while Chrome "has a mind of its own".
+    if (isVeniceAdapterSelected()) {
+      setTimeout(() => {
+        fetch(getAIExeBackendUrl() + '/api/provider/cleanup_internal', { method: 'POST' })
+          .then((resp) => (resp && resp.ok ? resp.json() : null))
+          .then((data) => {
+            if (data) recordDebugTrace('venice_internal_cleanup', { deleted: String((data && data.deleted) || 0), ok: String(Boolean(data && data.ok)) });
+          })
+          .catch(() => { });
+      }, 5000);
+    }
     // Deterministic resume marker — survives intermediate messages (unlike needsContinue,
     // which an in-between reply clears). Set when the build stops with more to do; cleared
     // only when a RESUME run actually finishes it. Intermediate chat/edit runs (not a

@@ -128,6 +128,23 @@ def provider_rename_chat(payload: ProviderRenameChatRequest):
         return {"ok": False, "reason": f"adapter error: {exc}"}
 
 
+@router.post("/provider/cleanup_internal")
+def provider_cleanup_internal():
+    """Sweep the adapter's internal one-shot Venice threads (adapter only, best-effort).
+    AI.EXE calls this when an agent run ends so the sidebar clears in one pass."""
+    base, _model = provider_store.resolve()
+    if not base or provider_store.kind() != "ollama":
+        return {"ok": False, "reason": "not an adapter provider"}
+    url = base.rstrip("/") + "/api/aiexe/cleanup_internal"
+    try:
+        resp = httpx.post(url, json={}, timeout=httpx.Timeout(connect=10.0, read=120.0, write=10.0, pool=10.0))
+        if resp.status_code == 200:
+            return resp.json()
+        return {"ok": False, "reason": f"adapter HTTP {resp.status_code}"}
+    except httpx.HTTPError as exc:
+        return {"ok": False, "reason": f"adapter error: {exc}"}
+
+
 @router.post("/provider/stop_generation")
 def provider_stop_generation(payload: ProviderStopGenerationRequest):
     """Ask the Venice adapter to stop the active browser generation for this AI.EXE chat."""

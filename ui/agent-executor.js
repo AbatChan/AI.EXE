@@ -2576,11 +2576,19 @@
           // contains the replacement — stop re-editing the same block and move on).
           const matchedButNoChange = applied && applied.appliedCount > 0
             && String(applied.output || '') === originalContent;
+          // "Already satisfies the request" is a LIE while a build/check error for
+          // this file is still live — it sent a model chasing phantom stale caches.
+          const errorStillLiveForPath = (toolEvents || []).slice(-8).some((e) => e
+            && ['run_app', 'run_command', 'check_code', 'validate_files'].includes(String(e.tool || '').toLowerCase())
+            && (e.ok === false || Number(e.runErrorCount) > 0 || Number(e.checkErrorCount) > 0 || e.validationPassed === false)
+            && String(e.observation || '').includes(path));
           return {
             ok: false,
             mutated,
             observation: matchedButNoChange
-              ? `edit_file made no change to ${path}: the file already contains that exact text, so it likely already satisfies the request. Do NOT re-submit the same edit — take the next planned step or finalize instead.`
+              ? (errorStillLiveForPath
+                ? `edit_file made no change to ${path}: your replacement text is IDENTICAL to what the file already contains — you re-sent the existing line instead of a fixed one. The reported error is still unfixed. Re-edit with a replacement that actually DIFFERS (remove or rewrite the offending part).`
+                : `edit_file made no change to ${path}: the file already contains that exact text, so it likely already satisfies the request. Do NOT re-submit the same edit — take the next planned step or finalize instead.`)
               : `edit_file blocked for ${path}: no edits were applied — the find/anchor text was not found. Use exact existing text from the current file in the find/anchor field.`,
           };
         }
