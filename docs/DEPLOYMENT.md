@@ -1,6 +1,21 @@
-# Deployment Guide (Windows Offline Bundle)
+# Deployment Guide
 
-## Build release binaries
+## Release matrix (canonical — one definition of "release")
+
+| Channel | What it is | How it's built | Status |
+| --- | --- | --- | --- |
+| **Hosted Windows GUI** | `AI.EXE-Windows.zip`: WebView2 GUI, remote providers, in-app auto-update | GitHub Actions (`.github/workflows/build-windows.yml`) → GitHub Release | **LIVE — the shipped product.** Pushing `main` triggers it and lights the client's update badge. |
+| **macOS preview** | `ai_exe_gui_mac.app` for development/testing | Local `cmake --build build-mac-preview` | Dev-only, never shipped. |
+| **Strict offline bundle (Phase 1)** | CLI + GUI + `model.gguf` + `llama-cli.exe`, manifest-validated, no network | `scripts/package_windows.ps1` + `validate_bundle.ps1` | **LEGACY / DORMANT.** The original offline-first deliverable; strict offline is a future (client phase-3) story. Do not confuse with the live release. |
+
+The rest of this document describes the **legacy strict offline bundle** only.
+For the live release there is nothing to do by hand: push `main`, CI publishes.
+
+---
+
+## Legacy: Phase‑1 strict offline bundle
+
+### Build release binaries
 
 ```powershell
 cmake -S . -B build -G "Visual Studio 17 2022" -A x64
@@ -9,7 +24,7 @@ cmake --build build --config Release
 
 Release builds enable hosted/API inference provider selection by default. Configure CMake with `-DAI_EXE_ENABLE_REMOTE_PROVIDERS=OFF` only when producing a strictly offline-only build. The localhost planner bridge remains disabled unless CMake is configured with `-DAI_EXE_ENABLE_DEV_PLANNER=ON`.
 
-## Create bundle
+### Create bundle
 
 ```powershell
 pwsh ./scripts/package_windows.ps1 -BuildRoot build -BuildConfig Release -OutRoot dist/AI_EXE_Phase1 -Zip
@@ -26,7 +41,11 @@ Output layout:
 - `dist/AI_EXE_Phase1/data/runtime/llama-cli.exe` (optional but required for real generation)
 - `dist/AI_EXE_Phase1/manifest.sha256`
 
-## Validate bundle
+Note: the packaging script carries an explicit UI file list that is maintained
+by hand — UI modules added after the last packaging pass may be missing. Treat
+any bundle as unvalidated until `validate_bundle.ps1` passes.
+
+### Validate bundle
 
 ```powershell
 pwsh ./scripts/validate_bundle.ps1 -BundleRoot dist/AI_EXE_Phase1
@@ -47,14 +66,14 @@ Validation checks:
 - backend self-test executes when `data/runtime/infer_backend.exe` is present
 - local model and inference engine are present unless demo validation explicitly allows them to be missing
 
-## Run (non-technical demo)
+### Run (non-technical demo)
 
 Double-click either:
 
 - `RUN_AI_GUI.cmd` (preferred, if present)
 - `RUN_AI.cmd` (CLI)
 
-## CUDA runtime packaging notes
+### CUDA runtime packaging notes
 
 The project does not download runtime files. If your backend requires additional local DLLs, copy only the required DLLs into the bundle root next to `AI.exe`.
 

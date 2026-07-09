@@ -1,3 +1,6 @@
+# LEGACY (Phase-1 strict offline bundle validator) — NOT the live release.
+# The shipped product is the hosted GUI zip built by CI on push to main.
+# See docs/DEPLOYMENT.md release matrix.
 param(
   [string]$BundleRoot = "dist/AI_EXE_Phase1",
   [switch]$AllowMissingInferenceEngine

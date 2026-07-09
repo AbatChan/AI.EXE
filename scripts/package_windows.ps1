@@ -1,3 +1,6 @@
+# LEGACY (Phase-1 strict offline bundle) — NOT the live release.
+# The shipped product is the hosted GUI zip built by CI on push to main
+# (.github/workflows/build-windows.yml). See docs/DEPLOYMENT.md release matrix.
 param(
   [string]$BuildRoot = "build",
   [string]$BuildConfig = "Release",
