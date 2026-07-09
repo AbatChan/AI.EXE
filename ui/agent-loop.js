@@ -2456,9 +2456,9 @@
           return true;
         }
         if (toolResult && toolResult.permissionRequired) {
-          // Ask-first commands are a hard human-in-the-loop boundary. Do not feed the
-          // permission result back to the model and let it ask again; surface one
-          // approval card, commit the paused state, and stop this agent run.
+          // Ask-first commands are a hard human-in-the-loop boundary — but the run
+          // HOLDS on the shared confirmation card (like project-scope and delete)
+          // and continues seamlessly after the choice, instead of ending the run.
           setAgentProgress('Waiting for approval.');
           appendAgentActivity(deps.buildAgentActivityFromToolResult(decision, toolResult, toolEvents));
           const permissionCommand = String(
@@ -2467,43 +2467,82 @@
             || decision.command
             || ''
           ).trim();
-          const userFacingMessage = `Permission needed to run \`${permissionCommand || 'this command'}\`. Approve once to run it, or cancel.`;
-          if (typeof deps.requestAgentCommandApproval === 'function') {
-            deps.requestAgentCommandApproval(chatId, {
+          const userFacingMessage = `Permission needed to run \`${permissionCommand || 'this command'}\`. Approve once, always allow it, or cancel.`;
+          if (permissionCommand && typeof deps.requestProjectScopeConfirmation === 'function') {
+            recordDebugTrace('agent_command_permission_requested', {
+              chatId: String(chatId || ''),
+              step: String(step),
+              tool: String(decision.tool || ''),
               command: permissionCommand,
+              mode: 'hold',
+            }, { chatId: String(chatId || ''), step, decision, command: permissionCommand });
+            const choice = await deps.requestProjectScopeConfirmation(chatId, {
+              kind: 'command_approval',
               userMessage: userFacingMessage,
+              command: permissionCommand,
             });
+            recordDebugTrace('agent_command_approval_choice', {
+              chatId: String(chatId || ''),
+              step: String(step),
+              command: permissionCommand,
+              choice: String(choice || 'dismissed'),
+            }, { chatId: String(chatId || ''), step, choice: String(choice || '') });
+            if (choice === 'approve_command' || choice === 'approve_always') {
+              if (choice === 'approve_always' && typeof deps.rememberAlwaysAllowedAgentCommand === 'function') {
+                deps.rememberAlwaysAllowedAgentCommand(permissionCommand);
+              }
+              setAgentProgress('Running approved command...');
+              toolResult = await deps.executeDeveloperToolCall(chatId, decision, taskText, toolEvents, toolPlanSpec, {
+                approvedNewProject: Boolean(requestToken && requestToken.approvedNewProject),
+                skipNewProjectConfirmation: Boolean(requestToken && requestToken.skipNewProjectConfirmation),
+                forceCurrentWorkspace: Boolean(requestToken && requestToken.forceCurrentWorkspace),
+                approvedCommand: permissionCommand,
+              });
+            } else {
+              toolResult = {
+                ok: false,
+                mutated: Boolean(toolResult && toolResult.mutated),
+                observation: `User declined to run \`${permissionCommand}\`. Do NOT request this command again; continue without it or finalize honestly with what could be verified.`,
+              };
+            }
+          } else {
+            // Fallback (no mid-flight confirm available): paused-state card + stop.
+            if (typeof deps.requestAgentCommandApproval === 'function') {
+              deps.requestAgentCommandApproval(chatId, {
+                command: permissionCommand,
+                userMessage: userFacingMessage,
+              });
+            }
+            if (agentHasWorkspaceMutations()) {
+              await deps.refreshWorkspaceTree(true);
+            }
+            deps.consumeLiveAssistantText();
+            deps.commitAssistantMessage(chatId, userFacingMessage, userFacingMessage, {
+              agentActivities,
+              // Human approval is a paused state, not a final/completed response.
+              agentMeta: agentMetaWithRevert({
+                startedAt,
+                completedAt: 0,
+                collapsed: false,
+                waitingForApproval: true,
+              }),
+              forceNeedsContinue: false,
+            });
+            recordDebugTrace('agent_command_permission_requested', {
+              chatId: String(chatId || ''),
+              step: String(step),
+              tool: String(decision.tool || ''),
+              command: permissionCommand,
+              mode: 'stop',
+            }, {
+              chatId: String(chatId || ''),
+              step,
+              decision,
+              toolResult,
+              command: permissionCommand,
+            });
+            return true;
           }
-          if (agentHasWorkspaceMutations()) {
-            await deps.refreshWorkspaceTree(true);
-          }
-          deps.consumeLiveAssistantText();
-          deps.commitAssistantMessage(chatId, userFacingMessage, userFacingMessage, {
-            agentActivities,
-            // Human approval is a paused state, not a final/completed response.
-            // Leaving completedAt unset keeps the activity panel contextual while
-            // the composer confirmation waits for Approve once / Cancel.
-            agentMeta: agentMetaWithRevert({
-              startedAt,
-              completedAt: 0,
-              collapsed: false,
-              waitingForApproval: true,
-            }),
-            forceNeedsContinue: false,
-          });
-          recordDebugTrace('agent_command_permission_requested', {
-            chatId: String(chatId || ''),
-            step: String(step),
-            tool: String(decision.tool || ''),
-            command: permissionCommand,
-          }, {
-            chatId: String(chatId || ''),
-            step,
-            decision,
-            toolResult,
-            command: permissionCommand,
-          });
-          return true;
         }
         if (toolResult && toolResult.requiresDeleteConfirmation) {
           // Human-in-the-loop approval for a destructive op. Surface what's being

@@ -3527,6 +3527,13 @@ function getComposerPreflightConfirmationChoices(pending = null) {
       { mode: 'cancel_delete', label: 'Keep it' },
     ];
   }
+  if (pending && pending.kind === 'command_approval') {
+    return [
+      { mode: 'approve_command', label: 'Approve once' },
+      { mode: 'approve_always', label: 'Always allow' },
+      { mode: 'cancel_command', label: 'Cancel' },
+    ];
+  }
   if (pending && pending.workspaceOpen === false) {
     return [
       { mode: 'create_new_project', label: 'Create a new project' },
@@ -3950,13 +3957,17 @@ function renderComposerConfirmationUi() {
     labelEl.textContent = choice.label;
     option.appendChild(labelEl);
 
+    // Dismiss/Submit renders on exactly ONE row (the last, or the one above it
+    // when the last is selected) — per-row copies duplicated with 3+ options.
+    const lastIndex = choices.length - 1;
+    const actionsRowIndex = composerConfirmSelectedIndex === lastIndex ? Math.max(0, lastIndex - 1) : lastIndex;
     if (index === composerConfirmSelectedIndex) {
       const arrowEl = document.createElement('span');
       arrowEl.className = 'composer-confirm-option-arrow';
       arrowEl.setAttribute('aria-hidden', 'true');
       arrowEl.textContent = '›';
       option.appendChild(arrowEl);
-    } else {
+    } else if (index === actionsRowIndex) {
       const actionsEl = document.createElement('span');
       actionsEl.className = 'composer-confirm-actions-inline';
 
@@ -12037,6 +12048,7 @@ const agentLoop = window.AIExeAgentLoop && typeof window.AIExeAgentLoop.createAg
     verifyAgentDoneCriteria,
     getChatManualContext: (chatId) => String((findChatById(chatId) || {}).manualContext || ''),
     requestProjectScopeConfirmation,
+    rememberAlwaysAllowedAgentCommand,
     requestAgentCommandApproval,
     invokeWorkspaceAction,
     resetWorkspaceForNewProject,
@@ -12084,6 +12096,7 @@ const aiNativeAgentLoop = window.AIExeAiNativeAgentLoop && typeof window.AIExeAi
     consumeLiveAssistantText,
     sanitizeAssistantText,
     requestProjectScopeConfirmation,
+    rememberAlwaysAllowedAgentCommand,
     requestAgentCommandApproval,
     invokeWorkspaceAction,
     deriveProjectNameFromTask,
@@ -13452,7 +13465,12 @@ async function runApprovedAgentCommandOnce(chatId, command) {
     return false;
   }
   if (pendingInferenceCount > 0 && isCurrentViewInferenceChat()) {
-    showComposerNotice('Still responding in this chat — wait or stop it before approving a command.');
+    // A held run shows the approval choices in the composer card — steer there.
+    if (typeof getActiveComposerPermissionRequest === 'function' && getActiveComposerPermissionRequest()) {
+      showComposerNotice('Choose in the approval card below — the run is waiting on it.');
+    } else {
+      showComposerNotice('Still responding in this chat — wait or stop it before approving a command.');
+    }
     return false;
   }
   consumedAgentCommandApprovals.add(approvalKey);

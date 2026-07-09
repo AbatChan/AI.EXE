@@ -2648,7 +2648,13 @@
             };
           }
           if (classification.policy === 'ask_first') {
-            return buildCommandPermissionRequiredResult(proofCommand, classification, mutated, 'run_app');
+            const approvedProofCommand = String((runOptions && runOptions.approvedCommand) || '').trim();
+            if (approvedProofCommand && approvedProofCommand === proofCommand) {
+              classification.policy = 'auto_safe';
+              classification.reason = 'approved ask-first command';
+            } else {
+              return buildCommandPermissionRequiredResult(proofCommand, classification, mutated, 'run_app');
+            }
           }
 
           deps.setActiveAgentStreamStatus(chatId, `Running terminal proof: ${proofCommand}`);
