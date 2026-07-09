@@ -1447,7 +1447,15 @@ def _aiexe_collect_models_from_modal(driver):
                 stagnant = 0
                 last_count = len(names)
             if at_bottom and stagnant >= 3:
-                break
+                # Virtualized list may still be lazy-loading past the reported bottom —
+                # one longer beat before trusting it (partial 18-of-~80 scrapes came
+                # from breaking here too early).
+                _t.sleep(0.7)
+                add_visible()
+                if len(names) == last_count:
+                    break
+                stagnant = 0
+                last_count = len(names)
     else:
         print("AIEXE_MODELS no scroll container found", flush=True)
     print("AIEXE_MODELS modal count expected=%s collected=%d" % (expected or "?", len(names)), flush=True)
