@@ -1025,6 +1025,30 @@
       if (phasedProjectRun) {
         const phases = preferPlanFile ? filePhases : (planPhases.length ? planPhases : filePhases);
         planSpec.phases = phases;
+        // Every expected file must belong to SOME phase: files outside all phases
+        // (index.html, src/main.tsx, src/App.tsx on a live run) silently never got
+        // built and the "finished" project couldn't run. Entry/foundation files go
+        // to the first phase, everything else to the last. Fresh plans only —
+        // plan.md resumes keep their persisted contract.
+        if (!preferPlanFile) {
+          const covered = new Set(allPhaseFilePaths({ phases }, deps.normalizeWorkspacePath));
+          const missing = (Array.isArray(planSpec.expectedFiles) ? planSpec.expectedFiles : [])
+            .map((p) => deps.normalizeWorkspacePath(p || ''))
+            .filter((p) => p && p !== '/' && /\.[A-Za-z0-9]+$/.test(p) && !covered.has(p));
+          if (missing.length) {
+            const foundationRe = /(?:^\/index\.html$|^\/src\/(?:main|app|index)\.[a-z]+$|^\/package\.json$|config\.[a-z]+$)/i;
+            missing.forEach((p) => {
+              const target = foundationRe.test(p) ? phases[0] : phases[phases.length - 1];
+              if (!target) return;
+              if (!Array.isArray(target.tasks)) target.tasks = [];
+              target.tasks.push({ text: p, done: false });
+            });
+            recordDebugTrace('agent_phase_plan_completeness_fill', {
+              chatId: String(chatId || ''),
+              missing: deps.debugPreview(missing.join(' | '), 240),
+            }, { chatId: String(chatId || ''), missing });
+          }
+        }
         // Resuming over a fallback plan: its heuristic file list/name would poison
         // pending-requirements and get force-rewritten into plan.md's title. Restore
         // both from plan.md, the source of truth.
@@ -3097,6 +3121,11 @@
               continue;
             }
             setAgentProgress('Preparing the summary...');
+            // Auto-finalizing while on the LAST phase must tick plan.md + fade the
+            // tracker — it used to leave Phase N's boxes open under a "complete" final.
+            if (phaseState && phaseState.activeIndex >= phaseState.phases.length - 1) {
+              try { await completeActivePhase(); } catch (_) { }
+            }
             const finalText = await deps.generateAgentCompletionText(taskText, toolEvents, getWorkspaceLabel(), planSpec);
             if (agentHasWorkspaceMutations()) {
               await deps.refreshWorkspaceTree(true);

@@ -1,6 +1,7 @@
 (function initAIExeAgentPlanner(global) {
   function createAgentPlanner(deps) {
     const normalizeWorkspacePath = deps.normalizeWorkspacePath;
+    const getWorkspaceFileTreeSummary = deps.getWorkspaceFileTreeSummary;
     const isAgentTaskGameLike = deps.isAgentTaskGameLike;
     const hasReadmeRunInstructions = deps.hasReadmeRunInstructions;
     const isLikelyCompleteReadme = deps.isLikelyCompleteReadme;
@@ -439,6 +440,19 @@
     function sanitizeAgentGeneratedFileContent(outputText, path = '') {
       let text = String(outputText || '').replace(/\r/g, '').trim();
       if (!text) return '';
+      // A whole tool-call envelope as file content ({"action":"tool","tool":
+      // "write_file",...,"content":"..."}) corrupted a real tailwind.config.js —
+      // unwrap to the inner content when the envelope parses cleanly.
+      if (text.startsWith('{') && text.includes('"content"') && /"(?:action|tool)"\s*:/.test(text.slice(0, 200))) {
+        try {
+          const envelope = JSON.parse(text);
+          if (envelope && typeof envelope === 'object'
+            && typeof envelope.content === 'string' && envelope.content.trim()
+            && (envelope.action || envelope.tool)) {
+            text = envelope.content.replace(/\r/g, '').trim();
+          }
+        } catch (_) { }
+      }
       const normalizedPath = normalizeWorkspacePath(path || '');
       const extension = (normalizedPath.match(/\.([a-z0-9]+)$/i) || [])[1] || '';
       const languageAliases = {
@@ -840,10 +854,15 @@
       const transcript = buildAgentHistoryTranscript(chatId, 10);
       const workspace = typeof getWorkspaceContext === 'function' ? getWorkspaceContext() : {};
       const template = await loadPromptTemplate('developer_agent_plan');
+      let planWorkspaceRoot = workspace.workspaceRootName ? `/${workspace.workspaceRootName}` : '(none)';
+      try {
+        const tree = typeof getWorkspaceFileTreeSummary === 'function' ? await getWorkspaceFileTreeSummary() : '';
+        if (tree) planWorkspaceRoot += `\nCurrent project file structure (live):\n${tree}`;
+      } catch (_) { }
       return renderPromptTemplate(template, {
         AGENT_ENVIRONMENT: getAgentEnvironmentContext('plan'),
         CHAT_HISTORY: transcript || '(none)',
-        CURRENT_WORKSPACE_ROOT: workspace.workspaceRootName ? `/${workspace.workspaceRootName}` : '(none)',
+        CURRENT_WORKSPACE_ROOT: planWorkspaceRoot,
         CURRENT_SELECTION: normalizeWorkspacePath(workspace.currentPath || '/'),
         CURRENT_SELECTION_KIND: workspace.currentKind === 'file' ? 'file' : 'folder',
         TASK: String(taskText || '').trim(),
@@ -1085,7 +1104,13 @@
       const workspace = typeof getWorkspaceContext === 'function' ? getWorkspaceContext() : {};
       const selectedPath = normalizeWorkspacePath(workspace.currentPath || '/');
       const selectedKind = workspace.currentKind === 'file' ? 'file' : 'folder';
-      const currentWorkspaceRoot = workspace.workspaceRootName ? `/${workspace.workspaceRootName}` : '(none)';
+      let currentWorkspaceRoot = workspace.workspaceRootName ? `/${workspace.workspaceRootName}` : '(none)';
+      // Always give the model the LIVE project structure (system files excluded) —
+      // stops each phase burning steps on list_dir re-discovery and grounds paths.
+      try {
+        const tree = typeof getWorkspaceFileTreeSummary === 'function' ? await getWorkspaceFileTreeSummary() : '';
+        if (tree) currentWorkspaceRoot += `\nCurrent project file structure (live):\n${tree}`;
+      } catch (_) { }
       const allEvents = toolEvents || [];
       const recentEvents = allEvents.slice(-10);
       const olderEvents = allEvents.slice(0, allEvents.length - recentEvents.length);

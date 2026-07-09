@@ -11298,6 +11298,47 @@ const promptCoreApi = promptCore || {};
 const agentDecisionGrammar = String(promptCoreApi.agentDecisionGrammar || '');
 const agentPlanGrammar = String(promptCoreApi.agentPlanGrammar || '');
 
+// Live project file tree for agent prompts — fresh each step, system noise
+// (.DS_Store, node_modules, .git, .aiexe, build output) excluded. Short cache
+// so decision + repair prompts within one step don't re-walk.
+let _workspaceTreeSummaryCache = { at: 0, text: '' };
+async function getWorkspaceFileTreeSummary() {
+  const ctx = typeof getWorkspaceContext === 'function' ? getWorkspaceContext() || {} : {};
+  if (!ctx.workspaceRootName && !ctx.rootLoaded) return '';
+  const now = Date.now();
+  if (now - _workspaceTreeSummaryCache.at < 5000) return _workspaceTreeSummaryCache.text;
+  const HIDDEN = new Set(['.DS_Store', 'Thumbs.db', 'desktop.ini', '.Spotlight-V100', '.Trashes',
+    '.fseventsd', '.aiexe', '.git', 'node_modules', 'dist', 'build', '.venv', '__pycache__', '.next', 'coverage']);
+  const lines = [];
+  let budget = 120;
+  const walk = async (dirPath, depth) => {
+    if (budget <= 0 || depth > 4) return;
+    let res = null;
+    try { res = await invokeWorkspaceAction('workspaceList', { path: dirPath }); } catch (_) { return; }
+    if (!res || !res.ok) return;
+    let parsed = {};
+    try { parsed = JSON.parse(String(res.output || '{}')); } catch (_) { return; }
+    const entries = (Array.isArray(parsed.entries) ? parsed.entries : [])
+      .filter((e) => e && e.name && !HIDDEN.has(e.name) && !String(e.name).startsWith('._'))
+      .sort((a, b) => (a.kind === b.kind ? String(a.name).localeCompare(String(b.name)) : (a.kind === 'folder' ? -1 : 1)));
+    for (const entry of entries) {
+      if (budget <= 0) { lines.push(`${'  '.repeat(depth)}…`); return; }
+      budget -= 1;
+      const indent = '  '.repeat(depth);
+      if (entry.kind === 'folder') {
+        lines.push(`${indent}${entry.name}/`);
+        await walk(normalizeWorkspacePath(entry.path || `${dirPath}/${entry.name}`), depth + 1);
+      } else {
+        lines.push(`${indent}${entry.name}`);
+      }
+    }
+  };
+  try { await walk('/', 0); } catch (_) { }
+  const text = lines.join('\n');
+  _workspaceTreeSummaryCache = { at: now, text };
+  return text;
+}
+
 function getWorkspaceContext() {
   const rootNode = workspaceTreeState.get('/') || null;
   const rootEntries = rootNode && Array.isArray(rootNode.children)
@@ -11738,6 +11779,7 @@ async function requestAgentPlannerInferenceInner(prompt, maxTokens, grammar = ''
 const agentPlanner = window.AIExeAgentPlanner && typeof window.AIExeAgentPlanner.createAgentPlanner === 'function'
   ? window.AIExeAgentPlanner.createAgentPlanner({
     normalizeWorkspacePath,
+    getWorkspaceFileTreeSummary,
     isAgentTaskGameLike,
     hasReadmeRunInstructions,
     isLikelyCompleteReadme,
@@ -13424,11 +13466,18 @@ async function runApprovedAgentCommandOnce(chatId, command) {
     commitAssistantMessage(chat.id, observation, observation, {
       agentActivities: activities,
       agentMeta: { startedAt, completedAt: Date.now(), collapsed: false },
-      // Approval commands are usually dependency/setup steps that unblock the
-      // previous agent action. Keep Continue available so the user can resume
-      // verification/fixing after the approved command finishes.
       forceNeedsContinue: true,
     });
+    // Approval = "unblock the run and keep going" (same seamless feel as the
+    // project-scope choice) — resume the agent automatically once the command
+    // has run, instead of parking on a manual Continue.
+    window.setTimeout(() => {
+      try {
+        if (String(activeChatId || '') !== String(chat.id) || pendingInferenceCount > 0) return;
+        recordDebugTrace('agent_command_approval_auto_resume', { chatId: String(chat.id), command: cleanCommand });
+        continueMessage();
+      } catch (_) { }
+    }, 400);
     return true;
   } catch (err) {
     const message = `Approved command \`${cleanCommand}\` failed to start: ${String((err && err.message) || err || 'unknown error')}`;
@@ -16736,6 +16785,10 @@ function sanitizeAssistantText(text) {
   clean = clean.replace(/\b(?:RECENT_)?TOOL_RESULTS\b/g, 'the tool results');
   clean = clean.replace(/\bDONE_CRITERIA\b/g, 'the plan');
   clean = clean.replace(/\b(?:AGENT_ENVIRONMENT|PROJECT_CONTRACT|PROJECT_STATE)\b/g, 'the project setup');
+  // Orphaned code-fence language labels: when the ```json fence is stripped, its
+  // label survives as a lone "json" line or a sentence-trailing " json" token.
+  clean = clean.replace(/^\s*json\s*$/gim, '');
+  clean = clean.replace(/([.!?:])\s+json\s*$/i, '$1');
   clean = clean
     .replace(/^\s*assistant\s*$/gim, '')
     .replace(/^\s*user\s*$/gim, '')
