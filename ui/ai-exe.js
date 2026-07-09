@@ -8322,7 +8322,7 @@ const agentStepFunctionSchema = {
         path: { type: 'string' },
         paths: { type: 'array', items: { type: 'string' }, description: 'For read_files: the list of file paths to read together in one step.' },
         content: { type: 'string' },
-        command: { type: 'string', description: 'For run_command: the command to run. Commands are policy-gated direct argv commands; installs/removes require approval. Examples: "python main.py", "node --check script.js", "php -l index.php", "go test -mod=readonly ./...".' },
+        command: { type: 'string', description: 'For run_command: the command to run. Commands are policy-gated direct argv commands; installs/removes require approval. Examples: "python main.py", "node --check script.js", "php -l index.php", "go test -mod=readonly ./...". No shell operators or chaining (&&, ;, |). To clear a stale Vite/bundler cache, run the dev script with a force flag ("npm run dev -- --force") or delete the cache dir (e.g. /node_modules/.vite) with the delete tool — never rm.' },
         src_path: { type: 'string' },
         dst_path: { type: 'string' },
         scope: { type: 'string', description: 'Optional path prefix or specific file to restrict search_files to, e.g. /ui or /ui/agent-executor.js.' },

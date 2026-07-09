@@ -3113,14 +3113,31 @@
       }
 
       if (tool === 'delete') {
-        if (!mustExplicitlyDelete) {
+        const path = deps.normalizeWorkspacePath(decision.path || '');
+        // Regenerable build-cache dirs may be deleted without the user having said
+        // "delete" — a stale cache is a legitimate repair step. Still ask-first:
+        // the confirmation card below runs regardless. Conservative list only
+        // (no dist/build — those can be a user's only artifacts).
+        const isRegenerableBuildCache = (() => {
+          const norm = String(path || '').toLowerCase().replace(/\/+$/, '');
+          if (/\/__pycache__$/.test(norm)) return true;
+          return [
+            '/node_modules/.vite',
+            '/node_modules/.cache',
+            '/.next',
+            '/.nuxt',
+            '/.parcel-cache',
+            '/.turbo',
+            '/.pytest_cache',
+          ].includes(norm);
+        })();
+        if (!mustExplicitlyDelete && !isRegenerableBuildCache) {
           return {
             ok: false,
             mutated,
-            observation: 'delete blocked: user did not explicitly request delete/remove/trash.',
+            observation: 'delete blocked: user did not explicitly request delete/remove/trash. (Exception: regenerable build caches like /node_modules/.vite may be deleted with user approval.)',
           };
         }
-        const path = deps.normalizeWorkspacePath(decision.path || '');
         if (!path || path === '/') {
           return { ok: false, mutated, observation: 'delete requires a valid file/folder path.' };
         }
