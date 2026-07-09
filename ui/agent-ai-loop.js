@@ -208,12 +208,16 @@
         const raw = String(response && response.output ? response.output : '');
         const thought = splitThoughtAndJson(raw);
         if (thought) {
-          pushActivity({
-            kind: 'thought',
-            title: '',
-            detail: thought.slice(0, 900),
-            status: 'done',
-          });
+          // Sanitize before display — raw thoughts parrot internal tool names.
+          const cleanThought = String((deps.sanitizeAssistantText ? deps.sanitizeAssistantText(thought) : thought) || '').trim();
+          if (cleanThought) {
+            pushActivity({
+              kind: 'thought',
+              title: '',
+              detail: cleanThought.slice(0, 900),
+              status: 'done',
+            });
+          }
         }
 
         const parsed = normalizeDecision(extractJsonObject(raw));

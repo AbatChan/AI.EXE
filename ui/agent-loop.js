@@ -2112,13 +2112,10 @@
           return true;
         }
 
-        if (decision.thought) {
-          appendAgentActivity({
-            kind: 'thought',
-            detail: decision.thought,
-            status: 'done',
-          });
-        }
+        // Route through appendAgentNarration (sanitize + dedupe). A raw append here
+        // leaked "edit_file" etc.: humanization changed the copy narrated earlier,
+        // so the exact-duplicate merge no longer dropped this one.
+        if (decision.thought) appendAgentNarration(decision.thought);
 
         // Polish-loop breakers: after a clean write, reading it back or rewriting
         // it whole is churn unless something actually failed since.
@@ -2933,11 +2930,16 @@
             .map((event) => deps.normalizeWorkspacePath(event.path || ''))
             .filter(Boolean))];
           const keptSummary = keptList.length ? ` I kept the files that are already done: ${keptList.slice(0, 6).join(', ')}.` : '';
-          const stoppedText = `${decision.tool} for ${timedOutPath} took too long, so I stopped instead of retrying for several minutes.${keptSummary} Tell me the exact change you want for ${timedOutPath} and I'll continue from here.`;
+          // Humanize the internal tool name for user-facing text (edit_file -> "the file edit").
+          const timedOutToolLabel = (deps.sanitizeAssistantText
+            ? String(deps.sanitizeAssistantText(String(decision.tool || '')) || '').trim()
+            : String(decision.tool || '')) || 'the step';
+          const timedOutToolSentence = timedOutToolLabel.charAt(0).toUpperCase() + timedOutToolLabel.slice(1);
+          const stoppedText = `${timedOutToolSentence} for ${timedOutPath} took too long, so I stopped instead of retrying for several minutes.${keptSummary} Tell me the exact change you want for ${timedOutPath} and I'll continue from here.`;
           appendAgentActivity({
             kind: 'error',
             title: 'Stopped (timed out)',
-            detail: `${decision.tool} for ${timedOutPath} exceeded the time limit`,
+            detail: `${timedOutToolSentence} for ${timedOutPath} exceeded the time limit`,
             status: 'error',
             openPath: timedOutPath.startsWith('/') ? timedOutPath : '',
             openKind: 'file',
