@@ -509,8 +509,12 @@
       const sections = [];
       Array.from(byPath.entries()).slice(-maxFiles).forEach(([path, state]) => {
         if (state.original == null || !String(state.original).trim()) {
-          const lineCount = String(state.current || '').split('\n').length;
-          sections.push(`Created ${path} (${lineCount} lines).`);
+          const current = String(state.current || '');
+          const lineCount = current.split('\n').length;
+          // Real evidence, not just a filename — creation-run audits judged
+          // "Created /x (N lines)" as unverifiable and flagged everything unmet.
+          const head = current.split('\n').slice(0, 25).join('\n').slice(0, 1100);
+          sections.push(`Created ${path} (${lineCount} lines). Opening lines (file continues beyond this sample):\n${head}`);
           return;
         }
         const diff = buildCompactLineDiff(state.original, state.current);
@@ -575,7 +579,15 @@
         .slice(0, 4);
       if (entries.length < 2) return [];
       const filesBlock = entries
-        .map(([path, content]) => `FILE ${path}:\n${String(content).slice(0, 6000)}`)
+        .map(([path, content]) => {
+          const text = String(content);
+          // Clipped input must be labelled — the reviewer reported the clip point
+          // itself as an "unclosed tag" defect.
+          const clipNote = text.length > 6000
+            ? ' (TRUNCATED for this review — the real file continues; do NOT report missing closing tags/braces or anything at the cut-off as a defect)'
+            : '';
+          return `FILE ${path}${clipNote}:\n${text.slice(0, 6000)}`;
+        })
         .join('\n\n');
       const prompt = [
         'Review this small multi-file project for REAL cross-file functional defects that a syntax check cannot see.',

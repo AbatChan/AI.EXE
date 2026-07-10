@@ -199,10 +199,15 @@
         String(event.tool || '').toLowerCase() === 'validate_files' && event.validationPassed === true
       ));
       const verifiedNoDefects = verificationConditionalTask && !anyWorkspaceMutation && cleanValidatePassed;
+      // Work done in earlier runs of this task (Continue/crash recovery) counts.
+      const priorDone = plan && plan._priorRunDone && typeof plan._priorRunDone === 'object' ? plan._priorRunDone : null;
+      const priorMutated = (p) => Boolean(priorDone && priorDone.mutated && priorDone.mutated.has(p));
+      const priorRead = (p) => Boolean(priorDone && ((priorDone.read && priorDone.read.has(p)) || priorMutated(p)));
+      const priorValidatePassed = Boolean(priorDone && priorDone.validatePassed === true);
       const affectedFileSatisfied = (targetPath) => hasSuccessfulAgentTool(
         toolEvents,
         (event) => ['write_file', 'edit_file'].includes(String(event.tool || '').toLowerCase()) && normalizeWorkspacePath(event.path || '') === targetPath,
-      ) || hasNoOpEditAttempt(targetPath) || verifiedNoDefects;
+      ) || priorMutated(targetPath) || hasNoOpEditAttempt(targetPath) || verifiedNoDefects;
 
       const readmeWrite = getLatestSuccessfulAgentWrite(toolEvents, (event) => normalizeWorkspacePath(event.path || '') === '/README.md');
       const primarySourceWrite = getLatestSuccessfulAgentSourceWrite(toolEvents, (event, normalized) => {
@@ -306,7 +311,8 @@
           requirements.push({
             id: `inspect_${path}`,
             label: `inspect ${path}`,
-            met: hasSuccessfulAgentTool(toolEvents, (event) => String(event.tool || '').toLowerCase() === 'read_file' && normalizeWorkspacePath(event.path || '') === path),
+            met: priorRead(path)
+              || hasSuccessfulAgentTool(toolEvents, (event) => String(event.tool || '').toLowerCase() === 'read_file' && normalizeWorkspacePath(event.path || '') === path),
           });
         });
 
@@ -330,7 +336,8 @@
         requirements.push({
           id: 'validate_written_files',
           label: isSoftwareProject ? 'validate the written project files' : 'validate the updated files',
-          met: hasSuccessfulAgentTool(toolEvents, (event) => String(event.tool || '').toLowerCase() === 'validate_files' && event.validationPassed === true),
+          met: priorValidatePassed
+            || hasSuccessfulAgentTool(toolEvents, (event) => String(event.tool || '').toLowerCase() === 'validate_files' && event.validationPassed === true),
         });
       }
 
@@ -344,7 +351,8 @@
         requirements.push({
           id: 'validate_code_mutations',
           label: 'validate the changed code files',
-          met: hasSuccessfulAgentTool(toolEvents, (event) => String(event.tool || '').toLowerCase() === 'validate_files' && event.validationPassed === true),
+          met: priorValidatePassed
+            || hasSuccessfulAgentTool(toolEvents, (event) => String(event.tool || '').toLowerCase() === 'validate_files' && event.validationPassed === true),
         });
       }
 
@@ -371,7 +379,8 @@
           requirements.push({
             id: 'validate_after_unscoped_edit',
             label: 'validate the updated files',
-            met: hasSuccessfulAgentTool(toolEvents, (event) => String(event.tool || '').toLowerCase() === 'validate_files' && event.validationPassed === true),
+            met: priorValidatePassed
+              || hasSuccessfulAgentTool(toolEvents, (event) => String(event.tool || '').toLowerCase() === 'validate_files' && event.validationPassed === true),
           });
         }
       }
@@ -1206,10 +1215,29 @@
       // dumps to a pointer (re-read on demand) so the prompt doesn't balloon with
       // stale file contents — the main driver of context bloat / degradation.
       const FULL_TOOL_TAIL = 3;
-      const toolLog = diagnosticsLog + expandedReadLog + relevantOlderLog + inspectedNote + recentEvents.map((event, index) => {
+      // Pinned digest of every mutation applied this task (incl. earlier runs) —
+      // survives context compaction and Continue, so the model never re-hunts
+      // for a bug it already fixed or re-applies a change it already made.
+      const priorRunDone = planSpec && planSpec._priorRunDone && typeof planSpec._priorRunDone === 'object'
+        ? planSpec._priorRunDone
+        : null;
+      const appliedDigest = priorRunDone && priorRunDone.mutated && priorRunDone.mutated.size
+        ? `CHANGES ALREADY APPLIED THIS TASK (including earlier runs — these are SAVED in the files; do NOT redo them or re-investigate the symptoms they fixed):\n${Array.from(priorRunDone.mutated.entries()).slice(-12).map(([p, note]) => `- ${note || `modified ${p}`}`).join('\n')}${priorRunDone.validatePassed ? '\n- validation passed after the latest change' : ''}\n\n`
+        : '';
+      // Only the LATEST app run reflects the current files — older ones misled the
+      // model into "my fix didn't take effect" while reading a pre-edit snapshot.
+      const lastRunAppIdx = (() => {
+        let idx = -1;
+        recentEvents.forEach((e, i) => { if (e && e.ok && String(e.tool || '').toLowerCase() === 'run_app') idx = i; });
+        return idx;
+      })();
+      const toolLog = appliedDigest + diagnosticsLog + expandedReadLog + relevantOlderLog + inspectedNote + recentEvents.map((event, index) => {
         const tool = String(event && event.tool ? event.tool : 'unknown');
         const obs = String(event && event.observation ? event.observation : '');
         const isTail = index >= recentEvents.length - FULL_TOOL_TAIL;
+        if (String(tool).toLowerCase() === 'run_app' && event && event.ok && index < lastRunAppIdx) {
+          return `ToolResult ${index + 1}: run_app — SUPERSEDED: files changed after this run; the CURRENT app state is ToolResult ${lastRunAppIdx + 1} below. Ignore this older result and its snapshot.`;
+        }
         // Aged batch-read pointers claim "full content is in that result" after
         // the batch result itself was compacted away — restate honestly.
         if (!isTail && event && event._fromBatchRead) {

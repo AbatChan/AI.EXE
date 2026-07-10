@@ -1724,10 +1724,21 @@
       const listedExistingFiles = new Set();
       if (Array.isArray(toolEvents)) {
         toolEvents.forEach((event) => {
-          if (!event || !event.ok || String(event.tool || '').toLowerCase() !== 'list_dir') return;
-          for (const match of String(event.observation || '').matchAll(/-\s+\[file\]\s+([^\s(]+)/g)) {
-            const listedPath = deps.normalizeWorkspacePath(`/${String(match[1] || '').trim()}`);
-            if (listedPath && listedPath !== '/') listedExistingFiles.add(listedPath);
+          if (!event || !event.ok) return;
+          const eventTool = String(event.tool || '').toLowerCase();
+          if (eventTool === 'list_dir') {
+            for (const match of String(event.observation || '').matchAll(/-\s+\[file\]\s+([^\s(]+)/g)) {
+              const listedPath = deps.normalizeWorkspacePath(`/${String(match[1] || '').trim()}`);
+              if (listedPath && listedPath !== '/') listedExistingFiles.add(listedPath);
+            }
+            return;
+          }
+          // search hits ("- /path:123:") prove the file exists too
+          if (eventTool === 'search_files') {
+            for (const match of String(event.observation || '').matchAll(/-\s+([^\s:]+):\d+:/g)) {
+              const hitPath = deps.normalizeWorkspacePath(String(match[1] || '').trim());
+              if (hitPath && hitPath !== '/') listedExistingFiles.add(hitPath);
+            }
           }
         });
       }
@@ -2488,7 +2499,14 @@
           && ['read_file', 'write_file', 'edit_file'].includes(String(event.tool || '').toLowerCase())
           && deps.normalizeWorkspacePath(event.path || '') === path
         ));
-        if (!alreadyReadOrWrittenThisFile) {
+        // search hits on this file give real anchors — accept them as grounding
+        const locatedViaSearchHits = Array.isArray(toolEvents) && toolEvents.some((event) => (
+          event
+          && event.ok
+          && String(event.tool || '').toLowerCase() === 'search_files'
+          && new RegExp(`${path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}:\\d+:`).test(String(event.observation || ''))
+        ));
+        if (!alreadyReadOrWrittenThisFile && !locatedViaSearchHits) {
           return {
             ok: false,
             mutated,
@@ -2784,13 +2802,51 @@
           return { ok: false, mutated, observation: `run_app failed: ${(result && result.message) || 'could not load the page'}.` };
         }
         const errors = Array.isArray(result.errors) ? result.errors.filter(Boolean) : [];
+        // Render snapshot: what the page ACTUALLY shows after load (DOM-measured,
+        // not phrase-based) — lets the agent verify visual claims itself.
+        const snap = result.snapshot && typeof result.snapshot === 'object' ? result.snapshot : null;
+        const snapshotText = snap ? (snap.error
+          ? `\nRender snapshot unavailable (${snap.error}).`
+          : [
+            '\nRender snapshot (measured from the live DOM after load — this is what the user sees):',
+            snap.title ? `- page title: ${snap.title}` : '',
+            `- visible text: "${String(snap.text || '(none)')}"`,
+            Array.isArray(snap.hiddenButRendered) && snap.hiddenButRendered.length
+              ? `- PROBLEM: marked hidden (hidden/aria-hidden attribute) but still visibly rendered — CSS display rules are overriding the attribute: ${snap.hiddenButRendered.join(', ')}`
+              : '',
+            Array.isArray(snap.bigOverlays) && snap.bigOverlays.length
+              ? `- large overlays covering most of the viewport (may block interaction): ${snap.bigOverlays.join(', ')}`
+              : '',
+            snap.centerTop ? `- topmost element at viewport center (what a click there hits): ${snap.centerTop}` : '',
+            Array.isArray(snap.ids) && snap.ids.length ? `- element visibility: ${snap.ids.join(', ')}` : '',
+          ].filter(Boolean).join('\n')) : '';
+        // Interaction probe report: which elements were synthetically clicked and
+        // what the UI showed afterwards (only when it actually changed).
+        const after = result.snapshotAfter && typeof result.snapshotAfter === 'object' && !result.snapshotAfter.error
+          ? result.snapshotAfter
+          : null;
+        const clickedList = Array.isArray(result.clicked) && result.clicked.length
+          ? `\nInteraction probe (synthetic clicks on visible native controls + tap points): ${result.clicked.join(', ')}`
+          : '';
+        const afterChanged = after && snap && JSON.stringify(after) !== JSON.stringify(snap);
+        const afterText = afterChanged ? [
+          '\nAfter interaction:',
+          `- visible text: "${String(after.text || '(none)')}"`,
+          Array.isArray(after.hiddenButRendered) && after.hiddenButRendered.length
+            ? `- still marked hidden but visibly rendered: ${after.hiddenButRendered.join(', ')}`
+            : '',
+          Array.isArray(after.bigOverlays) && after.bigOverlays.length
+            ? `- large overlays now covering the viewport: ${after.bigOverlays.join(', ')}`
+            : '',
+        ].filter(Boolean).join('\n') : '';
         return {
           ok: true,
           mutated,
           runErrorCount: errors.length,
-          observation: errors.length
-            ? `run_app ${htmlTarget}: ${errors.length} runtime error${errors.length === 1 ? '' : 's'} during startup:\n- ${errors.join('\n- ')}\nFix these (the file:line references point into the inlined sources), then run_app again to verify.`
-            : `run_app ${htmlTarget}: started cleanly — no runtime errors, unhandled rejections, or console.error during the startup smoke run.`,
+          renderSnapshot: snap,
+          observation: (errors.length
+            ? `run_app ${htmlTarget}: ${errors.length} runtime error${errors.length === 1 ? '' : 's'} during the smoke run:\n- ${errors.join('\n- ')}\nFix these (the file:line references point into the inlined sources; "[during interaction probe]" errors fired when a visible control/point was clicked), then run_app again to verify.`
+            : `run_app ${htmlTarget}: started cleanly — no runtime errors, unhandled rejections, or console.error during startup or the interaction probe.`) + snapshotText + clickedList + afterText,
         };
       }
 

@@ -1806,7 +1806,18 @@
           })()
         },
         edit: { running: 'Applying changes', done: `Updated ${count} file${count !== 1 ? 's' : ''}` },
-        validate: { running: 'Checking files', done: validateHasIssues ? 'Checked files \u2014 issues found' : 'Checked files \u2014 no issues found' },
+        validate: { running: 'Checking files', done: (() => {
+          // Name every kind of verification the group actually contains \u2014 a bare
+          // "Checked files" hid the syntax check and app run inside the drawer.
+          const has = (t) => items.some((a) => a && String(a.title || '').startsWith(t));
+          const parts = [];
+          if (has('Checked syntax')) parts.push('syntax');
+          if (has('Checked files')) parts.push('files');
+          if (has('Ran the app')) parts.push('app run');
+          if (has('Ran command')) parts.push('command run');
+          const what = parts.length ? parts.join(' + ') : 'files';
+          return validateHasIssues ? `Checked ${what} \u2014 issues found` : `Checked ${what} \u2014 no issues found`;
+        })() },
         cleanup: { running: 'Organizing files', done: (() => {
           const moves = items.filter((a) => a && a.kind === 'move').length;
           const deletes = items.filter((a) => a && a.kind === 'delete').length;

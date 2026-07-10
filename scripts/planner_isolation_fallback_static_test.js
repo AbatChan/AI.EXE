@@ -45,4 +45,11 @@ assert.match(adapter, /not _chat_key\.startswith\("id:internal:"\)/);
 assert.match(adapter, /key\.startswith\("id:internal:"\)/);
 assert.match(adapter, /not k\.startswith\("id:internal:chat:"\)/);
 
+// Agent images upload ONCE per persistent scratch thread (dedup by chat +
+// attachment id, released if the carrying call fails) — the old 3x-per-run
+// cap re-piled the same image into the thread on every run.
+assert.match(aiExe, /agentAdapterUploadedAttachmentIds/);
+assert.match(aiExe, /function releaseAgentAdapterForwardedAttachments/);
+assert.doesNotMatch(aiExe, /agentAdapterAttachmentsSentCount/);
+
 console.log('PASS: planner calls are isolated, router-shaped plan JSON is rejected, Vite React fallback is preserved, Venice scratch threads are stable per chat, and version is synced');

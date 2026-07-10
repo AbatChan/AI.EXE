@@ -2077,9 +2077,27 @@
         expectedFiles.push('/README.md');
       }
       phases = normalizeWebProjectPhases(phases, expectedFiles, primaryStack);
+      // Internal tool identifiers are backend vocabulary — never surface them in
+      // user-visible plan text (checklist/goal/validation). Closed-set mapping of
+      // our own tool names, case-insensitive; not content/phrasing dependent.
+      const humanizePlanText = (value) => String(value || '')
+        .replace(/`?\bcheck_code\b`?/gi, 'the syntax check')
+        .replace(/`?\brun_app\b`?/gi, 'the app preview run')
+        .replace(/`?\brun_command\b`?/gi, 'the terminal run')
+        .replace(/`?\bvalidate_files\b`?/gi, 'static file validation')
+        .replace(/`?\bread_files\b`?/gi, 'file reads')
+        .replace(/`?\bread_file\b`?/gi, 'a file read')
+        .replace(/`?\bwrite_file\b`?/gi, 'a file write')
+        .replace(/`?\bedit_file\b`?/gi, 'a file edit')
+        .replace(/`?\bsearch_files\b`?/gi, 'a file search')
+        .replace(/`?\blist_dir\b`?/gi, 'a folder scan')
+        .replace(/`?\bnew_project\b`?/gi, 'project setup')
+        .replace(/\b(the|a|an)\s+(?:the|a|an)\s+/gi, '$1 ')
+        .trim();
+      doneCriteria = doneCriteria.map(humanizePlanText).filter(Boolean);
       // Clip at a word boundary with a visible ellipsis — a hard slice ends the
       // Goal mid-list ("Modal, Avatar,") and reads as a corrupted prompt.
-      const rawParsedSummary = String(parsed && parsed.summary ? parsed.summary : '').trim();
+      const rawParsedSummary = humanizePlanText(String(parsed && parsed.summary ? parsed.summary : '').trim());
       const parsedSummary = rawParsedSummary.length > 220
         ? `${rawParsedSummary.slice(0, 220).replace(/\s+\S*$/, '')}…`
         : rawParsedSummary;
@@ -2095,7 +2113,7 @@
         filesToInspect,
         doneCriteria,
         phases,
-        validationSteps,
+        validationSteps: validationSteps.map(humanizePlanText).filter(Boolean),
         projectContract: buildAgentProjectContract(taskText, taskKind, primaryStack, expectedFiles),
         summary: parsedSummary,
       };

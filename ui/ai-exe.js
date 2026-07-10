@@ -8515,13 +8515,14 @@ async function streamOllamaChatCompletion(provider, prompt, handlers = {}, optio
     if (output.trim()) {
       if (stopOnCompleteJson) {
         const message = 'Adapter structured stream ended with incomplete JSON.';
+        // Retriable: a cut stream is usually a transient adapter hiccup — the
+        // agent loop's short-backoff retry recovers it instead of killing the run.
         return {
           ok: false,
           output: output.slice(0, maxOutputChars || output.length),
           error: message,
           message,
           truncated: true,
-          nonRetriable: true,
           provider,
           model,
         };
@@ -8752,6 +8753,13 @@ async function requestSelectedRemoteTextCompletion(prompt, maxTokens, systemProm
   return result;
 }
 
+// chatId -> Set of attachment ids already uploaded to that chat's PERSISTENT
+// Venice scratch thread. Since thread-per-chat (v7.2.2) an image uploaded there
+// once stays in that conversation's history for every later internal call —
+// the old forward-3x-per-run cap (built for one-shot threads) re-piled the
+// same image into the thread on every run of the same chat.
+const agentAdapterUploadedAttachmentIds = new Map();
+
 function takeAgentAdapterAttachmentsForPrompt(prompt, options = {}) {
   if (Array.isArray(options && options.attachments) && options.attachments.length) {
     return options.attachments;
@@ -8759,22 +8767,31 @@ function takeAgentAdapterAttachmentsForPrompt(prompt, options = {}) {
   const token = activeInferenceRequest;
   if (!token || !isVeniceAdapterSelected()) return [];
   if (!Array.isArray(token.attachments) || !token.attachments.length) return [];
-  // Agent-mode adapter calls each run in an ISOLATED one-shot Venice thread, so
-  // a single "sent once" upload only ever reached the plan call — every later
-  // step was blind. Forward to the first few marker-bearing calls (plan +
-  // project generation + first decision) instead; capped so a 24-step run
-  // doesn't re-upload on every step.
-  const sentCount = Number(token.agentAdapterAttachmentsSentCount) || 0;
-  if (sentCount >= 3) return [];
   const text = String(prompt || '');
   if (!/\[ATTACHMENTS\]|\(image attached/i.test(text)) return [];
-  token.agentAdapterAttachmentsSentCount = sentCount + 1;
+  const chatKey = String(token.chatId || '');
+  let uploaded = agentAdapterUploadedAttachmentIds.get(chatKey);
+  if (!uploaded) {
+    uploaded = new Set();
+    agentAdapterUploadedAttachmentIds.set(chatKey, uploaded);
+  }
+  const fresh = token.attachments.filter((att) => att && !uploaded.has(String(att.id || att.name || '')));
+  if (!fresh.length) return [];
+  fresh.forEach((att) => uploaded.add(String(att.id || att.name || '')));
   pushDebugTrace('agent_adapter_attachments_forwarded', {
-    chatId: String(token.chatId || ''),
-    count: String(token.attachments.length),
-    forwardIndex: String(sentCount + 1),
+    chatId: chatKey,
+    count: String(fresh.length),
   });
-  return token.attachments;
+  return fresh;
+}
+
+// The call that carried the upload failed — the image never reached the
+// thread; let the next marker-bearing call forward it again.
+function releaseAgentAdapterForwardedAttachments(chatId, list) {
+  if (!Array.isArray(list) || !list.length) return;
+  const uploaded = agentAdapterUploadedAttachmentIds.get(String(chatId || ''));
+  if (!uploaded) return;
+  list.forEach((att) => uploaded.delete(String((att && (att.id || att.name)) || '')));
 }
 
 async function requestRemoteTextCompletionForCapability(capability, prompt, maxTokens, options = {}) {
@@ -8823,6 +8840,9 @@ async function requestRemoteTextCompletionForCapability(capability, prompt, maxT
       ...(completionOptions.stopOnCompleteJson ? { stopOnCompleteJson: true } : {}),
       ...(Number(completionOptions.maxOutputChars) > 0 ? { maxOutputChars: Number(completionOptions.maxOutputChars) } : {}),
     });
+    if ((!result || !result.ok) && adapterAttachments.length) {
+      releaseAgentAdapterForwardedAttachments(activeInferenceRequest && activeInferenceRequest.chatId, adapterAttachments);
+    }
     return result ? { ...result, workerId: worker.id, provider, model: getProviderModel(provider) } : result;
   }
   if (getInferenceProviderDef(provider).protocol === 'ollama') {
@@ -8841,6 +8861,9 @@ async function requestRemoteTextCompletionForCapability(capability, prompt, maxT
         ...(completionOptions.adapterChatId ? { adapterChatId: completionOptions.adapterChatId } : {}),
       },
     );
+    if ((!result || !result.ok) && adapterAttachments.length) {
+      releaseAgentAdapterForwardedAttachments(activeInferenceRequest && activeInferenceRequest.chatId, adapterAttachments);
+    }
     return result ? { ...result, workerId: worker.id } : result;
   }
   if (provider === 'anthropic') {
@@ -9321,23 +9344,17 @@ async function requestWorkspaceInspectAnswer(chatId, latestUserMessage, inspectC
     const raw = String(rawText || '').trim();
     if (!raw) return '';
     const unfenced = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
-    const decodeJsonStringLiteral = (value) => {
-      const text = String(value || '').trim();
-      if (!text) return '';
-      try {
-        return JSON.parse(`"${text
-          .replace(/\\/g, '\\\\')
-          .replace(/"/g, '\\"')
-          .replace(/\r/g, '\\r')
-          .replace(/\n/g, '\\n')}"`);
-      } catch (_) {
-        return text
-          .replace(/\\n/g, '\n')
-          .replace(/\\r/g, '\r')
-          .replace(/\\"/g, '"')
-          .replace(/\\\\/g, '\\');
-      }
-    };
+    // Decode JSON string escapes directly. The old escape-then-JSON.parse round
+    // trip was a no-op (it re-escaped the literal \n before parsing), so answers
+    // shipped with raw "\n\n" text in the chat.
+    const decodeJsonStringLiteral = (value) => String(value || '')
+      .replace(/\\\\/g, '\u0000')
+      .replace(/\\n/g, '\n')
+      .replace(/\\r/g, '\r')
+      .replace(/\\t/g, '\t')
+      .replace(/\\"/g, '"')
+      .replace(/\u0000/g, '\\')
+      .trim();
     const sanitizeWorkspaceInspectCandidate = (value) => String(value || '')
       .split('\n')
       .filter((line) => {
@@ -9358,6 +9375,10 @@ async function requestWorkspaceInspectAnswer(chatId, latestUserMessage, inspectC
       .join('\n')
       .replace(/^final user-facing answer"?\}?\s*\n*/gim, '')
       .replace(/^(?:Do not|If the inspected files|Prefer direct|RECENT_CHAT:|LATEST_USER:|INSPECTED_WORKSPACE_CONTEXT:)[^\n]*\n?/gim, '')
+      // JSON-envelope remnants when the model's JSON failed to parse: strip a
+      // leading {"answer":" and a trailing "} so they never reach the chat.
+      .replace(/^\s*\{?\s*"answer"\s*:\s*"/i, '')
+      .replace(/"\s*\}\s*$/, '')
       .replace(/\n{3,}/g, '\n\n')
       .trim();
     const parsed = extractFirstJsonObject(unfenced);
@@ -9365,6 +9386,15 @@ async function requestWorkspaceInspectAnswer(chatId, latestUserMessage, inspectC
       const parsedAnswer = sanitizeWorkspaceInspectCandidate(parsed.answer || '');
       if (!looksLikePlaceholderInspectAnswer(parsedAnswer)) {
         return parsedAnswer;
+      }
+    }
+    // Unescaped inner quotes break strict parsing AND stop the lazy match at the
+    // first quote — try a greedy end-anchored capture first (JSON's own syntax).
+    const greedyAnswer = unfenced.match(/"answer"\s*:\s*"([\s\S]*)"\s*\}?\s*$/i);
+    if (greedyAnswer && greedyAnswer[1]) {
+      const decodedGreedy = sanitizeWorkspaceInspectCandidate(decodeJsonStringLiteral(greedyAnswer[1]));
+      if (!looksLikePlaceholderInspectAnswer(decodedGreedy)) {
+        return decodedGreedy;
       }
     }
     const answerFieldMatches = Array.from(unfenced.matchAll(/"answer"\s*:\s*"([\s\S]*?)"\s*}?/gi));
@@ -9376,7 +9406,9 @@ async function requestWorkspaceInspectAnswer(chatId, latestUserMessage, inspectC
         return decodedAnswer;
       }
     }
-    const cleaned = sanitizeWorkspaceInspectCandidate(unfenced);
+    const cleaned = sanitizeWorkspaceInspectCandidate(
+      /"answer"\s*:/i.test(unfenced) ? decodeJsonStringLiteral(unfenced) : unfenced
+    );
     if (!looksLikePlaceholderInspectAnswer(cleaned)) {
       return cleaned;
     }
@@ -9459,7 +9491,12 @@ async function performWorkspaceInspectReply(chatId, promptText, requestToken, on
   const listPath = workspaceContext.currentKind === 'folder'
     ? normalizeWorkspacePath(workspaceContext.currentPath || '/')
     : parentWorkspacePath(workspaceContext.currentPath || '/');
-  reportProgress(`Inspecting ${listPath || '/'}...`);
+  // "/" reads as a raw path in the UI — show the workspace name (or "workspace")
+  // for the root, and the folder name for subfolders.
+  const inspectLabel = (!listPath || listPath === '/')
+    ? (String(workspaceContext.workspaceRootName || '').trim() || 'workspace')
+    : (listPath.split('/').filter(Boolean).pop() || listPath);
+  reportProgress(`Inspecting ${inspectLabel}...`);
   const listResponse = await invokeWorkspaceBridgeAction('workspaceList', { path: listPath || '/' });
   if (!listResponse || !listResponse.ok) {
     return { ok: false, message: (listResponse && listResponse.message) || 'Failed to inspect workspace.' };
@@ -9467,7 +9504,7 @@ async function performWorkspaceInspectReply(chatId, promptText, requestToken, on
   const listInfo = summarizeWorkspaceListPayload(listResponse.output || '');
   // Work-panel rows so inspect shows which files it actually read.
   const activities = [{
-    kind: 'list', title: 'Inspected', detail: listPath || '/',
+    kind: 'list', title: 'Inspected', detail: inspectLabel,
     openPath: listPath || '', openKind: 'folder', status: 'done', ts: Date.now(),
   }];
   reportProgress('Choosing relevant files...');
@@ -10170,19 +10207,52 @@ async function runWorkspaceAppSmokeTest(htmlPath) {
       html = html.replace(match[0], `<script>\n${js}\n</script>`);
     }
   }
-  const hook = `<script>(function(){var send=function(t){try{parent.postMessage({__aiexeSmoke:true,text:String(t).slice(0,400)},'*');}catch(e){}};
+  const hook = `<script>(function(){var phase='startup';var send=function(t){try{parent.postMessage({__aiexeSmoke:true,phase:phase,text:String(t).slice(0,400)},'*');}catch(e){}};
 window.onerror=function(m,s,l,c){send(m+' ('+(s||'inline')+':'+(l||0)+':'+(c||0)+')');};
 window.addEventListener('unhandledrejection',function(e){send('Unhandled promise rejection: '+((e.reason&&e.reason.message)||e.reason));});
 var ce=console.error;console.error=function(){send(Array.prototype.slice.call(arguments).map(String).join(' '));try{ce.apply(console,arguments);}catch(e){}};
 try{window.localStorage&&window.localStorage.length;}catch(e){var mem={};try{Object.defineProperty(window,'localStorage',{configurable:true,value:{getItem:function(k){return k in mem?mem[k]:null;},setItem:function(k,v){mem[k]=String(v);},removeItem:function(k){delete mem[k];},clear:function(){mem={};},key:function(i){return Object.keys(mem)[i]||null;},get length(){return Object.keys(mem).length;}}});}catch(e2){}}
-window.addEventListener('load',function(){setTimeout(function(){try{parent.postMessage({__aiexeSmokeDone:true},'*');}catch(e){}},400);});
+var rendered=function(el){if(!el||el.nodeType!==1)return false;var cs;try{cs=window.getComputedStyle(el);}catch(e){return false;}if(!cs||cs.display==='none'||cs.visibility==='hidden'||Number(cs.opacity)===0)return false;var r=el.getClientRects();return Boolean(r&&r.length);};
+var label=function(el){var t=el.tagName.toLowerCase();if(el.id)return t+'#'+el.id;var c=String(el.className&&el.className.baseVal!==undefined?el.className.baseVal:el.className||'').trim().split(/\\s+/).slice(0,2).join('.');return c?t+'.'+c:t;};
+var snap=function(){try{
+var d=document,w=window;if(!d.body)return{error:'no body'};
+var txt=[],walker=d.createTreeWalker(d.body,NodeFilter.SHOW_TEXT,null),n,steps=0,joined='';
+while((n=walker.nextNode())&&steps++<3000){var s=String(n.nodeValue||'').replace(/\\s+/g,' ').trim();if(s&&rendered(n.parentElement)){txt.push(s);joined=txt.join(' ');if(joined.length>600)break;}}
+var vw=w.innerWidth||800,vh=w.innerHeight||600,hiddenButRendered=[],bigOverlays=[],idVis=[],all=d.body.getElementsByTagName('*');
+for(var i=0;i<all.length&&i<4000;i++){var el=all[i],isR=rendered(el);
+if((el.hasAttribute('hidden')||el.getAttribute('aria-hidden')==='true')&&isR&&hiddenButRendered.length<10)hiddenButRendered.push(label(el));
+if(isR&&bigOverlays.length<8){var cs=window.getComputedStyle(el);if((cs.position==='fixed'||cs.position==='absolute')){var r=el.getBoundingClientRect();if(r.width*r.height>=vw*vh*0.5)bigOverlays.push(label(el)+(cs.zIndex!=='auto'?' (z:'+cs.zIndex+')':''));}}
+if(el.id&&idVis.length<30)idVis.push('#'+el.id+':'+(isR?'visible':'hidden'));}
+var center=d.elementFromPoint(vw/2,vh/2);
+return{title:String(d.title||'').slice(0,120),text:(txt.join(' ')).slice(0,600),hiddenButRendered:hiddenButRendered,bigOverlays:bigOverlays,centerTop:center?label(center):'',ids:idVis};
+}catch(e){return{error:String(e&&e.message||e)};}};
+var probe=function(){phase='interaction';var clicked=[];try{
+document.addEventListener('click',function(e){try{var t=e.target;while(t&&t.nodeType===1){if(t.tagName==='A'&&t.getAttribute('href')){e.preventDefault();break;}t=t.parentElement;}}catch(err){}},true);
+var vw=window.innerWidth||800,vh=window.innerHeight||600,seen=[];
+var tryClick=function(el,how){if(!el||el.nodeType!==1||seen.indexOf(el)>=0)return;if(el===document.body||el===document.documentElement)return;seen.push(el);if(clicked.length>=8)return;clicked.push(how+':'+label(el));
+try{if(typeof el.click==='function')el.click();else el.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true}));}catch(e){send('click on '+label(el)+' threw: '+(e&&e.message||e));}};
+var controls=document.querySelectorAll('button,[role="button"],input[type="button"],input[type="submit"],summary'),count=0;
+for(var i=0;i<controls.length&&count<5;i++){var el=controls[i];if(rendered(el)&&!el.disabled){tryClick(el,'control');count++;}}
+var pts=[[vw/2,vh/2],[vw/4,vh/4],[3*vw/4,3*vh/4]];
+for(var p=0;p<pts.length;p++){var hit=document.elementFromPoint(pts[p][0],pts[p][1]);if(hit&&rendered(hit))tryClick(hit,'point');}
+}catch(e){send('interaction probe failed: '+(e&&e.message||e));}
+return clicked;};
+window.addEventListener('load',function(){setTimeout(function(){
+var s1=snap();var clicked=probe();
+setTimeout(function(){var s2=snap();
+try{parent.postMessage({__aiexeSmokeSnapshot:true,snapshot:s1,after:s2,clicked:clicked},'*');}catch(e){}
+try{parent.postMessage({__aiexeSmokeDone:true},'*');}catch(e){}},500);},400);});
 })();</script>`;
   html = /<head[^>]*>/i.test(html) ? html.replace(/<head[^>]*>/i, (m) => `${m}\n${hook}`) : `${hook}\n${html}`;
   return new Promise((resolve) => {
     const errors = [];
+    let renderSnapshot = null;
+    let renderSnapshotAfter = null;
+    let interactionClicked = null;
     const iframe = document.createElement('iframe');
     iframe.setAttribute('sandbox', 'allow-scripts');
-    iframe.style.cssText = 'position:fixed;left:-9999px;top:-9999px;width:800px;height:600px;visibility:hidden;';
+    // opacity (not visibility) keeps inner layout/innerText real while invisible
+    iframe.style.cssText = 'position:fixed;left:-9999px;top:-9999px;width:800px;height:600px;opacity:0;pointer-events:none;';
     let settled = false;
     const finish = () => {
       if (settled) return;
@@ -10194,18 +10264,32 @@ window.addEventListener('load',function(){setTimeout(function(){try{parent.postM
       const reportedErrors = usesEsModules
         ? ['Uses ES module import/export, which does NOT load when the page is opened from file:// (offline) — this breaks the whole app. Convert the scripts to classic <script src="..."> files with no import/export (expose shared values on window), then run again.']
         : errors.slice(0, 12);
-      resolve({ ok: true, errors: reportedErrors, htmlPath: normalized });
+      resolve({
+        ok: true,
+        errors: reportedErrors,
+        htmlPath: normalized,
+        snapshot: renderSnapshot,
+        snapshotAfter: renderSnapshotAfter,
+        clicked: interactionClicked,
+      });
     };
     const onMessage = (event) => {
       const data = event && event.data;
       if (!data || typeof data !== 'object') return;
-      if (data.__aiexeSmoke && typeof data.text === 'string') errors.push(data.text);
+      if (data.__aiexeSmoke && typeof data.text === 'string') {
+        errors.push((data.phase === 'interaction' ? '[during interaction probe] ' : '') + data.text);
+      }
+      if (data.__aiexeSmokeSnapshot && data.snapshot && typeof data.snapshot === 'object') {
+        renderSnapshot = data.snapshot;
+        if (data.after && typeof data.after === 'object') renderSnapshotAfter = data.after;
+        if (Array.isArray(data.clicked)) interactionClicked = data.clicked;
+      }
       if (data.__aiexeSmokeDone) window.setTimeout(finish, 150);
     };
     window.addEventListener('message', onMessage);
     document.body.appendChild(iframe);
     iframe.srcdoc = html;
-    window.setTimeout(finish, 3000);
+    window.setTimeout(finish, 4500); // load + snapshot + interaction probe + settle
   });
 }
 
@@ -11926,12 +12010,18 @@ function resetWorkspaceForNewProject() {
 function isLikelyNewAgentFileTarget(toolEvents = [], path = '') {
   const normalized = normalizeWorkspacePath(path || '');
   if (!normalized || normalized === '/') return false;
-  return !Array.isArray(toolEvents) || !toolEvents.some((event) => (
-    event
-    && event.ok
-    && normalizeWorkspacePath(event.path || '') === normalized
-    && ['write_file', 'edit_file', 'read_file'].includes(String(event.tool || '').toLowerCase())
-  ));
+  return !Array.isArray(toolEvents) || !toolEvents.some((event) => {
+    if (!event || !event.ok) return false;
+    const tool = String(event.tool || '').toLowerCase();
+    if (['write_file', 'edit_file', 'read_file'].includes(tool)) {
+      return normalizeWorkspacePath(event.path || '') === normalized;
+    }
+    // search hits ("- /path:123:") prove the file exists — search counts as knowing it
+    if (tool === 'search_files') {
+      return new RegExp(`${normalized.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}:\\d+:`).test(String(event.observation || ''));
+    }
+    return false;
+  });
 }
 
 function syncMovedFileTab(srcPath, dstPath) {
@@ -17183,17 +17273,17 @@ function sanitizeAssistantText(text) {
   // Humanize internal tool names the model parrots into narration ("The
   // run_app blocker..."). Display-only; observations/prompts keep real names.
   clean = clean
-    .replace(/`?\brun_app\b`?/g, 'the app run')
-    .replace(/`?\brun_command\b`?/g, 'the terminal command')
-    .replace(/`?\bvalidate_files\b`?/g, 'validation')
-    .replace(/`?\bcheck_code\b`?/g, 'the code check')
-    .replace(/`?\bread_files\b`?/g, 'the file reads')
-    .replace(/`?\bread_file\b`?/g, 'the file read')
-    .replace(/`?\bwrite_file\b`?/g, 'the file write')
-    .replace(/`?\bedit_file\b`?/g, 'the file edit')
-    .replace(/`?\blist_dir\b`?/g, 'the folder scan')
-    .replace(/`?\bsearch_files\b`?/g, 'the file search')
-    .replace(/`?\bnew_project\b`?/g, 'the project setup');
+    .replace(/`?\brun_app\b`?/gi, 'the app run')
+    .replace(/`?\brun_command\b`?/gi, 'the terminal command')
+    .replace(/`?\bvalidate_files\b`?/gi, 'validation')
+    .replace(/`?\bcheck_code\b`?/gi, 'the code check')
+    .replace(/`?\bread_files\b`?/gi, 'the file reads')
+    .replace(/`?\bread_file\b`?/gi, 'the file read')
+    .replace(/`?\bwrite_file\b`?/gi, 'the file write')
+    .replace(/`?\bedit_file\b`?/gi, 'the file edit')
+    .replace(/`?\blist_dir\b`?/gi, 'the folder scan')
+    .replace(/`?\bsearch_files\b`?/gi, 'the file search')
+    .replace(/`?\bnew_project\b`?/gi, 'the project setup');
   // The replacements above carry their own "the"; when the model already wrote
   // an article ("the write_file") that produced "the the file write" — collapse.
   clean = clean.replace(/\b(the|a|an|this|that|these|those|its|our|your|my)\s+the\s+(app run|terminal command|code check|file reads|file read|file write|file edit|folder scan|file search|project setup)\b/gi, '$1 $2');

@@ -240,6 +240,43 @@
     return variants[Math.abs(Number(doneIdx) || 0) % variants.length];
   }
 
+  // Cross-run done-work memory per chat: survives Continue/stream crashes so
+  // final_check and PENDING_REQUIREMENTS never re-demand work an earlier run
+  // of the same task already did (the "inspect /style.css again" churn loop).
+  const agentChatDoneWork = new Map(); // chatId -> { task, read:Set, mutated:Map(path->note), validatePassed:bool }
+  function getAgentChatDoneWork(chatId, taskText) {
+    const key = String(chatId || '');
+    const task = String(taskText || '').trim();
+    // Short nudges ("continue", "try again") inherit the prior task's memory;
+    // a genuinely new task starts fresh.
+    const continueNudge = task.length <= 48;
+    let entry = agentChatDoneWork.get(key);
+    if (!entry || (entry.task !== task && !continueNudge)) {
+      entry = { task, read: new Set(), mutated: new Map(), validatePassed: false };
+      agentChatDoneWork.set(key, entry);
+    }
+    return entry;
+  }
+  function recordAgentDoneWork(done, ev, norm) {
+    if (!done || !ev || !ev.ok) return;
+    const tool = String(ev.tool || '').toLowerCase();
+    const path = typeof norm === 'function' ? norm(ev.path || '') : String(ev.path || '');
+    if (tool === 'new_project') {
+      // fresh workspace: prior accomplishments no longer apply
+      done.read.clear();
+      done.mutated.clear();
+      done.validatePassed = false;
+      return;
+    }
+    if (tool === 'read_file' && path && path !== '/') done.read.add(path);
+    if (['write_file', 'edit_file'].includes(tool) && path && path !== '/') {
+      const note = String(ev.observation || '').split('\n')[0].trim().slice(0, 160);
+      done.mutated.set(path, note || `${tool} ok: ${path}`);
+      done.validatePassed = false; // new mutation needs a fresh validate pass
+    }
+    if (tool === 'validate_files' && ev.validationPassed === true) done.validatePassed = true;
+  }
+
   function createAgentLoop(deps) {
     const recordDebugTrace = typeof deps.recordDebugTrace === 'function'
       ? deps.recordDebugTrace
@@ -262,6 +299,15 @@
         toolEvents.push = function pushWithRunLog(...items) {
           items.forEach((ev) => { try { runLog.emitToolEvent(ev); } catch (_) { /* observe-only */ } });
           return arrayPush.apply(this, items);
+        };
+      }
+      // Cross-run done-work memory: record every ok event (chains over runLog wrapper).
+      const doneWork = getAgentChatDoneWork(chatId, taskText);
+      {
+        const basePush = toolEvents.push.bind(toolEvents);
+        toolEvents.push = (...items) => {
+          items.forEach((ev) => { try { recordAgentDoneWork(doneWork, ev, deps.normalizeWorkspacePath); } catch (_) { /* observe-only */ } });
+          return basePush(...items);
         };
       }
       // Oscillation guard: if an edit returns a file to a prior content state, the
@@ -439,6 +485,8 @@
           && event.originalContent.trim());
         if (!editedExisting) return null;
         criteriaNudgeUsed = true;
+        // This is a slow model call — never leave the user staring at dead air.
+        setAgentProgress('Reviewing the result...');
         const check = await deps.verifyAgentDoneCriteria(taskText, toolEvents, planSpec);
         if (!check || check.ok || !Array.isArray(check.unmet) || !check.unmet.length) return null;
         return check.unmet;
@@ -1037,6 +1085,10 @@
         planSpec = deps.buildFallbackAgentPlanSpec(taskText, { chatId, forceProjectScope: true });
       }
       if (runLog && planSpec) runLog.emitPlan(planSpec);
+      // Ride cross-run done-work on the plan so requirement checks and the
+      // decision prompt see earlier runs' accomplishments (attach after emitPlan
+      // so the plan log stays clean of the live Set/Map).
+      if (planSpec) planSpec._priorRunDone = doneWork;
       // The chat's manual context rides in the contract so every prompt sees it.
       const chatManualContext = typeof deps.getChatManualContext === 'function'
         ? String(deps.getChatManualContext(chatId) || '').trim()
@@ -2408,7 +2460,16 @@
             || String(decision.tool || '').toLowerCase() === 'search_files')) {
           const inspections = countInspectionsSinceMutation(toolEvents);
           const inspectionCap = String(decision.tool || '').toLowerCase() === 'search_files' ? 12 : 8;
-          if (inspections >= inspectionCap) {
+          // Never budget-block a read the edit gate itself demanded (guard deadlock)
+          const readTarget = deps.normalizeWorkspacePath(decision.path || '');
+          const editGateDemandedRead = Boolean(readTarget) && toolEvents.slice(-4).some((event) => (
+            event
+            && !event.ok
+            && String(event.tool || '').toLowerCase() === 'edit_file'
+            && deps.normalizeWorkspacePath(event.path || '') === readTarget
+            && /read the file first|not known yet/i.test(String(event.observation || ''))
+          ));
+          if (inspections >= inspectionCap && !editGateDemandedRead) {
             recordDebugTrace('agent_inspection_budget_blocked', {
               chatId: String(chatId || ''), step: String(step), tool: String(decision.tool || ''), inspections: String(inspections),
             }, { chatId: String(chatId || ''), step, tool: String(decision.tool || ''), inspections });
