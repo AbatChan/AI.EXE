@@ -19344,37 +19344,8 @@ async function bootstrapAiExeUi() {
   // window on the first scan; the dedupe note makes the re-scan idempotent.
   setTimeout(() => { scanForInterruptedAgentRuns(); }, 3000);
   setTimeout(() => { scanForInterruptedAgentRuns(); }, 30000);
-  installSettingsClickProbe();
 }
 void bootstrapAiExeUi();
-
-// TEMP diagnostic (remove once the settings-modal report is closed): log what
-// actually renders 400ms after real clicks on the settings/account controls.
-function installSettingsClickProbe() {
-  const styleOf = (el) => {
-    if (!el) return null;
-    const cs = getComputedStyle(el);
-    const r = el.getBoundingClientRect();
-    return {
-      cls: String(el.className || ''), display: cs.display, opacity: cs.opacity,
-      rect: `${Math.round(r.left)},${Math.round(r.top)} ${Math.round(r.width)}x${Math.round(r.height)}`,
-    };
-  };
-  document.addEventListener('click', (evt) => {
-    const hit = evt.target && evt.target.closest
-      ? evt.target.closest('#loginBtn, #accountSettingsBtn, #settingsBtn, #accountPopover')
-      : null;
-    if (!hit) return;
-    const source = hit.id || 'accountPopover';
-    setTimeout(() => {
-      recordDebugTrace('request_settings_click_probe', {}, {
-        source,
-        popover: styleOf(accountPopover),
-        settings: styleOf(settingsBackdrop),
-      });
-    }, 400);
-  }, true);
-}
 
 // ── Project generation
 function handleProjKey(e) {

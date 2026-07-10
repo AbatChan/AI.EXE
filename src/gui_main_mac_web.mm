@@ -1559,7 +1559,10 @@ std::string BuildStreamEvent(const std::string &id, bool done,
 @implementation AiExeWebView
 - (void)mouseDown:(NSEvent *)event {
   NSPoint point = [self convertPoint:event.locationInWindow fromView:nil];
-  if (point.y >= NSHeight(self.bounds) - 38.0) {
+  // WKWebView is flipped (y=0 at the top): the titlebar band is small y,
+  // not height-38 (that was the bottom strip, eating clicks down there).
+  const CGFloat top_offset = self.isFlipped ? point.y : NSHeight(self.bounds) - point.y;
+  if (top_offset <= 38.0) {
     [self.window performWindowDragWithEvent:event];
     return;
   }
