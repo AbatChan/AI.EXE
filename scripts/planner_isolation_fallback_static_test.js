@@ -58,6 +58,17 @@ const agentLoopSrc = fs.readFileSync(path.join(__dirname, '..', 'ui', 'agent-loo
 assert.match(aiExe, /outputLimitExceeded: true/);
 assert.match(agentLoopSrc, /outputLimitNudges/);
 assert.match(agentLoopSrc, /agent_decision_output_limit_recovered/);
+// ...and the planner failure return must PROPAGATE the flag to the loop
+// (it rebuilds the object — dropping the flag silently disabled the recovery).
+assert.match(aiExe, /outputLimitExceeded: Boolean\(remote && remote\.outputLimitExceeded\)/);
+// Prevention lives in the decision prompt, template and fallback in sync.
+const decisionMd = fs.readFileSync(path.join(__dirname, '..', 'ui', 'prompts', 'developer_agent_decision.md'), 'utf8');
+const decisionRepairMd = fs.readFileSync(path.join(__dirname, '..', 'ui', 'prompts', 'developer_agent_decision_repair.md'), 'utf8');
+['NEVER inline a whole file in `content`'].forEach((marker) => {
+  assert.ok(decisionMd.includes(marker), 'decision md has the no-whole-file rule');
+  assert.ok(decisionRepairMd.includes(marker), 'decision repair md has the no-whole-file rule');
+  assert.ok(promptCore.includes(marker), 'prompt-core fallback has the no-whole-file rule');
+});
 
 // Model catalog: the picker renders only a curated slice, so the scraper must
 // sweep the search box (full-catalog discovery) and persist the swept flag.

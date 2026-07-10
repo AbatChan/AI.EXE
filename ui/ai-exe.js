@@ -12218,6 +12218,8 @@ async function requestAgentPlannerInferenceInner(prompt, maxTokens, grammar = ''
       httpStatus: (remote && remote.httpStatus) || 0,
       hardFail: Boolean(hardFail),
       nonRetriable: Boolean(remote && remote.nonRetriable),
+      // the loop steers on this instead of stopping (whole file inlined in a decision)
+      outputLimitExceeded: Boolean(remote && remote.outputLimitExceeded),
     };
   }
   return requestNativeAgentPlannerInference(prompt, maxTokens, grammar);
