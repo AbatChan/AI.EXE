@@ -8689,12 +8689,12 @@ async function requestAnthropicTextCompletion(prompt, maxTokens) {
 }
 
 function buildIsolatedAdapterChatId(scope = 'internal') {
-  const cleanScope = String(scope || 'internal')
-    .toLowerCase()
-    .replace(/[^a-z0-9_-]+/g, '-')
-    .replace(/^-|-$/g, '')
-    .slice(0, 40) || 'internal';
-  return `internal:${cleanScope}:${nowTs().toString(36)}:${Math.random().toString(36).slice(2, 10)}`;
+  // ONE persistent Venice scratch thread per AI.EXE chat, shared by every internal
+  // scope (planner/edit/router). Unique-per-call ids flooded the user's Venice
+  // sidebar with one-shot "Return EXACTLY ONE JSON..." threads and forced the
+  // adapter into delete sweeps (Chrome restore/park dance). The adapter's per-chat
+  // URL map turns a stable id into thread reuse automatically.
+  return `internal:chat:${String(activeChatId || 'shared')}`;
 }
 
 function inferInternalAdapterPromptScope(prompt = '') {

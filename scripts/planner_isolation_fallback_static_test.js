@@ -34,4 +34,15 @@ assert.match(promptCore, /Do not add adjacent pages, screens, or features/);
 assert.match(cmake, /AI_EXE_APP_VERSION "\d+\.\d+\.\d+"/);
 assert.equal(pkg.version, (cmake.match(/AI_EXE_APP_VERSION "([^"]+)"/) || [])[1]);
 
-console.log('PASS: planner calls are isolated, router-shaped plan JSON is rejected, Vite React fallback is preserved, and version is synced');
+// Venice thread hygiene: internal calls REUSE one stable scratch thread per chat
+// (no per-call timestamp/random ids → no sidebar flood, no delete sweeps), the
+// adapter never renames internal threads, renames get ONE attempt (no Chrome
+// restore/park retry loop), and cleanup never deletes the stable scratch threads.
+const adapter = fs.readFileSync(path.join(__dirname, '..', 'backend', 'app', 'venice_adapter_server.py'), 'utf8');
+assert.match(aiExe, /return `internal:chat:\$\{String\(activeChatId \|\| 'shared'\)\}`/);
+assert.doesNotMatch(aiExe, /internal:\$\{cleanScope\}:\$\{nowTs\(\)/);
+assert.match(adapter, /not _chat_key\.startswith\("id:internal:"\)/);
+assert.match(adapter, /key\.startswith\("id:internal:"\)/);
+assert.match(adapter, /not k\.startswith\("id:internal:chat:"\)/);
+
+console.log('PASS: planner calls are isolated, router-shaped plan JSON is rejected, Vite React fallback is preserved, Venice scratch threads are stable per chat, and version is synced');

@@ -2893,9 +2893,13 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
         # when smart naming completes; this backend path catches missed/raced attempts.
         try:
             _slug = _aiexe_slug_from_url(AIEXE_CHAT_URLS.get(_chat_key, "")) if _chat_key else ""
-            if _chat_key and _slug and _wanted_chat_name and AIEXE_THREAD_NAMED.get(_chat_key) != _wanted_chat_name:
-                if _aiexe_sidebar_op_with_restore(driver, lambda: _aiexe_rename_chat(driver, _slug, _wanted_chat_name), "RENAME"):
-                    AIEXE_THREAD_NAMED[_chat_key] = _wanted_chat_name
+            if (_chat_key and _slug and _wanted_chat_name
+                    and not _chat_key.startswith("id:internal:")
+                    and AIEXE_THREAD_NAMED.get(_chat_key) != _wanted_chat_name):
+                # ONE attempt per wanted name, success or not — a failing rename retried
+                # on every request made Chrome restore/park visibly over and over.
+                AIEXE_THREAD_NAMED[_chat_key] = _wanted_chat_name
+                _aiexe_sidebar_op_with_restore(driver, lambda: _aiexe_rename_chat(driver, _slug, _wanted_chat_name), "RENAME")
         except Exception as _e:
             print("AIEXE_RENAME deferred path failed: %s" % _e, flush=True)
 
@@ -3035,12 +3039,17 @@ def aiexe_rename_chat_route():
     if key and AIEXE_THREAD_NAMED.get(key) == name:
         return Response(json.dumps({"ok": True, "slug": slug, "skipped": "already named"}),
                         content_type='application/json; charset=utf-8')
+    if key.startswith("id:internal:"):
+        return Response(json.dumps({"ok": True, "slug": slug, "skipped": "internal thread"}),
+                        content_type='application/json; charset=utf-8')
     with selenium_lock:
         if not _aiexe_driver_alive(driver):
             driver = _aiexe_reopen_driver("browser session was closed before rename_chat")
-        ok = _aiexe_sidebar_op_with_restore(driver, lambda: _aiexe_rename_chat(driver, slug, name[:80]), "RENAME")
-        if ok and key:
+        # ONE attempt per wanted name — record it before trying so a failure is never
+        # retried into a visible Chrome restore/park loop.
+        if key:
             AIEXE_THREAD_NAMED[key] = name
+        ok = _aiexe_sidebar_op_with_restore(driver, lambda: _aiexe_rename_chat(driver, slug, name[:80]), "RENAME")
     return Response(json.dumps({"ok": bool(ok), "slug": slug}),
                     content_type='application/json; charset=utf-8')
 
@@ -3361,7 +3370,10 @@ def _aiexe_cleanup_internal_batch(min_count=1, respect_user_window=True, cap=20)
     """Delete tracked internal one-shot threads in ONE restore/park pass.
     Returns deleted count, or -1 when skipped (busy/user has the window)."""
     global driver
-    internal = [k for k in list(AIEXE_CHAT_URLS.keys()) if k.startswith("id:internal:")]
+    # Only legacy one-shot ids (id:internal:<scope>:<ts>:<rand>). The stable per-chat
+    # scratch threads (id:internal:chat:<chatId>) are REUSED across runs — never delete.
+    internal = [k for k in list(AIEXE_CHAT_URLS.keys())
+                if k.startswith("id:internal:") and not k.startswith("id:internal:chat:")]
     if len(internal) < max(1, int(min_count)):
         return 0
     if not selenium_lock.acquire(blocking=False):
