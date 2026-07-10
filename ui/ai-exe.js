@@ -14652,6 +14652,9 @@ const composerModelPill = document.getElementById('composerModelPill');
 const composerModelPop = document.getElementById('composerModelPop');
 const composerModelSearch = document.getElementById('composerModelSearch');
 const composerModelList = document.getElementById('composerModelList');
+const composerAdapterStartBtn = document.getElementById('composerAdapterStartBtn');
+let veniceAdapterLastKnownStarting = false;
+let composerAdapterStatusPollTimer = 0;
 
 function composerModelChoices() {
   const provider = getSelectedInferenceProvider();
@@ -14665,15 +14668,35 @@ function composerModelChoices() {
 
 function renderComposerModelPill() {
   if (!composerModelWrap || !composerModelPill) return;
+  const adapterOffline = isVeniceAdapterSelected() && !veniceAdapterLastKnownServing;
+  if (composerAdapterStartBtn) {
+    composerAdapterStartBtn.classList.toggle('hidden', !adapterOffline);
+    composerAdapterStartBtn.disabled = Boolean(_adapterStartingForSend || veniceAdapterLastKnownStarting);
+    const label = composerAdapterStartBtn.querySelector('span');
+    if (label) label.textContent = composerAdapterStartBtn.disabled ? 'Starting…' : 'Start adapter';
+  }
+  composerModelPill.style.display = adapterOffline ? 'none' : '';
   const c = composerModelChoices();
-  if (!c || !c.list.length) { composerModelWrap.style.display = 'none'; return; }
+  if (!adapterOffline && (!c || !c.list.length)) { composerModelWrap.style.display = 'none'; return; }
   composerModelWrap.style.display = '';
+  if (adapterOffline) {
+    if (typeof recalcComposerChipOverflow === 'function') setTimeout(recalcComposerChipOverflow, 0);
+    return;
+  }
   const cur = String(getProviderModel(c.provider) || '');
   const priced = isProviderModelPriced(c.provider, cur);
   setModelButtonContent(composerModelPill, cur || 'Model', priced);
   setAppTooltip(composerModelPill, '');   // coin icon carries the only tooltip
   // The pill's width changes the space left for the action chips — re-run the +N overflow.
   if (typeof recalcComposerChipOverflow === 'function') setTimeout(recalcComposerChipOverflow, 0);
+}
+
+if (composerAdapterStartBtn) {
+  composerAdapterStartBtn.addEventListener('click', () => {
+    // This composer control starts the adapter only. Unlike the send-error toast,
+    // it never submits a draft the user is still composing.
+    void startVeniceAdapterThenResend({ resendPending: false });
+  });
 }
 
 function buildComposerModelList(filter) {
@@ -14743,6 +14766,24 @@ async function refreshComposerModelsFromProvider() {
     const provider = getSelectedInferenceProvider();
     const def = getInferenceProviderDef(provider);
     if (!def || def.protocol !== 'ollama') { renderComposerModelPill(); return; }
+    if (provider === VENICE_ADAPTER_PROVIDER_ID) {
+      try {
+        const statusRes = await fetch(getAIExeBackendUrl() + '/api/adapter/status');
+        const status = statusRes.ok ? await statusRes.json() : null;
+        veniceAdapterLastKnownServing = Boolean(status && status.serving);
+        veniceAdapterLastKnownStarting = Boolean(status && status.running && !status.serving);
+      } catch (_) {
+        veniceAdapterLastKnownServing = false;
+        veniceAdapterLastKnownStarting = false;
+      }
+      if (!veniceAdapterLastKnownServing) {
+        renderComposerModelPill();
+        clearTimeout(composerAdapterStatusPollTimer);
+        composerAdapterStatusPollTimer = setTimeout(refreshComposerModelsFromProvider, 2500);
+        return;
+      }
+      clearTimeout(composerAdapterStatusPollTimer);
+    }
     const r = await fetch(getAIExeBackendUrl() + '/api/provider-health');
     if (!r.ok) { renderComposerModelPill(); return; }
     const h = await r.json();
@@ -16891,16 +16932,18 @@ async function ensureAdapterInstalledWithFeedback(backend) {
   }
 }
 
-async function startVeniceAdapterThenResend() {
+async function startVeniceAdapterThenResend(options = {}) {
   if (_adapterStartingForSend) return;
+  const resendPending = options.resendPending !== false;
   const backend = getAIExeBackendUrl();
   const user = String(appSettings.veniceAdapterUsername || '').trim();
   const pass = String(appSettings.veniceAdapterPassword || '');
   // Snapshot what the user meant to send when they hit send. If they keep typing while the
   // adapter boots (~30s), we must NOT auto-send their in-progress text — only auto-send when
   // the box is still exactly that snapshot.
-  const pendingAtStart = String((mainInput && mainInput.value) || '').trim();
+  const pendingAtStart = resendPending ? String((mainInput && mainInput.value) || '').trim() : '';
   _adapterStartingForSend = true;
+  if (typeof renderComposerModelPill === 'function') renderComposerModelPill();
   try {
     let st = null;
     try { st = await (await fetch(backend + '/api/adapter/status')).json(); } catch (_) {}
@@ -16908,6 +16951,7 @@ async function startVeniceAdapterThenResend() {
       const installed = await ensureAdapterInstalledWithFeedback(backend);
       if (!installed) {
         _adapterStartingForSend = false;
+        if (typeof renderComposerModelPill === 'function') renderComposerModelPill();
         return;
       }
     }
@@ -16922,6 +16966,7 @@ async function startVeniceAdapterThenResend() {
     const startPayload = await startRes.json();
     if (!startPayload || !startPayload.ok) {
       _adapterStartingForSend = false;
+      if (typeof renderComposerModelPill === 'function') renderComposerModelPill();
       showAppNotification({
         title: "Couldn't start adapter",
         message: String((startPayload && startPayload.detail) || 'Network or backend issue while starting the adapter.'),
@@ -16941,13 +16986,16 @@ async function startVeniceAdapterThenResend() {
         resendStatusRetries = 0;
         if (s && s.serving) {
           _adapterStartingForSend = false;
+          veniceAdapterLastKnownServing = true;
+          veniceAdapterLastKnownStarting = false;
           if (typeof refreshAdapterStatus === 'function') refreshAdapterStatus();
           const nowText = String((mainInput && mainInput.value) || '').trim();
           // Only auto-send if the box still holds exactly what the user sent — if they've kept
           // typing (or cleared it), leave their draft alone and just say it's ready.
-          const autoSend = Boolean(nowText && nowText === pendingAtStart);
+          const autoSend = Boolean(resendPending && nowText && nowText === pendingAtStart);
           showAppNotification({ title: 'Adapter ready', message: autoSend ? 'Sending your message…' : 'Venice Pro is ready — press send.', kind: 'success' });
           if (typeof refreshComposerModelsFromProvider === 'function') void refreshComposerModelsFromProvider();
+          if (typeof renderComposerModelPill === 'function') renderComposerModelPill();
           if (autoSend && typeof sendMessage === 'function') void sendMessage();  // resend only the unchanged snapshot
           return;
         }
@@ -16959,9 +17007,11 @@ async function startVeniceAdapterThenResend() {
       }
     }
     _adapterStartingForSend = false;
+    if (typeof renderComposerModelPill === 'function') renderComposerModelPill();
     showAppNotification({ title: "Adapter didn't start", message: 'Check Settings → Provider (Chrome installed? login/captcha?). Then resend.', kind: 'error', durationMs: 8000 });
   } catch (err) {
     _adapterStartingForSend = false;
+    if (typeof renderComposerModelPill === 'function') renderComposerModelPill();
     showAppNotification({ title: "Couldn't start adapter", message: String((err && err.message) || err), kind: 'error' });
   }
 }

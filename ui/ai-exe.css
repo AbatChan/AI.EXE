@@ -6425,6 +6425,35 @@ html.platform-mac .settings-sidebar {
   transition: color 0.18s ease, background 0.18s ease, border-color 0.18s ease;
 }
 .composer-model-pill:hover { color: var(--text1, inherit); background: var(--bg2, rgba(255,255,255,0.05)); }
+.composer-adapter-start {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  width: auto;
+  max-width: 148px;
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid rgba(0, 229, 255, 0.32);
+  border-radius: 999px;
+  background: linear-gradient(135deg, rgba(0, 229, 255, 0.14), rgba(124, 58, 237, 0.12));
+  color: #a7f6ff;
+  font-family: var(--font-sans);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.15px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: transform 0.18s var(--ease-out), border-color 0.18s ease, box-shadow 0.18s ease, background 0.18s ease;
+}
+.composer-adapter-start svg { width: 13px; height: 13px; flex: 0 0 auto; }
+.composer-adapter-start:hover:not(:disabled) {
+  border-color: rgba(0, 229, 255, 0.68);
+  background: linear-gradient(135deg, rgba(0, 229, 255, 0.22), rgba(124, 58, 237, 0.17));
+  box-shadow: 0 4px 16px rgba(0, 229, 255, 0.18);
+  transform: translateY(-1px);
+}
+.composer-adapter-start:disabled { cursor: wait; opacity: 0.72; }
+.composer-adapter-start.hidden { display: none; }
 .model-name-text {
   min-width: 0;
   overflow: hidden;
