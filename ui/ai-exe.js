@@ -7491,9 +7491,7 @@ function setSendLoading(loading, loadingHere = loading) {
   if (!sendBtn) return;
   sendBtn.classList.toggle('loading', loadingHere);
   sendBtn.classList.toggle('cancel-mode', loadingHere);
-  sendBtn.title = loadingHere ? 'Stop generation' : (loading ? 'Another chat is still responding' : 'Send');
-  sendBtn.setAttribute('aria-label', loadingHere ? 'Stop generation' : 'Send message');
-  sendBtn.disabled = false;
+  syncSendButtonAvailability(loading, loadingHere);
   if (continueBtn) {
     continueBtn.disabled = loading;
   }
@@ -7543,6 +7541,22 @@ function setSendLoading(loading, loadingHere = loading) {
     setComposerMenuOpen(false);
   }
   updateContinueButtonVisibility();
+}
+
+function syncSendButtonAvailability(operationRunning = pendingInferenceCount > 0, loadingHere = Boolean(operationRunning && isCurrentViewInferenceChat())) {
+  if (!sendBtn) return;
+  if (loadingHere) {
+    sendBtn.disabled = false;
+    sendBtn.title = 'Pause generation';
+    sendBtn.setAttribute('aria-label', 'Pause generation');
+    return;
+  }
+  const hasContent = Boolean(mainInput && String(mainInput.value || '').trim());
+  sendBtn.disabled = !hasContent;
+  sendBtn.title = hasContent
+    ? (operationRunning ? 'Queue message' : 'Send message')
+    : (operationRunning ? 'Another chat is still responding' : 'Type a message to send');
+  sendBtn.setAttribute('aria-label', hasContent ? (operationRunning ? 'Queue message' : 'Send message') : 'Type a message to send');
 }
 
 function isCurrentViewInferenceChat() {
@@ -16150,6 +16164,7 @@ function autoResize(el) {
   const cc = document.getElementById('charCount');
   if (cc) cc.textContent = `${el.value.length} / ∞`;
   updateTokenRing();
+  syncSendButtonAvailability();
 }
 
 function clearInputBox() {
@@ -16158,6 +16173,7 @@ function clearInputBox() {
   const cc = document.getElementById('charCount');
   if (cc) cc.textContent = '0 / ∞';
   updateTokenRing();
+  syncSendButtonAvailability();
 }
 
 function setMicListeningState(listening) {

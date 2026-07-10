@@ -501,15 +501,16 @@
                   <rect x="7" y="7" width="10" height="10" rx="2"></rect>
                 </svg>
               </button>
-              <button class="send-btn" id="sendBtn" onclick="handleSendButtonClick()" aria-label="Send message">
+              <button class="send-btn" id="sendBtn" onclick="handleSendButtonClick()" aria-label="Send message" disabled>
                 <svg class="send-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                  stroke-width="2.5">
-                  <line x1="22" y1="2" x2="11" y2="13"></line>
-                  <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+                  stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M12 19V5"></path>
+                  <path d="m6.5 10.5 5.5-5.5 5.5 5.5"></path>
                 </svg>
                 <svg class="cancel-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                  stroke-width="2">
-                  <rect x="5.5" y="5.5" width="13" height="13" rx="2.2" fill="currentColor" stroke="none"></rect>
+                  stroke-width="2" aria-hidden="true">
+                  <rect x="6.5" y="5.5" width="3.8" height="13" rx="1" fill="currentColor" stroke="none"></rect>
+                  <rect x="13.7" y="5.5" width="3.8" height="13" rx="1" fill="currentColor" stroke="none"></rect>
                 </svg>
               </button>
             </div>
