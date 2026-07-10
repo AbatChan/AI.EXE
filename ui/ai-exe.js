@@ -838,7 +838,6 @@ const searchDropdown = document.getElementById('searchDropdown');
 const searchPaletteBackdrop = document.getElementById('searchPaletteBackdrop');
 const sidebarSearchBtn = document.getElementById('sidebarSearchBtn');
 const floatingChatBtn = document.getElementById('floatingChatBtn');
-const floatingWorkBtn = document.getElementById('floatingWorkBtn');
 const plusBtn = document.getElementById('plusBtn');
 const plusModalBackdrop = document.getElementById('plusModalBackdrop');
 const plusModalCloseBtn = document.getElementById('plusModalCloseBtn');
@@ -3355,7 +3354,6 @@ function closeSearchPalette() {
 function syncFloatingViewToggle() {
   const work = middleViewMode !== 'chat' || getActiveTabId() !== 'chat';
   if (floatingChatBtn) { floatingChatBtn.classList.toggle('active', !work); floatingChatBtn.setAttribute('aria-selected', work ? 'false' : 'true'); }
-  if (floatingWorkBtn) { floatingWorkBtn.classList.toggle('active', work); floatingWorkBtn.setAttribute('aria-selected', work ? 'true' : 'false'); }
 }
 if (sidebarSearchBtn) sidebarSearchBtn.addEventListener('click', openSearchPalette);
 if (searchPaletteBackdrop) searchPaletteBackdrop.addEventListener('click', (e) => { if (e.target === searchPaletteBackdrop) closeSearchPalette(); });
