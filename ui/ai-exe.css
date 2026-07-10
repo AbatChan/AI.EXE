@@ -581,13 +581,13 @@ body.resizing-panels .panel-resizer {
   cursor: pointer;
   transition: color 0.18s ease, background 0.18s ease;
 }
-.sidebar-search-btn svg { width: 17px; height: 17px; }
+.sidebar-search-btn svg { width: 18px; height: 18px; }
 .sidebar-search-btn:hover { color: var(--accent); background: rgba(0, 229, 255, 0.035); }
 .left-sidebar.collapsed .sidebar-top-actions { display: none; }
 
 .sidebar-toggle svg {
-  width: 17px;
-  height: 17px;
+  width: 18px;
+  height: 18px;
 }
 
 .sidebar-inner {
