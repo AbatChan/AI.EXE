@@ -1849,6 +1849,10 @@ std::string BuildStreamEvent(const std::string &id, bool done,
       ExtractJsonStringField(requestJson, "storage");
   const std::string storage_key =
       ExtractJsonStringField(requestJson, "storageKey");
+  const int storage_offset =
+      std::max(0, ExtractJsonIntField(requestJson, "offset", 0));
+  const int storage_limit =
+      std::clamp(ExtractJsonIntField(requestJson, "limit", 48000), 1024, 64000);
   int max_tokens = ExtractJsonIntField(requestJson, "maxTokens", 0);
   if (max_tokens <= 0) {
     max_tokens = ExtractJsonIntField(requestJson, "max_tokens", 0);
@@ -1875,6 +1879,22 @@ std::string BuildStreamEvent(const std::string &id, bool done,
       message = op_err;
     } else if (!storage_key.empty()) {
       output = ExtractJsonStringField(saved_storage, storage_key);
+    }
+  } else if (action == "appStorageReadKeyChunk") {
+    std::string saved_storage;
+    if (!ReadUiStateBackup(&saved_storage, &op_err)) {
+      ok = false;
+      message = op_err;
+    } else if (!storage_key.empty()) {
+      const std::string value = ExtractJsonStringField(saved_storage, storage_key);
+      const size_t start = std::min(static_cast<size_t>(storage_offset), value.size());
+      size_t end = std::min(start + static_cast<size_t>(storage_limit), value.size());
+      while (end > start && end < value.size() &&
+             (static_cast<unsigned char>(value[end]) & 0xC0) == 0x80) {
+        --end;
+      }
+      output = value.substr(start, end - start);
+      message = std::to_string(end) + "/" + std::to_string(value.size());
     }
   } else if (action == "appStorageWrite") {
     if (!WriteUiStateBackup(persisted_storage, &op_err)) {
@@ -2489,6 +2509,48 @@ std::string BuildStreamEvent(const std::string &id, bool done,
   WKWebViewConfiguration *config = [[WKWebViewConfiguration alloc] init];
   config.preferences.javaScriptCanOpenWindowsAutomatically = NO;
   WKUserContentController *controller = [[WKUserContentController alloc] init];
+  std::string saved_ui_state;
+  std::string saved_ui_state_err;
+  if (ReadUiStateBackup(&saved_ui_state, &saved_ui_state_err) && !saved_ui_state.empty()) {
+    NSData *backup_data = [NSData dataWithBytes:saved_ui_state.data()
+                                          length:saved_ui_state.size()];
+    NSError *backup_error = nil;
+    id parsed_backup = [NSJSONSerialization JSONObjectWithData:backup_data
+                                                       options:0
+                                                         error:&backup_error];
+    if (!backup_error && [parsed_backup isKindOfClass:[NSDictionary class]]) {
+      NSDictionary *backup = (NSDictionary *)parsed_backup;
+      [backup enumerateKeysAndObjectsUsingBlock:^(id raw_key, id raw_value, BOOL *stop) {
+        (void)stop;
+        if (![raw_key isKindOfClass:[NSString class]] ||
+            ![raw_value isKindOfClass:[NSString class]]) return;
+        NSString *key = (NSString *)raw_key;
+        NSString *value = (NSString *)raw_value;
+        NSUInteger offset = 0;
+        while (offset < value.length) {
+          const NSUInteger wanted = MIN((NSUInteger)24000, value.length - offset);
+          NSRange range = [value rangeOfComposedCharacterSequencesForRange:NSMakeRange(offset, wanted)];
+          NSString *chunk = [value substringWithRange:range];
+          NSData *pair_data = [NSJSONSerialization dataWithJSONObject:@[ key, chunk ] options:0 error:nil];
+          NSString *pair_json = [[NSString alloc] initWithData:pair_data encoding:NSUTF8StringEncoding];
+          NSString *source = [NSString stringWithFormat:
+              @"(function(){var p=%@,s=window.__aiExeStorageRestore||(window.__aiExeStorageRestore={});s[p[0]]=(s[p[0]]||'')+p[1];})();",
+              pair_json];
+          [controller addUserScript:[[WKUserScript alloc]
+              initWithSource:source
+               injectionTime:WKUserScriptInjectionTimeAtDocumentStart
+            forMainFrameOnly:YES]];
+          offset = NSMaxRange(range);
+        }
+      }];
+      NSString *commit_restore =
+          @"(function(){try{var s=window.__aiExeStorageRestore||{},changed=false;Object.keys(s).forEach(function(k){if(k.indexOf('ai_exe_')!==0)return;var saved=s[k],current=localStorage.getItem(k);if(k==='ai_exe_auth_v1'){try{var a=JSON.parse(saved||'{}'),b=JSON.parse(current||'{}'),users={},list=[];(a.users||[]).concat(b.users||[]).forEach(function(u){if(u&&u.usernameKey)users[u.usernameKey]=u;});Object.keys(users).forEach(function(id){list.push(users[id]);});var merged={users:list,currentUser:b.currentUser||a.currentUser||null};var next=JSON.stringify(merged);if(next!==current){localStorage.setItem(k,next);changed=true;}return;}catch(e){}}if(k.indexOf('ai_exe_chats_')===0){try{var oldChats=JSON.parse(saved||'[]'),newChats=JSON.parse(current||'[]'),byId={};oldChats.concat(newChats).forEach(function(chat){if(chat&&chat.id)byId[chat.id]=chat;});var mergedChats=Object.keys(byId).map(function(id){return byId[id];});if(mergedChats.length>newChats.length){localStorage.setItem(k,JSON.stringify(mergedChats));changed=true;}return;}catch(e){}}if(current===null){localStorage.setItem(k,saved);changed=true;}});delete window.__aiExeStorageRestore;if(changed&&sessionStorage.getItem('aiExeStorageRestoreReload')!=='1'){sessionStorage.setItem('aiExeStorageRestoreReload','1');location.reload();}}catch(e){}})();";
+      [controller addUserScript:[[WKUserScript alloc]
+          initWithSource:commit_restore
+           injectionTime:WKUserScriptInjectionTimeAtDocumentEnd
+        forMainFrameOnly:YES]];
+    }
+  }
   [controller addScriptMessageHandler:self name:@"aiexe"];
   config.userContentController = controller;
 

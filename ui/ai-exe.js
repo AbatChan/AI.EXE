@@ -230,12 +230,31 @@ function installNativeUiStorageBackup() {
 async function hydrateNativeUiStorage() {
   if (!isMacNativeUi()) return;
   const readKey = async (key) => {
-    try {
-      const response = await nativeBridge.invoke('appStorageReadKey', { storageKey: key, timeoutMs: 12000 });
-      return response && response.ok && typeof response.output === 'string' ? response.output : '';
-    } catch (_) {
-      return '';
+    let value = '';
+    let offset = 0;
+    for (let part = 0; part < 256; part += 1) {
+      let response;
+      try {
+        response = await nativeBridge.invoke('appStorageReadKeyChunk', {
+          storageKey: key,
+          offset,
+          limit: 48000,
+          timeoutMs: 12000,
+        });
+      } catch (_) {
+        return '';
+      }
+      if (!response || !response.ok || typeof response.output !== 'string') return '';
+      value += response.output;
+      const progress = String(response.message || '').match(/^(\d+)\/(\d+)$/);
+      if (!progress) return value;
+      const nextOffset = Number(progress[1]) || 0;
+      const total = Number(progress[2]) || 0;
+      if (nextOffset >= total) return value;
+      if (nextOffset <= offset) return '';
+      offset = nextOffset;
     }
+    return '';
   };
   const restoreKey = async (key) => {
     if (!key || localStorage.getItem(key) !== null) return '';
@@ -743,10 +762,10 @@ function enterChatView() {
 }
 
 function openWorkView() {
-  if (getActiveTabId && getActiveTabId() !== 'chat') {
+  if (activeTabId !== 'chat') {
     renderMiddleView();
   } else if (Array.isArray(openFileTabs) && openFileTabs.length) {
-    switchToTab(openFileTabs[openFileTabs.length - 1].id);
+    switchToTab(openFileTabs[openFileTabs.length - 1].path);
   } else {
     openCodeArtifactsView(codeBtn);
     return;
@@ -3439,7 +3458,7 @@ function closeSearchPalette() {
   if (searchDropdown) searchDropdown.classList.remove('open');
 }
 function syncFloatingViewToggle() {
-  const work = middleViewMode !== 'chat' || getActiveTabId() !== 'chat';
+  const work = middleViewMode !== 'chat' || activeTabId !== 'chat';
   if (floatingChatBtn) { floatingChatBtn.classList.toggle('active', !work); floatingChatBtn.setAttribute('aria-selected', work ? 'false' : 'true'); }
 }
 if (sidebarSearchBtn) sidebarSearchBtn.addEventListener('click', openSearchPalette);
@@ -19305,7 +19324,6 @@ async function resolveTypingFallback(chatId) {
 
 async function bootstrapAiExeUi() {
   installNativeUiStorageBackup();
-  await hydrateNativeUiStorage();
   loadAuthStore();
   updateLoginUi();
   loadAppSettings();
