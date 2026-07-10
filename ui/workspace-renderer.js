@@ -181,8 +181,6 @@
       row.className = `ws-row ws-draft ${workspaceDraft.kind}`;
       row.classList.add('selected');
       row.style.paddingLeft = `${6 + (depth * 6)}px`;
-      row.classList.add('ui-tooltip-anchor');
-      row.dataset.tooltip = parent === '/' ? '/' : parent;
 
       const spacer = document.createElement('span');
       spacer.className = 'ws-spacer';
@@ -274,8 +272,7 @@
       if (deps.getWorkspaceSelectedPaths().has(entry.path)) {
         row.classList.add('selected');
       }
-      row.classList.add('ui-tooltip-anchor');
-      row.dataset.tooltip = entry.path;
+      // No tooltip: the row already shows the name; a tip repeating it is noise.
 
       if (entry.kind === 'folder') {
         const state = deps.getWorkspaceNodeState(entry.path);
@@ -621,7 +618,7 @@
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 6 15 12 9 18"></polyline></svg>
           </button>
           <span class="ws-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7.5a2 2 0 0 1 2-2h3.6a1 1 0 0 1 .7.3l1.4 1.4a1 1 0 0 0 .7.3H18a2 2 0 0 1 2 2v6.5a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"></path></svg></span>
-          <span class="ws-label ui-tooltip-anchor" data-tooltip="${rootLabel}">${rootLabel}</span>
+          <span class="ws-label">${rootLabel}</span>
         `;
       const rootChev = rootRow.querySelector('.ws-chevron');
       if (rootChev) {

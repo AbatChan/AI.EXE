@@ -13198,8 +13198,13 @@ function renderArtifactBrowser() {
         : '';
       const preview = String(item.content || '').trim().slice(0, 180);
       const allowDelete = Boolean(item) && (isCodeArtifact(item) || item.type !== 'canvas');
+      const kindLabel = langBadge || (item.type === 'canvas' ? 'CANVAS' : 'FILE');
       row.innerHTML = `
-          <button type="button" class="artifact-row-main">
+          <button type="button" class="artifact-row-main" aria-label="Open ${escapeHtml(item.name)}">
+            <div class="artifact-row-preview-head">
+              <span class="artifact-row-badge">${escapeHtml(kindLabel)}</span>
+              <span class="artifact-row-open-hint">Open</span>
+            </div>
             ${preview ? `<div class="artifact-row-preview">${escapeHtml(preview)}</div>` : ''}
           </button>
           <div class="artifact-row-actions">
@@ -13221,7 +13226,6 @@ function renderArtifactBrowser() {
             </button>` : ''}
           </div>
           <div class="artifact-row-info">
-            ${langBadge ? `<div class="artifact-row-badge">${escapeHtml(langBadge)}</div>` : ''}
             <div class="artifact-row-title">${escapeHtml(item.name)}</div>
             <div class="artifact-row-meta">${escapeHtml(chatName)} • ${escapeHtml(formatTimeAgo(item.createdAt))} • ${escapeHtml(item.size || '0 B')}</div>
           </div>
