@@ -14,15 +14,20 @@
       if (deps.workspaceBackBtn) {
         deps.workspaceBackBtn.style.display = deps.getWorkspaceCurrentPath() === '/' ? 'none' : 'inline-flex';
       }
+      // Branded tooltip (ui-tooltip-anchor + data-tooltip), not the native title tip.
       if (deps.expCloseProjectBtn) {
         deps.expCloseProjectBtn.disabled = !hasOpenProject;
-        deps.expCloseProjectBtn.title = hasOpenProject
+        deps.expCloseProjectBtn.classList.add('ui-tooltip-anchor');
+        deps.expCloseProjectBtn.removeAttribute('title');
+        deps.expCloseProjectBtn.dataset.tooltip = hasOpenProject
           ? 'Close the current open project'
           : 'No project is currently open';
       }
       if (deps.expDeleteSelectedBtn) {
         deps.expDeleteSelectedBtn.disabled = deletablePaths.length === 0;
-        deps.expDeleteSelectedBtn.title = deletablePaths.length > 0
+        deps.expDeleteSelectedBtn.classList.add('ui-tooltip-anchor');
+        deps.expDeleteSelectedBtn.removeAttribute('title');
+        deps.expDeleteSelectedBtn.dataset.tooltip = deletablePaths.length > 0
           ? 'Move the selected file(s) or folder(s) to Trash'
           : 'Select a file or folder inside the project to delete it';
       }
@@ -176,7 +181,8 @@
       row.className = `ws-row ws-draft ${workspaceDraft.kind}`;
       row.classList.add('selected');
       row.style.paddingLeft = `${6 + (depth * 6)}px`;
-      row.title = parent === '/' ? '/' : parent;
+      row.classList.add('ui-tooltip-anchor');
+      row.dataset.tooltip = parent === '/' ? '/' : parent;
 
       const spacer = document.createElement('span');
       spacer.className = 'ws-spacer';
@@ -268,7 +274,8 @@
       if (deps.getWorkspaceSelectedPaths().has(entry.path)) {
         row.classList.add('selected');
       }
-      row.title = entry.path;
+      row.classList.add('ui-tooltip-anchor');
+      row.dataset.tooltip = entry.path;
 
       if (entry.kind === 'folder') {
         const state = deps.getWorkspaceNodeState(entry.path);
@@ -614,7 +621,7 @@
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 6 15 12 9 18"></polyline></svg>
           </button>
           <span class="ws-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7.5a2 2 0 0 1 2-2h3.6a1 1 0 0 1 .7.3l1.4 1.4a1 1 0 0 0 .7.3H18a2 2 0 0 1 2 2v6.5a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"></path></svg></span>
-          <span class="ws-label" title="${rootLabel}">${rootLabel}</span>
+          <span class="ws-label ui-tooltip-anchor" data-tooltip="${rootLabel}">${rootLabel}</span>
         `;
       const rootChev = rootRow.querySelector('.ws-chevron');
       if (rootChev) {
