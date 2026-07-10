@@ -531,8 +531,8 @@ body.resizing-panels .panel-resizer {
 
 .sidebar-toggle {
   position: static;
-  width: 34px;
-  height: 34px;
+  width: 28px;
+  height: 28px;
   padding: 0;
   line-height: 0;
   border-radius: 9px;
@@ -561,17 +561,17 @@ body.resizing-panels .panel-resizer {
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  gap: 4px;
+  gap: 2px;
   position: absolute;
-  top: 8px;
-  right: 10px;
+  top: 42px;
+  right: 12px;
   padding: 0;
   z-index: 12;
 }
 
 .sidebar-search-btn {
-  width: 32px;
-  height: 32px;
+  width: 28px;
+  height: 28px;
   border: 0;
   border-radius: 9px;
   background: transparent;
@@ -581,20 +581,13 @@ body.resizing-panels .panel-resizer {
   cursor: pointer;
   transition: color 0.18s ease, background 0.18s ease;
 }
-.sidebar-search-btn svg { width: 19px; height: 19px; }
+.sidebar-search-btn svg { width: 17px; height: 17px; }
 .sidebar-search-btn:hover { color: var(--accent); background: rgba(0, 229, 255, 0.035); }
-.left-sidebar.collapsed .sidebar-top-actions {
-  top: 56px;
-  right: 0;
-  left: 0;
-  flex-direction: column;
-  justify-content: center;
-  gap: 6px;
-}
+.left-sidebar.collapsed .sidebar-top-actions { display: none; }
 
 .sidebar-toggle svg {
-  width: 19px;
-  height: 19px;
+  width: 17px;
+  height: 17px;
 }
 
 .sidebar-inner {
@@ -602,7 +595,7 @@ body.resizing-panels .panel-resizer {
   flex-direction: column;
   flex: 1;
   overflow: hidden;
-  padding-top: 12px;
+  padding-top: 42px;
   opacity: 1;
   transition: opacity 0.2s;
 }
@@ -622,7 +615,7 @@ body.resizing-panels .panel-resizer {
 }
 
 .sidebar-brand-row {
-  padding: 0 46px 9px 10px;
+  padding: 0 76px 9px 10px;
 }
 
 .update-badge {
@@ -8123,9 +8116,9 @@ body.right-panel-collapsed #rightResizer {
   display: none;
   flex-direction: column;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   padding: 12px 0;
-  padding-top: 52px;
+  padding-top: 44px;
 }
 
 .left-sidebar.collapsed .collapsed-icons {
@@ -8133,9 +8126,9 @@ body.right-panel-collapsed #rightResizer {
 }
 
 .col-icon {
-  width: 30px;
-  height: 30px;
-  border-radius: 6px;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -8146,13 +8139,13 @@ body.right-panel-collapsed #rightResizer {
 }
 
 .col-icon .icon-svg {
-  width: 15px;
-  height: 15px;
+  width: 18px;
+  height: 18px;
 }
 
 .col-icon:hover {
   color: var(--accent);
-  background: var(--panel2);
+  background: rgba(0, 229, 255, 0.04);
 }
 
 /* Typing indicator */

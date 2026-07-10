@@ -19311,7 +19311,6 @@ async function bootstrapAiExeUi() {
   loadAppSettings();
   startBackendProviderSync();  // push the saved provider/key to the backend on startup + retry
   moveGlobalControlsIntoSidebar();
-  setupMacTopbarNativeDrag();
   setupComposerKeyboardDiagnostics();
   setupComposerEnterCaptureSubmitGuard();
   hydrateCustomTooltips(document);

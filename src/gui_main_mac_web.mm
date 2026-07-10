@@ -1551,6 +1551,22 @@ std::string BuildStreamEvent(const std::string &id, bool done,
 
 } // namespace
 
+// The web view fills the transparent titlebar. Let AppKit own dragging in the
+// top titlebar band so dragging never selects page text or depends on JS.
+@interface AiExeWebView : WKWebView
+@end
+
+@implementation AiExeWebView
+- (void)mouseDown:(NSEvent *)event {
+  NSPoint point = [self convertPoint:event.locationInWindow fromView:nil];
+  if (point.y >= NSHeight(self.bounds) - 38.0) {
+    [self.window performWindowDragWithEvent:event];
+    return;
+  }
+  [super mouseDown:event];
+}
+@end
+
 @interface AppDelegate : NSObject <NSApplicationDelegate, NSWindowDelegate,
                                    WKScriptMessageHandler, WKUIDelegate>
 @end
@@ -2476,8 +2492,8 @@ std::string BuildStreamEvent(const std::string &id, bool done,
   [controller addScriptMessageHandler:self name:@"aiexe"];
   config.userContentController = controller;
 
-  _webView = [[WKWebView alloc] initWithFrame:[[_window contentView] bounds]
-                                configuration:config];
+  _webView = [[AiExeWebView alloc] initWithFrame:[[_window contentView] bounds]
+                                  configuration:config];
   [_webView setUIDelegate:self];
   [_webView setAutoresizingMask:(NSViewWidthSizable | NSViewHeightSizable)];
   [_webView setAllowsBackForwardNavigationGestures:NO];
