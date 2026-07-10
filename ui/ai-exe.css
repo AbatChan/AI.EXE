@@ -8092,6 +8092,34 @@ body.right-panel-collapsed #rightResizer {
   margin-left: 5px;
 }
 
+/* Run lives on the project row, not the header — keeps the icon strip airy. */
+.ws-root-run {
+  margin-left: auto;
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text3);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: color 0.18s ease, background 0.18s ease;
+}
+.ws-root-run:hover {
+  color: var(--accent);
+  background: rgba(0, 229, 255, 0.07);
+}
+.ws-root-run svg {
+  width: 13px;
+  height: 13px;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
 .ws-root-row .ws-label {
   font-weight: 700;
   color: var(--text);
