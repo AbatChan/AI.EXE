@@ -756,6 +756,7 @@ def presence_of_either_element_located(locators):
     return _predicate
 
 AIEXE_MODELS_CACHE = []
+AIEXE_LAST_SCRAPE_SWEPT = False   # last scrape included the full a-z0-9 search sweep (or a fresh swept cache)
 AIEXE_CURRENT_MODEL = ""   # last model name observed on Venice's composer button (cache — no selenium)
 
 # --- Per-chat Venice conversation mapping -----------------------------------
@@ -1460,6 +1461,58 @@ def _aiexe_collect_models_from_modal(driver):
         print("AIEXE_MODELS no scroll container found", flush=True)
     print("AIEXE_MODELS modal count expected=%s collected=%d" % (expected or "?", len(names)), flush=True)
     return names
+
+
+def _aiexe_sweep_models_by_search(driver):
+    """Full-catalog discovery. The picker only RENDERS a curated slice (~18 rows —
+    the scroll container's whole content IS that slice), but its search box queries
+    the FULL catalog. Sweeping a-z and 0-9 surfaces every model, including ones
+    Venice added after our fallback list was written."""
+    import time as _t
+    box = _aiexe_search_input(driver)
+    if box is None:
+        print("AIEXE_MODELS sweep: search input unavailable", flush=True)
+        return []
+    found = []
+    seen = set()
+    for ch in "abcdefghijklmnopqrstuvwxyz0123456789":
+        try:
+            _aiexe_set_native_value(driver, box, ch, "HTMLInputElement")
+        except Exception:
+            try:
+                box.clear()
+                box.send_keys(ch)
+            except Exception:
+                continue
+        _t.sleep(0.35)
+        stagnant = 0
+        for _ in range(8):
+            new = 0
+            for t in _aiexe_model_titles(driver):
+                if t and t not in seen:
+                    seen.add(t)
+                    found.append(t)
+                    new += 1
+            scroller = _aiexe_model_scroll_container(driver)
+            if scroller is None:
+                break
+            try:
+                at_bottom = bool(driver.execute_script(
+                    "var e=arguments[0];"
+                    "e.scrollTop = Math.min(e.scrollHeight, e.scrollTop + Math.max(320, e.clientHeight * 0.85));"
+                    "return e.scrollTop + e.clientHeight >= e.scrollHeight - 4;", scroller))
+            except Exception:
+                at_bottom = True
+            _t.sleep(0.15)
+            stagnant = stagnant + 1 if new == 0 else 0
+            if at_bottom and stagnant >= 2:
+                break
+    try:
+        _aiexe_set_native_value(driver, box, "", "HTMLInputElement")
+    except Exception:
+        pass
+    print("AIEXE_MODELS search sweep found %d models" % len(found), flush=True)
+    return found
 
 
 def _aiexe_find_visible_model_title(driver, name):
@@ -2254,7 +2307,7 @@ def _aiexe_delete_chat(driver, slug, nav_fallback=True):
 def aiexe_scrape_models(driver):
     """Read Venice's real model list from the picker (title attrs). Best-effort; cached once."""
     import time as _t
-    global AIEXE_PRICED_MODELS, AIEXE_PRICED_CHECKED_MODELS
+    global AIEXE_PRICED_MODELS, AIEXE_PRICED_CHECKED_MODELS, AIEXE_LAST_SCRAPE_SWEPT
     try:
         AIEXE_PRICED_MODELS = set()
         AIEXE_PRICED_CHECKED_MODELS = set()
@@ -2270,10 +2323,30 @@ def aiexe_scrape_models(driver):
             return []
         _t.sleep(1)
         names = _aiexe_collect_models_from_modal(driver)
-        # Venice's catalog rarely changes: same model list as last boot -> reuse the cached
-        # priced set and skip the whole per-model search sweep (it's the slow, fragile part).
+        # The curated slice above misses everything Venice doesn't feature. Merge the
+        # FULL catalog: reuse the last swept list when it's fresh (<24h) and still
+        # contains every curated name; otherwise sweep the search box (a-z0-9).
         cache = _aiexe_load_model_cache()
-        if names and set(names) == set(cache.get("models") or []) and cache.get("priced"):
+        cached_models = [m for m in (cache.get("models") or []) if m]
+        swept_cache_fresh = (
+            bool(cached_models)
+            and bool(cache.get("swept"))
+            and (_t.time() - float(cache.get("ts") or 0)) < 24 * 3600
+            and all(n in cached_models for n in names)
+        )
+        if swept_cache_fresh:
+            for n in cached_models:
+                if n not in names:
+                    names.append(n)
+            AIEXE_LAST_SCRAPE_SWEPT = True
+            print("AIEXE_MODELS reused swept catalog (%d total) — cache fresh" % len(names), flush=True)
+        else:
+            swept = _aiexe_sweep_models_by_search(driver)
+            for n in swept:
+                if n not in names:
+                    names.append(n)
+            AIEXE_LAST_SCRAPE_SWEPT = bool(swept)
+        if names and set(names) == set(cached_models) and cache.get("priced"):
             AIEXE_PRICED_MODELS = set(cache["priced"])
             AIEXE_PRICED_CHECKED_MODELS = set(names)
             print("AIEXE_PRICED reused cached set (%d) — catalog unchanged" % len(AIEXE_PRICED_MODELS), flush=True)
@@ -2322,7 +2395,13 @@ def _aiexe_load_model_cache():
 def _aiexe_save_model_cache(models):
     try:
         with open(AIEXE_MODEL_CACHE_FILE, "w") as f:
-            json.dump({"models": list(models), "priced": sorted(AIEXE_PRICED_MODELS), "ts": time.time()}, f)
+            json.dump({
+                "models": list(models),
+                "priced": sorted(AIEXE_PRICED_MODELS),
+                "ts": time.time(),
+                # full-catalog quality marker: False forces a re-sweep next boot
+                "swept": bool(AIEXE_LAST_SCRAPE_SWEPT),
+            }, f)
     except Exception:
         pass
 

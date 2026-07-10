@@ -52,4 +52,10 @@ assert.match(aiExe, /agentAdapterUploadedAttachmentIds/);
 assert.match(aiExe, /function releaseAgentAdapterForwardedAttachments/);
 assert.doesNotMatch(aiExe, /agentAdapterAttachmentsSentCount/);
 
+// Model catalog: the picker renders only a curated slice, so the scraper must
+// sweep the search box (full-catalog discovery) and persist the swept flag.
+assert.match(adapter, /def _aiexe_sweep_models_by_search/);
+assert.match(adapter, /"swept": bool\(AIEXE_LAST_SCRAPE_SWEPT\)/);
+assert.match(adapter, /swept_cache_fresh/);
+
 console.log('PASS: planner calls are isolated, router-shaped plan JSON is rejected, Vite React fallback is preserved, Venice scratch threads are stable per chat, and version is synced');
