@@ -475,10 +475,7 @@ restoreLayoutWidths();
 
 function toggleSidebar() {
   leftSidebar.classList.toggle('collapsed');
-  if (leftSidebar.classList.contains('collapsed')) {
-    toggleIcon.innerHTML = '<path d="M9 18l6-6-6-6"/>';
-  } else {
-    toggleIcon.innerHTML = '<path d="M15 18l-6-6 6-6"/>';
+  if (!leftSidebar.classList.contains('collapsed')) {
     applyLayoutWidths(getCssPx('--sidebar-w', sidebarDefaultWidth), getCssPx('--right-w', rightDefaultWidth));
     persistLayoutWidths();
   }
@@ -491,11 +488,7 @@ function applyRightSidebarCollapsed(collapsed) {
   const btn = document.getElementById('rightCollapseBtn');
   const icon = document.getElementById('rightCollapseIcon');
   if (icon) {
-    // Point the chevrons toward where the panel will go: right when open
-    // (collapse outward), left when collapsed (expand back in).
-    icon.innerHTML = isCollapsed
-      ? '<path d="M11 18l-6-6 6-6"></path><path d="M18 18l-6-6 6-6"></path>'
-      : '<path d="M13 18l6-6-6-6"></path><path d="M6 18l6-6-6-6"></path>';
+    icon.innerHTML = '<rect x="3.5" y="4" width="17" height="16" rx="3"></rect><path d="M13 4v16"></path>';
   }
   if (btn) btn.title = isCollapsed ? 'Expand Explorer' : 'Collapse Explorer';
 }
@@ -618,6 +611,7 @@ function openArtifactsView(btn) {
   artifactDetailOrigin = 'artifacts';
   renderHistory();
   renderMiddleView();
+  syncFloatingViewToggle();
 }
 
 function openCodeArtifactsView(btn) {
@@ -629,6 +623,7 @@ function openCodeArtifactsView(btn) {
   artifactDetailOrigin = 'artifacts';
   renderHistory();
   renderMiddleView();
+  syncFloatingViewToggle();
 }
 
 function openArtifactDetail(artifactKey, origin = 'artifacts') {
@@ -657,6 +652,19 @@ function enterChatView() {
   if (artifactsBtn) artifactsBtn.classList.remove('active');
   renderHistory();
   renderMiddleView();
+  syncFloatingViewToggle();
+}
+
+function openWorkView() {
+  if (getActiveTabId && getActiveTabId() !== 'chat') {
+    renderMiddleView();
+  } else if (Array.isArray(openFileTabs) && openFileTabs.length) {
+    switchToTab(openFileTabs[openFileTabs.length - 1].id);
+  } else {
+    openCodeArtifactsView(codeBtn);
+    return;
+  }
+  syncFloatingViewToggle();
 }
 
 const histList = document.getElementById('historyList');
@@ -827,6 +835,10 @@ const settingsWorkerList = document.getElementById('settingsWorkerList');
 let settingsAutosaveTimer = 0;
 const searchInput = document.getElementById('searchInput');
 const searchDropdown = document.getElementById('searchDropdown');
+const searchPaletteBackdrop = document.getElementById('searchPaletteBackdrop');
+const sidebarSearchBtn = document.getElementById('sidebarSearchBtn');
+const floatingChatBtn = document.getElementById('floatingChatBtn');
+const floatingWorkBtn = document.getElementById('floatingWorkBtn');
 const plusBtn = document.getElementById('plusBtn');
 const plusModalBackdrop = document.getElementById('plusModalBackdrop');
 const plusModalCloseBtn = document.getElementById('plusModalCloseBtn');
@@ -3323,10 +3335,30 @@ function renderSearchDropdown(query) {
       searchQuery = '';
       searchDropdown.innerHTML = '';
       searchDropdown.classList.remove('open');
+      closeSearchPalette();
     });
   });
 }
 
+function openSearchPalette() {
+  if (!searchPaletteBackdrop || !searchInput) return;
+  searchPaletteBackdrop.classList.add('open');
+  searchPaletteBackdrop.setAttribute('aria-hidden', 'false');
+  setTimeout(() => searchInput.focus(), 0);
+}
+function closeSearchPalette() {
+  if (!searchPaletteBackdrop) return;
+  searchPaletteBackdrop.classList.remove('open');
+  searchPaletteBackdrop.setAttribute('aria-hidden', 'true');
+  if (searchDropdown) searchDropdown.classList.remove('open');
+}
+function syncFloatingViewToggle() {
+  const work = middleViewMode !== 'chat' || getActiveTabId() !== 'chat';
+  if (floatingChatBtn) { floatingChatBtn.classList.toggle('active', !work); floatingChatBtn.setAttribute('aria-selected', work ? 'false' : 'true'); }
+  if (floatingWorkBtn) { floatingWorkBtn.classList.toggle('active', work); floatingWorkBtn.setAttribute('aria-selected', work ? 'true' : 'false'); }
+}
+if (sidebarSearchBtn) sidebarSearchBtn.addEventListener('click', openSearchPalette);
+if (searchPaletteBackdrop) searchPaletteBackdrop.addEventListener('click', (e) => { if (e.target === searchPaletteBackdrop) closeSearchPalette(); });
 if (plusBtn) plusBtn.addEventListener('click', openPlusModal);
 if (plusModalBackdrop) plusModalBackdrop.addEventListener('click', (e) => { if (e.target === plusModalBackdrop) closePlusModal(); });
 if (plusModalCloseBtn) plusModalCloseBtn.addEventListener('click', closePlusModal);
@@ -3377,9 +3409,13 @@ if (searchInput) {
       searchInput.value = '';
       searchQuery = '';
       if (searchDropdown) searchDropdown.classList.remove('open');
+      closeSearchPalette();
     }
   });
 }
+document.addEventListener('keydown', (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); openSearchPalette(); }
+});
 if (searchDropdown) searchDropdown.addEventListener('mousedown', () => clearTimeout(searchBlurTimer));
 
 function clearSearchTermHighlights(scope = document) {
@@ -13317,8 +13353,11 @@ function renderArtifactBrowser() {
 
 function renderMiddleView() {
   if (chatShell && typeof chatShell.renderMiddleView === 'function') {
-    return chatShell.renderMiddleView();
+    const result = chatShell.renderMiddleView();
+    syncFloatingViewToggle();
+    return result;
   }
+  syncFloatingViewToggle();
   return undefined;
 }
 

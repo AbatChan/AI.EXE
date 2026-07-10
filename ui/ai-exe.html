@@ -15,30 +15,8 @@
 
   <div class="window-chrome-spacer" aria-hidden="true"></div>
 
-  <!-- TOP BAR -->
+  <!-- Compact title surface; navigation lives in the workspace itself. -->
   <div class="topbar">
-    <div class="logo" style="margin-right: 12px; position: relative;">
-      AI.EXE
-      <div class="logo-ver" id="appBuildVer" data-app-version>v...</div>
-    </div>
-
-    <div class="top-center">
-      <div class="search-wrap">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <circle cx="11" cy="11" r="8" />
-          <path d="m21 21-4.35-4.35" />
-        </svg>
-        <input class="search-input" id="searchInput" type="text" placeholder="Search chats, files, projects..."
-          autocomplete="off">
-        <div class="search-dropdown" id="searchDropdown" aria-hidden="true"></div>
-      </div>
-
-      <button class="btn-plus" id="plusBtn" title="Add" type="button"><svg width="14" height="14" viewBox="0 0 24 24"
-          fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
-          <path d="M12 5v14M5 12h14" />
-        </svg></button>
-    </div>
-
     <div class="top-right-actions">
       <button class="top-icon-btn" id="settingsBtn" title="Settings" type="button">
         <svg class="icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -57,11 +35,15 @@
 
     <!-- LEFT SIDEBAR -->
     <div class="left-sidebar" id="leftSidebar">
-      <div class="sidebar-toggle" onclick="toggleSidebar()" title="Toggle sidebar">
-        <svg id="toggleIcon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-          stroke-width="2.5">
-          <path d="M15 18l-6-6 6-6" />
-        </svg>
+      <div class="sidebar-top-actions">
+        <button class="sidebar-toggle" onclick="toggleSidebar()" title="Toggle sidebar">
+          <svg id="toggleIcon" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">
+            <rect x="3.5" y="4" width="17" height="16" rx="3"></rect><path d="M11 4v16"></path>
+          </svg>
+        </button>
+        <button class="sidebar-search-btn" id="sidebarSearchBtn" type="button" title="Search">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-4-4"></path></svg>
+        </button>
       </div>
 
       <!-- Collapsed icon strip -->
@@ -230,6 +212,10 @@
 
     <!-- MIDDLE -->
     <div class="middle">
+      <div class="floating-view-toggle" id="floatingViewToggle" role="tablist" aria-label="Workspace view">
+        <button class="floating-view-btn active" id="floatingChatBtn" type="button" role="tab" aria-selected="true" onclick="enterChatView()">Chat</button>
+        <button class="floating-view-btn" id="floatingWorkBtn" type="button" role="tab" aria-selected="false" onclick="openWorkView()">Work</button>
+      </div>
       <div class="middle-tab-bar" id="middleTabBar">
         <div class="middle-tab active" id="tabChat" data-tab="chat">
           <span class="middle-tab-label">Chat</span>
@@ -1088,6 +1074,15 @@
   <input id="datasetFileInput" type="file" accept=".csv,.json,.tsv,.xlsx" style="display:none">
   <input id="workspaceImportInput" type="file" multiple style="display:none">
   <input id="workspaceImportFolderInput" type="file" webkitdirectory directory multiple style="display:none">
+  <div class="search-palette-backdrop" id="searchPaletteBackdrop" aria-hidden="true">
+    <div class="search-palette" role="dialog" aria-modal="true" aria-label="Search AI.EXE">
+      <div class="search-wrap">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+        <input class="search-input" id="searchInput" type="text" placeholder="Search chats, files, projects..." autocomplete="off">
+        <div class="search-dropdown" id="searchDropdown" aria-hidden="true"></div>
+      </div>
+    </div>
+  </div>
   <script src="ui-config.js"></script>
   <script src="vendor/markdown-it/markdown-it.min.js"></script>
   <script src="vendor/katex/katex.min.js"></script>
