@@ -92,6 +92,34 @@ ok('tool states tallied', finished.tools.completed === 1 && finished.tools.block
   && finished.tools.awaiting_approval === 1);
 ok('run with no terminal event is INTERRUPTED', crashed.interrupted === true && crashed.terminalState === null);
 
+// --- boot-recovery selection (interrupted-run notify) ---
+const T = 1000000000000; // base ts
+const mkTurn = (turnId, threadId, ts, state, type = 'turn') => ({ v: 1, seq: 1, ts, threadId, turnId, itemId: `${turnId}:x`, type, state, data: {} });
+const recoveryEntries = [
+  // chat-a: interrupted run, quiet for 60s → notify
+  mkTurn('run-a', 'chat-a', T, 'started'),
+  mkTurn('run-a', 'chat-a', T + 5000, 'completed', 'tool'),
+  // chat-b: interrupted but already notified → skip
+  mkTurn('run-b', 'chat-b', T, 'started'),
+  { v: 1, seq: 0, ts: T + 6000, threadId: 'chat-b', turnId: 'run-b', itemId: 'run-b:recovery', type: 'note', state: 'completed', data: { kind: 'interrupted_recovery_notice' } },
+  // chat-c: interrupted run superseded by a later completed run → skip
+  mkTurn('run-c1', 'chat-c', T - 50000, 'started'),
+  mkTurn('run-c2', 'chat-c', T, 'started'),
+  mkTurn('run-c2', 'chat-c', T + 8000, 'completed'),
+  // chat-d: interrupted but still fresh (inside quiet window) → skip
+  mkTurn('run-d', 'chat-d', T + 55000, 'started'),
+  // chat-e: interrupted but ancient (> maxAge) → skip
+  mkTurn('run-e', 'chat-e', T - 500000000, 'started'),
+];
+const toNotify = events.selectInterruptedRunsToNotify(recoveryEntries, {
+  now: T + 65000,
+  maxAgeMs: 48 * 3600 * 1000,
+  minQuietMs: 20000,
+});
+ok('boot recovery selects exactly the lost run', toNotify.length === 1 && toNotify[0].turnId === 'run-a');
+ok('already-notified, superseded, fresh, and ancient runs are skipped',
+  !toNotify.some((r) => ['run-b', 'run-c1', 'run-c2', 'run-d', 'run-e'].includes(r.turnId)));
+
 // --- static wiring checks ---
 const agentLoop = fs.readFileSync(path.join(__dirname, '..', 'ui', 'agent-loop.js'), 'utf8');
 const aiExe = fs.readFileSync(path.join(__dirname, '..', 'ui', 'ai-exe.js'), 'utf8');
@@ -114,6 +142,10 @@ ok('app persists to agent_runs channel un-gated', /channel: 'agent_runs'/.test(a
   && /function persistAgentRunEvent/.test(aiExe));
 ok('app passes createRunEventLog into the loop deps', /createRunEventLog: createAgentRunEventLog/.test(aiExe));
 ok('read-back + :debug runs viewer wired', /readDebugLog/.test(aiExe) && /action === 'runs'/.test(aiExe));
+ok('boot schedules the interrupted-run recovery scan', /scanForInterruptedAgentRuns\(\); \}, 3000\)/.test(aiExe)
+  && /function scanForInterruptedAgentRuns/.test(aiExe));
+ok('recovery notice sets Continue and dedupes via note event', /forceNeedsContinue: true \}\)/.test(aiExe)
+  && /interrupted_recovery_notice/.test(aiExe));
 ok('html loads agent-events before agent-core', html.indexOf('agent-events.js') !== -1
   && html.indexOf('agent-events.js') < html.indexOf('agent-core.js'));
 ok('cmake bundles agent-events.js on both hosts', /WIN_AGENT_EVENTS_JS/.test(cmake) && /MAC_AGENT_EVENTS_JS/.test(cmake));

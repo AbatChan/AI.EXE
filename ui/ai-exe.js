@@ -7282,6 +7282,61 @@ async function summarizeAgentRunHistory(maxBytes = 400000) {
   return window.AIExeAgentEvents ? window.AIExeAgentEvents.summarizeRunLifecycle(entries) : [];
 }
 
+// Boot-time recovery from a hard kill/crash mid-run: the durable run log is the
+// only witness (beforeunload and the loop's finally never ran). Surface a resume
+// notice in the affected chat; dedupe by writing a note event back to the log.
+function markInterruptedRunNoticed(turnId, threadId, why) {
+  persistAgentRunEvent({
+    v: 1,
+    seq: 0,
+    ts: Date.now(),
+    threadId: String(threadId || ''),
+    turnId: String(turnId || ''),
+    itemId: `${turnId}:recovery`,
+    type: 'note',
+    state: 'completed',
+    data: { kind: 'interrupted_recovery_notice', why: String(why || '') },
+  });
+}
+
+async function scanForInterruptedAgentRuns() {
+  try {
+    if (!nativeBridge.available() || !window.AIExeAgentEvents
+      || typeof window.AIExeAgentEvents.selectInterruptedRunsToNotify !== 'function') return;
+    const entries = await loadAgentRunEvents();
+    if (!entries.length) return;
+    const interrupted = window.AIExeAgentEvents.selectInterruptedRunsToNotify(entries);
+    for (const run of interrupted) {
+      // A run streaming right now isn't lost, whatever the log says yet.
+      if (activeAgentStreamState && String(activeAgentStreamState.chatId || '') === String(run.threadId)) continue;
+      const chat = findChatById(run.threadId);
+      if (!chat) {
+        markInterruptedRunNoticed(run.turnId, run.threadId, 'chat_missing');
+        continue;
+      }
+      // An assistant reply after the run started means some exit path committed
+      // the run to the chat — nothing was lost, just mark it handled.
+      const messages = Array.isArray(chat.messages) ? chat.messages : [];
+      const lastAi = [...messages].reverse().find((m) => m && m.role === 'ai');
+      if (lastAi && (Number(lastAi.ts) || 0) >= run.firstTs) {
+        markInterruptedRunNoticed(run.turnId, run.threadId, 'assistant_reply_present');
+        continue;
+      }
+      const toolsDone = (run.tools && run.tools.completed) || 0;
+      const notice = toolsDone > 0
+        ? `The last agent run here was interrupted — the app closed mid-run after ${toolsDone} completed step${toolsDone === 1 ? '' : 's'}. Files already written are saved in the workspace. Press Continue and I'll pick up from the current state.`
+        : 'The last agent run here was interrupted before it could do any work — the app closed mid-run. Press Continue and I\'ll start again from your request.';
+      appendMessageToChat(chat.id, 'ai', notice, 0, { forceNeedsContinue: true });
+      markInterruptedRunNoticed(run.turnId, run.threadId, 'notice_shown');
+      recordDebugTrace('agent_interrupted_run_recovered', {
+        chatId: String(run.threadId),
+        turnId: String(run.turnId),
+        toolsDone: String(toolsDone),
+      }, { chatId: String(run.threadId), run });
+    }
+  } catch (_) { /* recovery is best-effort; never block boot */ }
+}
+
 function formatAgentRunSummaryLine(run) {
   if (!run) return '';
   const state = run.interrupted ? 'INTERRUPTED' : String(run.terminalState || 'unknown').toUpperCase();
@@ -18970,6 +19025,10 @@ setupComposerEnterCaptureSubmitGuard();
 hydrateCustomTooltips(document);
 initGlobalTooltipSystem();
 refreshWorkspaceForCurrentUser();
+// Second pass: a reopen right after a crash lands inside the fresh-run quiet
+// window on the first scan; the dedupe note makes the re-scan idempotent.
+setTimeout(() => { scanForInterruptedAgentRuns(); }, 3000);
+setTimeout(() => { scanForInterruptedAgentRuns(); }, 30000);
 
 // ── Project generation
 function handleProjKey(e) {

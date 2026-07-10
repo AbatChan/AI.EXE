@@ -189,6 +189,31 @@
     return Array.from(turns.values()).sort((a, b) => a.firstTs - b.firstTs);
   }
 
+  // Boot-recovery selection: a hard kill/crash mid-run never reaches beforeunload
+  // or the loop's finally, so a turn with no terminal event is the only witness.
+  // Pick the LATEST run per thread (an older interrupted run was superseded) that
+  // is interrupted, not freshly active (quiet window), not stale, and not already
+  // notified (dedupe via interrupted_recovery_notice note events in the log).
+  function selectInterruptedRunsToNotify(entries, options) {
+    const opts = options && typeof options === 'object' ? options : {};
+    const now = Number(opts.now) || Date.now();
+    const maxAgeMs = Number(opts.maxAgeMs) || 48 * 3600 * 1000;
+    const minQuietMs = Number(opts.minQuietMs) || 20000;
+    const list = Array.isArray(entries) ? entries : [];
+    const notified = new Set(list
+      .filter((e) => e && e.type === 'note' && e.data && e.data.kind === 'interrupted_recovery_notice')
+      .map((e) => String(e.turnId)));
+    const lastRunByThread = new Map();
+    summarizeRunLifecycle(list).forEach((run) => {
+      if (run.threadId) lastRunByThread.set(run.threadId, run);
+    });
+    return Array.from(lastRunByThread.values()).filter((run) => run.interrupted
+      && !notified.has(run.turnId)
+      && run.lastTs > 0
+      && (now - run.lastTs) >= minQuietMs
+      && (now - run.lastTs) <= maxAgeMs);
+  }
+
   global.AIExeAgentEvents = {
     PROTOCOL_VERSION,
     TERMINAL_TURN_STATES,
@@ -197,5 +222,6 @@
     summarizeToolEventData,
     parseRunEventLines,
     summarizeRunLifecycle,
+    selectInterruptedRunsToNotify,
   };
 })(typeof window !== 'undefined' ? window : globalThis);
