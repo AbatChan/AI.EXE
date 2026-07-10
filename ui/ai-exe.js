@@ -7244,6 +7244,58 @@ function persistDebugEntry(channel, entry) {
     .catch(() => undefined);
 }
 
+// Agent run lifecycle events (agent-events.js protocol) — always persisted,
+// not gated by debugTraceEnabled: this is the durable run record, not a trace.
+function persistAgentRunEvent(entry) {
+  if (!nativeBridge.available() || !entry) return;
+  persistedDebugLogQueue = persistedDebugLogQueue
+    .catch(() => undefined)
+    .then(() => nativeBridge.invoke('appendDebugLog', {
+      channel: 'agent_runs',
+      entry: JSON.stringify(entry),
+    }))
+    .catch(() => undefined);
+}
+
+function createAgentRunEventLog(options) {
+  if (!window.AIExeAgentEvents || typeof window.AIExeAgentEvents.createRunEventLog !== 'function') return null;
+  return window.AIExeAgentEvents.createRunEventLog({
+    ...(options && typeof options === 'object' ? options : {}),
+    persist: persistAgentRunEvent,
+  });
+}
+
+// Read back the durable run log (line-aligned tail) for replay/inspection.
+async function loadAgentRunEvents(maxBytes = 400000) {
+  if (!nativeBridge.available() || !window.AIExeAgentEvents) return [];
+  try {
+    const res = await nativeBridge.invoke('readDebugLog', { channel: 'agent_runs', maxBytes: String(maxBytes) });
+    if (!res || !res.ok) return [];
+    return window.AIExeAgentEvents.parseRunEventLines(String(res.output || ''));
+  } catch (_) {
+    return [];
+  }
+}
+
+async function summarizeAgentRunHistory(maxBytes = 400000) {
+  const entries = await loadAgentRunEvents(maxBytes);
+  return window.AIExeAgentEvents ? window.AIExeAgentEvents.summarizeRunLifecycle(entries) : [];
+}
+
+function formatAgentRunSummaryLine(run) {
+  if (!run) return '';
+  const state = run.interrupted ? 'INTERRUPTED' : String(run.terminalState || 'unknown').toUpperCase();
+  const started = run.firstTs ? new Date(run.firstTs).toISOString().replace('T', ' ').slice(0, 19) : '?';
+  const secs = run.lastTs > run.firstTs ? Math.round((run.lastTs - run.firstTs) / 1000) : 0;
+  const tools = run.tools || {};
+  const toolBits = [`ok:${tools.completed || 0}`];
+  if (tools.failed) toolBits.push(`fail:${tools.failed}`);
+  if (tools.blocked) toolBits.push(`blocked:${tools.blocked}`);
+  if (tools.awaiting_approval) toolBits.push(`awaiting:${tools.awaiting_approval}`);
+  const task = String(run.task || '').slice(0, 80);
+  return `[${state}] ${started} (${secs}s) ${run.turnId} chat=${run.threadId || '?'} tools ${toolBits.join(' ')}${task ? ` — ${task}` : ''}`;
+}
+
 function recordDebugTrace(kind, previewPayload = {}, fullPayload = null) {
   const previewEntry = pushDebugTrace(kind, previewPayload);
   const entry = {
@@ -8264,6 +8316,7 @@ async function requestOllamaChatCompletion(provider, prompt, maxTokens, systemPr
     const response = await fetch(getAIExeBackendUrl() + '/api/provider/complete', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
+      signal: extra.abortController instanceof AbortController ? extra.abortController.signal : undefined,
       body: JSON.stringify({
         messages,
         max_tokens: Math.max(1, Number(maxTokens) || 4096),
@@ -8312,6 +8365,9 @@ async function streamOllamaChatCompletion(provider, prompt, handlers = {}, optio
   } else {
     try { const c = getActiveChat(); chatId = (c && c.id) || ''; } catch (_) { /* noop */ }
   }
+  const maxOutputChars = Math.max(0, Number(options.maxOutputChars) || 0);
+  const stopOnCompleteJson = Boolean(options.stopOnCompleteJson);
+  let structuredStreamError = '';
   try {
     const response = await fetch(getAIExeBackendUrl() + '/api/provider/stream', {
       method: 'POST',
@@ -8323,6 +8379,8 @@ async function streamOllamaChatCompletion(provider, prompt, handlers = {}, optio
         temperature: 0.2,
         chat_id: chatId,
         think: options.thinkActive ? 'on' : 'off',
+        ...(stopOnCompleteJson ? { structured_output: true } : {}),
+        ...(maxOutputChars > 0 ? { max_output_chars: maxOutputChars } : {}),
         ...(Array.isArray(options.attachments) && options.attachments.length ? { attachments: options.attachments } : {}),
         ...(options.chatName ? { chat_name: options.chatName } : {}),
       }),
@@ -8332,7 +8390,30 @@ async function streamOllamaChatCompletion(provider, prompt, handlers = {}, optio
     const decoder = new TextDecoder();
     let buf = '';
     let output = '';
-    let streamErr = '';
+    const completeJsonEnd = (text) => {
+      const source = String(text || '');
+      const start = source.indexOf('{');
+      if (start < 0) return -1;
+      let depth = 0;
+      let inString = false;
+      let escaped = false;
+      for (let i = start; i < source.length; i += 1) {
+        const ch = source[i];
+        if (inString) {
+          if (escaped) escaped = false;
+          else if (ch === '\\') escaped = true;
+          else if (ch === '"') inString = false;
+          continue;
+        }
+        if (ch === '"') { inString = true; continue; }
+        if (ch === '{') depth += 1;
+        else if (ch === '}') {
+          depth -= 1;
+          if (depth === 0) return i + 1;
+        }
+      }
+      return -1;
+    };
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
@@ -8344,25 +8425,69 @@ async function streamOllamaChatCompletion(provider, prompt, handlers = {}, optio
         if (!line) continue;
         let obj = null;
         try { obj = JSON.parse(line); } catch (_) { continue; }
-        if (obj && obj.error) { streamErr = String(obj.error); continue; }
+        if (obj && obj.error) { structuredStreamError = String(obj.error); continue; }
         const delta = obj && obj.message && typeof obj.message.content === 'string' ? obj.message.content : '';
         if (delta) {
           output += delta;
           if (typeof handlers.onDelta === 'function') handlers.onDelta(delta);
+          const jsonEnd = stopOnCompleteJson ? completeJsonEnd(output) : -1;
+          if (jsonEnd > 0) {
+            output = output.slice(0, jsonEnd);
+            try { await reader.cancel(); } catch (_) { /* best-effort */ }
+            stopVeniceAdapterGeneration(chatId);
+            return {
+              ok: true, output, provider, model,
+              status: { lastInferenceRoute: `${provider}:${model}`, lastPersistentError: '', lastCompletionStatus: 'ok', lastCompletionLikelyTruncated: false },
+            };
+          }
+          if (maxOutputChars > 0 && output.length > maxOutputChars) {
+            try { await reader.cancel(); } catch (_) { /* best-effort */ }
+            stopVeniceAdapterGeneration(chatId);
+            return {
+              ok: false,
+              output: output.slice(0, maxOutputChars),
+              error: 'Adapter response exceeded the structured-output limit.',
+              message: 'Adapter response exceeded the structured-output limit.',
+              truncated: true,
+              nonRetriable: true,
+              provider,
+              model,
+            };
+          }
         }
       }
     }
     if (output.trim()) {
+      if (stopOnCompleteJson) {
+        const message = 'Adapter structured stream ended with incomplete JSON.';
+        return {
+          ok: false,
+          output: output.slice(0, maxOutputChars || output.length),
+          error: message,
+          message,
+          truncated: true,
+          nonRetriable: true,
+          provider,
+          model,
+        };
+      }
       return {
         ok: true, output, provider, model,
         status: { lastInferenceRoute: `${provider}:${model}`, lastPersistentError: '', lastCompletionStatus: 'ok', lastCompletionLikelyTruncated: false },
       };
     }
-    if (streamErr) return { ok: false, output: '', error: streamErr, message: streamErr, provider, model };
+    if (structuredStreamError) return { ok: false, output: '', error: structuredStreamError, message: structuredStreamError, provider, model };
     // Empty stream with no explicit error — try the one-shot path before giving up.
   } catch (err) {
     if (err && err.name === 'AbortError') return { ok: false, cancelled: true, message: 'Cancelled by user.' };
     // fall through to the one-shot fallback
+  }
+  // Structured planner calls must stay bounded. Falling back to the adapter's
+  // unbounded one-shot path would recreate the exact runaway-output timeout this
+  // stream guard is meant to prevent.
+  if (stopOnCompleteJson) {
+    const message = structuredStreamError || 'Adapter structured stream ended without a complete JSON object.';
+    return { ok: false, output: '', error: message, message, nonRetriable: true, provider, model };
   }
   const result = await requestOllamaChatCompletion(provider, prompt, options.maxTokens, options.systemPrompt || '', Boolean(options.thinkActive), {
     attachments: options.attachments,
@@ -8370,6 +8495,7 @@ async function streamOllamaChatCompletion(provider, prompt, handlers = {}, optio
     isolatedAdapterChat: options.isolatedAdapterChat,
     adapterChatScope: options.adapterChatScope,
     adapterChatId: options.adapterChatId,
+    abortController: options.abortController,
   });
   if (result && result.ok && typeof handlers.onDelta === 'function' && result.output) {
     handlers.onDelta(String(result.output));
@@ -8639,6 +8765,8 @@ async function requestRemoteTextCompletionForCapability(capability, prompt, maxT
       ...(completionOptions.isolatedAdapterChat ? { isolatedAdapterChat: true } : {}),
       ...(completionOptions.adapterChatScope ? { adapterChatScope: completionOptions.adapterChatScope } : {}),
       ...(completionOptions.adapterChatId ? { adapterChatId: completionOptions.adapterChatId } : {}),
+      ...(completionOptions.stopOnCompleteJson ? { stopOnCompleteJson: true } : {}),
+      ...(Number(completionOptions.maxOutputChars) > 0 ? { maxOutputChars: Number(completionOptions.maxOutputChars) } : {}),
     });
     return result ? { ...result, workerId: worker.id, provider, model: getProviderModel(provider) } : result;
   }
@@ -8652,6 +8780,10 @@ async function requestRemoteTextCompletionForCapability(capability, prompt, maxT
       {
         ...(adapterAttachments.length ? { attachments: adapterAttachments } : {}),
         ...(extraChatName ? { chatName: extraChatName } : {}),
+        ...(completionOptions.abortController instanceof AbortController ? { abortController: completionOptions.abortController } : {}),
+        ...(completionOptions.isolatedAdapterChat ? { isolatedAdapterChat: true } : {}),
+        ...(completionOptions.adapterChatScope ? { adapterChatScope: completionOptions.adapterChatScope } : {}),
+        ...(completionOptions.adapterChatId ? { adapterChatId: completionOptions.adapterChatId } : {}),
       },
     );
     return result ? { ...result, workerId: worker.id } : result;
@@ -11889,13 +12021,39 @@ async function requestAgentPlannerInferenceInner(prompt, maxTokens, grammar = ''
   }
   const remoteProvider = isRemoteInferenceProviderEnabled() ? getSelectedInferenceProvider() : null;
   if (remoteProvider) {
-    let remote = await requestSelectedRemoteTextCompletion(prompt, maxTokens, systemPrompt, { isolatedAdapterChat: true, adapterChatScope: 'agent-planner' });
+    // Structured adapter calls use streaming even though normal planner calls are
+    // one-shot. That lets us stop as soon as one balanced JSON object arrives and
+    // reject runaway malformed output before a huge repeated field burns the full
+    // five-minute decision timeout. Larger plan calls receive a proportionally
+    // larger bound than short per-step decisions.
+    const requestedPlannerTokens = Number(maxTokens) || agentDecisionMaxTokens;
+    const adapterStructuredOptions = isVeniceAdapterSelected()
+      ? {
+          preferStreaming: true,
+          stopOnCompleteJson: true,
+          maxOutputChars: requestedPlannerTokens <= 1200
+            ? 3500
+            : Math.min(24000, Math.max(8000, requestedPlannerTokens * 5)),
+        }
+      : {};
+    let remote = await requestSelectedRemoteTextCompletion(prompt, maxTokens, systemPrompt, {
+      isolatedAdapterChat: true,
+      adapterChatScope: 'agent-planner',
+      ...adapterStructuredOptions,
+    });
     // Only retry for transient failures (rate limit / network). Skip retry for auth/credits errors.
-    const hardFail = remote && !remote.ok && remote.httpStatus && (remote.httpStatus === 401 || remote.httpStatus === 402 || remote.httpStatus === 403);
+    const hardFail = Boolean(remote && !remote.ok && (
+      remote.nonRetriable
+      || (remote.httpStatus && (remote.httpStatus === 401 || remote.httpStatus === 402 || remote.httpStatus === 403))
+    ));
     if (remote && remote.cancelled) return { ok: false, cancelled: true, message: 'Cancelled.' };
     if ((!remote || !remote.ok) && !hardFail) {
       await new Promise((resolve) => setTimeout(resolve, 2500));
-      remote = await requestSelectedRemoteTextCompletion(prompt, maxTokens, systemPrompt, { isolatedAdapterChat: true, adapterChatScope: 'agent-planner' });
+      remote = await requestSelectedRemoteTextCompletion(prompt, maxTokens, systemPrompt, {
+        isolatedAdapterChat: true,
+        adapterChatScope: 'agent-planner',
+        ...adapterStructuredOptions,
+      });
     }
     if (remote && remote.ok) {
       return {
@@ -11906,7 +12064,13 @@ async function requestAgentPlannerInferenceInner(prompt, maxTokens, grammar = ''
     }
     const remoteMsg = (remote && remote.message) || `${remoteProvider} API unavailable — check your connection.`;
     // Propagate hard failures (credits/key) so the caller can stop, not degrade.
-    return { ok: false, message: remoteMsg, httpStatus: (remote && remote.httpStatus) || 0, hardFail: Boolean(hardFail) };
+    return {
+      ok: false,
+      message: remoteMsg,
+      httpStatus: (remote && remote.httpStatus) || 0,
+      hardFail: Boolean(hardFail),
+      nonRetriable: Boolean(remote && remote.nonRetriable),
+    };
   }
   return requestNativeAgentPlannerInference(prompt, maxTokens, grammar);
 }
@@ -12110,6 +12274,7 @@ const agentLoop = window.AIExeAgentLoop && typeof window.AIExeAgentLoop.createAg
     pushDebugTrace,
     recordDebugTrace,
     debugPreview,
+    createRunEventLog: createAgentRunEventLog,
     resetActiveAgentStreamState,
     buildAgentPlanActivity,
     computeAgentChecklistProgress,
@@ -16264,12 +16429,22 @@ function handleLocalCommand(rawValue) {
     emitLocalAssistantMessage(input, `\`\`\`json\n${JSON.stringify(state, null, 2)}\n\`\`\``);
     return true;
   }
+  if (action === 'runs') {
+    const limit = Math.max(1, Math.min(20, Number(parts[2]) || 6));
+    (async () => {
+      const runs = await summarizeAgentRunHistory();
+      const rows = runs.slice(-limit).map(formatAgentRunSummaryLine).filter(Boolean);
+      const body = rows.length ? rows.join('\n') : 'No agent runs recorded yet.';
+      emitLocalAssistantMessage(input, `\`\`\`text\n${body}\n\`\`\``);
+    })();
+    return true;
+  }
   if (action === 'recover') {
     const recovered = resetStaleInferenceRuntime(':debug recover');
     emitLocalAssistantMessage(input, recovered ? 'Recovered stale inference state.' : 'No stale inference state detected.');
     return true;
   }
-  emitLocalAssistantMessage(input, 'Debug commands: :debug on | :debug off | :debug dump [N] [all] | :debug state | :debug recover | :debug clear');
+  emitLocalAssistantMessage(input, 'Debug commands: :debug on | :debug off | :debug dump [N] [all] | :debug runs [N] | :debug state | :debug recover | :debug clear');
   return true;
 }
 

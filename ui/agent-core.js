@@ -1971,12 +1971,14 @@
         expectedFiles = dedupe(expectedFiles.map(remapToExistingWorkspaceFile).filter(Boolean));
         affectedFiles = dedupe(affectedFiles.map(remapToExistingWorkspaceFile).filter(Boolean));
         filesToInspect = dedupe(filesToInspect.map(remapToExistingWorkspaceFile).filter(Boolean));
-        // Only inspection targets must already exist (can't read a planned file).
-        const existingInspectFiles = filesToInspect.filter((path) => rootFilePaths.includes(normalizeWorkspacePath(path || '')));
-        const existingAffectedFiles = affectedFiles.filter((path) => rootFilePaths.includes(normalizeWorkspacePath(path || '')));
-        filesToInspect = existingInspectFiles.length > 0
-          ? existingInspectFiles
-          : (existingAffectedFiles.length > 0 ? existingAffectedFiles : rootFilePaths.slice());
+        // rootEntries only contains the workspace root, so it cannot prove whether a
+        // nested path such as /src/components/Hero.tsx exists. The old "existing only"
+        // filter discarded every nested target and replaced it with unrelated root
+        // config files. For an edit, the model-named inspect/affected paths are the best
+        // grounded targets; a real read failure can still trigger discovery afterward.
+        filesToInspect = filesToInspect.length > 0
+          ? filesToInspect
+          : (affectedFiles.length > 0 ? affectedFiles.slice() : rootFilePaths.slice());
       }
       const webEditNeedsCoordinatedFiles = taskKind === 'edit'
         && hasOpenWorkspaceContext()

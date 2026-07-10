@@ -2672,6 +2672,11 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
         _dom_probe_prev = ""
         _dom_probe_stable = 0
         _dom_probe_ts = 0.0
+        try:
+            _structured_limit = int(data.get('aiexe_max_output_chars') or 0) if data.get('aiexe_structured_output') else 0
+        except (TypeError, ValueError):
+            _structured_limit = 0
+        _structured_limit = max(0, min(_structured_limit, 50000))
 
         def _emit(txt):
             # Stream a piece of assistant text in the right shape for the response format.
@@ -2783,6 +2788,10 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
                 except Exception:
                     _probe = ""
                 if _probe and _probe != _pre_send_reply:
+                    if _structured_limit and len(_probe) > _structured_limit:
+                        print("AIEXE_STRUCTURED output exceeded %d chars — stopping" % _structured_limit, flush=True)
+                        _aiexe_stop_generation(driver, "structured output limit")
+                        break
                     if _probe == _dom_probe_prev and not _aiexe_generation_running(driver):
                         _dom_probe_stable += 1
                         if _dom_probe_stable >= 2:
@@ -2811,6 +2820,8 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
                     _aiexe_clear_cancel_key(_chat_key)
                     return
                 _txt = _aiexe_read_last_assistant_text(driver)
+                if _structured_limit and _txt and len(_txt) > _structured_limit:
+                    _aiexe_stop_generation(driver, "structured DOM output limit")
                 if _txt and _txt == _prev:
                     _stable += 1
                     if _stable >= 3:
@@ -2828,6 +2839,8 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
                         _m = _emit(_delta)
                         if _m: yield _m
                     _prev = _txt
+                    if _structured_limit and len(_prev) > _structured_limit:
+                        break
                 if driver.execute_script("return window.streamComplete;"):
                     _stable += 1
                 time.sleep(0.8)

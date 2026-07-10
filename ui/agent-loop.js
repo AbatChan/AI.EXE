@@ -251,6 +251,19 @@
       if (!taskText) return false;
       const toolEvents = [];
       const agentActivities = [];
+      // Durable run lifecycle log (agent-events.js). toolEvents.push is the one
+      // choke point every tool result flows through — intercept it so each event
+      // lands in the durable log without touching any push site. Observe-only.
+      const runLog = typeof deps.createRunEventLog === 'function'
+        ? deps.createRunEventLog({ threadId: String(chatId || ''), task: taskText })
+        : null;
+      if (runLog) {
+        const arrayPush = Array.prototype.push;
+        toolEvents.push = function pushWithRunLog(...items) {
+          items.forEach((ev) => { try { runLog.emitToolEvent(ev); } catch (_) { /* observe-only */ } });
+          return arrayPush.apply(this, items);
+        };
+      }
       // Oscillation guard: if an edit returns a file to a prior content state, the
       // agent is flip-flopping — block further edits to it and finalize.
       const fileStateHistory = new Map(); // path -> Set(contentHash)
@@ -1014,6 +1027,7 @@
           chatId: String(chatId || ''),
           reason: deps.debugPreview(String(planSpec._planHardError), 240),
         }, { chatId: String(chatId || ''), planSpec });
+        if (runLog) runLog.end({ errored: true, message: String(planSpec._planHardError) });
         return true;
       }
       // Safety net: if a planner ever returns a non-project plan despite the flag,
@@ -1022,6 +1036,7 @@
         && typeof deps.buildFallbackAgentPlanSpec === 'function') {
         planSpec = deps.buildFallbackAgentPlanSpec(taskText, { chatId, forceProjectScope: true });
       }
+      if (runLog && planSpec) runLog.emitPlan(planSpec);
       // The chat's manual context rides in the contract so every prompt sees it.
       const chatManualContext = typeof deps.getChatManualContext === 'function'
         ? String(deps.getChatManualContext(chatId) || '').trim()
@@ -1479,6 +1494,7 @@
             status: 'error',
           });
           totalTimedOut = true;
+          if (runLog) runLog.emit('note', 'completed', { kind: 'total_timeout', elapsedMs: Date.now() - startedAt });
           // Keep a live status through the wrap-up — "Stopped." with a hidden
           // 2-minute completion call behind it reads as a frozen app.
           setAgentProgress('Out of time — writing the wrap-up...');
@@ -1495,6 +1511,7 @@
           : null;
         if (decision) {
           decision._deterministic = true;
+          if (runLog) runLog.emitDecision(step, 'deterministic', decision);
           recordDebugTrace('agent_deterministic_decision', {
             chatId: String(chatId || ''),
             step: String(step),
@@ -1561,7 +1578,7 @@
             }
             if (!deps.isInferenceActive(requestToken)) return true;
             if (res && res.ok) break;
-            const retriable = Boolean(res && !res.ok && !res.timedOut);
+            const retriable = Boolean(res && !res.ok && !res.timedOut && !res.hardFail && !res.nonRetriable);
             if (!retriable) break;
             // A 429 means the provider is throttling, not broken — it clears on its
             // own. Each retry is itself a request, and Venice blocks for 30s after
@@ -1592,6 +1609,7 @@
 
           if (!deps.isInferenceActive(requestToken)) return true;
           if (!res || !res.ok) {
+            if (runLog) runLog.emitDecisionFailure(step, (res && res.message) || 'agent infer failed', Boolean(res && res.timedOut));
             setAgentProgress('Stopped.');
             appendAgentActivity({
               kind: 'error',
@@ -1623,11 +1641,13 @@
               agentMeta: agentMetaWithRevert({ startedAt, completedAt: Date.now(), collapsed: false }),
               forceNeedsContinue: true,
             });
+            if (runLog) runLog.end({ errored: !(res && res.timedOut), timedOut: Boolean(res && res.timedOut), message: (res && res.message) || 'agent step failed' });
             return true;
           }
 
           rawPlannerOutput = String(res.output || '');
           decision = deps.parseAgentDecision(rawPlannerOutput);
+          if (runLog && decision) runLog.emitDecision(step, 'model', decision);
           recordDebugTrace('agent_planner_output', {
             chatId: String(chatId || ''),
             step: String(step),
@@ -1669,6 +1689,7 @@
             ]);
             if (deps.isInferenceActive(requestToken) && repair && repair.ok) {
               decision = deps.parseAgentDecision(String(repair.output || ''));
+              if (runLog && decision) runLog.emitDecision(step, 'repair', decision);
               recordDebugTrace('agent_planner_output', {
                 chatId: String(chatId || ''),
                 step: String(step),
@@ -1689,6 +1710,7 @@
           const fallbackDecision = deps.deriveFallbackAgentDecision(taskText, toolEvents, planSpec);
           if (fallbackDecision) {
             decision = fallbackDecision;
+            if (runLog) runLog.emitDecision(step, 'fallback', decision);
             recordDebugTrace('agent_fallback_decision', {
               chatId: String(chatId || ''),
               step: String(step),
@@ -2888,6 +2910,10 @@
             ? toolResult.originalContent
             : undefined,
           createdNewFile: Boolean(toolResult && toolResult.createdNewFile),
+          mutated: Boolean(toolResult && toolResult.mutated),
+          // Approval/blocked policy — drives awaiting_approval/blocked run-log states.
+          commandPolicy: String((toolResult && toolResult.commandPolicy) || ''),
+          terminalCommand: String((toolResult && toolResult.terminalCommand) || ''),
           // run_app reports startup crashes as ok:true + runErrorCount>0 (not !ok).
           runErrorCount: Number(toolResult && toolResult.runErrorCount) || 0,
           // Read range — for the range-aware read-loop guard.
@@ -3513,8 +3539,14 @@
           error: String(err && err.stack ? err.stack : (err && err.message ? err.message : err)),
           toolEvents,
         });
+        if (runLog) { try { runLog.end({ errored: true, message: String(err && err.message ? err.message : err) }); } catch (_) { /* observe-only */ } }
         throw err;
       } finally {
+        // Exactly one terminal lifecycle event per run, whatever the exit path
+        // (end() is idempotent — explicit failure ends above win).
+        try {
+          if (runLog) runLog.end({ cancelled: !deps.isInferenceActive(requestToken), timedOut: totalTimedOut });
+        } catch (_) { /* observe-only */ }
         // Keep the tracker pinned between phases (a phased run that ended with more
         // phases to go); only clear it when no phased run is in flight.
         try {

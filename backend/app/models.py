@@ -78,6 +78,8 @@ class ProviderCompleteRequest(BaseModel):
     think: str = ""     # "on" | "off" — adapter normalizes Venice's per-chat Reasoning switch
     chat_name: str = "" # AI.EXE chat name — adapter renames the Venice conversation to match
     attachments: List[Dict[str, Any]] = []  # images the adapter uploads via Venice's file input
+    structured_output: bool = False  # internal planner JSON; enables strict adapter bounds
+    max_output_chars: int = 0        # hard character cap for structured adapter output
 
 
 class ProviderDeleteChatRequest(BaseModel):

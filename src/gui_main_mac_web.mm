@@ -1870,6 +1870,18 @@ std::string BuildStreamEvent(const std::string &id, bool done,
     } else {
       message = "Debug log appended.";
     }
+  } else if (action == "readDebugLog") {
+    const std::string channel =
+        ExtractJsonStringField(requestJson, "channel");
+    const std::string max_bytes_str =
+        ExtractJsonStringField(requestJson, "maxBytes");
+    const long max_bytes = strtol(max_bytes_str.c_str(), nullptr, 10);
+    if (!_runtime.ReadDebugLog(channel,
+                               max_bytes > 0 ? static_cast<size_t>(max_bytes) : 0,
+                               &output, &op_err)) {
+      ok = false;
+      message = op_err.empty() ? "Failed to read debug log." : op_err;
+    }
   } else if (action == "workspaceReadFile") {
     if (!WorkspaceReadFile(_runtime, workspace_path, &output, &op_err)) {
       ok = false;

@@ -68,6 +68,20 @@ const cases = [
     },
   },
   {
+    name: 'nested edit targets remain the inspection targets',
+    run: () => core.normalizeAgentPlanSpec({
+      task_kind: 'edit',
+      affected_files: '/src/components/Landing/Hero.tsx|/src/components/Landing/Features.tsx',
+      files_to_inspect: '',
+    }, 'replace the icons on the existing landing page', opts),
+    expect: (spec) => {
+      assert.deepEqual(spec.filesToInspect, [
+        '/src/components/Landing/Hero.tsx',
+        '/src/components/Landing/Features.tsx',
+      ], 'nested affected files must not be replaced by unrelated root config files');
+    },
+  },
+  {
     name: 'fallback plan for an edit follow-up does not fabricate mutation targets',
     run: () => core.buildFallbackAgentPlanSpec('how do i run to test?', opts),
     expect: (spec) => {

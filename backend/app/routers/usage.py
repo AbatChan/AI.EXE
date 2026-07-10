@@ -72,6 +72,9 @@ def provider_stream(payload: ProviderCompleteRequest) -> StreamingResponse:
         body["aiexe_chat_name"] = payload.chat_name
     if payload.attachments:
         body["aiexe_attachments"] = payload.attachments
+    if payload.structured_output:
+        body["aiexe_structured_output"] = True
+        body["aiexe_max_output_chars"] = max(1000, min(int(payload.max_output_chars or 0), 50000))
     url = base.rstrip("/") + "/api/chat"
     read_budget = float(settings.adapter_http_timeout)
 

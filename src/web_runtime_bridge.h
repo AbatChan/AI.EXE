@@ -43,6 +43,10 @@ class WebRuntimeBridge {
   bool AppendDebugLog(const std::string& channel,
                       const std::string& entry_json,
                       std::string* err);
+  bool ReadDebugLog(const std::string& channel,
+                    size_t max_bytes,
+                    std::string* out,
+                    std::string* err);
 
   std::string Generate(const std::string& prompt,
                        std::string* err,

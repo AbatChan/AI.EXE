@@ -5,6 +5,8 @@ const path = require('node:path');
 const aiExe = fs.readFileSync(path.join(__dirname, '..', 'ui', 'ai-exe.js'), 'utf8');
 const agentCore = fs.readFileSync(path.join(__dirname, '..', 'ui', 'agent-core.js'), 'utf8');
 const agentRuntime = fs.readFileSync(path.join(__dirname, '..', 'ui', 'agent-runtime.js'), 'utf8');
+const planPrompt = fs.readFileSync(path.join(__dirname, '..', 'ui', 'prompts', 'developer_agent_plan.md'), 'utf8');
+const promptCore = fs.readFileSync(path.join(__dirname, '..', 'ui', 'prompt-core.js'), 'utf8');
 const cmake = fs.readFileSync(path.join(__dirname, '..', 'CMakeLists.txt'), 'utf8');
 const pkg = require('../package.json');
 
@@ -26,6 +28,8 @@ assert.match(agentCore, /\/vite\.config\.ts/);
 assert.match(agentCore, /hasAgentPlanShape/);
 assert.match(agentCore, /Object\.prototype\.hasOwnProperty\.call\(parsedObj, 'route'\)/);
 assert.match(agentCore, /landingSubjectMatch/);
+assert.match(planPrompt, /Do not add adjacent pages, screens, or features/);
+assert.match(promptCore, /Do not add adjacent pages, screens, or features/);
 
 assert.match(cmake, /AI_EXE_APP_VERSION "\d+\.\d+\.\d+"/);
 assert.equal(pkg.version, (cmake.match(/AI_EXE_APP_VERSION "([^"]+)"/) || [])[1]);

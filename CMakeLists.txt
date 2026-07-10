@@ -24,9 +24,9 @@ option(AI_EXE_UI_REMEMBER_LAYOUT "Remember panel layout in local storage" ON)
 option(AI_EXE_ENABLE_REMOTE_PROVIDERS "Enable hosted/API inference providers in the UI" ON)
 option(AI_EXE_ENABLE_DEV_PLANNER "Enable localhost development planner endpoint in the UI" OFF)
 set(AI_EXE_WEBVIEW2_DIR "" CACHE PATH "Microsoft.Web.WebView2 NuGet package root (provides WebView2.h + WebView2Loader.dll for the Windows GUI). Without it the GUI builds in a non-rendering fallback mode.")
-set(AI_EXE_APP_VERSION "7.1.4" CACHE STRING "AI.EXE app and UI version" FORCE)
-set(AI_EXE_BUILD_TAG "venice-thread-sweep" CACHE STRING "Human-readable AI.EXE build tag" FORCE)
-set(AI_EXE_BUILD_LABEL "v${AI_EXE_APP_VERSION} (${AI_EXE_BUILD_TAG} 2026-07-09)")
+set(AI_EXE_APP_VERSION "7.2.0" CACHE STRING "AI.EXE app and UI version" FORCE)
+set(AI_EXE_BUILD_TAG "agent-run-events" CACHE STRING "Human-readable AI.EXE build tag" FORCE)
+set(AI_EXE_BUILD_LABEL "v${AI_EXE_APP_VERSION} (${AI_EXE_BUILD_TAG} 2026-07-10)")
 
 if(AI_EXE_UI_ANIMATIONS_DEFAULT)
   set(AI_EXE_UI_ANIMATIONS_DEFAULT_CPP "true")
@@ -100,6 +100,7 @@ if(WIN32)
   set(WIN_UI_JS "${CMAKE_SOURCE_DIR}/ui/ai-exe.js")
   set(WIN_MARKDOWN_RENDERER_JS "${CMAKE_SOURCE_DIR}/ui/markdown-renderer.js")
   set(WIN_PROMPT_CORE_JS "${CMAKE_SOURCE_DIR}/ui/prompt-core.js")
+  set(WIN_AGENT_EVENTS_JS "${CMAKE_SOURCE_DIR}/ui/agent-events.js")
   set(WIN_AGENT_CORE_JS "${CMAKE_SOURCE_DIR}/ui/agent-core.js")
   set(WIN_AGENT_PLANNER_JS "${CMAKE_SOURCE_DIR}/ui/agent-planner.js")
   set(WIN_AGENT_RUNTIME_JS "${CMAKE_SOURCE_DIR}/ui/agent-runtime.js")
@@ -155,6 +156,9 @@ if(WIN32)
       "${WIN_PROMPT_CORE_JS}"
       "$<TARGET_FILE_DIR:ai_exe_gui>/ui/prompt-core.js"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      "${WIN_AGENT_EVENTS_JS}"
+      "$<TARGET_FILE_DIR:ai_exe_gui>/ui/agent-events.js"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
       "${WIN_AGENT_CORE_JS}"
       "$<TARGET_FILE_DIR:ai_exe_gui>/ui/agent-core.js"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
@@ -208,6 +212,7 @@ if(APPLE)
   set(MAC_UI_JS ui/ai-exe.js)
   set(MAC_MARKDOWN_RENDERER_JS ui/markdown-renderer.js)
   set(MAC_PROMPT_CORE_JS ui/prompt-core.js)
+  set(MAC_AGENT_EVENTS_JS ui/agent-events.js)
   set(MAC_AGENT_CORE_JS ui/agent-core.js)
   set(MAC_AGENT_PLANNER_JS ui/agent-planner.js)
   set(MAC_AGENT_RUNTIME_JS ui/agent-runtime.js)
@@ -228,6 +233,7 @@ if(APPLE)
   set_source_files_properties(${MAC_UI_JS} PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
   set_source_files_properties(${MAC_MARKDOWN_RENDERER_JS} PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
   set_source_files_properties(${MAC_PROMPT_CORE_JS} PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
+  set_source_files_properties(${MAC_AGENT_EVENTS_JS} PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
   set_source_files_properties(${MAC_AGENT_CORE_JS} PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
   set_source_files_properties(${MAC_AGENT_PLANNER_JS} PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
   set_source_files_properties(${MAC_AGENT_RUNTIME_JS} PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
@@ -253,6 +259,7 @@ if(APPLE)
     ${MAC_UI_JS}
     ${MAC_MARKDOWN_RENDERER_JS}
     ${MAC_PROMPT_CORE_JS}
+    ${MAC_AGENT_EVENTS_JS}
     ${MAC_AGENT_CORE_JS}
     ${MAC_AGENT_PLANNER_JS}
     ${MAC_AGENT_RUNTIME_JS}

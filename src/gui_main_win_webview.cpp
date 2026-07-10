@@ -1596,6 +1596,18 @@ private:
       } else {
         message = "Debug log appended.";
       }
+    } else if (action == "readDebugLog") {
+      const std::string channel =
+          ExtractJsonStringField(request_json, "channel");
+      const std::string max_bytes_str =
+          ExtractJsonStringField(request_json, "maxBytes");
+      const long max_bytes = strtol(max_bytes_str.c_str(), nullptr, 10);
+      if (!runtime_.ReadDebugLog(channel,
+                                 max_bytes > 0 ? static_cast<size_t>(max_bytes) : 0,
+                                 &output, &op_err)) {
+        ok = false;
+        message = op_err.empty() ? "Failed to read debug log." : op_err;
+      }
     } else if (action == "workspaceReadFile") {
       if (!WorkspaceReadFile(runtime_, workspace_path, &output, &op_err)) {
         ok = false;

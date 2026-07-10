@@ -30,6 +30,8 @@
     "test:stale-send-state-recovery": "node scripts/stale_send_state_recovery_static_test.js",
     "test:message-append-refresh": "node scripts/message_append_refresh_static_test.js",
     "test:provider-completion-options": "node scripts/provider_completion_options_static_test.js",
+    "test:agent-unicode-search": "node scripts/agent_unicode_search_test.js",
+    "test:agent-run-events": "node scripts/agent_run_events_static_test.js",
     "test:safe-immediate-loader": "node scripts/safe_immediate_loader_static_test.js",
     "test:enter-delegates-to-send-button": "node scripts/enter_delegates_to_send_button_static_test.js",
     "test:enter-key-diagnostics": "node scripts/enter_key_diagnostics_static_test.js",
@@ -61,5 +63,5 @@
     "markdown-it-texmath": "^1.0.0",
     "rollup": "^4.59.0"
   },
-  "version": "7.0.1"
+  "version": "7.2.0"
 }

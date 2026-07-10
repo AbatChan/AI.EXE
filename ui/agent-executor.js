@@ -66,7 +66,14 @@
     }
 
     function buildSearchNeedles(query) {
-      const src = String(query || '').trim();
+      // Treat "emoji" as a search intent, not merely the ASCII identifier. Models
+      // sometimes emit an enormous pipe-delimited emoji inventory; the old ASCII-only
+      // word pass collapsed that whole request to just "emoji", so literal icons in
+      // JSX/HTML were invisible. Bound the input and use one sentinel that matches any
+      // pictographic emoji instead of carrying thousands of repeated glyphs around.
+      const raw = String(query || '').trim();
+      const src = raw.slice(0, 2000);
+      const wantsEmoji = /\bemojis?\b/i.test(src) || /\p{Extended_Pictographic}/u.test(src);
       const quoted = Array.from(src.matchAll(/["'“”‘’`]([^"'“”‘’`]{3,120})["'“”‘’`]/g))
         .map((match) => String(match[1] || '').trim())
         .filter(Boolean);
@@ -76,7 +83,12 @@
         .replace(/[^a-z0-9_-]+/g, ' ')
         .split(/\s+/)
         .filter((word) => word.length >= 4 && !/^(that|this|with|into|your|from|have|maybe|really|clicked|work|worked|excellent|source|files|search)$/i.test(word));
-      return Array.from(new Set([...quoted, ...lines, ...words].map((item) => String(item || '').trim()).filter(Boolean))).slice(0, 24);
+      return Array.from(new Set([
+        ...(wantsEmoji ? ['__aiexe_any_emoji__'] : []),
+        ...quoted,
+        ...lines,
+        ...words,
+      ].map((item) => String(item || '').trim()).filter(Boolean))).slice(0, 24);
     }
 
     function escapeRegExp(text) {
@@ -128,6 +140,9 @@
     }
 
     function lineMatchesNeedle(line, needle) {
+      if (needle === '__aiexe_any_emoji__') {
+        return /\p{Extended_Pictographic}/u.test(String(line || ''));
+      }
       const haystack = String(line || '').toLowerCase();
       const lowerNeedle = String(needle || '').toLowerCase();
       if (!lowerNeedle) return false;
@@ -135,6 +150,10 @@
       const normalizedHaystack = haystack.replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim();
       const normalizedNeedle = lowerNeedle.replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim();
       return normalizedNeedle.length >= 4 && normalizedHaystack.includes(normalizedNeedle);
+    }
+
+    function describeSearchNeedle(needle) {
+      return needle === '__aiexe_any_emoji__' ? 'emoji characters' : String(needle || '');
     }
 
     function getRecentSearchHitLines(toolEvents = [], path = '') {
@@ -1927,7 +1946,7 @@
           }
         }
         observation = [
-          `search_files ${path || '/'} for ${JSON.stringify(needles.slice(0, 8).join(' | '))}`,
+          `search_files ${path || '/'} for ${JSON.stringify(needles.slice(0, 8).map(describeSearchNeedle).join(' | '))}`,
           results.length ? results.join('\n') : `(no matches in ${files.length} text files)`,
         ].join('\n');
         return { ok: true, mutated, observation };
@@ -3232,6 +3251,8 @@
       getHtmlStructureIssue,
       getStructuralIssueForPath,
       validateWebProjectConsistency,
+      buildSearchNeedles,
+      lineMatchesNeedle,
     };
   }
 

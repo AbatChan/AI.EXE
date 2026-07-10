@@ -233,6 +233,74 @@ bool WebRuntimeBridge::AppendDebugLog(const std::string& channel,
   return true;
 }
 
+bool WebRuntimeBridge::ReadDebugLog(const std::string& channel,
+                                    size_t max_bytes,
+                                    std::string* out,
+                                    std::string* err) {
+  std::lock_guard<std::mutex> lock(mu_);
+  if (out) {
+    out->clear();
+  }
+  if (!initialized_) {
+    if (err) {
+      *err = "Runtime bridge not initialized.";
+    }
+    return false;
+  }
+
+  const std::string trimmed_channel = TrimAsciiWhitespace(channel);
+  if (!IsSafeDebugChannel(trimmed_channel)) {
+    if (err) {
+      *err = "Invalid debug log channel.";
+    }
+    return false;
+  }
+
+  const auto file_path = cfg_.log_path.parent_path() / (trimmed_channel + ".jsonl");
+  std::error_code ec;
+  if (!std::filesystem::exists(file_path, ec)) {
+    // Missing log = no entries yet; empty output, not an error.
+    if (err) {
+      err->clear();
+    }
+    return true;
+  }
+
+  std::ifstream in(file_path, std::ios::binary);
+  if (!in.good()) {
+    if (err) {
+      *err = "Failed to open debug log file.";
+    }
+    return false;
+  }
+
+  in.seekg(0, std::ios::end);
+  const std::streamoff size = in.tellg();
+  const std::streamoff cap = static_cast<std::streamoff>(
+      max_bytes > 0 ? max_bytes : static_cast<size_t>(400000));
+  const std::streamoff start = size > cap ? size - cap : 0;
+  in.seekg(start, std::ios::beg);
+
+  std::string content;
+  content.resize(static_cast<size_t>(size - start));
+  in.read(content.data(), static_cast<std::streamsize>(content.size()));
+  content.resize(static_cast<size_t>(in.gcount()));
+
+  // Truncated read: drop the torn first line so output is line-aligned JSONL.
+  if (start > 0) {
+    const size_t newline = content.find('\n');
+    content = newline == std::string::npos ? std::string() : content.substr(newline + 1);
+  }
+
+  if (out) {
+    *out = std::move(content);
+  }
+  if (err) {
+    err->clear();
+  }
+  return true;
+}
+
 std::string WebRuntimeBridge::Generate(const std::string& prompt,
                                        std::string* err,
                                        int max_tokens,
