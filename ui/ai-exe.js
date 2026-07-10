@@ -182,10 +182,97 @@ const nativeBridge = (() => {
   };
 })();
 
+// Mirror AI.EXE's local state into Application Support on macOS. WebKit's
+// file-URL localStorage may be treated as a new origin after a bundle swap;
+// this mirror lets a new build hydrate the same chats, attachments, and tabs.
+const nativeUiStoragePrefix = 'ai_exe_';
+let nativeUiStorageBackupTimer = 0;
+let nativeUiStorageHydrating = false;
+
+function isMacNativeUi() {
+  return document.documentElement.classList.contains('platform-mac') && nativeBridge.available();
+}
+
+function collectNativeUiStorage() {
+  const entries = {};
+  try {
+    for (let index = 0; index < localStorage.length; index += 1) {
+      const key = localStorage.key(index);
+      if (!key || !String(key).startsWith(nativeUiStoragePrefix)) continue;
+      const value = localStorage.getItem(key);
+      if (value !== null) entries[key] = value;
+    }
+  } catch (_) { }
+  return entries;
+}
+
+function scheduleNativeUiStorageBackup() {
+  if (!isMacNativeUi() || nativeUiStorageHydrating) return;
+  if (nativeUiStorageBackupTimer) clearTimeout(nativeUiStorageBackupTimer);
+  nativeUiStorageBackupTimer = setTimeout(() => {
+    nativeUiStorageBackupTimer = 0;
+    const storage = JSON.stringify(collectNativeUiStorage());
+    nativeBridge.invoke('appStorageWrite', { storage, timeoutMs: 10000 }).catch(() => { });
+  }, 350);
+}
+
+function installNativeUiStorageBackup() {
+  if (!isMacNativeUi() || !window.Storage || !Storage.prototype || Storage.prototype.__aiExeBackupInstalled) return;
+  const originalSetItem = Storage.prototype.setItem;
+  Storage.prototype.setItem = function patchedAiExeSetItem(key, value) {
+    const result = originalSetItem.call(this, key, value);
+    if (String(key || '').startsWith(nativeUiStoragePrefix)) scheduleNativeUiStorageBackup();
+    return result;
+  };
+  Object.defineProperty(Storage.prototype, '__aiExeBackupInstalled', { value: true, configurable: true });
+}
+
+async function hydrateNativeUiStorage() {
+  if (!isMacNativeUi()) return;
+  const readKey = async (key) => {
+    try {
+      const response = await nativeBridge.invoke('appStorageReadKey', { storageKey: key, timeoutMs: 12000 });
+      return response && response.ok && typeof response.output === 'string' ? response.output : '';
+    } catch (_) {
+      return '';
+    }
+  };
+  const restoreKey = async (key) => {
+    if (!key || localStorage.getItem(key) !== null) return '';
+    const value = await readKey(key);
+    if (value) localStorage.setItem(key, value);
+    return value;
+  };
+  nativeUiStorageHydrating = true;
+  try {
+    const authRaw = await restoreKey(authStorageKey);
+    const auth = (() => { try { return JSON.parse(authRaw || localStorage.getItem(authStorageKey) || '{}'); } catch (_) { return {}; } })();
+    const users = Array.isArray(auth && auth.users) ? auth.users : [];
+    const globalKeys = [layoutStorageKey, settingsStorageKey];
+    await Promise.all(globalKeys.map(restoreKey));
+    for (const user of users) {
+      const key = String(user && user.usernameKey ? user.usernameKey : '').trim();
+      if (!key) continue;
+      await Promise.all([
+        restoreKey(`${chatsStoragePrefix}::${key}`),
+        restoreKey(`${activeChatStoragePrefix}::${key}`),
+        restoreKey(`${pendingAttachmentsStoragePrefix}::${key}`),
+        restoreKey(`${artifactsStoragePrefix}::${key}`),
+        restoreKey(`${workspaceStoragePrefix}::${key}`),
+        restoreKey(`${fileTabsStoragePrefix}::${key}`),
+      ]);
+    }
+  } catch (_) {
+  } finally {
+    nativeUiStorageHydrating = false;
+  }
+  scheduleNativeUiStorageBackup();
+}
+
 function setupMacTopbarNativeDrag() {
   if (!document.documentElement.classList.contains('platform-mac')) return;
   if (!nativeBridge.available()) return;
-  const topbar = document.querySelector('.topbar');
+  const topbar = document.querySelector('.window-chrome-spacer');
   if (!topbar) return;
   const noDragSelector = [
     'button',
@@ -19216,21 +19303,26 @@ async function resolveTypingFallback(chatId) {
   await typewriterAssistantMessage(chatId, resp);
 }
 
-loadAuthStore();
-updateLoginUi();
-loadAppSettings();
-startBackendProviderSync();  // push the saved provider/key to the backend on startup + retry
-moveGlobalControlsIntoSidebar();
-setupMacTopbarNativeDrag();
-setupComposerKeyboardDiagnostics();
-setupComposerEnterCaptureSubmitGuard();
-hydrateCustomTooltips(document);
-initGlobalTooltipSystem();
-refreshWorkspaceForCurrentUser();
-// Second pass: a reopen right after a crash lands inside the fresh-run quiet
-// window on the first scan; the dedupe note makes the re-scan idempotent.
-setTimeout(() => { scanForInterruptedAgentRuns(); }, 3000);
-setTimeout(() => { scanForInterruptedAgentRuns(); }, 30000);
+async function bootstrapAiExeUi() {
+  installNativeUiStorageBackup();
+  await hydrateNativeUiStorage();
+  loadAuthStore();
+  updateLoginUi();
+  loadAppSettings();
+  startBackendProviderSync();  // push the saved provider/key to the backend on startup + retry
+  moveGlobalControlsIntoSidebar();
+  setupMacTopbarNativeDrag();
+  setupComposerKeyboardDiagnostics();
+  setupComposerEnterCaptureSubmitGuard();
+  hydrateCustomTooltips(document);
+  initGlobalTooltipSystem();
+  refreshWorkspaceForCurrentUser();
+  // Second pass: a reopen right after a crash lands inside the fresh-run quiet
+  // window on the first scan; the dedupe note makes the re-scan idempotent.
+  setTimeout(() => { scanForInterruptedAgentRuns(); }, 3000);
+  setTimeout(() => { scanForInterruptedAgentRuns(); }, 30000);
+}
+void bootstrapAiExeUi();
 
 // ── Project generation
 function handleProjKey(e) {

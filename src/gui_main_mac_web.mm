@@ -18,6 +18,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <sys/stat.h>
 #include <vector>
 
 #include "command_runner.h"
@@ -33,6 +34,86 @@ bool FileExists(const std::filesystem::path &p) {
   std::error_code ec;
   return std::filesystem::exists(p, ec) &&
          std::filesystem::is_regular_file(p, ec);
+}
+
+// WebKit file-URL storage can be tied to a replaced bundle path. Keep a compact
+// mirror of UI state in Application Support, which survives an in-place update.
+std::filesystem::path UiStateBackupPath() {
+  NSArray<NSURL *> *locations = [[NSFileManager defaultManager]
+      URLsForDirectory:NSApplicationSupportDirectory
+             inDomains:NSUserDomainMask];
+  NSURL *base_url = locations.firstObject;
+  if (!base_url || !base_url.path.length) {
+    return {};
+  }
+  return std::filesystem::path([base_url.path UTF8String]) / "AI.EXE" /
+         "ui-storage-v1.json";
+}
+
+bool ReadUiStateBackup(std::string *output, std::string *err) {
+  if (!output) return false;
+  output->clear();
+  const auto path = UiStateBackupPath();
+  if (path.empty()) return true;
+  std::error_code ec;
+  if (!std::filesystem::exists(path, ec)) return true;
+  const auto size = std::filesystem::file_size(path, ec);
+  if (ec || size > 12 * 1024 * 1024) {
+    if (err) *err = "Saved UI state is unavailable or too large.";
+    return false;
+  }
+  std::ifstream input(path, std::ios::binary);
+  if (!input) {
+    if (err) *err = "Could not read saved UI state.";
+    return false;
+  }
+  output->assign(std::istreambuf_iterator<char>(input),
+                 std::istreambuf_iterator<char>());
+  return true;
+}
+
+bool WriteUiStateBackup(const std::string &payload, std::string *err) {
+  if (payload.size() > 12 * 1024 * 1024) {
+    if (err) *err = "Saved UI state is too large.";
+    return false;
+  }
+  const auto path = UiStateBackupPath();
+  if (path.empty()) {
+    if (err) *err = "Application Support is unavailable.";
+    return false;
+  }
+  std::error_code ec;
+  std::filesystem::create_directories(path.parent_path(), ec);
+  if (ec) {
+    if (err) *err = "Could not create the AI.EXE data folder.";
+    return false;
+  }
+  const auto temporary = path.string() + ".tmp";
+  {
+    std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
+    if (!out) {
+      if (err) *err = "Could not write saved UI state.";
+      return false;
+    }
+    out.write(payload.data(), static_cast<std::streamsize>(payload.size()));
+    if (!out) {
+      if (err) *err = "Could not finish writing saved UI state.";
+      return false;
+    }
+  }
+  chmod(temporary.c_str(), S_IRUSR | S_IWUSR);
+  std::filesystem::rename(temporary, path, ec);
+  if (ec) {
+    std::filesystem::remove(path, ec);
+    ec.clear();
+    std::filesystem::rename(temporary, path, ec);
+  }
+  if (ec) {
+    if (err) *err = "Could not replace saved UI state.";
+    return false;
+  }
+  chmod(path.c_str(), S_IRUSR | S_IWUSR);
+  return true;
 }
 
 bool IsTruthyEnv(const char *value) {
@@ -1748,6 +1829,10 @@ std::string BuildStreamEvent(const std::string &id, bool done,
   const std::string window_dx = ExtractJsonStringField(requestJson, "dx");
   const std::string window_dy = ExtractJsonStringField(requestJson, "dy");
   const std::string locale = ExtractJsonStringField(requestJson, "locale");
+  const std::string persisted_storage =
+      ExtractJsonStringField(requestJson, "storage");
+  const std::string storage_key =
+      ExtractJsonStringField(requestJson, "storageKey");
   int max_tokens = ExtractJsonIntField(requestJson, "maxTokens", 0);
   if (max_tokens <= 0) {
     max_tokens = ExtractJsonIntField(requestJson, "max_tokens", 0);
@@ -1762,7 +1847,25 @@ std::string BuildStreamEvent(const std::string &id, bool done,
   std::string output;
   std::string op_err;
 
-  if (action == "status") {
+  if (action == "appStorageRead") {
+    if (!ReadUiStateBackup(&output, &op_err)) {
+      ok = false;
+      message = op_err;
+    }
+  } else if (action == "appStorageReadKey") {
+    std::string saved_storage;
+    if (!ReadUiStateBackup(&saved_storage, &op_err)) {
+      ok = false;
+      message = op_err;
+    } else if (!storage_key.empty()) {
+      output = ExtractJsonStringField(saved_storage, storage_key);
+    }
+  } else if (action == "appStorageWrite") {
+    if (!WriteUiStateBackup(persisted_storage, &op_err)) {
+      ok = false;
+      message = op_err;
+    }
+  } else if (action == "status") {
     _runtime.Refresh(&op_err);
   } else if (action == "verifyModel") {
     if (!_runtime.VerifyModel(&op_err)) {

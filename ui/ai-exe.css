@@ -118,7 +118,7 @@ body::before {
 /* ─── TOP BAR ─── */
 .window-chrome-spacer {
   height: var(--window-chrome-h);
-  background: var(--panel);
+  background: transparent;
   flex-shrink: 0;
   -webkit-app-region: drag;
 }
@@ -531,8 +531,8 @@ body.resizing-panels .panel-resizer {
 
 .sidebar-toggle {
   position: static;
-  width: 32px;
-  height: 32px;
+  width: 34px;
+  height: 34px;
   padding: 0;
   line-height: 0;
   border-radius: 9px;
@@ -549,9 +549,8 @@ body.resizing-panels .panel-resizer {
 }
 
 .sidebar-toggle:hover {
-  color: var(--text);
-  border-color: rgba(0, 229, 255, 0.28);
-  background: rgba(0, 229, 255, 0.08);
+  color: var(--accent);
+  background: rgba(0, 229, 255, 0.035);
 }
 
 .left-sidebar.collapsed .sidebar-toggle {
@@ -563,7 +562,11 @@ body.resizing-panels .panel-resizer {
   align-items: center;
   justify-content: flex-end;
   gap: 4px;
-  padding: 10px 10px 0;
+  position: absolute;
+  top: 8px;
+  right: 10px;
+  padding: 0;
+  z-index: 12;
 }
 
 .sidebar-search-btn {
@@ -578,14 +581,20 @@ body.resizing-panels .panel-resizer {
   cursor: pointer;
   transition: color 0.18s ease, background 0.18s ease;
 }
-.sidebar-search-btn svg { width: 17px; height: 17px; }
-.sidebar-search-btn:hover { color: var(--accent); background: rgba(0, 229, 255, 0.08); }
-.left-sidebar.collapsed .sidebar-top-actions { justify-content: center; padding: 10px 0 0; }
-.left-sidebar.collapsed .sidebar-search-btn { display: none; }
+.sidebar-search-btn svg { width: 19px; height: 19px; }
+.sidebar-search-btn:hover { color: var(--accent); background: rgba(0, 229, 255, 0.035); }
+.left-sidebar.collapsed .sidebar-top-actions {
+  top: 56px;
+  right: 0;
+  left: 0;
+  flex-direction: column;
+  justify-content: center;
+  gap: 6px;
+}
 
 .sidebar-toggle svg {
-  width: 12px;
-  height: 12px;
+  width: 19px;
+  height: 19px;
 }
 
 .sidebar-inner {
@@ -2547,10 +2556,18 @@ html.platform-mac .settings-sidebar {
 .workspace-tab-strip:has(.middle-tab:not(#tabChat)) {
   width: min(620px, calc(100% - 48px));
 }
+.workspace-tab-strip:not(:has(.middle-tab:not(#tabChat))) {
+  padding: 0;
+  background: transparent;
+  box-shadow: none;
+}
+.workspace-tab-strip:not(:has(.middle-tab:not(#tabChat))) .middle-tab-bar {
+  display: none;
+}
 .floating-view-btn {
   flex: 0 0 auto;
   align-self: stretch;
-  min-width: 76px;
+  min-width: 116px;
   padding: 0 16px;
   border: 0;
   border-radius: 999px;
@@ -2562,7 +2579,11 @@ html.platform-mac .settings-sidebar {
   cursor: pointer;
   transition: background 0.2s var(--ease-out), color 0.2s ease;
 }
-.floating-view-btn.active { background: #27272a; color: #fff; }
+.floating-view-btn.active {
+  background: linear-gradient(135deg, rgba(32, 43, 61, 0.98), rgba(29, 30, 43, 0.98));
+  color: #f8fbff;
+  box-shadow: inset 0 1px 0 rgba(148, 238, 255, 0.13), 0 4px 14px rgba(0, 0, 0, 0.26);
+}
 .floating-view-btn:hover:not(.active) { color: #fff; }
 
 /* ─── Tab Bar ─── */
@@ -7319,7 +7340,7 @@ html.platform-mac .settings-sidebar {
 .explorer-actions {
   display: inline-flex;
   align-items: center;
-  gap: 2px;
+  gap: 4px;
   min-width: 0;
   flex: 1;
   justify-content: flex-end;
@@ -7333,9 +7354,9 @@ html.platform-mac .settings-sidebar {
 }
 
 .exp-icon-btn {
-  width: 24px;
-  height: 24px;
-  border-radius: 8px;
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
   border: 0;
   background: transparent;
   color: var(--text3);
@@ -7348,9 +7369,8 @@ html.platform-mac .settings-sidebar {
 
 .exp-icon-btn:hover {
   color: var(--accent);
-  border-color: rgba(0, 229, 255, 0.32);
-  background: rgba(0, 229, 255, 0.08);
-  transform: translateY(-1px);
+  background: rgba(0, 229, 255, 0.035);
+  transform: none;
 }
 
 .exp-icon-btn.danger:hover {
@@ -7360,14 +7380,16 @@ html.platform-mac .settings-sidebar {
 }
 
 .exp-icon-btn svg {
-  width: 15px;
-  height: 15px;
+  width: 19px;
+  height: 19px;
+  stroke-width: 1.85;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .exp-icon-btn.active {
   color: var(--accent);
-  border-color: rgba(0, 229, 255, 0.32);
-  background: rgba(0, 229, 255, 0.08);
+  background: rgba(0, 229, 255, 0.05);
 }
 
 /* Collapsed Explorer: shrink to a thin rail with just the expand toggle. */
@@ -7388,6 +7410,10 @@ html.platform-mac .settings-sidebar {
   padding-left: 0;
   padding-right: 0;
 }
+.right-sidebar.collapsed .explorer-actions {
+  flex: 0 0 100%;
+  justify-content: center;
+}
 
 .search-palette-backdrop {
   position: fixed;
@@ -7396,31 +7422,32 @@ html.platform-mac .settings-sidebar {
   display: none;
   align-items: flex-start;
   justify-content: center;
-  padding-top: 7vh;
-  background: rgba(3, 5, 9, 0.46);
-  backdrop-filter: blur(9px);
+  padding-top: 10vh;
+  background: rgba(3, 5, 9, 0.52);
+  backdrop-filter: blur(7px);
 }
 .search-palette-backdrop.open { display: flex; }
 .search-palette {
-  width: min(680px, calc(100vw - 48px));
-  min-height: 180px;
-  border: 1px solid rgba(255,255,255,0.14);
-  border-radius: 28px;
-  background: #2b2b2c;
-  box-shadow: 0 28px 90px rgba(0,0,0,0.58), inset 0 1px 0 rgba(255,255,255,0.04);
+  width: min(520px, calc(100vw - 48px));
+  min-height: 132px;
+  border: 1px solid rgba(99, 216, 255, 0.18);
+  border-radius: 16px;
+  background: linear-gradient(145deg, rgba(18, 24, 35, 0.98), rgba(10, 13, 20, 0.99));
+  box-shadow: 0 22px 60px rgba(0,0,0,0.52), inset 0 1px 0 rgba(173, 241, 255, 0.06);
   overflow: hidden;
 }
 .search-palette .search-wrap { display: block; }
-.search-palette .search-wrap > svg { top: 24px; left: 24px; width: 20px; height: 20px; color: #a1a1aa; }
+.search-palette .search-wrap > svg { top: 17px; left: 18px; width: 18px; height: 18px; color: var(--text3); }
 .search-palette .search-input {
-  height: 68px;
+  height: 52px;
   border: 0;
   border-bottom: 1px solid rgba(255,255,255,0.1);
   border-radius: 0;
   background: transparent;
-  padding: 0 24px 0 56px;
-  color: #fff;
-  font-size: 20px;
+  padding: 0 18px 0 48px;
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 15px;
   letter-spacing: 0;
 }
 .search-palette .search-input:focus { box-shadow: none; background: transparent; }
@@ -7434,9 +7461,9 @@ html.platform-mac .settings-sidebar {
   background: transparent;
 }
 .search-palette .search-dropdown:not(.open) { display: none; }
-.search-palette .search-section-label { padding: 18px 24px 8px; color: #a1a1aa; }
-.search-palette .search-result-item { padding: 11px 24px; color: #e4e4e7; }
-.search-palette .search-result-item:hover { background: rgba(255,255,255,0.08); }
+.search-palette .search-section-label { padding: 13px 18px 6px; color: var(--text3); font-family: var(--font-mono); font-size: 10px; }
+.search-palette .search-result-item { padding: 9px 18px; color: var(--text2); }
+.search-palette .search-result-item:hover { background: rgba(0, 229, 255, 0.055); }
 
 body.right-panel-collapsed #rightResizer {
   display: none;
