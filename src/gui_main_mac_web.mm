@@ -1551,21 +1551,16 @@ std::string BuildStreamEvent(const std::string &id, bool done,
 
 } // namespace
 
-// The web view fills the transparent titlebar. Let AppKit own dragging in the
-// top titlebar band so dragging never selects page text or depends on JS.
+// The web view fills the transparent titlebar. The page decides what drags:
+// JS hit-tests the mousedown (buttons/rows win) and calls windowDragBegin,
+// which replays the recorded event so AppKit runs the drag session.
 @interface AiExeWebView : WKWebView
+@property(nonatomic, strong) NSEvent *aiexeLastMouseDown;
 @end
 
 @implementation AiExeWebView
 - (void)mouseDown:(NSEvent *)event {
-  NSPoint point = [self convertPoint:event.locationInWindow fromView:nil];
-  // WKWebView is flipped (y=0 at the top): the titlebar band is small y,
-  // not height-38 (that was the bottom strip, eating clicks down there).
-  const CGFloat top_offset = self.isFlipped ? point.y : NSHeight(self.bounds) - point.y;
-  if (top_offset <= 38.0) {
-    [self.window performWindowDragWithEvent:event];
-    return;
-  }
+  self.aiexeLastMouseDown = event;
   [super mouseDown:event];
 }
 @end
@@ -2316,6 +2311,25 @@ std::string BuildStreamEvent(const std::string &id, bool done,
         }
       }
       message = "Window moved.";
+    }
+  } else if (action == "windowDragBegin") {
+    if (!_window || !_webView) {
+      ok = false;
+      message = "Window is unavailable.";
+    } else {
+      auto beginDrag = ^{
+        AiExeWebView *web_view = (AiExeWebView *)_webView;
+        NSEvent *mouse_down = web_view.aiexeLastMouseDown;
+        if (mouse_down && NSEvent.pressedMouseButtons & 1) {
+          [_window performWindowDragWithEvent:mouse_down];
+        }
+      };
+      if ([NSThread isMainThread]) {
+        beginDrag();
+      } else {
+        dispatch_async(dispatch_get_main_queue(), beginDrag);
+      }
+      message = "Drag started.";
     }
   } else {
     ok = false;

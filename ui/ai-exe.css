@@ -2589,8 +2589,7 @@ html.platform-mac .settings-sidebar {
   min-height: 28px;
   max-height: 28px;
   padding: 0;
-  margin: 0 0 0 3px;
-  border-left: 1px solid rgba(148, 163, 184, 0.16);
+  margin: 0;
   background: transparent;
   overflow-x: auto;
   overflow-y: hidden;
@@ -2598,6 +2597,11 @@ html.platform-mac .settings-sidebar {
   scrollbar-width: none;
   box-sizing: border-box;
 }
+
+/* Single-pill strip: the Chat pseudo-tab never renders (the floating pill or
+   the one open file speaks for the view), and an empty bar collapses away. */
+#tabChat { display: none; }
+.middle-tab-bar.no-files { display: none; }
 
 .middle-tab-bar #tabChat { display: none; }
 
@@ -2609,15 +2613,16 @@ html.platform-mac .settings-sidebar {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 0 14px;
+  padding: 0 10px 0 15px;
   min-width: 0;
-  max-width: 180px;
+  max-width: 220px;
   height: 100%;
   border-right: 0;
+  border-radius: 999px;
   background: transparent;
   color: var(--text3);
   font-family: var(--font-sans);
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 500;
   cursor: pointer;
   transition: color 0.18s var(--ease-out), background 0.18s var(--ease-out);
@@ -2627,15 +2632,16 @@ html.platform-mac .settings-sidebar {
   -webkit-user-select: none;
 }
 
+
 .middle-tab:hover {
   color: var(--text2);
   background: rgba(255, 255, 255, 0.03);
 }
 
 .middle-tab.active {
-  color: var(--text);
-  background: rgba(255, 255, 255, 0.065);
-  box-shadow: none;
+  color: #f8fbff;
+  background: linear-gradient(135deg, rgba(32, 43, 61, 0.98), rgba(29, 30, 43, 0.98));
+  box-shadow: inset 0 1px 0 rgba(148, 238, 255, 0.13), 0 4px 14px rgba(0, 0, 0, 0.26);
 }
 
 .middle-tab.active::after {

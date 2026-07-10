@@ -3460,6 +3460,40 @@ function closeSearchPalette() {
 function syncFloatingViewToggle() {
   const work = middleViewMode !== 'chat' || activeTabId !== 'chat';
   if (floatingChatBtn) { floatingChatBtn.classList.toggle('active', !work); floatingChatBtn.setAttribute('aria-selected', work ? 'false' : 'true'); }
+  syncWorkspaceTabStrip();
+}
+
+// Pill strip: "Chat" only on a fresh/new chat, the single open file otherwise,
+// nothing once a conversation has content.
+function syncWorkspaceTabStrip() {
+  const strip = document.querySelector('.workspace-tab-strip');
+  if (!strip) return;
+  const hasFileTabs = Array.isArray(openFileTabs) && openFileTabs.length > 0;
+  let freshChat = inNewChatMode || !activeChatId;
+  if (!freshChat) {
+    const chat = findChatById(activeChatId);
+    freshChat = !chat || !Array.isArray(chat.messages) || chat.messages.length === 0;
+  }
+  strip.style.display = (hasFileTabs || freshChat) ? 'flex' : 'none';
+  if (floatingChatBtn) floatingChatBtn.style.display = hasFileTabs ? 'none' : '';
+  const bar = document.getElementById('middleTabBar');
+  if (bar) bar.classList.toggle('no-files', !hasFileTabs);
+}
+
+// Custom titlebar drag: the page hit-tests the top band and only asks the
+// native window to drag when the press is on inert surface, so controls that
+// live up there (explorer icons, tabs, search) keep working.
+function installMacTitlebarDrag() {
+  if (!isMacNativeUi()) return;
+  document.addEventListener('mousedown', (evt) => {
+    if (evt.button !== 0 || evt.clientY > 44) return;
+    const target = evt.target;
+    if (target && target.closest && target.closest(
+      'button, input, textarea, select, a, [contenteditable="true"], [role="button"], '
+      + '.workspace-tab-strip, .exp-menu, .account-popover, .ws-row, .hist-item, .search-wrap'
+    )) return;
+    void nativeBridge.invoke('windowDragBegin', {});
+  }, true);
 }
 if (sidebarSearchBtn) sidebarSearchBtn.addEventListener('click', openSearchPalette);
 if (searchPaletteBackdrop) searchPaletteBackdrop.addEventListener('click', (e) => { if (e.target === searchPaletteBackdrop) closeSearchPalette(); });
@@ -11792,6 +11826,7 @@ const fileViewerModule = window.AIExeFileViewer && typeof window.AIExeFileViewer
     setOpenFileTabs: (value) => { openFileTabs = Array.isArray(value) ? value : []; },
     getActiveTabId: () => activeTabId,
     setActiveTabId: (value) => { activeTabId = String(value || 'chat'); },
+    syncWorkspaceTabStrip: () => syncWorkspaceTabStrip(),
     getFileTabsPersistTimer: () => fileTabsPersistTimer,
     setFileTabsPersistTimer: (value) => { fileTabsPersistTimer = Number(value) || 0; },
     getFileTabsRestoreToken: () => fileTabsRestoreToken,
@@ -16086,6 +16121,7 @@ function renderActiveChat(...args) {
   syncAgentElapsedStatusForActiveChat();
   syncLiveInferenceUiState();
   renderPhaseTracker();
+  syncWorkspaceTabStrip();
   return result;
 }
 
@@ -19330,6 +19366,7 @@ async function resolveTypingFallback(chatId) {
 
 async function bootstrapAiExeUi() {
   installNativeUiStorageBackup();
+  installMacTitlebarDrag();
   loadAuthStore();
   updateLoginUi();
   loadAppSettings();

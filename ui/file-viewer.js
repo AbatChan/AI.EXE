@@ -587,6 +587,7 @@
         });
         middleTabBar.appendChild(el);
       });
+      if (typeof d.syncWorkspaceTabStrip === 'function') d.syncWorkspaceTabStrip();
     }
 
     function syncFileTabFromWorkspaceWrite(path, content, name = '', options = {}) {
@@ -726,6 +727,11 @@
         return;
       }
       const content = String(response.output || '');
+      // One file at a time: opening replaces the current tab (dirty tabs are
+      // kept so unsaved edits are never silently dropped).
+      for (let i = tabs.length - 1; i >= 0; i -= 1) {
+        if (!tabs[i].dirty) tabs.splice(i, 1);
+      }
       tabs.push({
         path: normalized,
         name: name || workspaceBaseName(normalized) || 'file',
