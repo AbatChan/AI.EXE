@@ -594,7 +594,7 @@ function applyRightSidebarCollapsed(collapsed) {
   const btn = document.getElementById('rightCollapseBtn');
   const icon = document.getElementById('rightCollapseIcon');
   if (icon) {
-    icon.innerHTML = '<rect x="3.5" y="4" width="17" height="16" rx="3"></rect><path d="M13 4v16"></path>';
+    icon.innerHTML = '<rect x="3" y="3" width="18" height="18" rx="2"></rect><path d="M15 3v18"></path>';
   }
   if (btn) btn.title = isCollapsed ? 'Expand Explorer' : 'Collapse Explorer';
 }
@@ -7306,6 +7306,7 @@ function shouldPersistDebugEntry(kind) {
     || key.startsWith('agent_')
     || key.startsWith('workspace_')
     || key.startsWith('preflight_')
+    || key.startsWith('window_')
     || key.endsWith('_error');
 }
 
@@ -10566,19 +10567,24 @@ async function fetchRuntimeStatus(action = 'status') {
 
 async function openSettingsModal() {
   if (!settingsBackdrop) return;
-  loadAppSettings();
-  syncInferenceProviderOptions();
-  if (settingsProviderSelect) settingsProviderSelect.value = getSelectedInferenceProvider();
-  if (settingsModelUrlInput) settingsModelUrlInput.value = appSettings.modelUrl;
-  if (settingsKeepModelChk) settingsKeepModelChk.checked = appSettings.keepModelOnUpdate;
-  if (settingsDebugTraceChk) settingsDebugTraceChk.checked = appSettings.debugTraceEnabled;
-  syncSettingsWorkModeUi();
-  syncSettingsProviderUi();
-  renderSettingsWorkerList();
-  openSettingsSection('general');
-  setSettingsNote('');
+  // Open first: a failed sub-render must never keep the modal invisible.
   settingsBackdrop.classList.add('open');
   settingsBackdrop.setAttribute('aria-hidden', 'false');
+  try {
+    loadAppSettings();
+    syncInferenceProviderOptions();
+    if (settingsProviderSelect) settingsProviderSelect.value = getSelectedInferenceProvider();
+    if (settingsModelUrlInput) settingsModelUrlInput.value = appSettings.modelUrl;
+    if (settingsKeepModelChk) settingsKeepModelChk.checked = appSettings.keepModelOnUpdate;
+    if (settingsDebugTraceChk) settingsDebugTraceChk.checked = appSettings.debugTraceEnabled;
+    syncSettingsWorkModeUi();
+    syncSettingsProviderUi();
+    renderSettingsWorkerList();
+    openSettingsSection('general');
+    setSettingsNote('');
+  } catch (err) {
+    recordDebugTrace('settings_modal_render_error', {}, { error: String(err && err.stack || err) });
+  }
   setTimeout(() => settingsCloseBtn && settingsCloseBtn.focus(), 0);
   setSettingsLoading(true);
   await waitForUiPaint();

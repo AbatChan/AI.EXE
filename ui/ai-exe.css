@@ -7297,9 +7297,9 @@ html.platform-mac .settings-sidebar {
 }
 
 .rs-header {
-  padding: 6px 10px;
-  min-height: 34px;
-  max-height: 34px;
+  padding: 7px 12px;
+  min-height: 42px;
+  max-height: 42px;
   box-sizing: border-box;
   border-bottom: 1px solid rgba(100, 116, 139, 0.22);
   background: rgba(20, 24, 34, 0.52);
@@ -7308,7 +7308,7 @@ html.platform-mac .settings-sidebar {
 
 .rs-title {
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: 12px;
   letter-spacing: 1.4px;
   text-transform: uppercase;
   color: #a8b5c9;
@@ -7322,12 +7322,12 @@ html.platform-mac .settings-sidebar {
   content: none;
 }
 
+/* No overflow clip here: the ⋯ dropdown (.exp-menu) must escape the header box. */
 .explorer-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 6px;
-  overflow: hidden;
 }
 
 .explorer-actions {
@@ -7343,13 +7343,12 @@ html.platform-mac .settings-sidebar {
   position: relative;
   display: inline-flex;
   align-items: center;
-  margin-left: 2px;
 }
 
 .exp-icon-btn {
-  width: 34px;
-  height: 34px;
-  border-radius: 9px;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
   border: 0;
   background: transparent;
   color: var(--text3);
@@ -7373,9 +7372,9 @@ html.platform-mac .settings-sidebar {
 }
 
 .exp-icon-btn svg {
-  width: 18px;
-  height: 18px;
-  stroke-width: 1.85;
+  width: 17px;
+  height: 17px;
+  stroke-width: 1.7;
   stroke-linecap: round;
   stroke-linejoin: round;
 }
