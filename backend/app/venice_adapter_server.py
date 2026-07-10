@@ -2150,13 +2150,13 @@ def _aiexe_row_action_button(driver, row, xpath):
         return None
 
 
-def _aiexe_row_via_thread_nav(driver, slug, label):
+def _aiexe_row_via_thread_nav(driver, slug, label, allow_hidden=False):
     """Virtualized sidebar can omit a row entirely; opening the thread itself makes it
     the active conversation, which Venice always renders in the list."""
     if not slug:
         return None
     try:
-        if driver.execute_script("return document.hidden === true"):
+        if driver.execute_script("return document.hidden === true") and not allow_hidden:
             print("AIEXE_%s thread-nav skipped (window hidden, paint throttled)" % label, flush=True)
             return None
     except Exception:
@@ -2264,10 +2264,11 @@ def _aiexe_sidebar_op_with_restore(driver, op, label):
     return ok
 
 
-def _aiexe_delete_chat(driver, slug, nav_fallback=True):
+def _aiexe_delete_chat(driver, slug, nav_fallback=True, allow_hidden_nav=False):
     """Delete a Venice conversation (irreversible — only on an explicit AI.EXE chat delete).
     nav_fallback=False = best-effort mode for background cleanup: no per-thread
-    navigation hunting (that made the window visibly 'wander' between chats)."""
+    navigation hunting. allow_hidden_nav=True lets an explicit delete try that
+    navigation while Chrome remains minimized; it must never restore the window."""
     if not slug:
         return False
     opened = _aiexe_open_sidebar(driver)
@@ -2276,13 +2277,13 @@ def _aiexe_delete_chat(driver, slug, nav_fallback=True):
         row = _aiexe_sidebar_row(driver, slug, tries=4 if not nav_fallback else 12)
         if row is None and nav_fallback:
             _aiexe_sidebar_diag(driver, slug, "DELETE")
-            row = _aiexe_row_via_thread_nav(driver, slug, "DELETE")
+            row = _aiexe_row_via_thread_nav(driver, slug, "DELETE", allow_hidden=allow_hidden_nav)
         if row is None:
             return False
         driver.execute_script("arguments[0].scrollIntoView({block:'center'});", row)
         btn = _aiexe_row_action_button(driver, row, VC_CHAT_DELETE_BUTTON_XPATH)
         if btn is None and _aiexe_slug_from_url(driver.current_url) != slug:
-            row = _aiexe_row_via_thread_nav(driver, slug, "DELETE")
+            row = _aiexe_row_via_thread_nav(driver, slug, "DELETE", allow_hidden=allow_hidden_nav)
             if row is not None:
                 btn = _aiexe_row_action_button(driver, row, VC_CHAT_DELETE_BUTTON_XPATH)
         if btn is None:
@@ -3073,8 +3074,9 @@ def chat():
 
 @app.route('/api/aiexe/delete_chat', methods=['POST'])
 def aiexe_delete_chat():
-    """Delete the Venice conversation for an AI.EXE chat (called on explicit chat delete).
-    Body: {aiexe_chat_id | chat_id, slug?}. Irreversible; guarded and best-effort."""
+    """Silently delete the Venice conversation paired with an explicit AI.EXE chat delete.
+    The local delete has already succeeded, so this is best-effort cleanup only: never
+    start, restore, reposition, or otherwise surface Chrome for it."""
     global driver
     req = parse_json_request(request) or {}
     key = _aiexe_chat_key(req)
@@ -3083,15 +3085,26 @@ def aiexe_delete_chat():
         return Response(json.dumps({"ok": False, "reason": "no mapped Venice conversation"}),
                         content_type='application/json; charset=utf-8')
     with selenium_lock:
+        reason = ""
         if not _aiexe_driver_alive(driver):
-            driver = _aiexe_reopen_driver("browser session was closed before delete_chat")
-        ok = _aiexe_sidebar_op_with_restore(driver, lambda: _aiexe_delete_chat(driver, slug), "DELETE")
-        if ok:
+            # Deleting one local chat must not relaunch Chrome just to clean a remote
+            # convenience copy. Forget the stale link and let the user carry on.
+            ok = False
+            reason = "browser unavailable; skipped remote cleanup"
+        else:
+            # Venice has no delete API. Drive its existing UI only while the already
+            # running Chrome stays minimized; missing/manual-deleted threads simply
+            # become stale links below, with no restore/park retry.
+            ok = _aiexe_delete_chat(driver, slug, nav_fallback=True, allow_hidden_nav=True)
+            if not ok:
+                reason = "Venice thread missing or unavailable; cleared stale mapping"
+        if key:
             AIEXE_CHAT_URLS.pop(key, None)
             AIEXE_THREAD_ATTACHMENTS.pop(key, None)
             AIEXE_THREAD_NAMED.pop(key, None)
             _aiexe_save_chat_map()
-    return Response(json.dumps({"ok": bool(ok), "slug": slug}),
+    return Response(json.dumps({"ok": bool(ok), "slug": slug, "reason": reason,
+                                "mapping_cleared": bool(key)}),
                     content_type='application/json; charset=utf-8')
 
 @app.route('/api/aiexe/cleanup_internal', methods=['POST'])
