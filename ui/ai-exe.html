@@ -56,8 +56,8 @@
         </div>
         <div class="col-icon" title="New Chat" onclick="startNewChat()">
           <svg class="icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M4 5.5A2.5 2.5 0 0 1 6.5 3h8A2.5 2.5 0 0 1 17 5.5v5"></path>
-            <path d="m13 14 6.5-6.5a1.8 1.8 0 0 1 2.5 2.5L15.5 16.5 12 17z"></path>
+            <path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+            <path d="M18.5 2.5a2.12 2.12 0 0 1 3 3L12 15l-4 1 1-4Z" />
           </svg>
         </div>
         <div class="col-icon" title="History" onclick="enterChatView()">
@@ -68,14 +68,14 @@
         </div>
         <div class="col-icon" title="Artifacts" onclick="openArtifactsView(artifactsBtn)">
           <svg class="icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <rect x="4" y="5" width="12" height="12" rx="2" />
-            <path d="M8 19h10a2 2 0 0 0 2-2V9" />
+            <path d="m12.83 2.18 7.31 3.65a2 2 0 0 1 1.1 1.79v8.76a2 2 0 0 1-1.1 1.79l-7.31 3.65a2 2 0 0 1-1.79 0l-7.31-3.65a2 2 0 0 1-1.1-1.79V7.62a2 2 0 0 1 1.1-1.79l7.31-3.65a2 2 0 0 1 1.79 0Z" />
+            <path d="m3.3 7 8.7 4.35L20.7 7M12 22V11.35" />
           </svg>
         </div>
         <div class="col-icon" title="Code" onclick="openCodeArtifactsView(codeBtn)">
           <svg class="icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <rect x="3" y="4" width="18" height="16" rx="2.5" />
-            <path d="m8 10 3 2-3 2M14 15h3" />
+            <path d="m4 17 6-6-6-6" />
+            <path d="M12 19h8" />
           </svg>
         </div>
       </div>
@@ -99,23 +99,23 @@
         <div class="sidebar-nav">
           <button class="snav-btn new-chat-btn" id="newChatBtn" onclick="startNewChat()">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M4 5.5A2.5 2.5 0 0 1 6.5 3h8A2.5 2.5 0 0 1 17 5.5v5"></path>
-              <path d="m13 14 6.5-6.5a1.8 1.8 0 0 1 2.5 2.5L15.5 16.5 12 17z"></path>
+              <path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+              <path d="M18.5 2.5a2.12 2.12 0 0 1 3 3L12 15l-4 1 1-4Z" />
             </svg>
             New Chat
           </button>
           <button class="snav-btn" id="artifactsBtn" onclick="openArtifactsView(this)">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <rect x="4" y="5" width="12" height="12" rx="2" />
-              <path d="M8 19h10a2 2 0 0 0 2-2V9" />
+              <path d="m12.83 2.18 7.31 3.65a2 2 0 0 1 1.1 1.79v8.76a2 2 0 0 1-1.1 1.79l-7.31 3.65a2 2 0 0 1-1.79 0l-7.31-3.65a2 2 0 0 1-1.1-1.79V7.62a2 2 0 0 1 1.1-1.79l7.31-3.65a2 2 0 0 1 1.79 0Z" />
+              <path d="m3.3 7 8.7 4.35L20.7 7M12 22V11.35" />
             </svg>
             Artifacts
             <span class="snav-badge" id="artifactCount">0</span>
           </button>
           <button class="snav-btn" id="codeBtn" onclick="openCodeArtifactsView(this)">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <rect x="3" y="4" width="18" height="16" rx="2.5" />
-              <path d="m8 10 3 2-3 2M14 15h3" />
+              <path d="m4 17 6-6-6-6" />
+              <path d="M12 19h8" />
             </svg>
             Code
             <span class="snav-badge" id="codeCount">0</span>
@@ -571,31 +571,28 @@
           <button class="exp-icon-btn rs-collapse-btn" id="rightCollapseBtn" type="button" title="Collapse Explorer"
             onclick="toggleRightSidebar()">
             <svg id="rightCollapseIcon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M13 18l6-6-6-6"></path>
-              <path d="M6 18l6-6-6-6"></path>
+              <rect x="3" y="4" width="18" height="16" rx="2.5" />
+              <path d="M13 4v16" />
             </svg>
           </button>
           <button class="exp-icon-btn" type="button" title="New File" onclick="createFile()">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
-              <polyline points="14 2 14 8 20 8"></polyline>
-              <line x1="12" y1="12" x2="12" y2="18"></line>
-              <line x1="9" y1="15" x2="15" y2="15"></line>
+              <path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z" />
+              <path d="M14 2v6h6M9 15h6M12 18v-6" />
             </svg>
           </button>
           <button class="exp-icon-btn" type="button" title="New Folder" onclick="createFolder()">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 2h9a2 2 0 0 1 2 2z"></path>
-              <line x1="12" y1="11" x2="12" y2="17"></line>
-              <line x1="9" y1="14" x2="15" y2="14"></line>
+              <path d="M20 20a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 2H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2Z" />
+              <path d="M12 10v6M9 13h6" />
             </svg>
           </button>
           <button class="exp-icon-btn" id="expOpenProjectBtn" type="button" title="Open Project (Cmd+O)"
             onclick="openWorkspaceProject()">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path
-                d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z">
-              </path>
+              <path d="m6 14 1.5-3h9l1.5 3" />
+              <path d="M3 7.5V6a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v1.5" />
+              <path d="M3 14h18v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" />
             </svg>
           </button>
           <button class="exp-icon-btn" id="expRunAppBtn" type="button" title="Run the project"
