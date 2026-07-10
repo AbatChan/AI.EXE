@@ -52,6 +52,13 @@ assert.match(aiExe, /agentAdapterUploadedAttachmentIds/);
 assert.match(aiExe, /function releaseAgentAdapterForwardedAttachments/);
 assert.doesNotMatch(aiExe, /agentAdapterAttachmentsSentCount/);
 
+// A decision that inlines a whole file overflows the structured-output cap —
+// the loop must steer the model to a small decision shape, not kill the run.
+const agentLoopSrc = fs.readFileSync(path.join(__dirname, '..', 'ui', 'agent-loop.js'), 'utf8');
+assert.match(aiExe, /outputLimitExceeded: true/);
+assert.match(agentLoopSrc, /outputLimitNudges/);
+assert.match(agentLoopSrc, /agent_decision_output_limit_recovered/);
+
 // Model catalog: the picker renders only a curated slice, so the scraper must
 // sweep the search box (full-catalog discovery) and persist the swept flag.
 assert.match(adapter, /def _aiexe_sweep_models_by_search/);

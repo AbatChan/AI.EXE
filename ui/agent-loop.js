@@ -325,6 +325,9 @@
       // Advisory final-gate: nudge the model at most once when it tries to
       // finish with planned items still unmet, then trust its judgment.
       let finalNudges = 0;
+      // Decision replies that inlined a whole file and blew the structured-output
+      // cap: recover by steering (content belongs to the dedicated content step).
+      let outputLimitNudges = 0;
       let runAppFinishNudges = 0;
       // Block completing a phase when the model wrote nothing that run.
       let phaseEmptyFinalNudges = 0;
@@ -1662,6 +1665,25 @@
           if (!deps.isInferenceActive(requestToken)) return true;
           if (!res || !res.ok) {
             if (runLog) runLog.emitDecisionFailure(step, (res && res.message) || 'agent infer failed', Boolean(res && res.timedOut));
+            // The model inlined a whole file into the decision JSON and blew the
+            // structured-output cap. Retrying the same prompt would overflow again —
+            // steer it to the correct shape instead of killing the run.
+            if (res && res.outputLimitExceeded && outputLimitNudges < 2) {
+              outputLimitNudges += 1;
+              toolEvents.push({
+                tool: '_invalid_output',
+                ok: false,
+                path: '',
+                observation: 'Your reply was cut off: it exceeded the per-step output limit because it inlined an entire file into the decision JSON. NEVER put whole-file content in a decision. Reply with ONLY the small decision object — e.g. {"action":"tool","tool":"edit_file","path":"/style.css"} with NO content field — and the harness will collect the actual file changes in a separate dedicated step that has a much larger budget.',
+              });
+              recordDebugTrace('agent_decision_output_limit_recovered', {
+                chatId: String(chatId || ''),
+                step: String(step),
+                nudge: String(outputLimitNudges),
+              }, { chatId: String(chatId || ''), step, nudge: outputLimitNudges, rawPreview: deps.debugPreview(String(res.output || ''), 240) });
+              setAgentProgress('Continuing...');
+              continue;
+            }
             setAgentProgress('Stopped.');
             appendAgentActivity({
               kind: 'error',

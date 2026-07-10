@@ -8505,6 +8505,9 @@ async function streamOllamaChatCompletion(provider, prompt, handlers = {}, optio
               message: 'Adapter response exceeded the structured-output limit.',
               truncated: true,
               nonRetriable: true,
+              // distinct from a cut stream: same prompt would overflow again, but the
+              // agent loop can recover by steering the model to a smaller reply shape
+              outputLimitExceeded: true,
               provider,
               model,
             };
