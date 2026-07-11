@@ -70,5 +70,7 @@ assert.match(releaseWorkflow, /PyInstaller/);
 assert.match(releaseWorkflow, /AI\.EXE Backend\.exe/);
 assert.match(releaseWorkflow, /Smoke-test bundled backend/);
 assert.match(releaseWorkflow, /Bundled AI\.EXE backend did not become healthy/);
+assert.match(win, /Downloading the new version\.\.\./);
+assert.doesNotMatch(win, /Downloading the new version…/);
 
 console.log('PASS: dev-server process manager (tracked start/stop, bridge actions, UI card, adapter thread cleanup)');
