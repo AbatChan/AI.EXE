@@ -11905,7 +11905,14 @@ const agentPlanGrammar = String(promptCoreApi.agentPlanGrammar || '');
 // Live project file tree for agent prompts — fresh each step, system noise
 // (.DS_Store, node_modules, .git, .aiexe, build output) excluded. Short cache
 // so decision + repair prompts within one step don't re-walk.
-let _workspaceTreeSummaryCache = { at: 0, text: '' };
+let _workspaceTreeSummaryCache = { at: 0, text: '', paths: new Set() };
+
+// Sync existence check against the last tree walk (the decision-prompt build
+// refreshes it just before pending requirements are computed).
+function workspaceTreeHasFile(path) {
+  const normalized = normalizeWorkspacePath(path || '');
+  return Boolean(normalized) && _workspaceTreeSummaryCache.paths.has(normalized);
+}
 async function getWorkspaceFileTreeSummary() {
   const ctx = typeof getWorkspaceContext === 'function' ? getWorkspaceContext() || {} : {};
   if (!ctx.workspaceRootName && !ctx.rootLoaded) return '';
@@ -11914,6 +11921,7 @@ async function getWorkspaceFileTreeSummary() {
   const HIDDEN = new Set(['.DS_Store', 'Thumbs.db', 'desktop.ini', '.Spotlight-V100', '.Trashes',
     '.fseventsd', '.aiexe', '.git', 'node_modules', 'dist', 'build', '.venv', '__pycache__', '.next', 'coverage']);
   const lines = [];
+  const paths = new Set();
   let budget = 120;
   const walk = async (dirPath, depth) => {
     if (budget <= 0 || depth > 4) return;
@@ -11929,9 +11937,11 @@ async function getWorkspaceFileTreeSummary() {
       if (budget <= 0) { lines.push(`${'  '.repeat(depth)}…`); return; }
       budget -= 1;
       const indent = '  '.repeat(depth);
+      const entryPath = normalizeWorkspacePath(entry.path || `${dirPath}/${entry.name}`);
+      if (entryPath) paths.add(entryPath);
       if (entry.kind === 'folder') {
         lines.push(`${indent}${entry.name}/`);
-        await walk(normalizeWorkspacePath(entry.path || `${dirPath}/${entry.name}`), depth + 1);
+        await walk(entryPath, depth + 1);
       } else {
         lines.push(`${indent}${entry.name}`);
       }
@@ -11939,7 +11949,7 @@ async function getWorkspaceFileTreeSummary() {
   };
   try { await walk('/', 0); } catch (_) { }
   const text = lines.join('\n');
-  _workspaceTreeSummaryCache = { at: now, text };
+  _workspaceTreeSummaryCache = { at: now, text, paths };
   return text;
 }
 
@@ -12424,6 +12434,7 @@ const agentPlanner = window.AIExeAgentPlanner && typeof window.AIExeAgentPlanner
   ? window.AIExeAgentPlanner.createAgentPlanner({
     normalizeWorkspacePath,
     getWorkspaceFileTreeSummary,
+    workspaceTreeHasFile,
     isAgentTaskGameLike,
     hasReadmeRunInstructions,
     isLikelyCompleteReadme,

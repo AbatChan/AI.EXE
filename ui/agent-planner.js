@@ -299,10 +299,15 @@
         .filter((path) => isSoftwareProject && !isDocsTask && path && path !== '/README.md' && path !== '/src')
         .slice(0, activePhasePaths.length ? 8 : 6)
         .forEach((path) => {
+          const isWriteDeliverable = plan.taskKind !== 'edit';
           requirements.push({
             id: `expected_${path}`,
-            label: `${plan.taskKind === 'edit' ? 'update' : 'write'} ${path}`,
-            met: affectedFileSatisfied(path),
+            label: `${isWriteDeliverable ? 'write' : 'update'} ${path}`,
+            // A "write X" deliverable that already exists on disk (built by an
+            // earlier phase/run) is done — demanding a write here pressures the
+            // model toward a forbidden overwrite and burns steps proving it.
+            met: affectedFileSatisfied(path)
+              || (isWriteDeliverable && typeof deps.workspaceTreeHasFile === 'function' && deps.workspaceTreeHasFile(path)),
           });
         });
 

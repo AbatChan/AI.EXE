@@ -2759,6 +2759,58 @@
           const missingDeps = proof.installCommand && looksLikeMissingNodeDependencies(`${res.message || ''}\n${res.output || ''}`);
           if (missingDeps) {
             const installCommand = String(proof.installCommand || '').trim();
+            // The user's single approval covers the install: run it here and
+            // retry the proof, instead of surfacing a second permission ask.
+            const approvedInstall = String((runOptions && runOptions.approvedCommand) || '').trim() === installCommand;
+            if (approvedInstall) {
+              const installClass = classifyAgentCommand(installCommand);
+              deps.setActiveAgentStreamStatus(chatId, `Installing dependencies: ${installCommand}`);
+              const installRes = await deps.invokeWorkspaceAction('runCommand', {
+                program: installClass.program,
+                argsLine: installClass.args.join('\n'),
+              });
+              const installStatus = installRes && installRes.ok ? parseRunCommandExitStatus(installRes.message) : null;
+              const installTail = commandOutputTail(installRes && installRes.output);
+              if (!installRes || !installRes.ok || !installStatus || installStatus.timedOut || installStatus.exitCode !== 0) {
+                return {
+                  ok: true,
+                  mutated,
+                  runErrorCount: 1,
+                  terminalCommand: installCommand,
+                  terminalProof: buildTerminalProof(installCommand, installRes || {}, installStatus || { exitCode: null, timedOut: false }),
+                  observation: `run_app ran the approved \`${installCommand}\` but it did not finish cleanly. Read the install errors, fix the cause (often package.json), then run_app again.${installTail ? `\nOutput:\n${installTail}` : ''}`,
+                };
+              }
+              deps.setActiveAgentStreamStatus(chatId, `Running terminal proof: ${proofCommand}`);
+              const retryRes = await deps.invokeWorkspaceAction('runCommand', {
+                program: classification.program,
+                argsLine: classification.args.join('\n'),
+              });
+              if (retryRes && retryRes.ok) {
+                const retryStatus = parseRunCommandExitStatus(retryRes.message);
+                const retryTail = commandOutputTail(retryRes.output);
+                const retryProof = buildTerminalProof(proofCommand, retryRes, retryStatus);
+                if (!retryStatus.timedOut && retryStatus.exitCode === 0) {
+                  return {
+                    ok: true,
+                    mutated,
+                    runErrorCount: 0,
+                    terminalCommand: proofCommand,
+                    terminalProof: retryProof,
+                    observation: `run_app installed dependencies (\`${installCommand}\`) and ${stackInfo.passLabel || 'the proof passed'} (${proofCommand} exited 0).${retryTail ? `\nOutput:\n${retryTail}` : ''}`,
+                  };
+                }
+                return {
+                  ok: true,
+                  mutated,
+                  runErrorCount: 1,
+                  terminalCommand: proofCommand,
+                  terminalProof: retryProof,
+                  observation: `run_app installed dependencies, but ${stackInfo.failLabel || 'the proof failed'} (${proofCommand} ${retryStatus.timedOut ? 'timed out' : `exited ${retryStatus.exitCode}`}). Read these real errors, fix the root cause in the referenced files, then run_app again.\nOutput:\n${retryTail || '(no output)'}`,
+                };
+              }
+              return { ok: false, mutated, observation: `run_app installed dependencies but could not re-run ${proofCommand}: ${(retryRes && retryRes.message) || 'unknown error'}.` };
+            }
             const installProofPreview = tail
               ? `Required because \`${proofCommand}\` reported:\n${tail}`
               : `Required because ${proofCommand} reported missing local dependencies.`;

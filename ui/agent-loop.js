@@ -3525,9 +3525,12 @@
         }
         if (evTool === 'run_app') {
           if (!event.ok || Number(event.runErrorCount) > 0) {
+            // Skip the harness preamble lines (they name internal tools and talk
+            // to the model, not the user) — quote the real error underneath.
             const errLine = String(event.observation || '')
               .split('\n')
               .map((l) => l.trim())
+              .filter((l) => l && !/^run_app\b/i.test(l) && !/^(build )?output:/i.test(l))
               .find((l) => /^-\s/.test(l) || /error|uncaught|cannot read|is not (defined|a function)/i.test(l)) || '';
             unresolvedValidationClause = ` Note: the app still throws an error when it runs that I couldn't fix${errLine ? ` (${errLine.replace(/^-\s*/, '').slice(0, 160)})` : ''}. Press Continue and I'll keep working on it.`;
           }
