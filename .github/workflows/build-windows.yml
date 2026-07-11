@@ -93,6 +93,18 @@ jobs:
               if (Test-Path $log) { Get-Content $log -Tail 200 }
               throw "Bundled AI.EXE backend stopped serving after boot: $_"
             }
+            # The frozen backend must install the adapter from BUNDLED files with no
+            # git/python on the box. This proves PyInstaller shipped the adapter source
+            # and that __file__ resolves when frozen (client had no git -> WinError 2).
+            try {
+              $inst = Invoke-WebRequest -UseBasicParsing -Method POST "http://127.0.0.1:18765/api/adapter/install"
+              $body = $inst.Content | ConvertFrom-Json
+              if (-not $body.ok) { throw "install not ok: $($inst.Content)" }
+            } catch {
+              $log = Join-Path $env:LOCALAPPDATA "AI_EXE/backend/backend.log"
+              if (Test-Path $log) { Get-Content $log -Tail 200 }
+              throw "Bundled AI.EXE adapter install failed (missing bundled server / needs git?): $_"
+            }
           } finally {
             if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force }
           }

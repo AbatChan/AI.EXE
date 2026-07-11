@@ -416,9 +416,21 @@ class AdapterManager:
                 pass
 
     def install(self, timeout: int = 600) -> dict:
-        """git clone + venv + pip install -r requirements.txt. Returns {ok, detail}."""
+        """Release: lay down the bundled adapter (no git/python needed). Source dev:
+        git clone + venv + pip install -r requirements.txt. Returns {ok, detail}."""
         try:
             self._append_log("AIEXE_INSTALL starting")
+            if self._uses_frozen_backend():
+                # The release backend already carries Selenium + the fully-patched server;
+                # git/python are not on the client's machine. Write our bundled canonical
+                # server + config straight into place — no clone, no network, no venv.
+                os.makedirs(self._dir, exist_ok=True)
+                self._patch_adapter()  # creates ollama_like_server.py + venice_config.py
+                if not self.is_installed():
+                    self._append_log("AIEXE_INSTALL bundled_server_missing")
+                    return {"ok": False, "detail": "bundled adapter server missing from release"}
+                self._append_log("AIEXE_INSTALL installed")
+                return {"ok": True, "detail": "installed"}
             if not os.path.isdir(self._dir):
                 os.makedirs(os.path.dirname(self._dir), exist_ok=True)
                 self._append_log("AIEXE_INSTALL downloading adapter from GitHub")
@@ -430,11 +442,6 @@ class AdapterManager:
             if not self.is_installed():
                 self._append_log("AIEXE_INSTALL clone_missing_server")
                 return {"ok": False, "detail": "clone done but ollama_like_server.py not found"}
-            if self._uses_frozen_backend():
-                # The release backend already carries Selenium and its dependencies.
-                self._patch_adapter()
-                self._append_log("AIEXE_INSTALL installed")
-                return {"ok": True, "detail": "installed"}
             venv_py = self._venv_python()
             if not os.path.exists(venv_py):
                 self._append_log("AIEXE_INSTALL creating Python environment")
