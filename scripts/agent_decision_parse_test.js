@@ -46,6 +46,16 @@ function ok(name, cond) {
   ok('well-formed edit_file decision is unchanged', d && d.action === 'tool' && d.tool === 'edit_file' && d.path === '/style.css');
 }
 
+{
+  const d = parseAgentDecision(JSON.stringify({
+    action: 'tool',
+    tool: 'edit_file',
+    path: '/app.js',
+    plan_update: ['Add the AI controls', 'Make legal AI moves after human turns', 'Keep undo and reset coherent'],
+  }));
+  ok('structured plan update is preserved with the tool decision', d && d.planUpdate === 'Add the AI controls|Make legal AI moves after human turns|Keep undo and reset coherent');
+}
+
 // Hermes/Qwen tool-call XML must parse without leaking the raw tool call or file
 // content as user-facing narration.
 {

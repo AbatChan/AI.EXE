@@ -377,6 +377,7 @@
       let scope = '';
       let command = '';
       let readPathsList = [];
+      let planUpdate = '';
 
       if (typeof DOMParser !== 'undefined' && /<decision>/i.test(candidate)) {
         try {
@@ -392,6 +393,7 @@
             tool = textOf('tool');
             path = textOf('path');
             message = textOf('message');
+            planUpdate = textOf('plan_update');
             srcPath = textOf('src_path') || textOf('srcPath');
             dstPath = textOf('dst_path') || textOf('dstPath');
             const rawContentMatch = candidate.match(/<content>([\s\S]*?)<\/content>/i);
@@ -410,6 +412,7 @@
         tool = extractTagRegex('tool', candidate);
         path = extractTagRegex('path', candidate);
         message = extractTagRegex('message', candidate);
+        planUpdate = extractTagRegex('plan_update', candidate);
         srcPath = extractTagRegex('src_path', candidate) || extractTagRegex('srcPath', candidate);
         dstPath = extractTagRegex('dst_path', candidate) || extractTagRegex('dstPath', candidate);
         const contentMatch = candidate.match(/<content>([\s\S]*?)<\/content>/i);
@@ -434,6 +437,7 @@
         srcPath = hermes('src_path') || hermes('srcPath');
         dstPath = hermes('dst_path') || hermes('dstPath');
         const th = hermes('thought'); if (th && !thought) thought = th;
+        planUpdate = hermes('plan_update') || planUpdate;
         offset = Number(hermes('offset')) || offset;
         startLine = Number(hermes('start_line')) || startLine;
         endLine = Number(hermes('end_line')) || endLine;
@@ -477,6 +481,9 @@
           tool = String(parsed.tool || '');
           path = String(parsed.path || '');
           message = String(parsed.message || '');
+          planUpdate = Array.isArray(parsed.plan_update)
+            ? parsed.plan_update.map((item) => String(item || '').trim()).filter(Boolean).join('|')
+            : String(parsed.plan_update || '');
           srcPath = String(parsed.src_path || parsed.srcPath || '');
           dstPath = String(parsed.dst_path || parsed.dstPath || '');
           content = String(parsed.content || '');
@@ -507,6 +514,7 @@
         tool = readStringValue('tool');
         path = readStringValue('path');
         message = readStringValue('message');
+        planUpdate = readStringValue('plan_update');
         srcPath = readStringValue('src_path') || readStringValue('srcPath');
         dstPath = readStringValue('dst_path') || readStringValue('dstPath');
         if (!String(content || '').trim()) content = readStringValue('content');
@@ -567,6 +575,7 @@
         end_line: Math.max(0, Number(endLine) || 0),
         scope: String(scope || '').trim(),
         paths: Array.isArray(readPathsList) ? readPathsList : [],
+        planUpdate: String(planUpdate || '').trim(),
         raw,
       };
     }

@@ -329,6 +329,7 @@
       // cap: recover by steering (content belongs to the dedicated content step).
       let outputLimitNudges = 0;
       let runAppFinishNudges = 0;
+      let autoFinalSummaryNudgeUsed = false;
       // Block completing a phase when the model wrote nothing that run.
       let phaseEmptyFinalNudges = 0;
       // The latest run_app since the last write, IF it still reports errors — used to
@@ -1328,6 +1329,8 @@
         : [];
       let lastChecklistSignature = '';
       let reviewNarrated = false;
+      let planUpdatePending = false;
+      let lastPlanUpdateSignature = '';
       const refreshChecklist = (finalizing = false, acceptedFinal = false) => {
         if (!checklistItems.length || typeof deps.computeAgentChecklistProgress !== 'function') return null;
         let progress = deps.computeAgentChecklistProgress(checklistItems, toolEvents, planSpec);
@@ -1357,11 +1360,12 @@
           lastChecklistSignature = signature;
           appendAgentActivity({
             kind: 'checklist',
-            title: 'Plan',
+            title: planUpdatePending ? 'Plan updated' : 'Plan',
             meta: `${doneCount}/${progress.length}`,
             items: progress.map((p) => ({ text: p.text, done: p.done })),
             status: 'done',
           });
+          planUpdatePending = false;
         }
         return {
           progress,
@@ -1372,6 +1376,29 @@
         };
       };
       refreshChecklist();
+
+      const applyDecisionPlanUpdate = (decision, step) => {
+        const items = String(decision && decision.planUpdate || '')
+          .split('|')
+          .map((item) => String(item || '').replace(/^\s*(?:[-*]|\d+[.)])\s*/, '').trim())
+          .filter(Boolean)
+          .slice(0, 5);
+        if (items.length < 3) return false;
+        const signature = items.join('\n');
+        if (signature === lastPlanUpdateSignature) return false;
+        lastPlanUpdateSignature = signature;
+        checklistItems.splice(0, checklistItems.length, ...items);
+        planSpec.doneCriteria = items.slice();
+        planUpdatePending = true;
+        lastChecklistSignature = '';
+        refreshChecklist();
+        recordDebugTrace('agent_plan_updated', {
+          chatId: String(chatId || ''),
+          step: String(step),
+          items: String(items.length),
+        }, { chatId: String(chatId || ''), step, items });
+        return true;
+      };
       setAgentProgress('Starting...');
 
       // .aiexe/plan.md = the phased build's source of truth (checkboxes are state).
@@ -1837,6 +1864,7 @@
         decision.path = normalizeDecisionPath(decision.path || '');
         decision.srcPath = normalizeDecisionPath(decision.srcPath || '');
         decision.dstPath = normalizeDecisionPath(decision.dstPath || '');
+        applyDecisionPlanUpdate(decision, step);
 
         if (phaseState && decision.action === 'tool' && String(decision.tool || '').toLowerCase() === 'validate_files') {
           const missingPhaseFiles = getKnownActivePhaseFileTaskGaps();
@@ -3448,6 +3476,16 @@
             const unmetCriteria = await getUnmetCriteriaNudge();
             if (unmetCriteria) {
               pushCriteriaNudgeObservation(unmetCriteria);
+              continue;
+            }
+            if (!autoFinalSummaryNudgeUsed) {
+              autoFinalSummaryNudgeUsed = true;
+              toolEvents.push({
+                tool: 'final_check',
+                ok: true,
+                observation: 'Validation passed and the requested changes are written. Return action:"final" now with a concise, grounded user summary. Do not run another tool.',
+              });
+              setAgentProgress('Preparing your summary...');
               continue;
             }
             setAgentProgress('Preparing the summary...');
