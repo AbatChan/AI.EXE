@@ -1012,6 +1012,8 @@ bool LaunchViteDevServerWin(const std::filesystem::path &root, int port,
       << ")\r\n"
       << "start \"\" \"" << url << "\"\r\n"
       << "echo Starting Vite dev server at " << url << "\r\n"
+      << "rem The launcher opened the URL; BROWSER=none stops Vite's server.open second tab.\r\n"
+      << "set BROWSER=none\r\n"
       << "call npm run dev -- --host 127.0.0.1 --port " << port << " --strictPort\r\n"
       << ":end\r\n"
       << "echo.\r\n"

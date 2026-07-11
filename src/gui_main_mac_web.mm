@@ -1456,7 +1456,9 @@ bool LaunchViteDevServerMac(const std::filesystem::path &root, int port,
          << "fi\n"
          << "( sleep 2; open " << sh_quote(url) << " ) >/dev/null 2>&1 &\n"
          << "echo 'Starting Vite dev server at " << url << "'\n"
-         << "npm run dev -- --host 127.0.0.1 --port " << port << " --strictPort\n";
+         // The launcher opens the URL itself; BROWSER=none stops Vite's
+         // server.open from opening a second tab.
+         << "BROWSER=none npm run dev -- --host 127.0.0.1 --port " << port << " --strictPort\n";
 
   NSString *tmpDir = NSTemporaryDirectory();
   NSString *scriptPath = [tmpDir stringByAppendingPathComponent:
