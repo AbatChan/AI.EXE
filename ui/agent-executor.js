@@ -2265,16 +2265,16 @@
               len: String(String(content || '').length),
             }, { path, issue, stage: stageLabel, len: String(content || '').length });
           }
-          const generated = await deps.generateAgentWriteFileContent(taskText, toolEvents, path, prior, planSpec);
+          const generated = await deps.generateAgentWriteFileContent(taskText, toolEvents, path, prior, planSpec, { persistPartials: creatingNewFile });
           if (generated) content = generated;
           return getStructuralIssueForPath(path, content);
         };
         if (shouldAutoGenerate && !modelSuppliedComplete && !(packageJsonTarget && String(content).trim())) {
-          const generated = await deps.generateAgentWriteFileContent(taskText, toolEvents, path, content, planSpec);
+          const generated = await deps.generateAgentWriteFileContent(taskText, toolEvents, path, content, planSpec, { persistPartials: creatingNewFile });
           if (generated) content = generated;
           await repairStructuralIssueOnce('initial generated content');
         } else if (!shouldAutoGenerate && !String(content).trim()) {
-          const generated = await deps.generateAgentWriteFileContent(taskText, toolEvents, path, '', planSpec);
+          const generated = await deps.generateAgentWriteFileContent(taskText, toolEvents, path, '', planSpec, { persistPartials: creatingNewFile });
           if (generated) content = generated;
         }
         if (!String(content).trim()) {
@@ -2546,6 +2546,16 @@
               ok: false,
               mutated,
               observation: `edit_file blocked for ${path}: the parser reported a localized syntax error, but no concrete find/replace edit was produced. The file was kept intact; retry with an exact edit program instead of rewriting the whole file.`,
+            };
+          }
+          // The rewrite prompt clips CURRENT_FILE to 22000 chars. Asking for a
+          // complete rewrite of a file the model can only half-see guarantees
+          // dropped content (or a refusal) — require targeted edits instead.
+          if (originalContent.length > 22000) {
+            return {
+              ok: false,
+              mutated,
+              observation: `edit_file blocked for ${path}: the file is too large (${originalContent.length} chars) for a safe whole-file rewrite. The file was kept intact. Make the change with a precise JSON edit program (exact anchor text from the file + replacement) — several small find/replace edits are fine.`,
             };
           }
           const rewritten = await deps.generateAgentRewriteExistingFileContent(taskText, toolEvents, path, originalContent, decision.content || '', planSpec);

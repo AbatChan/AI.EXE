@@ -2484,6 +2484,23 @@
                 endLine: reqEnd,
                 observation: `read_file ${readPath} (lines ${reqStart}–${reqEnd || allLines.length} of ${allLines.length}, served from this run's cache — the file has not changed):\n${slice.slice(0, deps.agentMaxToolOutputChars - 400)}`,
               });
+              // Cache hits skip the executor, so give the feed its Read chip here —
+              // otherwise the model's "Reading..." note renders with nothing under it.
+              const cacheRangeLabel = reqEnd > reqStart
+                ? `lines ${reqStart}–${reqEnd}`
+                : (reqStart > 1 ? `from line ${reqStart}` : '');
+              appendAgentActivity({
+                kind: 'read',
+                inlineMode: true,
+                title: 'Read',
+                detail: readPath.split('/').filter(Boolean).pop() || readPath,
+                openPath: readPath,
+                openKind: 'file',
+                openStartLine: reqStart,
+                openEndLine: reqEnd,
+                meta: cacheRangeLabel ? `${cacheRangeLabel} · cached` : 'cached',
+                status: 'done',
+              });
               recordDebugTrace('agent_read_served_from_cache', {
                 chatId: String(chatId || ''), step: String(step), path: readPath,
               }, { chatId: String(chatId || ''), step, path: readPath });

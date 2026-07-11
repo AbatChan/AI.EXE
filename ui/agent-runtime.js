@@ -178,7 +178,12 @@
     // Continues on either the provider's truncation signal or a structural check.
     // Emits an `agent_file_generation` trace (prompt size, output size, #continuations)
     // so under-generation / context-overflow is visible instead of silent.
-    async function generateFullAgentFile(prompt, path) {
+    async function generateFullAgentFile(prompt, path, options = {}) {
+      // Rewrites of EXISTING files must not persist partial passes: an early
+      // pass can be model prose/refusal, and writing it clobbers the real file
+      // before the executor's revert/structure guards ever see it (this is how
+      // a 43K app.js became its own rewrite-refusal text).
+      const persistPartials = !options || options.persistPartials !== false;
       const promptChars = String(prompt || '').length;
       // Heartbeat so the loop's idle-timeout knows this slow multi-pass generation
       // is actually progressing (not hung) and lets it finish a large file.
@@ -213,6 +218,7 @@
       // Persist after the first pass so the file is created + visible in the
       // workspace and the partial isn't lost if generation stops.
       const persistPartial = (text) => {
+        if (!persistPartials) return;
         if (typeof deps.persistAgentFile === 'function') deps.persistAgentFile(path, deps.sanitizeAgentGeneratedFileContent(text, path));
       };
       persistPartial(raw);
@@ -293,9 +299,9 @@
       });
     }
 
-    async function generateAgentWriteFileContent(taskText, toolEvents, path, priorAttempt = '', planSpec = null) {
+    async function generateAgentWriteFileContent(taskText, toolEvents, path, priorAttempt = '', planSpec = null, options = {}) {
       const prompt = await deps.buildAgentWriteFileContentPrompt(taskText, toolEvents, path, priorAttempt, planSpec);
-      return generateFullAgentFile(prompt, path);
+      return generateFullAgentFile(prompt, path, options);
     }
 
     // Split one multi-file response into {path, content}. Maps each fenced block to
@@ -422,7 +428,7 @@
 
     async function generateAgentRewriteExistingFileContent(taskText, toolEvents, path, currentContent, priorAttempt = '', planSpec = null) {
       const prompt = await deps.buildAgentRewriteExistingFilePrompt(taskText, toolEvents, path, currentContent, priorAttempt, planSpec);
-      return generateFullAgentFile(prompt, path);
+      return generateFullAgentFile(prompt, path, { persistPartials: false });
     }
 
     const loadPromptTemplate = typeof deps.loadPromptTemplate === 'function'

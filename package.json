@@ -19,6 +19,7 @@
     "test:chat-external-link": "node scripts/chat_external_link_test.js",
     "test:chat-delete-persistence": "node scripts/chat_delete_persistence_static_test.js",
     "test:agent-plan-update-ui": "node scripts/agent_plan_update_ui_static_test.js",
+    "test:agent-rewrite-persist-guard": "node scripts/agent_rewrite_persist_guard_static_test.js",
     "test:agent-write-repair": "node scripts/agent_write_file_repair_test.js",
     "test:agent-planner-diagnostics": "node scripts/agent_planner_diagnostics_test.js",
     "test:agent-grounding": "node scripts/agent_change_grounding_test.js",
@@ -68,7 +69,7 @@
     "markdown-it-texmath": "^1.0.0",
     "rollup": "^4.59.0"
   },
-  "version": "7.8.5",
+  "version": "7.8.7",
   "devDependencies": {
     "eslint-linter-browserify": "^10.7.0"
   }
