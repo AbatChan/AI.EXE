@@ -1320,6 +1320,12 @@
       const offenders = [];
       for (const name of Object.keys(firstDeclIndex)) {
         if (declCount[name] > 1) continue;
+        // This check is scope-blind: if the same name is ALSO declared with
+        // let/var anywhere (shadowing, e.g. `const nc` in one function and
+        // `let nr = ..., nc = ...` in another), it cannot tell which binding a
+        // later assignment touches — skip rather than flag legal code.
+        const letShadowRe = new RegExp(`\\b(?:let|var)\\b[^;\\n]{0,160}?\\b${name}\\b\\s*=`);
+        if (letShadowRe.test(stripped)) continue;
         // A bare assignment `name =` (not ==, ===, =>, JSX `prop={...}`, or a
         // property/.name), after the declaration, and not itself a const/let/var
         // declaration.
@@ -1330,6 +1336,15 @@
           if (nameAt <= firstDeclIndex[name]) continue;
           const before = stripped.slice(Math.max(0, nameAt - 7), nameAt);
           if (/\b(?:const|let|var)\s*$/.test(before)) continue;
+          // Declarator continuation (`const a = 1, name = 2`): if the enclosing
+          // statement opens with a declaration keyword, this is a declaration.
+          const stmtStart = Math.max(
+            stripped.lastIndexOf(';', nameAt),
+            stripped.lastIndexOf('{', nameAt),
+            stripped.lastIndexOf('}', nameAt),
+            stripped.lastIndexOf(')', nameAt),
+          );
+          if (stmtStart >= 0 && /\b(?:const|let|var)\b/.test(stripped.slice(stmtStart + 1, nameAt))) continue;
           const jsxContext = stripped.slice(Math.max(0, nameAt - 160), nameAt);
           const lastLt = jsxContext.lastIndexOf('<');
           const lastGt = jsxContext.lastIndexOf('>');
