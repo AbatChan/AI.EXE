@@ -6872,11 +6872,12 @@ html.platform-mac .settings-sidebar {
   display: none;
 }
 
+/* Stop state keeps the brand cyan — only the icon changes. */
 .send-btn.cancel-mode {
-  background: var(--accent2);
-  color: #fff;
+  background: var(--accent);
+  color: #04121a;
   border: none;
-  box-shadow: none;
+  box-shadow: 0 2px 12px rgba(0, 229, 255, 0.3);
 }
 
 .send-btn.cancel-mode .send-icon {
@@ -6888,8 +6889,8 @@ html.platform-mac .settings-sidebar {
 }
 
 .send-btn.cancel-mode:hover {
-  box-shadow: 0 4px 18px rgba(124, 58, 237, 0.36);
-  background: #8b5cf6;
+  box-shadow: 0 4px 18px rgba(0, 229, 255, 0.35);
+  background: #6ef2ff;
 }
 
 .send-btn:disabled {
