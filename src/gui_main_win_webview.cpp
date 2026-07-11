@@ -1864,6 +1864,16 @@ private:
       }
       output = lines;
       message = "ok";
+    } else if (action == "openExternalUrl") {
+      const std::string external_url = ExtractJsonStringField(request_json, "url");
+      if (external_url.rfind("http://", 0) != 0 && external_url.rfind("https://", 0) != 0) {
+        ok = false;
+        message = "Only http(s) URLs can be opened.";
+      } else {
+        ShellExecuteW(nullptr, L"open", Utf8ToWide(external_url).c_str(), nullptr,
+                      nullptr, SW_SHOWNORMAL);
+        message = "Opened.";
+      }
     } else if (action == "applyUpdate") {
       const std::string url = ExtractJsonStringField(request_json, "url");
       if (url.empty()) {

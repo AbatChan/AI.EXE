@@ -733,7 +733,10 @@
             }
             const url = runDevServer.url;
             if (url && autoOpen) {
-              try { window.open(url, '_blank'); } catch (_) { }
+              try {
+                if (typeof window.openExternalUrl === 'function') window.openExternalUrl(url);
+                else window.open(url, '_blank');
+              } catch (_) { }
             }
             const restartNote = restarted ? ' I restarted the dev server so it serves your latest changes.' : '';
             if (url) {

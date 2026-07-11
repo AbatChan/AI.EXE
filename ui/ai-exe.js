@@ -1488,7 +1488,7 @@ try {
       // Native handler downloads the new build, swaps files, and relaunches.
       nativeBridge.invoke('applyUpdate', { url: updateInfo.url, version: updateInfo.version });
     } else if (updateInfo.page) {
-      window.open(updateInfo.page, '_blank');
+      openExternalUrl(updateInfo.page);
     }
   }
   const startUpdateChecks = () => {
@@ -3479,6 +3479,21 @@ function syncWorkspaceTabStrip() {
   const bar = document.getElementById('middleTabBar');
   if (bar) bar.classList.toggle('no-files', !hasFileTabs);
 }
+
+// Open a URL in the user's default browser. window.open is dead inside the
+// native shells (no createWebView delegate), and a dev server's own opener
+// can land in the wrong Chrome instance — the bridge action is the one
+// reliable path.
+function openExternalUrl(url) {
+  const clean = String(url || '').trim();
+  if (!/^https?:\/\//i.test(clean)) return;
+  if (nativeBridge.available()) {
+    void nativeBridge.invoke('openExternalUrl', { url: clean });
+    return;
+  }
+  try { window.open(clean, '_blank'); } catch (_) { }
+}
+window.openExternalUrl = openExternalUrl;
 
 // Custom titlebar drag: the page hit-tests the top band and only asks the
 // native window to drag when the press is on inert surface, so controls that
@@ -14244,7 +14259,7 @@ function handleDevServerCardClick(event) {
     event.preventDefault();
     event.stopPropagation();
     const url = String(openBtn.dataset.devServerOpenUrl || '').trim();
-    if (/^https?:\/\/(?:127\.0\.0\.1|localhost|0\.0\.0\.0)/i.test(url)) window.open(url, '_blank');
+    if (/^https?:\/\/(?:127\.0\.0\.1|localhost|0\.0\.0\.0)/i.test(url)) openExternalUrl(url);
     return true;
   }
   const stopBtn = target.closest('[data-dev-server-stop]');

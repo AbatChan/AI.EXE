@@ -204,6 +204,8 @@ class DevServerManager {
 
     PROCESS_INFORMATION pi{};
     std::wstring mutable_cmd = cmdline;
+    // Vite/CRA honor BROWSER=none — the app opens the URL itself (inherited env).
+    SetEnvironmentVariableW(L"BROWSER", L"none");
     const BOOL created = CreateProcessW(
         nullptr, mutable_cmd.data(), nullptr, nullptr, TRUE,
         CREATE_SUSPENDED | CREATE_NO_WINDOW, nullptr,
@@ -278,6 +280,9 @@ class DevServerManager {
     if (pid == 0) {
       // Child: own process group so Stop can signal the whole server tree.
       setsid();
+      // Vite/CRA honor BROWSER=none: the app opens the URL itself, and a dev
+      // server self-open can land in the wrong Chrome instance (the adapter's).
+      setenv("BROWSER", "none", 1);
       dup2(fds[1], STDOUT_FILENO);
       dup2(fds[1], STDERR_FILENO);
       close(fds[0]);

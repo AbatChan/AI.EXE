@@ -2312,6 +2312,24 @@ std::string BuildStreamEvent(const std::string &id, bool done,
       }
       message = "Window moved.";
     }
+  } else if (action == "openExternalUrl") {
+    const std::string external_url = ExtractJsonStringField(requestJson, "url");
+    NSURL *url = [NSURL URLWithString:
+        [NSString stringWithUTF8String:external_url.c_str()]];
+    const bool safe = url && ([url.scheme isEqualToString:@"http"] ||
+                              [url.scheme isEqualToString:@"https"]);
+    if (!safe) {
+      ok = false;
+      message = "Only http(s) URLs can be opened.";
+    } else {
+      auto openIt = ^{ [[NSWorkspace sharedWorkspace] openURL:url]; };
+      if ([NSThread isMainThread]) {
+        openIt();
+      } else {
+        dispatch_async(dispatch_get_main_queue(), openIt);
+      }
+      message = "Opened.";
+    }
   } else if (action == "windowDragBegin") {
     if (!_window || !_webView) {
       ok = false;
