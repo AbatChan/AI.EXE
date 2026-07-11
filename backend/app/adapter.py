@@ -4,6 +4,7 @@ install (git clone + venv + pip) · start (spawn with the Venice login in env) �
 status. Credentials are passed per start() and NOT persisted server-side — the desktop
 keeps them locally and sends them when starting.
 """
+import glob
 import os
 import re
 import signal
@@ -502,6 +503,14 @@ class AdapterManager:
             # explicitly (Cloudflare blocks headless on Venice's sign-in).
             boot = os.path.join(os.path.dirname(os.path.abspath(__file__)), "adapter_boot.py")
             args = [py, boot, srv, str(port), "1" if headless else "0"]
+            # A killed adapter leaves webdriver-manager's download lock behind and
+            # every later start times out on it; no adapter runs here, so any lock
+            # is stale by definition.
+            for stale_lock in glob.glob(os.path.expanduser("~/.wdm/.wdm-lock-*")):
+                try:
+                    os.remove(stale_lock)
+                except OSError:
+                    pass
             try:
                 logf = open(self._log, "wb", buffering=0)  # capture why it lives/dies
                 logf.write(("AIEXE_ADAPTER_START launching %s\n" % time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())).encode("utf-8", "replace"))
