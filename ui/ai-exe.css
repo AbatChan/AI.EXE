@@ -2574,8 +2574,7 @@ html.platform-mac .settings-sidebar {
   gap: 0;
   width: auto;
   min-width: 0;
-  min-height: 34px;
-  max-height: 34px;
+  height: 34px;
   padding: 0;
   margin: 0;
   background: transparent;
@@ -2605,7 +2604,7 @@ html.platform-mac .settings-sidebar {
   padding: 0 12px 0 16px;
   min-width: 116px;
   max-width: 240px;
-  height: 100%;
+  height: 34px;
   border-right: 0;
   border-radius: 999px;
   background: transparent;
