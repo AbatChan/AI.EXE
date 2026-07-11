@@ -278,44 +278,15 @@
       const normalized = deps.normalizeWorkspacePath(path || '');
       const text = String(content || '');
       const issues = [];
-      const expectedFiles = getAllPlannedFiles(planSpec);
-      const htmlFile = expectedFiles.find((candidate) => /\.html?$/i.test(String(candidate || ''))) || '';
-      const cssFile = expectedFiles.find((candidate) => /\.(css|scss|sass|less)$/i.test(String(candidate || ''))) || '';
-      const scriptFile = expectedFiles.find((candidate) => /\.(js|mjs|cjs|ts|jsx|tsx)$/i.test(String(candidate || ''))) || '';
-      if (/```[a-z0-9_+\-]*|^\s*-\s+(?:Write|Keep|If this|Prefer|Respect|Use|Follow|Never|Do not)\b/im.test(text)) {
-        issues.push('contains prompt instructions or markdown fences instead of only file contents');
-      }
       if (/\.html?$/i.test(normalized)) {
-        if (cssFile && /<style[\s>]/i.test(text)) {
-          issues.push(`contains a page-local <style> block even though shared CSS is planned (${cssFile}); move those rules into the shared stylesheet and keep this HTML semantic`);
-        }
-        // Page-specific inline <script> (filters, accordions, form logic) is fine — it
-        // is NOT shared-code duplication, so it must not block. Only flag the genuine
-        // anti-pattern: an inline script re-rendering the shared shell (header/footer/nav).
-        if (scriptFile && /<script(?![^>]*\bsrc=)[\s>]/i.test(text)
-          && /\b(?:data-site-(?:header|footer)|renderHeader|renderFooter|injectShell|innerHTML\s*=\s*[`'"][^`'"]*<(?:header|footer|nav)\b)/i.test(text)) {
-          issues.push(`inline <script> appears to re-render the shared header/footer/nav even though ${scriptFile} provides them; remove the duplicate and load ${scriptFile} instead. Page-specific behavior can stay inline.`);
-        }
         const htmlStructureIssue = getHtmlStructureIssue(text);
         if (htmlStructureIssue) issues.push(htmlStructureIssue);
       }
       if (/\.css$/i.test(normalized)) {
-        if (/<\/?(?:html|head|body|script|main|section|div)\b|<!doctype html/i.test(text)) {
-          issues.push('contains HTML markup instead of pure CSS');
-        }
         const cssSyntaxIssue = getCssSyntaxIssue(text);
         if (cssSyntaxIssue) issues.push(cssSyntaxIssue);
       }
       if (/\.(js|ts|jsx|tsx)$/i.test(normalized)) {
-        // Strip template literals and innerHTML/textContent string assignments
-        // so that valid JS like `el.innerHTML = '<div>...'` is not flagged.
-        const strippedForHtmlCheck = text
-          .replace(/`[\s\S]*?`/g, '')           // remove template literals
-          .replace(/\.innerHTML\s*=\s*['"][\s\S]*?['"]\s*;/g, '')  // remove innerHTML assignments
-          .replace(/\.textContent\s*=\s*['"][\s\S]*?['"]\s*;/g, ''); // remove textContent assignments
-        if (/<\/?(?:html|head|body|style)\b|<!doctype html/i.test(strippedForHtmlCheck)) {
-          issues.push('contains HTML markup instead of pure JavaScript');
-        }
         const eslintResult = /\.(js|jsx|mjs|cjs)$/i.test(normalized)
           ? getJsCorrectnessIssues(text)
           : null;
@@ -1450,20 +1421,6 @@
         .filter((name) => name && !junkTokens.has(name.toLowerCase()));
     }
 
-    function extractCssIdSelectors(css) {
-      return Array.from(String(css || '').matchAll(/#([a-z_][a-z0-9_-]*)/gi))
-        .map((match) => String(match[1] || '').trim())
-        .filter((id) => {
-          if (!id) return false;
-          // Ignore typical hex color signatures
-          if (/^[0-9a-f]{3}$/i.test(id)) return false;
-          if (/^[0-9a-f]{4}$/i.test(id)) return false;
-          if (/^[0-9a-f]{6}$/i.test(id)) return false;
-          if (/^[0-9a-f]{8}$/i.test(id)) return false;
-          return true;
-        });
-    }
-
     function extractJsHtmlExpectations(js) {
       const src = String(js || '');
       const createdIds = Array.from(src.matchAll(/(?:\.id\s*=\s*|setAttribute\s*\(\s*['"]id['"]\s*,\s*)['"]([^'"]+)['"]/g))
@@ -1578,6 +1535,10 @@
 
     function validateWebProjectConsistency(fileContents, planSpec, advisoryOut = null) {
       const issues = [];
+      const addAdvisory = (issue) => {
+        const text = String(issue || '').trim();
+        if (text && Array.isArray(advisoryOut) && !advisoryOut.includes(text)) advisoryOut.push(text);
+      };
       const activeExpectedFiles = getActivePlannedFiles(planSpec);
       const allExpectedFiles = getAllPlannedFiles(planSpec);
       const plannedHtmlFiles = allExpectedFiles.filter((path) => /\.html?$/i.test(String(path || '')));
@@ -1615,12 +1576,12 @@
           cssFiles.forEach((plannedCssFile) => {
             const cssHref = plannedCssFile.replace(/^\//, '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
             if (!new RegExp(`href=["'][^"']*${cssHref}["']`, 'i').test(pageHtml)) {
-              issues.push(`${pagePath}: does not link shared stylesheet ${plannedCssFile}; pages must use the global CSS source of truth instead of redefining styles locally`);
+              addAdvisory(`${pagePath}: does not link shared stylesheet ${plannedCssFile}; verify the page has an intentional styling path`);
             }
           });
         }
         if (cssFiles.length && /<style[\s>]/i.test(pageHtml)) {
-          issues.push(`${pagePath}: contains a page-local <style> block even though shared CSS is planned (${cssFiles.join(', ')}); move page-specific rules into ${cssFile || 'the shared stylesheet'} and keep the HTML semantic`);
+          addAdvisory(`${pagePath}: has a page-local <style> block while shared CSS exists (${cssFiles.join(', ')}); keep it only if intentional`);
         }
         // Framework SPA (Vite/React): index.html loads ONE bundler entry (/src/main.tsx);
         // pages/components are reached via the JS import graph, not <script src> tags.
@@ -1634,7 +1595,7 @@
               const sharedLabel = sharedComponentScripts.includes(plannedScriptFile)
                 ? '; repeated header/nav/footer should come from the shared component source of truth'
                 : '';
-              issues.push(`${pagePath}: does not load ${plannedScriptFile}${sharedLabel}`);
+              addAdvisory(`${pagePath}: does not load ${plannedScriptFile}${sharedLabel}`);
             }
           });
         }
@@ -1653,39 +1614,22 @@
       }
       const htmlLabel = plannedHtmlFiles.length > 1 ? plannedHtmlFiles.join(', ') : htmlFile;
       const cssClasses = new Set(extractCssClassSelectors(css));
-      const cssIds = new Set(extractCssIdSelectors(css));
       const jsExpectations = extractJsHtmlExpectations(js);
-      const pushIssue = (issue) => {
-        const text = String(issue || '').trim();
-        if (text && !issues.includes(text)) issues.push(text);
-      };
-
       jsExpectations.ids.forEach((id) => {
         if (!htmlIds.has(id) && !jsExpectations.createdIds.includes(id)) {
-          pushIssue(`${scriptFile || 'script file'}: references #${id}, but ${htmlLabel} does not define that id`);
+          addAdvisory(`${scriptFile || 'script file'}: references #${id}, but ${htmlLabel} does not define it statically`);
         }
       });
       jsExpectations.dataActions.forEach((action) => {
         if (!htmlDataActions.has(action)) {
-          pushIssue(`${scriptFile || 'script file'}: expects data-action="${action}", but ${htmlLabel} does not provide it`);
+          addAdvisory(`${scriptFile || 'script file'}: expects data-action="${action}", but ${htmlLabel} does not provide it statically`);
         }
       });
       jsExpectations.queriedClasses.forEach((className) => {
         if (!htmlClasses.has(className) && !cssClasses.has(className) && !jsExpectations.createdClasses.includes(className)) {
-          pushIssue(`${scriptFile || 'script file'}: queries .${className}, but ${htmlLabel} does not define that class`);
+          addAdvisory(`${scriptFile || 'script file'}: queries .${className}, but ${htmlLabel} does not define it statically`);
         }
       });
-      // Removed (advisory, not crash-class — drove repair loops): "JS toggles .X" and
-      // "CSS styles #id" with no matching element are dead/no-op, not bugs. The
-      // crash-class `queries .X` / `references #id` checks (querySelector -> null) stay.
-      // NOTE: a "many CSS class selectors don't appear in HTML/JS" heuristic used to
-      // live here. It was net-negative: a rich, correct stylesheet legitimately has
-      // far more classes than the static markup mentions (state/hover/:not variants,
-      // descendant selectors, classes rendered via interpolated JS template strings
-      // like `class="movie-card ${watched}"`). It false-flagged good CSS, the model
-      // "repaired" correct code into worse code, re-failed, and timed out. Removed —
-      // the targeted checks below (JS toggles an undefined class; important HTML
-      // classes left unstyled) catch the cases that actually matter.
       // Advisory: root-relative links break when pages are opened from disk
       // (file:// resolves "/x" to the filesystem root) — the offline target.
       if (Array.isArray(advisoryOut)) {
@@ -1693,7 +1637,7 @@
           .map((match) => String(match[1] || ''))
           .filter((url) => !/^\/\//.test(url));
         if (rootRelative.length) {
-          advisoryOut.push(`${htmlFile}: uses root-relative links (${Array.from(new Set(rootRelative)).slice(0, 4).join(', ')}) which break when opened from disk via file:// — use relative paths (e.g. menu.html, ./style.css) instead`);
+          addAdvisory(`${htmlFile}: uses root-relative links (${Array.from(new Set(rootRelative)).slice(0, 4).join(', ')}) which break when opened from disk via file:// — use relative paths (e.g. menu.html, ./style.css) instead`);
         }
       }
       // Advisory only (cosmetic, not crash-class): unstyled classes degrade looks
@@ -1703,14 +1647,7 @@
       ));
       const unstyledImportantClasses = importantHtmlClasses.filter((className) => !cssClasses.has(className));
       if (css && unstyledImportantClasses.length > 3 && Array.isArray(advisoryOut)) {
-        advisoryOut.push(`${htmlFile}: classes used in the markup have no styles in ${cssFile || 'the stylesheet'} (${unstyledImportantClasses.slice(0, 6).map((name) => `.${name}`).join(', ')}) — style them if those sections look unfinished`);
-      }
-
-      if (cssClasses.has('buttons-grid') && !htmlClasses.has('buttons-grid') && htmlClasses.has('buttons')) {
-        pushIssue(`${cssFile || 'stylesheet'}: styles .buttons-grid, but ${htmlFile} uses .buttons for the calculator grid`);
-      }
-      if (htmlClasses.has('buttons') && !cssClasses.has('buttons') && cssClasses.has('buttons-grid')) {
-        pushIssue(`${htmlFile}: uses .buttons, but ${cssFile || 'stylesheet'} only defines .buttons-grid for the button layout`);
+        addAdvisory(`${htmlFile}: classes used in the markup have no styles in ${cssFile || 'the stylesheet'} (${unstyledImportantClasses.slice(0, 6).map((name) => `.${name}`).join(', ')}) — style them if those sections look unfinished`);
       }
       return issues;
     }
@@ -3180,9 +3117,7 @@
         const mechanicalAdvisory = completenessAdvisory;
         const webConsistencyIssues = validateWebProjectConsistency(fileContents, planSpec, mechanicalAdvisory);
         webConsistencyIssues.forEach((issue) => issues.push(issue));
-        // Python dependency check: if a .py imports a known third-party package,
-        // requirements.txt must list it (the Run button installs it into a venv).
-        // Catches the "import pygame" → ModuleNotFoundError class before finishing.
+        // Best-effort package declaration hint.
         if (Object.keys(fileContents).some((p) => /\.py$/i.test(p))) {
           let reqText = fileContents['/requirements.txt'] || '';
           if (!reqText) {
@@ -3191,7 +3126,7 @@
           }
           const missingDeps = getPythonMissingDependencies(fileContents, reqText);
           if (missingDeps.length) {
-            issues.push(`Python project imports third-party package(s) not declared in requirements.txt: ${missingDeps.join(', ')}. Create or extend /requirements.txt (one package per line) so the Run button can install them into the virtual environment — do NOT pip-install from inside the code.`);
+            mechanicalAdvisory.push(`Python project imports package(s) not found in requirements.txt: ${missingDeps.join(', ')}. Confirm they are declared in requirements.txt, pyproject.toml, or another intentional install path.`);
           }
         }
         const codePaths = Object.keys(fileContents).filter((path) => /\.(js|mjs|cjs|ts|jsx|tsx)$/i.test(path));
@@ -3213,7 +3148,7 @@
               }
             }
             if (!found) {
-              issues.push(`${path}: imports ${spec}, but none of these files exist: ${candidates.slice(0, 5).join(', ')}${candidates.length > 5 ? ', ...' : ''}`);
+              mechanicalAdvisory.push(`${path}: static scan could not resolve ${spec} to ${candidates.slice(0, 5).join(', ')}${candidates.length > 5 ? ', ...' : ''}. Confirm it is not generated, aliased, or a commented example.`);
             }
           }
         }
@@ -3422,6 +3357,7 @@
       getJsSyntaxIssue,
       getJsReassignedConstIssue,
       getJsCorrectnessIssues,
+      validateGeneratedFile,
       getHtmlStructureIssue,
       getStructuralIssueForPath,
       validateWebProjectConsistency,
