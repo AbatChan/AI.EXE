@@ -270,6 +270,7 @@ class DevServerManager {
       if (err) *err = "Could not create an output pipe for the dev server.";
       return false;
     }
+    const pid_t app_pid = getpid();
     const pid_t pid = fork();
     if (pid < 0) {
       close(fds[0]);
@@ -288,13 +289,28 @@ class DevServerManager {
       close(fds[0]);
       close(fds[1]);
       if (chdir(cwd.string().c_str()) != 0) _exit(127);
+      // No kill-on-close job on POSIX: run the command under a supervisor
+      // that group-kills everything if the app process disappears (a hard
+      // kill skips StopAll and would otherwise orphan the server).
+      std::string script =
+          std::string("\"$@\" & CHILD=$!; ")
+          + "( while kill -0 " + std::to_string(app_pid)
+          + " 2>/dev/null; do sleep 2; done; kill -- -$$ 2>/dev/null ) & WATCH=$!; "
+          + "wait $CHILD; CODE=$?; kill $WATCH 2>/dev/null; exit $CODE";
+      std::string sh = "/bin/sh";
+      std::string dash_c = "-c";
+      std::string arg0 = "aiexe-devserver";
       std::vector<char*> argv;
+      argv.push_back(sh.data());
+      argv.push_back(dash_c.data());
+      argv.push_back(script.data());
+      argv.push_back(arg0.data());
       std::string exe_str = exe.string();
       argv.push_back(exe_str.data());
       std::vector<std::string> owned(args);
       for (auto& a : owned) argv.push_back(a.data());
       argv.push_back(nullptr);
-      execv(exe_str.c_str(), argv.data());
+      execv(sh.c_str(), argv.data());
       _exit(127);
     }
     close(fds[1]);
