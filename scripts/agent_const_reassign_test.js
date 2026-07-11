@@ -35,6 +35,12 @@ ok('a const re-declared in another scope (shadowing) is skipped',
   'const a = 1;\nfunction g(){ const a = 2; return a; }');
 ok('=== and => near the name do not trip it',
   'const ok = true;\nconst h = () => ok === true ? 1 : 2;');
+// The chess-app false positive (v7.7.9): a const in one function plus a
+// let multi-declarator of the same name in another must not flag.
+ok('let multi-declarator shadowing a const elsewhere is fine',
+  'function a(){ const nc = c + dc; use(nc); }\nfunction b(){ let nr = r + dr, nc = c + dc;\nwhile (x) { nr += dr; nc += dc; } }');
+ok('const multi-declarator continuation is a declaration, not a reassignment',
+  'function a(){ const nc = c + dc; use(nc); }\nfunction b(){ const nr = r + dr, nc = c + dc; use(nr, nc); }');
 
 {
   const issue = getJsSyntaxIssue('function ok() {\n  return true;\n}\n}', new SyntaxError("Unexpected token '}'"));
