@@ -3509,7 +3509,7 @@ async function syncDevServerChips() {
     .filter(Boolean)
     .map((line) => {
       const parts = line.split('\t');
-      return { id: Number(parts[0]) || 0, running: parts[1] === 'running', command: parts.slice(3).join(' ').trim() };
+      return { id: Number(parts[0]) || 0, running: parts[1] === 'running', pid: Number(parts[2]) || 0, command: parts.slice(3).join(' ').trim() };
     })
     .filter((row) => row.id > 0 && row.running);
   for (const row of rows) {
@@ -3520,34 +3520,84 @@ async function syncDevServerChips() {
       if (match) _devServerChipState.urls[row.id] = match[0].replace(/[),.]+$/, '');
     } catch (_) { }
   }
-  const sig = rows.map((row) => `${row.id}:${row.command}:${_devServerChipState.urls[row.id] || ''}`).join('|');
+  const sig = rows.map((row) => `${row.id}:${row.command}:${_devServerChipState.urls[row.id] || ''}:${row.pid}`).join('|');
   if (sig === _devServerChipState.sig) return;
   _devServerChipState.sig = sig;
+  closeDevServerDetails();
   box.innerHTML = '';
   rows.forEach((row) => {
     const url = _devServerChipState.urls[row.id] || '';
-    const chip = document.createElement('button');
-    chip.type = 'button';
-    chip.className = 'dev-server-chip';
-    chip.title = url ? `${row.command} — open ${url}` : row.command;
     const port = url ? (url.match(/:(\d+)/) || [])[1] : '';
-    chip.innerHTML = `<span class="dsc-dot"></span><span class="dsc-label">${escapeHtml(row.command)}${port ? ` :${port}` : ''}</span>`;
-    chip.addEventListener('click', () => { if (url) openExternalUrl(url); });
-    const stopBtn = document.createElement('span');
-    stopBtn.className = 'dsc-stop';
-    stopBtn.setAttribute('role', 'button');
-    stopBtn.setAttribute('aria-label', 'Stop this server');
-    stopBtn.innerHTML = '<svg viewBox="0 0 24 24" width="10" height="10" fill="currentColor" stroke="none"><rect x="5" y="5" width="14" height="14" rx="2"></rect></svg>';
-    stopBtn.addEventListener('click', async (evt) => {
+    const chip = document.createElement('div');
+    chip.className = 'dev-server-chip';
+    chip.setAttribute('role', 'button');
+    chip.tabIndex = 0;
+    chip.innerHTML = `
+        <span class="dsc-dot"></span>
+        <span class="dsc-copy"><span class="dsc-cmd">${escapeHtml(row.command)}</span>${port ? `<span class="dsc-port">:${port}</span>` : ''}</span>
+        <span class="dsc-actions">
+          <button type="button" class="dsc-btn dsc-open ui-tooltip-anchor" data-tooltip="Open in browser">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M14 4h6v6"></path><path d="M20 4 10 14"></path><path d="M20 14v5a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 19V6a1.5 1.5 0 0 1 1.5-1.5H10"></path></svg>
+          </button>
+          <button type="button" class="dsc-btn dsc-stop ui-tooltip-anchor" data-tooltip="Stop server">
+            <span class="dsc-stop-square"></span>
+          </button>
+        </span>`;
+    chip.addEventListener('click', () => toggleDevServerDetails(chip, row, url));
+    chip.querySelector('.dsc-open').addEventListener('click', (evt) => {
       evt.stopPropagation();
+      if (url) openExternalUrl(url);
+    });
+    chip.querySelector('.dsc-stop').addEventListener('click', async (evt) => {
+      evt.stopPropagation();
+      if (chip.classList.contains('stopping')) return;
+      chip.classList.add('stopping');
+      closeDevServerDetails();
       try { await invokeWorkspaceAction('devServerStop', { serverId: row.id }); } catch (_) { }
       delete _devServerChipState.urls[row.id];
       _devServerChipState.sig = '';
       void syncDevServerChips();
     });
-    chip.appendChild(stopBtn);
     box.appendChild(chip);
   });
+}
+
+// Details popover for a chip — one shared element on <body> (position: fixed)
+// so no composer container can clip it.
+function closeDevServerDetails() {
+  const panel = document.getElementById('devServerDetails');
+  if (panel) panel.remove();
+}
+function toggleDevServerDetails(chip, row, url) {
+  const existing = document.getElementById('devServerDetails');
+  const wasOpen = existing && existing.dataset.serverId === String(row.id);
+  closeDevServerDetails();
+  if (wasOpen) return;
+  const rect = chip.getBoundingClientRect();
+  const panel = document.createElement('div');
+  panel.id = 'devServerDetails';
+  panel.dataset.serverId = String(row.id);
+  panel.innerHTML = `
+      <div class="dsd-row"><span>Status</span><strong class="dsd-running">Running</strong></div>
+      ${url ? `<div class="dsd-row"><span>Local URL</span><a href="#" class="dsd-url">${escapeHtml(url.replace(/^https?:\/\//, ''))} ↗</a></div>` : ''}
+      <div class="dsd-row"><span>Process</span><strong>${escapeHtml(row.command)}</strong></div>
+      <div class="dsd-row"><span>PID</span><strong>${Number(row.pid) || '—'}</strong></div>`;
+  panel.style.left = `${Math.max(10, Math.round(rect.left))}px`;
+  panel.style.bottom = `${Math.round(window.innerHeight - rect.top + 8)}px`;
+  const link = panel.querySelector('.dsd-url');
+  if (link) {
+    link.addEventListener('click', (evt) => {
+      evt.preventDefault();
+      openExternalUrl(url);
+    });
+  }
+  document.body.appendChild(panel);
+  const dismiss = (evt) => {
+    if (panel.contains(evt.target) || chip.contains(evt.target)) return;
+    closeDevServerDetails();
+    document.removeEventListener('pointerdown', dismiss, true);
+  };
+  document.addEventListener('pointerdown', dismiss, true);
 }
 
 // Custom titlebar drag: the page hit-tests the top band and only asks the

@@ -7219,71 +7219,169 @@ html.platform-mac .settings-sidebar {
   padding: 2px 2px 0 0;
 }
 
-/* Running dev servers: one pill per server, click opens, hover arms the stop. */
+/* Running dev servers: green glass pill; hover slides in Open + Stop, click
+   opens a details popover, stopping shows an amber spinner. */
 .dev-server-chips {
   display: flex;
   align-items: center;
   gap: 6px;
   margin-right: auto;
   min-width: 0;
-  overflow: hidden;
 }
 .dev-server-chip {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  height: 22px;
-  padding: 0 9px;
-  border: 1px solid rgba(74, 222, 128, 0.22);
-  border-radius: 999px;
-  background: rgba(74, 222, 128, 0.07);
+  height: 26px;
+  padding: 0 6px 0 10px;
+  border: 1px solid rgba(47, 212, 124, 0.32);
+  border-radius: 9px;
+  background: linear-gradient(180deg, rgba(11, 29, 22, 0.96), rgba(8, 20, 16, 0.96));
   color: var(--text2);
-  font-family: var(--font-mono);
-  font-size: 10.5px;
-  letter-spacing: 0.2px;
   cursor: pointer;
   white-space: nowrap;
-  transition: border-color 0.18s ease, background 0.18s ease, color 0.18s ease;
+  user-select: none;
+  -webkit-user-select: none;
+  transition: border-color 0.18s ease, background 0.18s ease, transform 0.18s ease, box-shadow 0.18s ease;
 }
-.dev-server-chip:hover {
-  border-color: rgba(74, 222, 128, 0.45);
-  background: rgba(74, 222, 128, 0.12);
-  color: var(--text);
+.dev-server-chip:hover,
+.dev-server-chip:focus-within {
+  transform: translateY(-1px);
+  border-color: rgba(61, 241, 141, 0.68);
+  background: linear-gradient(180deg, rgba(13, 34, 25, 0.97), rgba(8, 22, 17, 0.97));
+  box-shadow: 0 0 0 1px rgba(61, 241, 141, 0.06), 0 8px 20px rgba(0, 0, 0, 0.3);
 }
 .dsc-dot {
-  width: 6px;
-  height: 6px;
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
-  background: #4ade80;
-  box-shadow: 0 0 6px rgba(74, 222, 128, 0.7);
-  animation: dsc-pulse 2s ease-in-out infinite;
+  background: #2fd47c;
+  box-shadow: 0 0 9px rgba(47, 212, 124, 0.65);
   flex-shrink: 0;
 }
-@keyframes dsc-pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.45; }
+.dsc-copy {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  margin-left: 8px;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 11px;
 }
-.dsc-label {
+.dsc-cmd {
+  color: var(--text);
+  font-weight: 600;
+  letter-spacing: -0.01em;
   overflow: hidden;
   text-overflow: ellipsis;
-  max-width: 180px;
+  max-width: 150px;
 }
-.dsc-stop {
-  display: none;
+.dsc-port { color: #78849a; }
+.dev-server-chip:hover .dsc-port { color: #8e9ab0; }
+.dsc-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  width: 0;
+  margin-left: 0;
+  overflow: hidden;
+  opacity: 0;
+  transition: width 0.2s ease, margin-left 0.2s ease, opacity 0.15s ease;
+}
+.dev-server-chip:hover .dsc-actions,
+.dev-server-chip:focus-within .dsc-actions {
+  width: 44px;
+  margin-left: 7px;
+  opacity: 1;
+}
+.dsc-btn {
+  width: 21px;
+  height: 21px;
+  display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 14px;
-  height: 14px;
-  border-radius: 4px;
-  color: #ff8f8f;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: #8f9bb0;
+  cursor: pointer;
+  padding: 0;
   flex-shrink: 0;
+  transition: color 0.16s ease, background 0.16s ease, border-color 0.16s ease;
 }
-.dev-server-chip:hover .dsc-stop {
-  display: inline-flex;
+.dsc-btn svg { width: 12px; height: 12px; }
+.dsc-btn:hover {
+  color: #dce4f3;
+  background: rgba(255, 255, 255, 0.05);
 }
+.dsc-stop { color: #ff6678; }
 .dsc-stop:hover {
-  background: rgba(255, 90, 90, 0.18);
+  color: #ff8796;
+  background: rgba(255, 102, 120, 0.12);
 }
+.dsc-stop-square {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  background: currentColor;
+}
+.dev-server-chip.stopping {
+  border-color: rgba(245, 164, 35, 0.4);
+  background: linear-gradient(180deg, rgba(38, 27, 9, 0.97), rgba(23, 17, 7, 0.97));
+  pointer-events: none;
+}
+.dev-server-chip.stopping .dsc-dot {
+  background: transparent;
+  border: 2px solid rgba(245, 164, 35, 0.25);
+  border-top-color: #f5a423;
+  box-shadow: none;
+  animation: dsc-spin 0.75s linear infinite;
+}
+.dev-server-chip.stopping .dsc-port { color: #c38a2d; }
+.dev-server-chip.stopping .dsc-actions {
+  width: 0 !important;
+  margin-left: 0 !important;
+  opacity: 0 !important;
+}
+@keyframes dsc-spin { to { transform: rotate(360deg); } }
+#devServerDetails {
+  position: fixed;
+  z-index: 9500;
+  width: 270px;
+  padding: 10px;
+  border: 1px solid #273147;
+  border-radius: 13px;
+  background: #0b1019;
+  box-shadow: 0 20px 55px rgba(0, 0, 0, 0.4);
+  animation: dsd-reveal 0.17s var(--ease-out);
+}
+@keyframes dsd-reveal {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+#devServerDetails .dsd-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 7px 5px;
+  color: #78849a;
+  font-size: 12px;
+}
+#devServerDetails .dsd-row + .dsd-row {
+  border-top: 1px solid rgba(129, 143, 166, 0.09);
+}
+#devServerDetails strong {
+  color: #dbe3f1;
+  font-weight: 600;
+}
+#devServerDetails .dsd-running { color: #2fd47c; }
+#devServerDetails .dsd-url {
+  color: #50cfff;
+  text-decoration: none;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+#devServerDetails .dsd-url:hover { text-decoration: underline; }
 
 .composer-status-line.hidden {
   display: none !important;
