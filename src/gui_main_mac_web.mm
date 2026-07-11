@@ -1484,6 +1484,33 @@ bool LaunchViteDevServerMac(const std::filesystem::path &root, int port,
   return true;
 }
 
+// Run the Vite project inside the app via the tracked dev-server manager:
+// no Terminal window, logs land in the server record, and the process group
+// dies with the app (StopAll + kill-on-close) so nothing lingers.
+bool LaunchViteDevServerInApp(const std::filesystem::path &root, int port,
+                              std::string *err) {
+  std::ostringstream script;
+  script << "if ! command -v npm >/dev/null 2>&1; then"
+         << " echo 'Node.js/npm is required to run this Vite project.'; exit 1; fi\n"
+         << "if [ ! -d node_modules ]; then\n"
+         << "  echo 'Installing npm dependencies...'\n"
+         << "  npm install || npm install --legacy-peer-deps || exit 1\n"
+         << "fi\n"
+         << "exec npm run dev -- --host 127.0.0.1 --port " << port
+         << " --strictPort\n";
+  std::vector<std::string> args = {"-lc", script.str()};
+  std::string start_err;
+  const int sid = DevServerManager::Instance().Start(
+      "/bin/bash", args, root, "npm run dev", &start_err);
+  if (sid <= 0) {
+    if (err) {
+      *err = start_err.empty() ? "Could not start the dev server." : start_err;
+    }
+    return false;
+  }
+  return true;
+}
+
 // Launch Services routes an openURL to ANY running instance of the default
 // browser's bundle — including the Venice adapter's Selenium Chrome. When the
 // default browser is Chrome, launch a fresh instance with the URL as argv:
@@ -2203,10 +2230,11 @@ std::string BuildStreamEvent(const std::string &id, bool done,
           OpenUrlInDefaultBrowserSmart(
               [NSString stringWithUTF8String:output.c_str()]);
           message = "Vite dev server already running.";
-        } else if (LaunchViteDevServerMac(root, port, &op_err)) {
+        } else if (LaunchViteDevServerInApp(root, port, &op_err)
+                   || LaunchViteDevServerMac(root, port, &op_err)) {
           OpenViteUrlWhenReady(
               port, [NSString stringWithUTF8String:output.c_str()], 240);
-          message = "Starting Vite dev server.";
+          message = "Starting the dev server — the app opens when it's ready.";
         } else {
           ok = false;
           message = op_err.empty() ? "Could not run the Vite project." : op_err;
