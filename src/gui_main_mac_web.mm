@@ -2214,6 +2214,9 @@ std::string BuildStreamEvent(const std::string &id, bool done,
       }
     }
   } else if (action == "workspaceCloseRoot") {
+    // The project's dev servers belong to it — closing the project (not just
+    // the app) must not leave them serving in the background.
+    DevServerManager::Instance().StopAll();
     ClearWorkspaceRootOverride();
     message = "Project closed.";
   } else if (action == "runWorkspaceApp") {

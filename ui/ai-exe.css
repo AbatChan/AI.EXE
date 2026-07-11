@@ -7219,6 +7219,72 @@ html.platform-mac .settings-sidebar {
   padding: 2px 2px 0 0;
 }
 
+/* Running dev servers: one pill per server, click opens, hover arms the stop. */
+.dev-server-chips {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-right: auto;
+  min-width: 0;
+  overflow: hidden;
+}
+.dev-server-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 22px;
+  padding: 0 9px;
+  border: 1px solid rgba(74, 222, 128, 0.22);
+  border-radius: 999px;
+  background: rgba(74, 222, 128, 0.07);
+  color: var(--text2);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.2px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: border-color 0.18s ease, background 0.18s ease, color 0.18s ease;
+}
+.dev-server-chip:hover {
+  border-color: rgba(74, 222, 128, 0.45);
+  background: rgba(74, 222, 128, 0.12);
+  color: var(--text);
+}
+.dsc-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #4ade80;
+  box-shadow: 0 0 6px rgba(74, 222, 128, 0.7);
+  animation: dsc-pulse 2s ease-in-out infinite;
+  flex-shrink: 0;
+}
+@keyframes dsc-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
+.dsc-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 180px;
+}
+.dsc-stop {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  border-radius: 4px;
+  color: #ff8f8f;
+  flex-shrink: 0;
+}
+.dev-server-chip:hover .dsc-stop {
+  display: inline-flex;
+}
+.dsc-stop:hover {
+  background: rgba(255, 90, 90, 0.18);
+}
+
 .composer-status-line.hidden {
   display: none !important;
 }

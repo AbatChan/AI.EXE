@@ -3495,6 +3495,61 @@ function openExternalUrl(url) {
 }
 window.openExternalUrl = openExternalUrl;
 
+// Live dev-server chips at the bottom of the composer: one pill per running
+// server (click opens the app, hover reveals a stop button). Signature-diffed
+// so the 5s poll doesn't churn the DOM.
+const _devServerChipState = { sig: '', urls: {} };
+async function syncDevServerChips() {
+  const box = document.getElementById('devServerChips');
+  if (!box || !nativeBridge.available()) return;
+  let res = null;
+  try { res = await invokeWorkspaceAction('devServerList', {}); } catch (_) { return; }
+  const rows = String(res && res.ok ? res.output : '')
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => {
+      const parts = line.split('\t');
+      return { id: Number(parts[0]) || 0, running: parts[1] === 'running', command: parts.slice(3).join(' ').trim() };
+    })
+    .filter((row) => row.id > 0 && row.running);
+  for (const row of rows) {
+    if (_devServerChipState.urls[row.id]) continue;
+    try {
+      const status = await invokeWorkspaceAction('devServerStatus', { serverId: row.id });
+      const match = String(status && status.output || '').match(/https?:\/\/(?:127\.0\.0\.1|localhost|0\.0\.0\.0)[^\s"']*/i);
+      if (match) _devServerChipState.urls[row.id] = match[0].replace(/[),.]+$/, '');
+    } catch (_) { }
+  }
+  const sig = rows.map((row) => `${row.id}:${row.command}:${_devServerChipState.urls[row.id] || ''}`).join('|');
+  if (sig === _devServerChipState.sig) return;
+  _devServerChipState.sig = sig;
+  box.innerHTML = '';
+  rows.forEach((row) => {
+    const url = _devServerChipState.urls[row.id] || '';
+    const chip = document.createElement('button');
+    chip.type = 'button';
+    chip.className = 'dev-server-chip';
+    chip.title = url ? `${row.command} — open ${url}` : row.command;
+    const port = url ? (url.match(/:(\d+)/) || [])[1] : '';
+    chip.innerHTML = `<span class="dsc-dot"></span><span class="dsc-label">${escapeHtml(row.command)}${port ? ` :${port}` : ''}</span>`;
+    chip.addEventListener('click', () => { if (url) openExternalUrl(url); });
+    const stopBtn = document.createElement('span');
+    stopBtn.className = 'dsc-stop';
+    stopBtn.setAttribute('role', 'button');
+    stopBtn.setAttribute('aria-label', 'Stop this server');
+    stopBtn.innerHTML = '<svg viewBox="0 0 24 24" width="10" height="10" fill="currentColor" stroke="none"><rect x="5" y="5" width="14" height="14" rx="2"></rect></svg>';
+    stopBtn.addEventListener('click', async (evt) => {
+      evt.stopPropagation();
+      try { await invokeWorkspaceAction('devServerStop', { serverId: row.id }); } catch (_) { }
+      delete _devServerChipState.urls[row.id];
+      _devServerChipState.sig = '';
+      void syncDevServerChips();
+    });
+    chip.appendChild(stopBtn);
+    box.appendChild(chip);
+  });
+}
+
 // Custom titlebar drag: the page hit-tests the top band and only asks the
 // native window to drag when the press is on inert surface, so controls that
 // live up there (explorer icons, tabs, search) keep working.
@@ -19407,6 +19462,7 @@ async function bootstrapAiExeUi() {
   // window on the first scan; the dedupe note makes the re-scan idempotent.
   setTimeout(() => { scanForInterruptedAgentRuns(); }, 3000);
   setTimeout(() => { scanForInterruptedAgentRuns(); }, 30000);
+  setInterval(() => { void syncDevServerChips(); }, 5000);
 }
 void bootstrapAiExeUi();
 
