@@ -2609,17 +2609,18 @@ html.platform-mac .settings-sidebar {
 .middle-tab {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 6px;
-  padding: 0 10px 0 15px;
-  min-width: 0;
-  max-width: 220px;
+  padding: 0 12px 0 16px;
+  min-width: 116px;
+  max-width: 240px;
   height: 100%;
   border-right: 0;
   border-radius: 999px;
   background: transparent;
   color: var(--text3);
   font-family: var(--font-sans);
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 500;
   cursor: pointer;
   transition: color 0.18s var(--ease-out), background 0.18s var(--ease-out);
@@ -2703,7 +2704,7 @@ html.platform-mac .settings-sidebar {
 
 /* ─── File Viewer ─── */
 .file-viewer {
-  --file-viewer-font-size: 13px;
+  --file-viewer-font-size: 14px;
   --file-viewer-line-height: 20.8px;
   flex: 1;
   display: flex;
@@ -2719,8 +2720,8 @@ html.platform-mac .settings-sidebar {
   display: flex;
   align-items: center;
   gap: 10px;
-  min-height: 34px;
-  padding: 5px 14px;
+  min-height: 42px;
+  padding: 7px 14px;
   border-bottom: 1px solid rgba(100, 116, 139, 0.2);
   background: linear-gradient(180deg, rgba(17, 21, 30, 0.96), rgba(12, 15, 22, 0.94));
   flex-shrink: 0;

@@ -31538,11 +31538,11 @@ var AIExeCodeMirrorBundle = (function (exports) {
         backgroundColor: "#0a0b0e",
         color: "#e2e8f0",
         fontFamily: '"SFMono-Regular", "Consolas", "Menlo", "Liberation Mono", monospace',
-        fontSize: "13px"
+        fontSize: "14px"
       },
       ".cm-scroller": {
         fontFamily: "inherit",
-        lineHeight: "20.8px"
+        lineHeight: "22.4px"
       },
       ".cm-content, .cm-gutter": {
         minHeight: "100%"
