@@ -73,19 +73,21 @@ function workspaceBaseName(candidate) {
   return parts[parts.length - 1] || '';
 }
 
-function makeExecutor(generator) {
+function makeExecutor(generator, options = {}) {
   const writes = [];
   const traces = [];
+  const files = options.files || {};
   const executor = global.AIExeAgentExecutor.createAgentExecutor({
     normalizeWorkspacePath,
     deriveProjectNameFromTask: core.deriveProjectNameFromTask,
     invokeWorkspaceAction: async (action, data) => {
       if (action === 'workspaceWriteFile') {
         writes.push({ path: data.path, content: data.content });
+        files[data.path] = data.content;
         return { ok: true };
       }
       if (action === 'workspaceMkdir') return { ok: true };
-      if (action === 'workspaceReadFile') return { ok: true, output: '' };
+      if (action === 'workspaceReadFile') return { ok: true, output: files[data.path] || '' };
       return { ok: true };
     },
     getWorkspaceRootName: () => rootName,
@@ -98,7 +100,7 @@ function makeExecutor(generator) {
     syncFileTabFromWorkspaceWrite: () => {},
     workspaceBaseName,
     agentMaxToolOutputChars: 26000,
-    isLikelyNewAgentFileTarget: () => true,
+    isLikelyNewAgentFileTarget: options.isLikelyNewAgentFileTarget || (() => true),
     setActiveAgentStreamStatus: () => {},
     isAgentGeneratedContentTarget: core.isAgentGeneratedContentTarget,
     generateAgentWriteFileContent: generator,
@@ -116,8 +118,8 @@ function makeExecutor(generator) {
     estimateTextBytes: (content) => Buffer.byteLength(String(content || '')),
     nowTs: () => Date.now(),
     parseAgentEditProgram: core.parseAgentEditProgram,
-    generateAgentEditFileProgram: async () => '',
-    generateAgentRewriteExistingFileContent: async () => '',
+    generateAgentEditFileProgram: options.generateAgentEditFileProgram || (async () => ''),
+    generateAgentRewriteExistingFileContent: options.generateAgentRewriteExistingFileContent || (async () => ''),
     applyAgentEditProgram: core.applyAgentEditProgram,
     removeWorkspaceTreeEntry: () => {},
     guessWorkspaceTargetKind: () => 'file',
@@ -324,4 +326,34 @@ const repairedScript = [
     'real const reassignment is still flagged'
   );
   console.log('PASS: JSX props do not trip const reassignment guard');
+
+  let rewriteCalls = 0;
+  const currentChessFile = 'function exportFen() {\n  return ${placement} ${turn};\n}\n';
+  const { executor: syntaxGuardExecutor, writes: syntaxGuardWrites } = makeExecutor(
+    async () => '',
+    {
+      files: { '/script.js': currentChessFile },
+      isLikelyNewAgentFileTarget: () => false,
+      generateAgentEditFileProgram: async () => '',
+      generateAgentRewriteExistingFileContent: async () => {
+        rewriteCalls += 1;
+        return 'const replaced = true;';
+      },
+    }
+  );
+  const syntaxGuard = await syntaxGuardExecutor.executeDeveloperToolCall(
+    'chat_write_repair',
+    { action: 'tool', tool: 'edit_file', path: '/script.js', content: '' },
+    'Repair the syntax error in the chess app.',
+    [
+      { tool: 'read_file', ok: true, path: '/script.js', content: currentChessFile },
+      { tool: 'validate_files', ok: true, observation: '/script.js: JavaScript syntax error: Unexpected token (line 2:10).' },
+    ],
+    planSpec
+  );
+  assert.equal(syntaxGuard.ok, false, 'missing localized edit program blocks the repair safely');
+  assert.equal(rewriteCalls, 0, 'localized syntax repair never falls back to a full-file rewrite');
+  assert.equal(syntaxGuardWrites.length, 0, 'original file is left untouched');
+  assert.match(syntaxGuard.observation, /kept intact|kept the current file/i, 'response asks for an exact edit');
+  console.log('PASS: syntax repair cannot trigger a destructive full-file rewrite');
 })();

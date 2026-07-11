@@ -653,6 +653,23 @@
       return false;
     }
 
+    function stripUnverifiedLocalUrls(text, toolEvents) {
+      const verified = new Set();
+      (toolEvents || []).forEach((event) => {
+        const detail = `${String(event && event.observation || '')}\n${String(event && event.terminalProof && event.terminalProof.url || '')}`;
+        for (const match of detail.matchAll(/https?:\/\/(?:127\.0\.0\.1|localhost|0\.0\.0\.0)(?::\d+)?[^\s"')<]*/gi)) verified.add(match[0]);
+      });
+      const localUrl = /https?:\/\/(?:127\.0\.0\.1|localhost|0\.0\.0\.0)(?::\d+)?[^\s"')<]*/gi;
+      return String(text || '').split('\n').map((line) => {
+        const matches = Array.from(line.matchAll(localUrl));
+        localUrl.lastIndex = 0;
+        const hasUnverifiedUrl = matches.some((match) => !verified.has(match[0]));
+        // Remove whole claims, not just the invented URL.
+        if (hasUnverifiedUrl && /\b(?:opened|launched|started|running)\b/i.test(line)) return null;
+        return line.replace(localUrl, (url) => verified.has(url) ? url : '');
+      }).filter((line) => line !== null).join('\n').replace(/\n{3,}/g, '\n\n');
+    }
+
     async function generateAgentCompletionText(taskText, toolEvents, workspaceLabel, planSpec = null) {
       const rows = Array.isArray(toolEvents) ? toolEvents.filter((item) => item && item.ok) : [];
       const writtenPaths = rows
@@ -680,6 +697,7 @@
         'For multi-file app work, short bullets are allowed.',
         'Keep it concise and specific to the actual work. Prefer under 120 words.',
         'Never mention internal tool names (write_file, edit_file, validate_files, run_app, run_command, read_file) — say it plainly: "edited", "checked the files", "ran the app".',
+        'Never invent a localhost URL or say the app was opened/running in a browser. Mention a local URL only when it appears verbatim in the tool results.',
         'CHANGES below lists the only real modifications made this run. Describe an outcome ONLY if those diffs actually implement it; if part of the request has no supporting change there, say plainly that it was not changed.',
         `Workspace name: ${workspaceLabel || deps.deriveProjectNameFromTask(taskText) || 'project'}`,
         `Task: ${String(taskText || '').trim()}`,
@@ -706,7 +724,7 @@
       }
       const remote = await deps.requestSelectedRemoteTextCompletion(prompt, 420);
       if (remote && remote.ok) {
-        const text = stripCompletionPreamble(deps.sanitizeAssistantText(remote.output || ''));
+        const text = stripCompletionPreamble(stripUnverifiedLocalUrls(deps.sanitizeAssistantText(remote.output || ''), toolEvents));
         if (text && !isLikelyIncompleteCompletion(text)) return text;
         recordDebugTrace('agent_completion_rejected', {
           source: 'remote',
@@ -716,7 +734,7 @@
       }
       const external = await requestExternalAgentPlanner(prompt, 420, 12000);
       if (external && external.ok) {
-        const text = stripCompletionPreamble(deps.sanitizeAssistantText(external.output || ''));
+        const text = stripCompletionPreamble(stripUnverifiedLocalUrls(deps.sanitizeAssistantText(external.output || ''), toolEvents));
         if (text && !isLikelyIncompleteCompletion(text)) return text;
         recordDebugTrace('agent_completion_rejected', {
           source: 'external',
@@ -779,6 +797,7 @@
       stitchFileContinuation,
       buildAgentCompletionFallbackText,
       generateAgentCompletionText,
+      stripUnverifiedLocalUrls,
       buildAgentProgressMarkdown,
       describeAgentToolTarget,
       buildCompactLineDiff,

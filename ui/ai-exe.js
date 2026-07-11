@@ -15587,6 +15587,12 @@ if (dictationApplyBtn) {
 }
 document.addEventListener('click', (evt) => {
   const target = evt.target;
+  const externalLink = target && typeof target.closest === 'function' ? target.closest('a[href]') : null;
+  if (externalLink && /^https?:\/\//i.test(String(externalLink.href || ''))) {
+    evt.preventDefault();
+    openExternalUrl(externalLink.href);
+    return;
+  }
   if (composerMenuOpen) {
     if (!(composerMenu && composerMenu.contains(target)) && !(composerPlusBtn && composerPlusBtn.contains(target))) {
       setComposerMenuOpen(false);

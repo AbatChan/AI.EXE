@@ -2537,6 +2537,17 @@
           }, { path, program });
         }
         if (!program) {
+          const syntaxRepair = (toolEvents || []).slice(-8).some((event) => {
+            const detail = `${String(event && event.observation || '')}\n${Array.isArray(event && event.validationIssues) ? event.validationIssues.join('\n') : ''}`;
+            return detail.includes(path) && /(?:syntax error|parsing error|unexpected token|outside of function)/i.test(detail);
+          });
+          if (syntaxRepair) {
+            return {
+              ok: false,
+              mutated,
+              observation: `edit_file blocked for ${path}: the parser reported a localized syntax error, but no concrete find/replace edit was produced. The file was kept intact; retry with an exact edit program instead of rewriting the whole file.`,
+            };
+          }
           const rewritten = await deps.generateAgentRewriteExistingFileContent(taskText, toolEvents, path, originalContent, decision.content || '', planSpec);
           const rewrittenTrim = String(rewritten || '').trim();
           const origLen = originalContent.trim().length;

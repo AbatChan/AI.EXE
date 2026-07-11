@@ -81,6 +81,9 @@ function createPlanner(expandedReadChars) {
     normalizeWorkspacePath,
     getAgentExpandedReadChars: () => expandedReadChars,
     agentMaxToolOutputChars: 8000,
+    buildAgentFileGenerationHints: () => [],
+    loadPromptTemplate: async () => '',
+    renderPromptTemplate: () => '',
   });
 }
 const siblingEvents = [
@@ -103,6 +106,20 @@ assert.ok(!excludedState.includes('CURRENT /index.html'), 'the target file itsel
 
 // --- verifyAgentDoneCriteria ---
 (async () => {
+  const longSource = Array.from({ length: 1300 }, (_, index) => `line-${index + 1}`).join('\n');
+  const repairPrompt = await localPlanner.buildAgentEditFileContentPrompt(
+    'repair the parser error',
+    [{ tool: 'validate_files', ok: true, observation: '/app.js: JavaScript syntax error: Unexpected token (line 1081:45).' }],
+    '/app.js',
+    longSource,
+    'Repair /app.js using the validation issue at line 1081.',
+    { expectedFiles: ['/app.js'] }
+  );
+  assert.ok(repairPrompt.includes('parser reported line 1081'), 'syntax repair prompt identifies the parser line');
+  assert.ok(repairPrompt.includes('line-1081'), 'syntax repair prompt includes the failing source region');
+  assert.ok(!repairPrompt.includes('line-1\nline-2\nline-3'), 'syntax repair prompt does not waste context on the unrelated file start');
+  console.log('PASS: syntax repair prompt includes the parser-reported source region');
+
   const editEvents = [
     { tool: 'edit_file', ok: true, path: '/style.css', content: 'body { display: flex; }', originalContent: 'body { display: block; }' },
   ];

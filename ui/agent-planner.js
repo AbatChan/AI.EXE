@@ -742,6 +742,19 @@
       ].filter(Boolean).join('\n');
     }
 
+    function buildEditFileContext(currentContent, toolEvents, path, priorAttempt = '') {
+      const source = String(currentContent || '');
+      const normalized = normalizeWorkspacePath(path || '');
+      const evidence = [String(priorAttempt || ''), ...(toolEvents || []).slice(-8).map((event) => String(event && event.observation || ''))].join('\n');
+      const lineMatch = evidence.match(new RegExp(`${normalized.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[^\n]{0,240}?line\\s+(\\d+)`, 'i')) || evidence.match(/line\s+(\d+)/i);
+      const line = Number(lineMatch && lineMatch[1]) || 0;
+      if (!line) return source.slice(0, 22000);
+      const lines = source.split('\n');
+      const start = Math.max(0, line - 121);
+      const end = Math.min(lines.length, line + 120);
+      return `Lines ${start + 1}-${end} (parser reported line ${line}):\n${lines.slice(start, end).join('\n')}`;
+    }
+
     async function buildAgentEditFileContentPrompt(taskText, toolEvents, path, currentContent, priorAttempt = '', planSpec = null) {
       const toolLog = (toolEvents || []).slice(-6).map((event, index) => {
         const observation = String(event && event.observation ? event.observation : '').slice(0, agentMaxToolOutputChars);
@@ -766,6 +779,7 @@
       const editHints = linksExternalStylesheet
         ? [...baseEditHints, 'This page links an external stylesheet. Make styling/layout changes by editing the linked CSS file — do NOT add a new inline <style> block, inline style="..." attributes, or !important overrides in this HTML; they fight the stylesheet and create conflicting styles.']
         : baseEditHints;
+      const fileContext = buildEditFileContext(currentContent, toolEvents, normalizedPath, priorAttempt);
       const template = await loadPromptTemplate('developer_agent_edit_file');
       if (template) {
         return renderPromptTemplate(template, {
@@ -776,7 +790,7 @@
           TASK: String(taskText || '').trim(),
           RECENT_TOOL_RESULTS: toolLog || '(none yet)',
           PREVIOUS_ATTEMPT_TO_IMPROVE: priorAttempt ? String(priorAttempt).slice(0, 1800) : '',
-          CURRENT_FILE: String(currentContent || '').slice(0, 22000),
+          CURRENT_FILE: fileContext,
         });
       }
       return [
@@ -807,7 +821,7 @@
           ? `PREVIOUS_ATTEMPT_TO_IMPROVE:\n${String(priorAttempt).slice(0, 1800)}`
           : '',
         'CURRENT_FILE:',
-        String(currentContent || '').slice(0, 22000),
+        fileContext,
         'JSON:',
       ].filter(Boolean).join('\n');
     }

@@ -41,4 +41,32 @@ function normalizeWorkspacePath(raw) {
 
   assert.equal(text, completion, 'complete bullet-list completion should not be rejected as incomplete');
   console.log('PASS: complete bullet-list completion text is accepted');
+
+  const inventedUrl = [
+    'The app is ready.',
+    'I opened the app for you — it is running at http://127.0.0.1:52111/ in your browser.',
+    'Use the files above to continue.',
+  ].join('\n');
+  const urlRuntime = global.AIExeAgentRuntime.createAgentRuntime({
+    normalizeWorkspacePath,
+    deriveProjectNameFromTask: () => 'project',
+    sanitizeAssistantText: (value) => String(value || '').trim(),
+    requestSelectedRemoteTextCompletion: async () => ({ ok: true, output: inventedUrl }),
+  });
+  const safeText = await urlRuntime.generateAgentCompletionText(
+    'build an app',
+    [{ tool: 'run_app', ok: true, observation: 'run_app completed a hidden smoke test.' }],
+    'project'
+  );
+  assert.doesNotMatch(safeText, /127\.0\.0\.1|opened the app|running at/i, 'invented local URL claim is removed as a whole sentence');
+  assert.match(safeText, /The app is ready/, 'useful completion text remains');
+  console.log('PASS: invented local URLs are removed from completion text');
+
+  const verifiedUrl = 'Preview: http://127.0.0.1:4173/';
+  assert.equal(
+    urlRuntime.stripUnverifiedLocalUrls(verifiedUrl, [{ tool: 'run_command', ok: true, observation: verifiedUrl }]),
+    verifiedUrl,
+    'local URL reported by a tool is preserved'
+  );
+  console.log('PASS: tool-reported local URLs are preserved');
 })();
