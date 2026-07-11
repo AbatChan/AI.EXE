@@ -31,18 +31,51 @@ def _watch_parent_and_exit() -> None:
     if not os.environ.get("AIEXE_PARENT_WATCH"):
         return
     parent = os.getppid()
+    if os.name == "nt":
+        _watch_parent_windows(parent)
+    else:
+        _watch_parent_posix(parent)
 
+
+def _watch_parent_posix(parent: int) -> None:
     def loop():
         while True:
             time.sleep(2)
             try:
-                os.kill(parent, 0)            # parent still alive?
+                os.kill(parent, 0)            # signal 0 = harmless existence probe (POSIX only)
             except (ProcessLookupError, PermissionError, OSError):
                 _stop_children()              # app is gone — take the adapter with us
                 os._exit(0)
             if os.getppid() != parent:        # reparented (parent died)
                 _stop_children()
                 os._exit(0)
+
+    threading.Thread(target=loop, daemon=True).start()
+
+
+def _watch_parent_windows(parent: int) -> None:
+    # NEVER use os.kill(pid, 0) here: on Windows any non-CTRL signal maps to
+    # TerminateProcess, and OpenProcess(PROCESS_ALL_ACCESS) on the GUI parent gets
+    # access-denied -> OSError -> the backend used to kill itself ~2s after boot.
+    # SYNCHRONIZE is grantable to a same-user child; wait on the parent handle instead.
+    import ctypes
+    from ctypes import wintypes
+
+    SYNCHRONIZE = 0x00100000
+    INFINITE = 0xFFFFFFFF
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.WaitForSingleObject.restype = wintypes.DWORD
+    kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    handle = kernel32.OpenProcess(SYNCHRONIZE, False, parent)
+    if not handle:
+        return  # can't observe the parent — keep serving rather than suicide
+
+    def loop():
+        kernel32.WaitForSingleObject(handle, INFINITE)  # blocks until parent exits
+        _stop_children()
+        os._exit(0)
 
     threading.Thread(target=loop, daemon=True).start()
 

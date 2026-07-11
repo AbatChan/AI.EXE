@@ -77,6 +77,22 @@ jobs:
               if (Test-Path $log) { Get-Content $log -Tail 200 }
               throw "Bundled AI.EXE backend did not become healthy"
             }
+            # Survive the parent-watch interval: a Windows os.kill(pid,0) regression
+            # would suicide the backend ~2s after boot, so re-check past that window.
+            Start-Sleep -Seconds 6
+            if ($proc.HasExited) {
+              $log = Join-Path $env:LOCALAPPDATA "AI_EXE/backend/backend.log"
+              if (Test-Path $log) { Get-Content $log -Tail 200 }
+              throw "Bundled AI.EXE backend exited after boot (parent-watch regression?)"
+            }
+            try {
+              $res = Invoke-WebRequest -UseBasicParsing "http://127.0.0.1:18765/health"
+              if ($res.StatusCode -ne 200) { throw "unhealthy: $($res.StatusCode)" }
+            } catch {
+              $log = Join-Path $env:LOCALAPPDATA "AI_EXE/backend/backend.log"
+              if (Test-Path $log) { Get-Content $log -Tail 200 }
+              throw "Bundled AI.EXE backend stopped serving after boot: $_"
+            }
           } finally {
             if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force }
           }
