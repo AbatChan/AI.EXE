@@ -211,9 +211,18 @@ function scheduleNativeUiStorageBackup() {
   if (nativeUiStorageBackupTimer) clearTimeout(nativeUiStorageBackupTimer);
   nativeUiStorageBackupTimer = setTimeout(() => {
     nativeUiStorageBackupTimer = 0;
-    const storage = JSON.stringify(collectNativeUiStorage());
-    nativeBridge.invoke('appStorageWrite', { storage, timeoutMs: 10000 }).catch(() => { });
+    void flushNativeUiStorageBackup();
   }, 350);
+}
+
+function flushNativeUiStorageBackup() {
+  if (!isMacNativeUi() || nativeUiStorageHydrating) return Promise.resolve();
+  if (nativeUiStorageBackupTimer) {
+    clearTimeout(nativeUiStorageBackupTimer);
+    nativeUiStorageBackupTimer = 0;
+  }
+  const storage = JSON.stringify(collectNativeUiStorage());
+  return nativeBridge.invoke('appStorageWrite', { storage, timeoutMs: 10000 }).catch(() => { });
 }
 
 function installNativeUiStorageBackup() {
@@ -14163,6 +14172,7 @@ function deleteChatFromModal() {
   inNewChatMode = !activeChatId;
   closeChatActionModal();
   saveChats();
+  void flushNativeUiStorageBackup();
   saveArtifacts();
 
   const refreshSteps = [

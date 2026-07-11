@@ -68,6 +68,18 @@ const cases = [
     },
   },
   {
+    name: 'edit plan falls back to its named expected files when affected files are omitted',
+    run: () => core.normalizeAgentPlanSpec({
+      task_kind: 'edit',
+      expected_files: '/template.html|/site.py',
+      affected_files: '',
+    }, 'add an AI opponent to the existing game', opts),
+    expect: (spec) => {
+      assert.equal(spec.taskKind, 'edit');
+      assert.deepEqual(spec.affectedFiles, ['/template.html', '/site.py']);
+    },
+  },
+  {
     name: 'nested edit targets remain the inspection targets',
     run: () => core.normalizeAgentPlanSpec({
       task_kind: 'edit',

@@ -2036,6 +2036,9 @@
       if (taskKind === 'edit' && expectedFiles.length === 0 && affectedFiles.length > 0) {
         expectedFiles = affectedFiles.slice();
       }
+      if (taskKind === 'edit' && affectedFiles.length === 0 && expectedFiles.length > 0) {
+        affectedFiles = expectedFiles.slice();
+      }
       const nonReadmeExpectedFiles = expectedFiles.filter((path) => path && path !== '/README.md');
       const simpleSingleFileProject = taskKind === 'project' && nonReadmeExpectedFiles.length === 1 && !explicitDocsTask;
       const requestedReadme = taskKind === 'project' && (

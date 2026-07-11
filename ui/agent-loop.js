@@ -783,7 +783,7 @@
         .test(String(taskText || ''));
 
       const shouldSummarizeReadOnlyRun = () => agentHasUsefulInspectionEvidence()
-        && (isVerificationOnlyTask() || !agentHasWorkspaceMutations());
+        && isVerificationOnlyTask();
 
       const getLastUsefulAgentNarration = () => {
         for (let i = agentActivities.length - 1; i >= 0; i -= 1) {
