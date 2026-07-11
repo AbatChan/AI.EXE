@@ -13,6 +13,9 @@ const renderer = read('ui/chat-renderer.js');
 const aiExe = read('ui/ai-exe.js');
 const css = read('ui/ai-exe.css');
 const adapter = read('backend/app/venice_adapter_server.py');
+const adapterManager = read('backend/app/adapter.py');
+const backendLauncher = read('backend/launcher.py');
+const releaseWorkflow = read('.github/workflows/build-windows.yml');
 
 // C++ manager: tracked spawn, group kill, kill-on-close job, app-quit stop.
 assert.match(manager, /class DevServerManager/);
@@ -50,5 +53,18 @@ assert.match(adapter, /_aiexe_internal_cleanup_loop/);
 assert.match(adapter, /id:internal:/);
 assert.match(adapter, /AIEXE_LAST_REQUEST_TS/);
 assert.match(adapter, /gevent\.spawn\(_aiexe_internal_cleanup_loop\)/);
+
+// Windows releases include and start the backend that owns /api/adapter/*.
+assert.match(win, /StartBundledBackend/);
+assert.match(win, /AI\.EXE Backend\.exe/);
+assert.match(win, /backend_process_ = StartBundledBackend/);
+assert.match(backendLauncher, /--adapter-boot/);
+assert.match(adapterManager, /_uses_frozen_backend/);
+assert.match(adapterManager, /--adapter-boot/);
+assert.match(aiExe, /function fetchBackendWhenReady/);
+assert.match(aiExe, /fetchBackendWhenReady\(backend \+ '\/api\/adapter\/status'\)/);
+assert.match(releaseWorkflow, /actions\/setup-python@v5/);
+assert.match(releaseWorkflow, /PyInstaller/);
+assert.match(releaseWorkflow, /AI\.EXE Backend\.exe/);
 
 console.log('PASS: dev-server process manager (tracked start/stop, bridge actions, UI card, adapter thread cleanup)');

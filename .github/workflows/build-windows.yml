@@ -36,6 +36,11 @@ jobs:
         with:
           arch: x64
 
+      - name: Setup Python for bundled backend
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
       - name: Build AI.EXE GUI
         shell: cmd
         run: |
@@ -44,6 +49,13 @@ jobs:
             -DBUILD_BACKEND_STUB=OFF ^
             -DAI_EXE_WEBVIEW2_DIR="%WEBVIEW2_DIR%"
           cmake --build build --target ai_exe_gui
+
+      - name: Bundle local adapter backend
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r backend/requirements.txt selenium webdriver-manager pyinstaller
+          python -m PyInstaller --noconfirm --clean --onedir --name "AI.EXE Backend" --paths backend --collect-all fastapi --collect-all uvicorn --collect-all pydantic --collect-all selenium --collect-all webdriver_manager --collect-all pypdf --add-data "backend/app/adapter_boot.py;app" --add-data "backend/app/venice_adapter_server.py;app" --add-data "backend/app/venice_config.py;app" backend/launcher.py
 
       - name: Assemble release
         shell: pwsh
@@ -57,6 +69,11 @@ jobs:
           # UI files (HTML/CSS/JS + prompts + CodeMirror vendor) copied by CMake post-build
           if (Test-Path "build/ui") {
             Copy-Item -Recurse "build/ui" "$out/ui"
+          }
+          Copy-Item -Recurse "dist/AI.EXE Backend" "$out/backend"
+
+          if (-not (Test-Path "$out/backend/AI.EXE Backend.exe")) {
+            throw "Bundled AI.EXE backend is missing"
           }
 
           # WebView2 loader next to the exe so it renders without a separate SDK install.

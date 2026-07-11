@@ -443,6 +443,24 @@ std::filesystem::path ResolveRuntimeRoot(const std::filesystem::path &ui_html) {
   return exe_dir;
 }
 
+HANDLE StartBundledBackend(const std::filesystem::path &runtime_root) {
+  const auto backend = runtime_root / "backend" / "AI.EXE Backend.exe";
+  if (!FileExists(backend)) {
+    return nullptr;
+  }
+  std::wstring command = L"\"" + backend.wstring() + L"\" --serve";
+  STARTUPINFOW startup{};
+  startup.cb = sizeof(startup);
+  PROCESS_INFORMATION process{};
+  if (!CreateProcessW(backend.wstring().c_str(), command.data(), nullptr, nullptr,
+                      FALSE, CREATE_NO_WINDOW, nullptr,
+                      backend.parent_path().wstring().c_str(), &startup, &process)) {
+    return nullptr;
+  }
+  CloseHandle(process.hThread);
+  return process.hProcess;
+}
+
 std::string TrimCopy(const std::string &text) {
   std::size_t start = 0;
   while (start < text.size() &&
@@ -1339,7 +1357,9 @@ public:
     }
 
     std::string runtime_err;
-    runtime_.Initialize(ResolveRuntimeRoot(ui_html_), false, &runtime_err);
+    const auto runtime_root = ResolveRuntimeRoot(ui_html_);
+    backend_process_ = StartBundledBackend(runtime_root);
+    runtime_.Initialize(runtime_root, false, &runtime_err);
     if (!runtime_err.empty()) {
       runtime_init_error_ = runtime_err;
     }
@@ -1413,6 +1433,11 @@ private:
     }
     case WM_DESTROY:
       DevServerManager::Instance().StopAll();
+      if (self->backend_process_) {
+        // Its parent watchdog retires the adapter and backend after this app exits.
+        CloseHandle(self->backend_process_);
+        self->backend_process_ = nullptr;
+      }
       SaveWindowPlacementToIni(hwnd);
       PostQuitMessage(0);
       return 0;
@@ -2105,6 +2130,7 @@ private:
   std::filesystem::path ui_html_;
   WebRuntimeBridge runtime_;
   std::string runtime_init_error_;
+  HANDLE backend_process_ = nullptr;
 
 #if AI_EXE_HAVE_WEBVIEW2_HEADER
   Microsoft::WRL::ComPtr<ICoreWebView2Controller> controller_;

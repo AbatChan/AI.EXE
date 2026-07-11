@@ -14864,6 +14864,21 @@ function adapterTargetPort() {
   const m = url.match(/:(\d{2,5})(?:\/|$)/);
   return m ? Number(m[1]) : (Number(VENICE_ADAPTER_DEFAULT_URL.match(/:(\d{2,5})/)[1]) || 9999);
 }
+
+async function fetchBackendWhenReady(url, options, timeoutMs = 8000) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError;
+  do {
+    try {
+      return await fetch(url, options);
+    } catch (error) {
+      lastError = error;
+      if (Date.now() >= deadline) break;
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    }
+  } while (Date.now() < deadline);
+  throw lastError || new Error('Backend did not start');
+}
 // Noise that isn't an error: HTTP access-log lines ("GET /api/tags HTTP/1.1" 200 ...),
 // server startup banners, and clean-shutdown notices.
 function isAdapterLogNoise(line) {
@@ -15367,12 +15382,12 @@ if (settingsAdapterStartBtn) {
       settingsAdapterStatus.style.color = 'var(--warning, #f59e0b)';
     }
     try {
-      const st = await (await fetch(backend + '/api/adapter/status')).json();
+      const st = await (await fetchBackendWhenReady(backend + '/api/adapter/status')).json();
       if (!st.installed) {
         const installed = await ensureAdapterInstalledWithFeedback(backend);
         if (!installed) return;
       }
-      const r = await (await fetch(backend + '/api/adapter/start', {
+      const r = await (await fetchBackendWhenReady(backend + '/api/adapter/start', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         // Visible browser: Venice's login is behind Cloudflare, which blocks headless. The
         // window also lets you complete an email verification code once (profile persists).

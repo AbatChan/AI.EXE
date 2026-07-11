@@ -226,6 +226,10 @@ class AdapterManager:
         exe = "python.exe" if os.name == "nt" else "python"
         return os.path.join(self._dir, ".venv", sub, exe)
 
+    @staticmethod
+    def _uses_frozen_backend() -> bool:
+        return bool(getattr(sys, "frozen", False))
+
     def _server_script(self) -> str:
         return os.path.join(self._dir, "ollama_like_server.py")
 
@@ -426,6 +430,11 @@ class AdapterManager:
             if not self.is_installed():
                 self._append_log("AIEXE_INSTALL clone_missing_server")
                 return {"ok": False, "detail": "clone done but ollama_like_server.py not found"}
+            if self._uses_frozen_backend():
+                # The release backend already carries Selenium and its dependencies.
+                self._patch_adapter()
+                self._append_log("AIEXE_INSTALL installed")
+                return {"ok": True, "detail": "installed"}
             venv_py = self._venv_python()
             if not os.path.exists(venv_py):
                 self._append_log("AIEXE_INSTALL creating Python environment")
@@ -470,7 +479,6 @@ class AdapterManager:
             if self.running():
                 return {"ok": True, "detail": "already running",
                         "pid": self._proc.pid if self._proc else None, "port": self._port}
-            py = python_exe or self._venv_python()
             srv = script or self._server_script()
             if not os.path.exists(srv):
                 return {"ok": False, "detail": "adapter not installed — install first", "port": port}
@@ -502,7 +510,11 @@ class AdapterManager:
             # its --headless DEFAULTS to True, so visible mode needs --no-headless
             # explicitly (Cloudflare blocks headless on Venice's sign-in).
             boot = os.path.join(os.path.dirname(os.path.abspath(__file__)), "adapter_boot.py")
-            args = [py, boot, srv, str(port), "1" if headless else "0"]
+            if self._uses_frozen_backend() and not python_exe:
+                args = [sys.executable, "--adapter-boot", srv, str(port), "1" if headless else "0"]
+            else:
+                py = python_exe or self._venv_python()
+                args = [py, boot, srv, str(port), "1" if headless else "0"]
             # A killed adapter leaves webdriver-manager's download lock behind and
             # every later start times out on it; no adapter runs here, so any lock
             # is stale by definition.
