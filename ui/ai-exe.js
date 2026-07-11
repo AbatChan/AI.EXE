@@ -3520,7 +3520,9 @@ async function syncDevServerChips() {
       if (match) _devServerChipState.urls[row.id] = match[0].replace(/[),.]+$/, '');
     } catch (_) { }
   }
-  const sig = rows.map((row) => `${row.id}:${row.command}:${_devServerChipState.urls[row.id] || ''}:${row.pid}`).join('|');
+  // '(none)' keeps the empty list distinct from the '' force-refresh sentinel —
+  // otherwise the render that clears the last (stopping) chip never runs.
+  const sig = rows.map((row) => `${row.id}:${row.command}:${_devServerChipState.urls[row.id] || ''}:${row.pid}`).join('|') || '(none)';
   if (sig === _devServerChipState.sig) return;
   _devServerChipState.sig = sig;
   closeDevServerDetails();
