@@ -2546,9 +2546,6 @@ html.platform-mac .settings-sidebar {
   box-shadow: 0 8px 20px rgba(0, 0, 0, 0.24), inset 0 1px 0 rgba(255,255,255,0.035);
   transform: translateX(-50%);
 }
-.workspace-tab-strip:has(.middle-tab:not(#tabChat)) {
-  width: min(620px, calc(100% - 48px));
-}
 .workspace-tab-strip:not(:has(.middle-tab:not(#tabChat))) {
   padding: 0;
   background: transparent;
