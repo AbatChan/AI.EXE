@@ -2540,19 +2540,10 @@ html.platform-mac .settings-sidebar {
   width: auto;
   max-width: calc(100% - 48px);
   height: 34px;
-  padding: 3px;
-  border-radius: 12px;
-  background: rgba(20, 20, 23, 0.94);
-  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.24), inset 0 1px 0 rgba(255,255,255,0.035);
-  transform: translateX(-50%);
-}
-.workspace-tab-strip:not(:has(.middle-tab:not(#tabChat))) {
   padding: 0;
+  border-radius: 999px;
   background: transparent;
-  box-shadow: none;
-}
-.workspace-tab-strip:not(:has(.middle-tab:not(#tabChat))) .middle-tab-bar {
-  display: none;
+  transform: translateX(-50%);
 }
 .floating-view-btn {
   flex: 0 0 auto;
@@ -2583,8 +2574,8 @@ html.platform-mac .settings-sidebar {
   gap: 0;
   width: auto;
   min-width: 0;
-  min-height: 28px;
-  max-height: 28px;
+  min-height: 34px;
+  max-height: 34px;
   padding: 0;
   margin: 0;
   background: transparent;
