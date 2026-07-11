@@ -28,6 +28,16 @@ def redirect_frozen_server_logs() -> None:
 
 def main() -> None:
     configure_frozen_runtime()
+    if len(sys.argv) > 1 and sys.argv[1] == "--adapter-selfcheck":
+        # CI guard: prove the adapter's runtime deps are frozen in (flask/gevent were
+        # missing -> ModuleNotFoundError only when the adapter actually launched).
+        import flask  # noqa: F401
+        import gevent  # noqa: F401
+        from gevent.pywsgi import WSGIServer  # noqa: F401
+        import selenium  # noqa: F401
+        import webdriver_manager  # noqa: F401
+        print("adapter-selfcheck ok")
+        return
     if len(sys.argv) > 1 and sys.argv[1] == "--adapter-boot":
         from app import adapter_boot
         sys.argv = [sys.argv[0], *sys.argv[2:]]

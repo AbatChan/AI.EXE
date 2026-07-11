@@ -54,14 +54,19 @@ jobs:
         shell: pwsh
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r backend/requirements.txt selenium webdriver-manager pyinstaller
-          python -m PyInstaller --noconfirm --clean --onedir --name "AI.EXE Backend" --paths backend --collect-all fastapi --collect-all uvicorn --collect-all pydantic --collect-all selenium --collect-all webdriver_manager --collect-all pypdf --add-data "backend/app/adapter_boot.py;app" --add-data "backend/app/venice_adapter_server.py;app" --add-data "backend/app/venice_config.py;app" backend/launcher.py
+          python -m pip install -r backend/requirements.txt selenium webdriver-manager flask gevent pyinstaller
+          python -m PyInstaller --noconfirm --clean --onedir --name "AI.EXE Backend" --paths backend --collect-all fastapi --collect-all uvicorn --collect-all pydantic --collect-all selenium --collect-all webdriver_manager --collect-all pypdf --collect-all flask --collect-all gevent --collect-all greenlet --add-data "backend/app/adapter_boot.py;app" --add-data "backend/app/venice_adapter_server.py;app" --add-data "backend/app/venice_config.py;app" backend/launcher.py
 
       - name: Smoke-test bundled backend
         shell: pwsh
         run: |
           $env:AIEXE_BACKEND_PORT = "18765"
           $backend = (Resolve-Path "dist/AI.EXE Backend/AI.EXE Backend.exe").Path
+          # Prove the adapter's runtime deps (flask/gevent/selenium) are frozen in —
+          # they're only imported when the adapter launches, so boot alone won't catch it.
+          $sc = & $backend "--adapter-selfcheck" 2>&1
+          if ($LASTEXITCODE -ne 0) { throw "adapter-selfcheck failed: $sc" }
+          Write-Host $sc
           $proc = Start-Process -FilePath $backend -ArgumentList "--serve" -PassThru -WindowStyle Hidden
           try {
             $ready = $false
