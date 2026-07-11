@@ -316,20 +316,24 @@
         if (/<\/?(?:html|head|body|style)\b|<!doctype html/i.test(strippedForHtmlCheck)) {
           issues.push('contains HTML markup instead of pure JavaScript');
         }
-        let jsSyntaxFailed = false;
-        if (!/\b(import|export)\b/.test(text)) {
+        const eslintResult = /\.(js|jsx|mjs|cjs)$/i.test(normalized)
+          ? getJsCorrectnessIssues(text)
+          : null;
+        if (eslintResult) {
+          if (eslintResult.syntaxIssue) {
+            issues.push(`has a JavaScript syntax error: ${eslintResult.syntaxIssue}`);
+          } else {
+            issues.push(...eslintResult.issues);
+          }
+        } else if (/\.(js|mjs|cjs)$/i.test(normalized) && !/\b(import|export)\b/.test(text)) {
+          // Last-resort fallback when the bundled parser is unavailable.
           try {
-            // Syntax-only check for normal script files.
             // eslint-disable-next-line no-new, no-new-func
             new Function(text);
           } catch (err) {
-            jsSyntaxFailed = true;
             const syntaxIssue = getJsSyntaxIssue(text, err);
             issues.push(`has a JavaScript syntax error: ${syntaxIssue || String(err && err.message ? err.message : err || 'unknown error')}`);
           }
-        }
-        if (!jsSyntaxFailed) {
-          // new Function() only catches parse errors; catch const-reassignment (a runtime error) statically.
           const constIssue = getJsReassignedConstIssue(text);
           if (constIssue) issues.push(constIssue);
         }
@@ -1292,11 +1296,57 @@
       return parseMessage;
     }
 
-    // Static detection of the "Assignment to constant variable" regression:
-    // a simple `const NAME = …` that is later reassigned with a bare `NAME = …`.
-    // Strings/comments are stripped first so matches inside them don't false-flag,
-    // and a NAME declared more than once is skipped (likely block-scoped shadowing,
-    // which we can't resolve cheaply and don't want to over-report).
+    // Scope-aware parser for definite JavaScript runtime errors.
+    let agentEslintLinter = null;
+    function getJsCorrectnessIssues(jsText) {
+      const eslintGlobal = typeof window !== 'undefined' ? window.eslint : null;
+      if (!eslintGlobal || typeof eslintGlobal.Linter !== 'function') return null;
+      try {
+        if (!agentEslintLinter) agentEslintLinter = new eslintGlobal.Linter();
+        const rules = {
+          'no-const-assign': 'error',
+          'constructor-super': 'error',
+          'no-this-before-super': 'error',
+        };
+        const text = String(jsText || '');
+        const lint = (sourceType) => agentEslintLinter.verify(text, {
+          languageOptions: {
+            ecmaVersion: 'latest',
+            sourceType,
+            parserOptions: { ecmaFeatures: { jsx: true } },
+          },
+          rules,
+        });
+        const sourceTypes = /\b(?:import|export)\b/.test(text) ? ['module', 'script'] : ['script', 'module'];
+        let messages = null;
+        for (const sourceType of sourceTypes) {
+          const attempt = lint(sourceType);
+          if (!attempt.some((m) => m && m.fatal)) {
+            messages = attempt;
+            break;
+          }
+          if (!messages) messages = attempt;
+        }
+        const fatal = messages.find((m) => m && m.fatal);
+        if (fatal) {
+          return {
+            issues: [],
+            syntaxIssue: `${String(fatal.message || 'invalid syntax').replace(/\.$/, '')} (line ${fatal.line || 1}${fatal.column ? `:${fatal.column}` : ''})`,
+          };
+        }
+        return {
+          issues: messages
+          .filter((m) => m && !m.fatal)
+          .slice(0, 6)
+          .map((m) => `${String(m.message || '').replace(/\.$/, '')} (line ${m.line}${m.column ? `:${m.column}` : ''}) — definite runtime error`),
+          syntaxIssue: '',
+        };
+      } catch (_) {
+        return null;
+      }
+    }
+
+    // Regex fallback used only if the bundled parser is unavailable.
     function getJsReassignedConstIssue(jsText) {
       const src = String(jsText || '');
       const stripped = src
@@ -3371,6 +3421,7 @@
       describeAgentToolPhase,
       getJsSyntaxIssue,
       getJsReassignedConstIssue,
+      getJsCorrectnessIssues,
       getHtmlStructureIssue,
       getStructuralIssueForPath,
       validateWebProjectConsistency,
