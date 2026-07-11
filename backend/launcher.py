@@ -1,6 +1,10 @@
 """Frozen and source entry point for the local AI.EXE API backend."""
 import os
 import sys
+import traceback
+
+
+_backend_log = None
 
 
 def configure_frozen_runtime() -> None:
@@ -12,6 +16,16 @@ def configure_frozen_runtime() -> None:
     os.makedirs(os.environ["AIEXE_BACKEND_DATA_DIR"], exist_ok=True)
 
 
+def redirect_frozen_server_logs() -> None:
+    global _backend_log
+    if not getattr(sys, "frozen", False):
+        return
+    path = os.path.join(os.environ["AIEXE_BACKEND_DATA_DIR"], "backend.log")
+    _backend_log = open(path, "a", encoding="utf-8", buffering=1)
+    sys.stdout = _backend_log
+    sys.stderr = _backend_log
+
+
 def main() -> None:
     configure_frozen_runtime()
     if len(sys.argv) > 1 and sys.argv[1] == "--adapter-boot":
@@ -20,6 +34,7 @@ def main() -> None:
         adapter_boot.main()
         return
 
+    redirect_frozen_server_logs()
     import uvicorn
     from app.config import settings
     from app.main import app
@@ -27,4 +42,8 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except BaseException:
+        traceback.print_exc()
+        raise

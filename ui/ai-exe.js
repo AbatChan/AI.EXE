@@ -14865,7 +14865,7 @@ function adapterTargetPort() {
   return m ? Number(m[1]) : (Number(VENICE_ADAPTER_DEFAULT_URL.match(/:(\d{2,5})/)[1]) || 9999);
 }
 
-async function fetchBackendWhenReady(url, options, timeoutMs = 8000) {
+async function fetchBackendWhenReady(url, options, timeoutMs = 25000) {
   const deadline = Date.now() + timeoutMs;
   let lastError;
   do {

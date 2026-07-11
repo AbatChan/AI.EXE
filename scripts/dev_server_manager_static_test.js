@@ -59,12 +59,16 @@ assert.match(win, /StartBundledBackend/);
 assert.match(win, /AI\.EXE Backend\.exe/);
 assert.match(win, /backend_process_ = StartBundledBackend/);
 assert.match(backendLauncher, /--adapter-boot/);
+assert.match(backendLauncher, /redirect_frozen_server_logs/);
 assert.match(adapterManager, /_uses_frozen_backend/);
 assert.match(adapterManager, /--adapter-boot/);
 assert.match(aiExe, /function fetchBackendWhenReady/);
+assert.match(aiExe, /timeoutMs = 25000/);
 assert.match(aiExe, /fetchBackendWhenReady\(backend \+ '\/api\/adapter\/status'\)/);
 assert.match(releaseWorkflow, /actions\/setup-python@v5/);
 assert.match(releaseWorkflow, /PyInstaller/);
 assert.match(releaseWorkflow, /AI\.EXE Backend\.exe/);
+assert.match(releaseWorkflow, /Smoke-test bundled backend/);
+assert.match(releaseWorkflow, /Bundled AI\.EXE backend did not become healthy/);
 
 console.log('PASS: dev-server process manager (tracked start/stop, bridge actions, UI card, adapter thread cleanup)');

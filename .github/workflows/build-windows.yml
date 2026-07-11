@@ -57,6 +57,30 @@ jobs:
           python -m pip install -r backend/requirements.txt selenium webdriver-manager pyinstaller
           python -m PyInstaller --noconfirm --clean --onedir --name "AI.EXE Backend" --paths backend --collect-all fastapi --collect-all uvicorn --collect-all pydantic --collect-all selenium --collect-all webdriver_manager --collect-all pypdf --add-data "backend/app/adapter_boot.py;app" --add-data "backend/app/venice_adapter_server.py;app" --add-data "backend/app/venice_config.py;app" backend/launcher.py
 
+      - name: Smoke-test bundled backend
+        shell: pwsh
+        run: |
+          $env:AIEXE_BACKEND_PORT = "18765"
+          $backend = (Resolve-Path "dist/AI.EXE Backend/AI.EXE Backend.exe").Path
+          $proc = Start-Process -FilePath $backend -ArgumentList "--serve" -PassThru -WindowStyle Hidden
+          try {
+            $ready = $false
+            1..50 | ForEach-Object {
+              Start-Sleep -Milliseconds 500
+              try {
+                $res = Invoke-WebRequest -UseBasicParsing "http://127.0.0.1:18765/health"
+                if ($res.StatusCode -eq 200) { $ready = $true; break }
+              } catch { }
+            }
+            if (-not $ready) {
+              $log = Join-Path $env:LOCALAPPDATA "AI_EXE/backend/backend.log"
+              if (Test-Path $log) { Get-Content $log -Tail 200 }
+              throw "Bundled AI.EXE backend did not become healthy"
+            }
+          } finally {
+            if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force }
+          }
+
       - name: Assemble release
         shell: pwsh
         run: |
