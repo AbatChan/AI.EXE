@@ -593,6 +593,10 @@ class AdapterManager:
         elif "AIEXE_INSTALL starting".lower() in lower and "AIEXE_INSTALL installed".lower() not in lower and not self.is_installed():
             stage = "installing"
             detail = "Downloading the adapter and dependencies."
+        elif "chrome_not_found" in lower or "google chrome is not installed" in lower:
+            stage = "error"
+            detail = "Google Chrome is not installed on this machine."
+            retry_hint = "Install Chrome from google.com/chrome, then press Start adapter again."
         elif network_issue:
             stage = "network"
             detail = "Network looks slow or unavailable while reaching Venice or installing dependencies."

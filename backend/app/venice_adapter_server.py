@@ -117,6 +117,43 @@ def capture_and_redirect_browser_logs(driver):
         print(f"Browser log: {entry['level']} - {entry['message']}", file=sys.stderr)
 
 
+def _aiexe_find_chrome():
+    """Return an installed Chrome/Chromium binary path, or '' if none is found.
+    Covers Windows Program Files, per-user LocalAppData installs, the App Paths
+    registry key, and anything on PATH."""
+    import shutil
+    candidates = []
+    if os.name == "nt":
+        for env in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"):
+            base = os.environ.get(env)
+            if base:
+                candidates.append(os.path.join(base, "Google", "Chrome", "Application", "chrome.exe"))
+                candidates.append(os.path.join(base, "Chromium", "Application", "chrome.exe"))
+        try:
+            import winreg
+            for root in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+                try:
+                    with winreg.OpenKey(root, r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe") as k:
+                        val, _ = winreg.QueryValueEx(k, None)
+                        if val:
+                            candidates.append(val)
+                except OSError:
+                    pass
+        except Exception:
+            pass
+    for name in ("google-chrome", "chrome", "chromium", "chromium-browser"):
+        found = shutil.which(name)
+        if found:
+            candidates.append(found)
+    for c in candidates:
+        try:
+            if c and os.path.exists(c):
+                return c
+        except Exception:
+            pass
+    return ""
+
+
 def get_webdriver(headless=True, debug_browser=False, docker=False):
     chrome_options = webdriver.ChromeOptions()
     chrome_options.add_argument("--user-data-dir=" + os.path.join(os.path.dirname(os.path.abspath(__file__)), ".chrome-profile"))
@@ -166,20 +203,35 @@ def get_webdriver(headless=True, debug_browser=False, docker=False):
         except WebDriverException as e:
             print(f"Chrome initialization failed: {e}")
     else:
-        # Use ChromeDriverManager to install
+        # No system chromedriver. On Windows the client's VM often has no Chrome at all;
+        # without a precheck webdriver-manager hangs forever on "Opening Chrome". Fail
+        # fast with a clear message. macOS/Linux keep their original behavior (Selenium
+        # locates Chrome.app itself) so the mac preview is unaffected.
+        if os.name == "nt":
+            chrome_bin = _aiexe_find_chrome()
+            if not chrome_bin:
+                print("AIEXE_DRIVER chrome_not_found: Google Chrome is not installed.", flush=True)
+                raise Exception(
+                    "Google Chrome is not installed on this machine. Install Chrome from "
+                    "https://www.google.com/chrome, then press Start adapter again.")
+            chrome_options.binary_location = chrome_bin
+            print("AIEXE_DRIVER chrome_binary=%r" % chrome_bin, flush=True)
 
         try:
-            driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
+            print("AIEXE_DRIVER resolving chromedriver (first run downloads it — needs internet)...", flush=True)
+            service = Service(ChromeDriverManager().install())
+            print("AIEXE_DRIVER launching Chrome...", flush=True)
+            driver = webdriver.Chrome(service=service, options=chrome_options)
+            print("AIEXE_DRIVER chrome_ready", flush=True)
             return driver
         except WebDriverException as e:
-            print(f"Chrome not found ({e}), trying Chromium")
-
+            print(f"Chrome not found ({e}), trying Chromium", flush=True)
 
         try:
             driver = webdriver.Chrome(service=Service(ChromeDriverManager(chrome_type=ChromeType.CHROMIUM).install()), options=chrome_options)
             return driver
         except WebDriverException as e:
-            print(f"Chromium error occurred: {e}")
+            print(f"Chromium error occurred: {e}", flush=True)
 
     raise Exception("Neither Chrome nor Chromium could be initialized. Please make sure one of them is installed.")
 
