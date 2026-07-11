@@ -1454,10 +1454,9 @@ bool LaunchViteDevServerMac(const std::filesystem::path &root, int port,
          << "    npm install --legacy-peer-deps || { read -n 1 -s -r -p 'Install failed. Press any key to close...'; exit 1; }\n"
          << "  }\n"
          << "fi\n"
-         << "( sleep 2; open " << sh_quote(url) << " ) >/dev/null 2>&1 &\n"
          << "echo 'Starting Vite dev server at " << url << "'\n"
-         // The launcher opens the URL itself; BROWSER=none stops Vite's
-         // server.open from opening a second tab.
+         // The app opens the URL when the port is up (smart browser routing);
+         // BROWSER=none stops Vite's server.open from adding a second tab.
          << "BROWSER=none npm run dev -- --host 127.0.0.1 --port " << port << " --strictPort\n";
 
   NSString *tmpDir = NSTemporaryDirectory();
@@ -1483,6 +1482,50 @@ bool LaunchViteDevServerMac(const std::filesystem::path &root, int port,
     return false;
   }
   return true;
+}
+
+// Launch Services routes an openURL to ANY running instance of the default
+// browser's bundle — including the Venice adapter's Selenium Chrome. When the
+// default browser is Chrome, launch a fresh instance with the URL as argv:
+// Chrome's default-profile singleton forwards it to (or starts) the user's
+// real Chrome, and the adapter instance (separate --user-data-dir) never sees it.
+void OpenUrlInDefaultBrowserSmart(NSString *urlString) {
+  NSURL *url = [NSURL URLWithString:urlString];
+  if (!url) return;
+  void (^doOpen)(void) = ^{
+    NSURL *browser = [[NSWorkspace sharedWorkspace] URLForApplicationToOpenURL:url];
+    NSString *bundle_id = browser ? [[NSBundle bundleWithURL:browser] bundleIdentifier] : nil;
+    if (bundle_id && [bundle_id isEqualToString:@"com.google.Chrome"]) {
+      NSWorkspaceOpenConfiguration *cfg = [NSWorkspaceOpenConfiguration configuration];
+      cfg.createsNewApplicationInstance = YES;
+      cfg.arguments = @[ urlString ];
+      [[NSWorkspace sharedWorkspace] openApplicationAtURL:browser
+                                            configuration:cfg
+                                        completionHandler:nil];
+      return;
+    }
+    [[NSWorkspace sharedWorkspace] openURL:url];
+  };
+  if ([NSThread isMainThread]) {
+    doOpen();
+  } else {
+    dispatch_async(dispatch_get_main_queue(), doOpen);
+  }
+}
+
+// The app owns opening a cold-started Vite URL (the launcher script no longer
+// self-opens): poll the port and open once it serves. Generous cap — a first
+// run may npm-install for minutes before the server binds.
+void OpenViteUrlWhenReady(int port, NSString *urlString, int attempts_left) {
+  if (IsLoopbackTcpPortOpen(port)) {
+    OpenUrlInDefaultBrowserSmart(urlString);
+    return;
+  }
+  if (attempts_left <= 0) return;
+  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)NSEC_PER_SEC),
+                 dispatch_get_main_queue(), ^{
+    OpenViteUrlWhenReady(port, urlString, attempts_left - 1);
+  });
 }
 
 std::string StatusToJson(const WebRuntimeStatus &s) {
@@ -2157,12 +2200,12 @@ std::string BuildStreamEvent(const std::string &id, bool done,
         const int port = StableVitePortForRoot(root);
         output = "http://127.0.0.1:" + std::to_string(port) + "/";
         if (IsLoopbackTcpPortOpen(port)) {
-          NSURL *appUrl = [NSURL URLWithString:[NSString stringWithUTF8String:output.c_str()]];
-          if (appUrl) {
-            [[NSWorkspace sharedWorkspace] openURL:appUrl];
-          }
+          OpenUrlInDefaultBrowserSmart(
+              [NSString stringWithUTF8String:output.c_str()]);
           message = "Vite dev server already running.";
         } else if (LaunchViteDevServerMac(root, port, &op_err)) {
+          OpenViteUrlWhenReady(
+              port, [NSString stringWithUTF8String:output.c_str()], 240);
           message = "Starting Vite dev server.";
         } else {
           ok = false;
@@ -2176,10 +2219,8 @@ std::string BuildStreamEvent(const std::string &id, bool done,
         } else {
           const std::string rel = target.entry.filename().string();
           if (rel != "index.html") url += rel;  // base URL already ends with '/'
-          NSURL *appUrl = [NSURL URLWithString:[NSString stringWithUTF8String:url.c_str()]];
-          if (appUrl) {
-            [[NSWorkspace sharedWorkspace] openURL:appUrl];
-          }
+          OpenUrlInDefaultBrowserSmart(
+              [NSString stringWithUTF8String:url.c_str()]);
           output = url;
           message = "App running.";
         }
@@ -2324,12 +2365,8 @@ std::string BuildStreamEvent(const std::string &id, bool done,
       ok = false;
       message = "Only http(s) URLs can be opened.";
     } else {
-      auto openIt = ^{ [[NSWorkspace sharedWorkspace] openURL:url]; };
-      if ([NSThread isMainThread]) {
-        openIt();
-      } else {
-        dispatch_async(dispatch_get_main_queue(), openIt);
-      }
+      OpenUrlInDefaultBrowserSmart(
+          [NSString stringWithUTF8String:external_url.c_str()]);
       message = "Opened.";
     }
   } else if (action == "windowDragBegin") {
