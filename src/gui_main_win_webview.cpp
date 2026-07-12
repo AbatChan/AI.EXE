@@ -15,6 +15,7 @@
 #include <shellapi.h>
 #include <shlobj.h>
 #include <shlwapi.h>
+#include <tlhelp32.h>
 
 #include <algorithm>
 #include <cctype>
@@ -45,6 +46,9 @@
 #endif
 
 namespace {
+
+constexpr wchar_t kWindowClassName[] = L"AI_EXE_WEBVIEW_WINDOW";
+constexpr wchar_t kSingleInstanceMutex[] = L"Local\\AI_EXE_GUI_SINGLE_INSTANCE";
 
 constexpr UINT kMsgShowError = WM_APP + 1;
 constexpr UINT kMsgPostWebResponse = WM_APP + 2;
@@ -499,6 +503,37 @@ std::filesystem::path ResolveRuntimeRoot(const std::filesystem::path &ui_html) {
   return exe_dir;
 }
 
+void RetireStaleBundledBackend(const std::filesystem::path &backend) {
+  const std::wstring wanted = backend.lexically_normal().wstring();
+  HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+  if (snapshot == INVALID_HANDLE_VALUE) return;
+  PROCESSENTRY32W entry{};
+  entry.dwSize = sizeof(entry);
+  bool retired = false;
+  if (Process32FirstW(snapshot, &entry)) {
+    do {
+      if (_wcsicmp(entry.szExeFile, backend.filename().wstring().c_str()) != 0) continue;
+      HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION |
+                                       PROCESS_TERMINATE | SYNCHRONIZE,
+                                   FALSE, entry.th32ProcessID);
+      if (!process) continue;
+      std::vector<wchar_t> path(32768, L'\0');
+      DWORD size = static_cast<DWORD>(path.size());
+      if (QueryFullProcessImageNameW(process, 0, path.data(), &size) &&
+          _wcsicmp(std::wstring(path.data(), size).c_str(), wanted.c_str()) == 0) {
+        TerminateProcess(process, 0);
+        WaitForSingleObject(process, 1500);
+        retired = true;
+      }
+      CloseHandle(process);
+    } while (Process32NextW(snapshot, &entry));
+  }
+  CloseHandle(snapshot);
+  // Give an old adapter's parent-watch a moment to retire its Chrome tree and
+  // release port 8765 before the replacement backend binds it.
+  if (retired) Sleep(650);
+}
+
 HANDLE StartBundledBackend(const std::filesystem::path &runtime_root,
                            HANDLE *job_out) {
   if (job_out) *job_out = nullptr;
@@ -506,6 +541,7 @@ HANDLE StartBundledBackend(const std::filesystem::path &runtime_root,
   if (!FileExists(backend)) {
     return nullptr;
   }
+  RetireStaleBundledBackend(backend);
   std::wstring command = L"\"" + backend.wstring() + L"\" --serve";
   STARTUPINFOW startup{};
   startup.cb = sizeof(startup);
@@ -1333,7 +1369,7 @@ bool LaunchUpdater(const std::string &url, const std::string &version,
      << L"  St('reopen|100')\r\n"
      // Schedule the relaunch in a detached helper so this updater window can close
      // cleanly first; otherwise both windows overlap for a visible beat.
-     << L"  $cmd=\"Start-Sleep -Milliseconds 900; Start-Process -FilePath '\"+$exe.Replace(\"'\",\"''\")+\"' -WorkingDirectory '\"+$app.Replace(\"'\",\"''\")+\"'\"\r\n"
+     << L"  $cmd=\"Start-Sleep -Milliseconds 350; Start-Process -FilePath '\"+$exe.Replace(\"'\",\"''\")+\"' -WorkingDirectory '\"+$app.Replace(\"'\",\"''\")+\"'\"\r\n"
      << L"  $enc=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($cmd))\r\n"
      << L"  Start-Process powershell.exe -WindowStyle Hidden -ArgumentList @('-NoProfile','-EncodedCommand',$enc)\r\n"
      << L"  Remove-Item -Recurse -Force $t -ErrorAction SilentlyContinue\r\n"
@@ -1441,7 +1477,7 @@ void CALLBACK UpdateCloseTimerProc(HWND hwnd, UINT, UINT_PTR id, DWORD) {
 class AppWindow {
 public:
   bool Create(HINSTANCE instance) {
-    const wchar_t *cls = L"AI_EXE_WEBVIEW_WINDOW";
+    const wchar_t *cls = kWindowClassName;
 
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
@@ -2312,6 +2348,17 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   // Must run before any window is created so WebView2 renders at native DPI (crisp).
   EnableHighDpiAwareness();
 
+  HANDLE instance_mutex = CreateMutexW(nullptr, TRUE, kSingleInstanceMutex);
+  if (instance_mutex && GetLastError() == ERROR_ALREADY_EXISTS) {
+    if (HWND existing = FindWindowW(kWindowClassName, nullptr)) {
+      if (IsIconic(existing)) ShowWindow(existing, SW_RESTORE);
+      ShowWindow(existing, SW_SHOW);
+      SetForegroundWindow(existing);
+    }
+    CloseHandle(instance_mutex);
+    return 0;
+  }
+
   const HRESULT com_hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
   const bool com_initialized =
       SUCCEEDED(com_hr) || com_hr == RPC_E_CHANGED_MODE;
@@ -2325,12 +2372,20 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     if (com_initialized) {
       CoUninitialize();
     }
+    if (instance_mutex) {
+      ReleaseMutex(instance_mutex);
+      CloseHandle(instance_mutex);
+    }
     return 1;
   }
 
   const int code = app.Run();
   if (com_initialized) {
     CoUninitialize();
+  }
+  if (instance_mutex) {
+    ReleaseMutex(instance_mutex);
+    CloseHandle(instance_mutex);
   }
   return code;
 }
