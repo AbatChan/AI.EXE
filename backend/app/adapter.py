@@ -50,15 +50,26 @@ _PATCHED_LOGIN = '''def login_to_venice_with_username(username, password):
     print("Logging in to Venice with username and password...", flush=True)
     driver.get("https://venice.ai/sign-in")
     _t.sleep(3)
+    def _open_classic_chat():
+        # Venice now lands fresh sign-ins on agent mode. The adapter requires classic mode,
+        # and keeping the visible setup window compact makes manual verification unobtrusive.
+        driver.get("https://venice.ai/chat/classic")
+        try:
+            rect = driver.get_window_rect() or {}
+            driver.set_window_rect(x=int(rect.get("x", 20)), y=int(rect.get("y", 20)),
+                                   width=670, height=570)
+        except Exception:
+            try:
+                driver.set_window_size(670, 570)
+            except Exception:
+                pass
+        print("AIEXE_BROWSER classic_ready size=670x570", flush=True)
     _submit = "//button[@data-localization-key='formButtonPrimary' or @type='submit' or contains(., 'Continue') or contains(., 'Sign in') or contains(., 'Log in')]"
     # Already signed in via the saved Chrome profile? Venice redirects off /sign-in.
     try:
         if "/sign-in" not in driver.current_url:
             print("Already logged in (saved session).")
-            try:
-                driver.minimize_window()
-            except Exception:
-                pass
+            _open_classic_chat()
             return driver
     except Exception:
         pass
@@ -141,10 +152,7 @@ _PATCHED_LOGIN = '''def login_to_venice_with_username(username, password):
     except Exception as _e:
         print("Login auto-fill error (will wait for a manual sign-in): " + str(_e))
     ensure_logged_in(driver)
-    try:
-        driver.minimize_window()  # out of the way; the adapter keeps using it to serve
-    except Exception:
-        pass
+    _open_classic_chat()
     print(f"Logged in as {username}")
     return driver
 

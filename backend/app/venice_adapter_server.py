@@ -432,12 +432,27 @@ def login_to_venice_with_username(username, password):
     print("Logging in to Venice with username and password...", flush=True)
     driver.get("https://venice.ai/sign-in")
     _t.sleep(3)
+    def _open_classic_chat():
+        # Venice now lands fresh sign-ins on agent mode. The adapter requires classic mode,
+        # and keeping the visible setup window compact makes manual verification unobtrusive.
+        driver.get(VC_CHAT_URL)
+        try:
+            rect = driver.get_window_rect() or {}
+            driver.set_window_rect(x=int(rect.get("x", 20)), y=int(rect.get("y", 20)),
+                                   width=670, height=570)
+        except Exception:
+            try:
+                driver.set_window_size(670, 570)
+            except Exception:
+                pass
+        print("AIEXE_BROWSER classic_ready size=670x570", flush=True)
     _submit = "//button[@data-localization-key='formButtonPrimary' or @type='submit' or contains(., 'Continue') or contains(., 'Sign in') or contains(., 'Log in')]"
     # Already signed in via the saved Chrome profile? Venice redirects off /sign-in.
     # (Not minimized here — the boot sequence minimizes once after scrape+credits.)
     try:
         if "/sign-in" not in driver.current_url:
             print("Already logged in (saved session).")
+            _open_classic_chat()
             return driver
     except Exception:
         pass
@@ -520,6 +535,7 @@ def login_to_venice_with_username(username, password):
     except Exception as _e:
         print("Login auto-fill error (will wait for a manual sign-in): " + str(_e))
     ensure_logged_in(driver)
+    _open_classic_chat()
     # Deliberately NOT minimized here: startup still needs to scrape models + read credits,
     # which is only reliable while the window paints. The boot sequence minimizes ONCE at
     # the end (one visible window that sets things up, then gets out of the way).
@@ -1530,8 +1546,12 @@ def _aiexe_read_credits(driver, allow_ui=True):
           return true;
         """)
         if toggled:
-            time.sleep(0.6)
-            captured = _capture_visible_credit_text("sidebar")
+            captured = False
+            for _ in range(12):
+                if _capture_visible_credit_text("sidebar"):
+                    captured = True
+                    break
+                time.sleep(0.25)
             try:  # close the sidebar we opened — leave the UI as we found it
                 driver.execute_script("""
                   const btn = Array.from(document.querySelectorAll('button'))

@@ -31,7 +31,7 @@ PASSWORD_FIELDS = [
     ("id", "password-field"),
     ("css", "input[type='password']"),
 ]
-LOGIN_SUBMIT_XPATH = "//button[@type='submit' or contains(., 'Continue') or contains(., 'Sign in') or contains(., 'Log in')]"
+LOGIN_SUBMIT_XPATH = "//button[@data-localization-key='formButtonPrimary' or @type='submit' or contains(., 'Continue') or contains(., 'Sign in') or contains(., 'Log in')]"
 # We consider ourselves logged in once the URL leaves this path (stable across UI changes).
 SIGN_IN_URL_MARKER = "/sign-in"
 
