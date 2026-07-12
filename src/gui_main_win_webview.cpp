@@ -1274,9 +1274,10 @@ bool LaunchUpdater(const std::string &url, const std::string &version,
      << L"$f.StartPosition='CenterScreen'; $f.TopMost=$true; $f.BackColor=$bg\r\n"
      << L"$f.Region=New-Object Drawing.Region((RoundPath 0 0 $f.Width $f.Height 20))\r\n"
      << L"DoubleBuffer $f\r\n"
+     << L"$logoBmp=$null; $logoPath=Join-Path $app 'ui\\assets\\app-icon.png'; try { if(Test-Path -LiteralPath $logoPath){ $logoBmp=[Drawing.Image]::FromFile($logoPath) } } catch {}\r\n"
      // Left panel: the app's own icon (AI.EXE logo) + a divider — matches the template.
-     << L"$left=New-Object Windows.Forms.Panel; $left.SetBounds(0,0,140,176); $left.BackColor=$bg2; $left.Tag=$exe; DoubleBuffer $left\r\n"
-     << L"$left.Add_Paint({ param($s,$e) $g=$e.Graphics; $g.SmoothingMode='AntiAlias'; $g.InterpolationMode='HighQualityBicubic'; $pen=New-Object Drawing.Pen($line,1); $g.DrawLine($pen,($s.Width-1),14,($s.Width-1),($s.Height-14)); $pen.Dispose(); $sz=64; $ix=[int](($s.Width-$sz)/2); $iy=[int](($s.Height-$sz)/2); try { $ic=[System.Drawing.Icon]::ExtractAssociatedIcon([string]$s.Tag); if($ic){ $bmp=$ic.ToBitmap(); $g.DrawImage($bmp,$ix,$iy,$sz,$sz); $bmp.Dispose(); $ic.Dispose() } } catch {} })\r\n"
+     << L"$left=New-Object Windows.Forms.Panel; $left.SetBounds(0,0,140,176); $left.BackColor=$bg2; $left.Tag=$logoBmp; DoubleBuffer $left\r\n"
+     << L"$left.Add_Paint({ param($s,$e) $g=$e.Graphics; $g.SmoothingMode='AntiAlias'; $g.InterpolationMode='HighQualityBicubic'; $pen=New-Object Drawing.Pen($line,1); $g.DrawLine($pen,($s.Width-1),14,($s.Width-1),($s.Height-14)); $pen.Dispose(); $sz=64; $ix=[int](($s.Width-$sz)/2); $iy=[int](($s.Height-$sz)/2); try { if($s.Tag -is [Drawing.Image]){ $g.DrawImage($s.Tag,$ix,$iy,$sz,$sz) } } catch {} })\r\n"
      // Status-icon box: rounded border + a spinning accent arc + a per-phase glyph.
      << L"$si=New-Object Windows.Forms.Panel; $si.SetBounds(168,30,44,44); $si.BackColor=$bg; DoubleBuffer $si\r\n"
      << L"$si.Add_Paint({ param($s,$e) $g=$e.Graphics; $g.SmoothingMode='AntiAlias'; $rp=RoundPath 0 0 ($s.Width-1) ($s.Height-1) 13; $pen=New-Object Drawing.Pen($line,1); $g.DrawPath($pen,$rp); $pen.Dispose(); $cx=$s.Width/2; $cy=$s.Height/2; if($script:phase -ne 'reopen'){ $sp=New-Object Drawing.Pen($acc,2); $sp.StartCap='Round'; $sp.EndCap='Round'; $g.DrawArc($sp,8,8,($s.Width-16),($s.Height-16),$script:spin,90); $sp.Dispose() }; $gc= if($script:phase -eq 'reopen'){$success}else{$acc}; $gp=New-Object Drawing.Pen($gc,2); $gp.StartCap='Round'; $gp.EndCap='Round'; $gp.LineJoin='Round'; if($script:phase -eq 'reopen'){ $g.DrawLines($gp,@((New-Object Drawing.PointF([single]($cx-6),[single]$cy)),(New-Object Drawing.PointF([single]($cx-1.5),[single]($cy+4.5))),(New-Object Drawing.PointF([single]($cx+6),[single]($cy-5))))) } elseif($script:phase -eq 'install'){ $g.DrawLine($gp,[single]($cx-6),[single]$cy,[single]($cx+6),[single]$cy); $g.DrawLine($gp,[single]$cx,[single]($cy-6),[single]$cx,[single]($cy+6)) } else { $g.DrawLine($gp,[single]$cx,[single]($cy-6),[single]$cx,[single]($cy+4)); $g.DrawLines($gp,@((New-Object Drawing.PointF([single]($cx-4),[single]$cy)),(New-Object Drawing.PointF([single]$cx,[single]($cy+4))),(New-Object Drawing.PointF([single]($cx+4),[single]$cy)))) }; $gp.Dispose() })\r\n"
@@ -1313,8 +1314,11 @@ bool LaunchUpdater(const std::string &url, const std::string &version,
      << L"  Expand-Archive -Path $zip -DestinationPath $x -Force\r\n"
      << L"  Copy-Item -Path (Join-Path $x '*') -Destination $app -Recurse -Force\r\n"
      << L"  St('reopen|100')\r\n"
-     << L"  Start-Sleep -Milliseconds 600\r\n"
-     << L"  Start-Process -FilePath $exe -WorkingDirectory $app\r\n"
+     // Schedule the relaunch in a detached helper so this updater window can close
+     // cleanly first; otherwise both windows overlap for a visible beat.
+     << L"  $cmd=\"Start-Sleep -Milliseconds 900; Start-Process -FilePath '\"+$exe.Replace(\"'\",\"''\")+\"' -WorkingDirectory '\"+$app.Replace(\"'\",\"''\")+\"'\"\r\n"
+     << L"  $enc=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($cmd))\r\n"
+     << L"  Start-Process powershell.exe -WindowStyle Hidden -ArgumentList @('-NoProfile','-EncodedCommand',$enc)\r\n"
      << L"  Remove-Item -Recurse -Force $t -ErrorAction SilentlyContinue\r\n"
      << L"} -ArgumentList $u,$app,$exe," << pid << L",$status\r\n"
      << L"$timer=New-Object Windows.Forms.Timer; $timer.Interval=33\r\n"
@@ -1333,6 +1337,7 @@ bool LaunchUpdater(const std::string &url, const std::string &version,
      << L"})\r\n"
      << L"$f.Add_Shown({ $timer.Start() })\r\n"
      << L"[Windows.Forms.Application]::Run($f)\r\n"
+     << L"if($logoBmp){ $logoBmp.Dispose() }\r\n"
      << L"if($script:job){ Remove-Job -Id $script:job.Id -Force -ErrorAction SilentlyContinue }\r\n"
      << L"Remove-Item -LiteralPath $status -Force -ErrorAction SilentlyContinue\r\n";
 

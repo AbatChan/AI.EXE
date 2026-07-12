@@ -2005,6 +2005,31 @@ html.platform-mac .settings-sidebar {
   grid-column: 1 / -1;
 }
 
+.adapter-diagnostics {
+  margin-top: 10px;
+  border: 1px solid color-mix(in srgb, var(--border) 78%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--panel) 72%, transparent);
+  color: var(--text2);
+}
+.adapter-diagnostics summary {
+  padding: 9px 11px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  user-select: none;
+}
+.adapter-diagnostics pre {
+  max-height: 220px;
+  margin: 0;
+  padding: 0 11px 11px;
+  overflow: auto;
+  color: var(--text2);
+  font: 11px/1.45 var(--mono, ui-monospace, SFMono-Regular, Consolas, monospace);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .settings-pane[data-settings-pane="models"] > .settings-section > .settings-field {
   padding-left: 0;
   padding-right: 0;

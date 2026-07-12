@@ -277,9 +277,45 @@ def _aiexe_windows_log_driver_failure(error):
         print("AIEXE_DRIVER chromedriver_log_unavailable: %s" % exc, flush=True)
 
 
+def _aiexe_windows_clear_profile_owner(profile_dir):
+    """Kill only stale Chrome trees launched with AI.EXE's dedicated profile."""
+    if os.name != "nt":
+        return
+    # An older adapter build could die without taking Chrome with it. A new Chrome
+    # then hands off to that orphan and exits, so ChromeDriver reports
+    # "session not created: Chrome instance exited". Match the exact profile path;
+    # never touch the user's normal Chrome windows.
+    escaped = profile_dir.replace("'", "''")
+    script = (
+        "$needle='" + escaped + "'; "
+        "Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" -ErrorAction SilentlyContinue | "
+        "Where-Object { $_.CommandLine -and $_.CommandLine.IndexOf($needle,[StringComparison]::OrdinalIgnoreCase) -ge 0 } | "
+        "ForEach-Object { taskkill /PID $_.ProcessId /T /F 2>$null | Out-Null }; "
+        "Start-Sleep -Milliseconds 500"
+    )
+    encoded = base64.b64encode(script.encode("utf-16le")).decode("ascii")
+    try:
+        subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       timeout=15, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    for name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+        try:
+            os.remove(os.path.join(profile_dir, name))
+        except OSError:
+            pass
+
+
 def get_webdriver(headless=True, debug_browser=False, docker=False):
     chrome_options = webdriver.ChromeOptions()
-    chrome_options.add_argument("--user-data-dir=" + os.path.join(os.path.dirname(os.path.abspath(__file__)), ".chrome-profile"))
+    profile_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".chrome-profile")
+    if os.name == "nt":
+        _aiexe_windows_clear_profile_owner(profile_dir)
+        # ChromeDriver's own verbose log recommends pipe transport; it avoids the
+        # DevToolsActivePort/loopback handoff that is fragile in Windows ARM VMs.
+        chrome_options.add_argument("--remote-debugging-pipe")
+    chrome_options.add_argument("--user-data-dir=" + profile_dir)
     try:
         chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
         chrome_options.add_argument("--disable-blink-features=AutomationControlled")

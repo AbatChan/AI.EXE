@@ -919,6 +919,8 @@ const settingsAdapterPassToggle = document.getElementById('settingsAdapterPassTo
 const settingsAdapterStartBtn = document.getElementById('settingsAdapterStartBtn');
 const settingsAdapterStopBtn = document.getElementById('settingsAdapterStopBtn');
 const settingsAdapterStatus = document.getElementById('settingsAdapterStatus');
+const settingsAdapterDiagnostics = document.getElementById('settingsAdapterDiagnostics');
+const settingsAdapterDiagnosticsText = document.getElementById('settingsAdapterDiagnosticsText');
 const settingsApiKeyLabel = document.getElementById('settingsApiKeyLabel');
 const settingsApiKeyInput = document.getElementById('settingsApiKeyInput');
 const settingsApiKeyToggle = document.getElementById('settingsApiKeyToggle');
@@ -14912,8 +14914,8 @@ function friendlyAdapterError(log) {
     return 'Venice rejected the login — double-check your email and password.';
   if (/aiexe_driver chrome_launch_failed/.test(lower))
     return 'Chrome opened, but ChromeDriver could not establish its session. The Adapter log now includes the exact driver diagnosis.';
-  if (/chromedriver|session not created|cannot find chrome|chrome not reachable|devtoolsactiveport|no chrome binary/.test(lower))
-    return "ChromeDriver couldn't launch Chrome. Open Settings → Provider and check the Adapter log for the exact error.";
+  if (/driver_download_failed|session not created|cannot find chrome|chrome not reachable|devtoolsactiveport|no chrome binary/.test(lower))
+    return 'Chrome could not finish starting. Expand Adapter diagnostics below for the exact reason.';
   if (/identifier-field|password-field|no such element|element not (found|interactable|visible)/.test(lower))
     return "Couldn't find the Venice login fields — Venice may have changed their sign-in page again.";
   if (/not installed/.test(lower))
@@ -14957,6 +14959,14 @@ async function refreshAdapterStatus() {
     settingsAdapterStatus.textContent = text;
     settingsAdapterStatus.style.color = color;
   };
+  const setDiagnostics = (log) => {
+    if (!settingsAdapterDiagnostics || !settingsAdapterDiagnosticsText) return;
+    const value = String(log || '').trim();
+    settingsAdapterDiagnostics.hidden = !value;
+    if (value && settingsAdapterDiagnosticsText.textContent !== value) {
+      settingsAdapterDiagnosticsText.textContent = value;
+    }
+  };
   let procAlive = false;   // adapter process is up (may still be opening Chrome / logging in)
   try {
     const res = await fetch(getAIExeBackendUrl() + '/api/adapter/status');
@@ -14983,7 +14993,9 @@ async function refreshAdapterStatus() {
         : 'Starting adapter — a Chrome window is opening (~30s). Sign in if prompted; it stays logged in after.')),
       s.network_issue ? 'var(--danger, #ef4444)' : 'var(--warning, #f59e0b)');
       fetch(getAIExeBackendUrl() + '/api/adapter/logs').then((r) => r.json()).then((d) => {
-        refreshAdapterStatus._loginWaiting = /sign in manually|Sign in - Venice|still on \/sign-in|verification code|email code/i.test(String((d && d.log) || ''));
+        const log = String((d && d.log) || '');
+        refreshAdapterStatus._loginWaiting = /sign in manually|Sign in - Venice|still on \/sign-in|verification code|email code/i.test(log);
+        setDiagnostics(log);
       }).catch(() => {});
       clearTimeout(refreshAdapterStatus._pollT);
       refreshAdapterStatus._pollT = setTimeout(refreshAdapterStatus, 2500);
@@ -14997,8 +15009,10 @@ async function refreshAdapterStatus() {
       if (s.installed) {
         // Stopped after being set up — likely crashed (Chrome/login). Show a plain reason if any.
         fetch(getAIExeBackendUrl() + '/api/adapter/logs').then((r) => r.json()).then((d) => {
-          const msg = friendlyAdapterError((d && d.log) || '');
+          const log = String((d && d.log) || '');
+          const msg = friendlyAdapterError(log);
           if (msg) setStatus('○ ' + msg, 'var(--danger, #ef4444)');
+          setDiagnostics(log);
         }).catch(() => {});
       }
     }
@@ -17123,6 +17137,12 @@ async function ensureVeniceAdapterReady() {
 // (Chrome opening → login → reading models/credits → ready), polled from status+logs —
 // the user is carried along without ever looking at the Chrome window.
 let _adapterProgressActive = false;
+let _adapterProgressCancel = null;
+function cancelAdapterStartupProgress() {
+  const cancel = _adapterProgressCancel;
+  _adapterProgressCancel = null;
+  if (typeof cancel === 'function') cancel();
+}
 function beginAdapterStartupProgress(opts = {}) {
   if (_adapterProgressActive) return true;   // a loop already owns the lifecycle
   const announceReady = opts.announceReady !== false;
@@ -17148,6 +17168,7 @@ function beginAdapterStartupProgress(opts = {}) {
     const btn = toast.querySelector('.app-toast-close');
     if (btn) btn.click(); else toast.remove();
   };
+  _adapterProgressCancel = closeToast;
   const backend = getAIExeBackendUrl();
   const fetchLog = async () => {
     try { return String((await (await fetch(backend + '/api/adapter/logs')).json()).log || ''); }
@@ -17249,7 +17270,7 @@ function beginAdapterStartupProgress(opts = {}) {
             showAppNotification({ title: "Adapter didn't start", message: why, kind: 'error', durationMs: 9000 });
             return;
           }
-        } else if (i >= 20) {                      // never launched at all (~30s)
+        } else if (i >= 30) {                      // includes first-run driver provisioning
           closeToast();
           showAppNotification({ title: "Adapter didn't start", message: 'The adapter process is not running — check Settings → Provider.', kind: 'error', durationMs: 9000 });
           return;
@@ -17259,6 +17280,7 @@ function beginAdapterStartupProgress(opts = {}) {
       showAppNotification({ title: 'Adapter is taking long', message: 'Still not serving — check the Chrome window (sign-in/captcha?) or Settings → Provider.', kind: 'warning', durationMs: 9000 });
     } finally {
       _adapterProgressActive = false;
+      if (_adapterProgressCancel === closeToast) _adapterProgressCancel = null;
       // Whatever the outcome (ready / failed / timed out), the start is no longer in
       // flight — clear the shared flag and re-render so both Start buttons reset in sync.
       _adapterStartingForSend = false;
@@ -17331,10 +17353,17 @@ async function startVeniceAdapterThenResend(options = {}) {
   // the box is still exactly that snapshot.
   const pendingAtStart = resendPending ? String((mainInput && mainInput.value) || '').trim() : '';
   _adapterStartingForSend = true;
-  // Give both entry points immediate feedback while the local backend accepts the
-  // start request; the richer sticky progress toast takes over once it is spawned.
-  showComposerNotice('Starting Venice adapter…', 6000);
   if (typeof renderComposerModelPill === 'function') renderComposerModelPill();
+  const started = beginAdapterStartupProgress({
+    announceReady: false,
+    onReady: () => {
+      const nowText = String((mainInput && mainInput.value) || '').trim();
+      const autoSend = Boolean(resendPending && nowText && nowText === pendingAtStart);
+      showAppNotification({ title: 'Adapter ready', message: autoSend ? 'Sending your message…' : 'Venice Pro is ready — press send.', kind: 'success' });
+      if (autoSend && typeof sendMessage === 'function') void sendMessage();
+    },
+  });
+  if (!started) return;
   try {
     let st = null;
     // fetchBackendWhenReady waits up to ~25s for the bundled backend to finish booting,
@@ -17343,6 +17372,7 @@ async function startVeniceAdapterThenResend(options = {}) {
     if (st && !st.installed) {
       const installed = await ensureAdapterInstalledWithFeedback(backend);
       if (!installed) {
+        cancelAdapterStartupProgress();
         _adapterStartingForSend = false;
         if (typeof renderComposerModelPill === 'function') renderComposerModelPill();
         return;
@@ -17358,6 +17388,7 @@ async function startVeniceAdapterThenResend(options = {}) {
     });
     const startPayload = await startRes.json();
     if (!startPayload || !startPayload.ok) {
+      cancelAdapterStartupProgress();
       _adapterStartingForSend = false;
       if (typeof renderComposerModelPill === 'function') renderComposerModelPill();
       showAppNotification({
@@ -17368,25 +17399,8 @@ async function startVeniceAdapterThenResend(options = {}) {
       });
       return;
     }
-    // Single progress poller for BOTH pages — it narrates progress, detects failure,
-    // owns _adapterStartingForSend, and calls onReady when serving. No second poll loop
-    // here (that produced racing, inconsistent toasts). onReady handles the auto-resend.
-    const started = beginAdapterStartupProgress({
-      announceReady: false,
-      onReady: () => {
-        const nowText = String((mainInput && mainInput.value) || '').trim();
-        // Only auto-send if the box still holds exactly what the user sent — if they've kept
-        // typing (or cleared it), leave their draft alone and just say it's ready.
-        const autoSend = Boolean(resendPending && nowText && nowText === pendingAtStart);
-        showAppNotification({ title: 'Adapter ready', message: autoSend ? 'Sending your message…' : 'Venice Pro is ready — press send.', kind: 'success' });
-        if (autoSend && typeof sendMessage === 'function') void sendMessage();  // resend only the unchanged snapshot
-      },
-    });
-    if (!started) {
-      _adapterStartingForSend = false;
-      if (typeof renderComposerModelPill === 'function') renderComposerModelPill();
-    }
   } catch (err) {
+    cancelAdapterStartupProgress();
     _adapterStartingForSend = false;
     if (typeof renderComposerModelPill === 'function') renderComposerModelPill();
     showAppNotification({ title: "Couldn't start adapter", message: String((err && err.message) || err), kind: 'error' });

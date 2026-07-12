@@ -24,8 +24,8 @@ option(AI_EXE_UI_REMEMBER_LAYOUT "Remember panel layout in local storage" ON)
 option(AI_EXE_ENABLE_REMOTE_PROVIDERS "Enable hosted/API inference providers in the UI" ON)
 option(AI_EXE_ENABLE_DEV_PLANNER "Enable localhost development planner endpoint in the UI" OFF)
 set(AI_EXE_WEBVIEW2_DIR "" CACHE PATH "Microsoft.Web.WebView2 NuGet package root (provides WebView2.h + WebView2Loader.dll for the Windows GUI). Without it the GUI builds in a non-rendering fallback mode.")
-set(AI_EXE_APP_VERSION "8.0.2" CACHE STRING "AI.EXE app and UI version" FORCE)
-set(AI_EXE_BUILD_TAG "windows-adapter-tree-cleanup" CACHE STRING "Human-readable AI.EXE build tag" FORCE)
+set(AI_EXE_APP_VERSION "8.0.3" CACHE STRING "AI.EXE app and UI version" FORCE)
+set(AI_EXE_BUILD_TAG "windows-chrome-session-recovery" CACHE STRING "Human-readable AI.EXE build tag" FORCE)
 set(AI_EXE_BUILD_LABEL "v${AI_EXE_APP_VERSION} (${AI_EXE_BUILD_TAG} 2026-07-12)")
 
 if(AI_EXE_UI_ANIMATIONS_DEFAULT)
@@ -116,6 +116,7 @@ if(WIN32)
   set(WIN_UI_CONFIG_JS "${CMAKE_BINARY_DIR}/generated/ui/ui-config.js")
   set(WIN_UI_PROMPTS_DIR "${CMAKE_SOURCE_DIR}/ui/prompts")
   set(WIN_UI_VENDOR_DIR "${CMAKE_SOURCE_DIR}/ui/vendor")
+  set(WIN_UI_ASSETS_DIR "${CMAKE_SOURCE_DIR}/ui/assets")
 
   add_executable(ai_exe_gui WIN32
     src/gui_main_win_webview.cpp
@@ -139,6 +140,7 @@ if(WIN32)
     COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:ai_exe_gui>/ui"
     COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:ai_exe_gui>/ui/prompts"
     COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:ai_exe_gui>/ui/vendor"
+    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:ai_exe_gui>/ui/assets"
     COMMAND ${CMAKE_COMMAND} -E rm -f "$<TARGET_FILE_DIR:ai_exe_gui>/ui/prompts/chat_namer.md"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
       "${WIN_UI_HTML}"
@@ -203,6 +205,9 @@ if(WIN32)
     COMMAND ${CMAKE_COMMAND} -E copy_directory
       "${WIN_UI_VENDOR_DIR}"
       "$<TARGET_FILE_DIR:ai_exe_gui>/ui/vendor"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+      "${WIN_UI_ASSETS_DIR}"
+      "$<TARGET_FILE_DIR:ai_exe_gui>/ui/assets"
   )
 endif()
 

@@ -12,6 +12,7 @@ import subprocess
 import sys
 import threading
 import time
+import zipfile
 
 import httpx
 
@@ -196,6 +197,7 @@ _PATCHED_INTERCEPTOR = '''def inject_request_interceptor(driver, api_data_json):
 
 class AdapterManager:
     def __init__(self, data_dir: str, repo: str = ADAPTER_REPO, port: int = 9999):
+        self._data_dir = data_dir
         self._dir = os.path.join(data_dir, ".tools", "venice-adapter")
         self._repo = repo
         self._proc = None
@@ -204,11 +206,19 @@ class AdapterManager:
         self._log = os.path.join(data_dir, "adapter.log")
 
     def read_log(self, tail: int = 4000) -> str:
+        main = ""
         try:
             with open(self._log, "rb") as fh:
-                return fh.read()[-tail:].decode("utf-8", "replace")
+                main = fh.read()[-tail:].decode("utf-8", "replace")
         except OSError:
-            return ""
+            pass
+        driver = ""
+        try:
+            with open(os.path.join(self._dir, "chromedriver.log"), "rb") as fh:
+                driver = fh.read()[-min(tail, 6000):].decode("utf-8", "replace")
+        except OSError:
+            pass
+        return main + (("\n--- ChromeDriver diagnostics ---\n" + driver) if driver else "")
 
     def _append_log(self, line: str) -> None:
         try:
@@ -216,6 +226,79 @@ class AdapterManager:
                 fh.write((str(line or "").rstrip() + "\n").encode("utf-8", "replace"))
         except OSError:
             pass
+
+    def _ensure_windows_driver_cache(self) -> tuple[bool, str]:
+        """Provision ChromeDriver in the main backend before the adapter starts.
+
+        The frozen adapter process proved unreliable while waiting on a child curl
+        process. The long-lived FastAPI backend already has a working HTTP stack, so
+        download/cache the official matching driver here. Fresh clients never need a
+        terminal; the adapter process simply consumes this cache.
+        """
+        if os.name != "nt":
+            return True, ""
+        try:
+            import winreg
+            version = ""
+            for root in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+                try:
+                    with winreg.OpenKey(root, r"SOFTWARE\Google\Chrome\BLBeacon") as key:
+                        version = str(winreg.QueryValueEx(key, "version")[0]).strip()
+                    if re.fullmatch(r"\d+(?:\.\d+){3}", version):
+                        break
+                except OSError:
+                    continue
+            if not re.fullmatch(r"\d+(?:\.\d+){3}", version):
+                return False, "Could not read the installed Google Chrome version."
+            cache = os.path.join(self._data_dir, "chromedriver")
+            driver = os.path.join(cache, "chromedriver.exe")
+            marker = os.path.join(cache, "version.txt")
+            try:
+                with open(marker, encoding="utf-8") as fh:
+                    cached = fh.read().strip()
+                if cached == version and os.path.isfile(driver):
+                    return True, ""
+            except OSError:
+                pass
+
+            major = version.split(".", 1)[0]
+            meta_url = "https://googlechromelabs.github.io/chrome-for-testing/LATEST_RELEASE_" + major
+            meta = httpx.get(meta_url, follow_redirects=True, timeout=20)
+            meta.raise_for_status()
+            driver_version = meta.text.strip()
+            if not re.fullmatch(r"\d+(?:\.\d+){3}", driver_version):
+                return False, "ChromeDriver metadata returned an invalid version."
+            url = ("https://storage.googleapis.com/chrome-for-testing-public/"
+                   f"{driver_version}/win64/chromedriver-win64.zip")
+            os.makedirs(cache, exist_ok=True)
+            archive_path = os.path.join(cache, "chromedriver-download.zip")
+            timeout = httpx.Timeout(180, connect=20)
+            with httpx.stream("GET", url, follow_redirects=True, timeout=timeout) as response:
+                response.raise_for_status()
+                with open(archive_path, "wb") as out:
+                    for chunk in response.iter_bytes(1024 * 256):
+                        out.write(chunk)
+            with zipfile.ZipFile(archive_path) as archive:
+                member = next((n for n in archive.namelist()
+                               if n.lower().endswith("/chromedriver.exe")), "")
+                if not member:
+                    return False, "ChromeDriver archive was invalid."
+                with archive.open(member) as source, open(driver + ".tmp", "wb") as out:
+                    while True:
+                        chunk = source.read(1024 * 256)
+                        if not chunk:
+                            break
+                        out.write(chunk)
+            os.replace(driver + ".tmp", driver)
+            with open(marker, "w", encoding="utf-8") as fh:
+                fh.write(version)
+            try:
+                os.remove(archive_path)
+            except OSError:
+                pass
+            return True, ""
+        except (OSError, httpx.HTTPError, zipfile.BadZipFile) as exc:
+            return False, "Could not prepare ChromeDriver automatically: " + str(exc)
 
     @property
     def install_dir(self) -> str:
@@ -491,6 +574,10 @@ class AdapterManager:
                 return {"ok": False, "detail": "adapter not installed — install first", "port": port}
             if not script:
                 self._patch_adapter()  # keep an existing install's patches current (idempotent)
+            if self._uses_frozen_backend() and not python_exe:
+                driver_ok, driver_detail = self._ensure_windows_driver_cache()
+                if not driver_ok:
+                    return {"ok": False, "detail": driver_detail, "port": port}
             env = dict(os.environ)
             env["PYTHONUNBUFFERED"] = "1"  # so adapter prints (incl. AIEXE_DIAG) hit the log live
             env["AIEXE_HIDE_PROMPT"] = "1" if hide_prompt else "0"
