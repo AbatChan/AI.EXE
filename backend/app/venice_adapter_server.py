@@ -407,9 +407,10 @@ def get_webdriver(headless=True, debug_browser=False, docker=False):
 
 def ensure_logged_in(driver):
     import os as _os, time as _t
-    # Venice changed the post-login UI; logged-in = we left /sign-in. Wait up to ~3 min so a
+    # Venice changed the post-login UI; logged-in = we left /sign-in. Wait up to ~5 min so a
     # one-time email verification code (or Cloudflare check) can be done in the visible window.
-    for _ in range(180):
+    print("AIEXE_LOGIN waiting_for_completion", flush=True)
+    for _ in range(300):
         try:
             url = driver.current_url
         except Exception:
@@ -431,7 +432,7 @@ def login_to_venice_with_username(username, password):
     print("Logging in to Venice with username and password...", flush=True)
     driver.get("https://venice.ai/sign-in")
     _t.sleep(3)
-    _submit = "//button[@type='submit' or contains(., 'Continue') or contains(., 'Sign in') or contains(., 'Log in')]"
+    _submit = "//button[@data-localization-key='formButtonPrimary' or @type='submit' or contains(., 'Continue') or contains(., 'Sign in') or contains(., 'Log in')]"
     # Already signed in via the saved Chrome profile? Venice redirects off /sign-in.
     # (Not minimized here — the boot sequence minimizes once after scrape+credits.)
     try:
@@ -449,6 +450,24 @@ def login_to_venice_with_username(username, password):
             except Exception:
                 pass
         return None
+    def _click_primary(stage):
+        for _ in range(12):
+            btn = _find_visible([(By.XPATH, _submit)])
+            if btn and btn.is_enabled() and btn.get_attribute("aria-disabled") != "true":
+                try:
+                    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn)
+                    btn.click()
+                except Exception:
+                    try:
+                        driver.execute_script("arguments[0].click();", btn)
+                    except Exception:
+                        btn = None
+                if btn:
+                    print("AIEXE_LOGIN %s_clicked" % stage, flush=True)
+                    return True
+            _t.sleep(0.5)
+        print("AIEXE_LOGIN %s_not_clickable" % stage, flush=True)
+        return False
     _email_sel = [(By.ID, "identifier-field"), (By.NAME, "identifier"),
                   (By.CSS_SELECTOR, "input[type='email']"),
                   (By.CSS_SELECTOR, "input[autocomplete='username']"),
@@ -468,25 +487,23 @@ def login_to_venice_with_username(username, password):
         if email_field:
             if not (email_field.get_attribute("value") or "").strip():
                 email_field.send_keys(username)
+            print("AIEXE_LOGIN email_filled", flush=True)
             password_input = _find_visible(_pass_sel)
             if not password_input:  # 2-step form: click Continue, then the password appears
-                try:
-                    (_find_visible([(By.XPATH, _submit)]) or email_field).click()
-                except Exception:
-                    pass
-                for _ in range(8):
+                _click_primary("email_continue")
+                print("AIEXE_LOGIN waiting_password", flush=True)
+                for _ in range(20):
                     password_input = _find_visible(_pass_sel)
                     if password_input:
                         break
-                    _t.sleep(1)
-            if password_input and not (password_input.get_attribute("value") or "").strip():
-                password_input.send_keys(password)
-            try:
-                btn = _find_visible([(By.XPATH, _submit)])
-                if btn:
-                    btn.click()
-            except Exception:
-                pass
+                    _t.sleep(0.5)
+            if password_input:
+                if not (password_input.get_attribute("value") or "").strip():
+                    password_input.send_keys(password)
+                print("AIEXE_LOGIN password_filled", flush=True)
+                _click_primary("password_continue")
+            else:
+                print("AIEXE_LOGIN waiting_for_user", flush=True)
         else:
             # Couldn't find the email field — dump the sign-in page so the real selectors (or a
             # Cloudflare challenge) are visible in the log, then wait for a manual sign-in.
@@ -499,6 +516,7 @@ def login_to_venice_with_username(username, password):
             except Exception:
                 pass
             print("Could not auto-fill the login — please sign in manually in the Chrome window.")
+            print("AIEXE_LOGIN waiting_for_user", flush=True)
     except Exception as _e:
         print("Login auto-fill error (will wait for a manual sign-in): " + str(_e))
     ensure_logged_in(driver)
