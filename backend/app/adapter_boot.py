@@ -30,13 +30,19 @@ def _terminate_group() -> None:
 
 def _watch_parent_and_exit() -> None:
     parent = os.getppid()
+    if os.name == "nt":
+        _watch_parent_windows(parent)
+    else:
+        _watch_parent_posix(parent)
 
+
+def _watch_parent_posix(parent: int) -> None:
     def loop():
         while True:
             time.sleep(2)
             gone = False
             try:
-                os.kill(parent, 0)            # backend still alive?
+                os.kill(parent, 0)            # signal 0 = harmless existence probe (POSIX only)
             except OSError:
                 gone = True
             if not gone and os.getppid() != parent:  # reparented (backend died)
@@ -44,6 +50,33 @@ def _watch_parent_and_exit() -> None:
             if gone:
                 _terminate_group()
                 os._exit(0)
+
+    threading.Thread(target=loop, daemon=True).start()
+
+
+def _watch_parent_windows(parent: int) -> None:
+    # NEVER os.kill(pid, 0) here: on Windows any non-CTRL signal maps to
+    # TerminateProcess, and OpenProcess(PROCESS_ALL_ACCESS) on the backend gets
+    # access-denied -> OSError -> the adapter used to os._exit ~2s after launch,
+    # before it ever opened Chrome. Wait on a SYNCHRONIZE handle instead.
+    import ctypes
+    from ctypes import wintypes
+
+    SYNCHRONIZE = 0x00100000
+    INFINITE = 0xFFFFFFFF
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.WaitForSingleObject.restype = wintypes.DWORD
+    kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    handle = kernel32.OpenProcess(SYNCHRONIZE, False, parent)
+    if not handle:
+        return  # can't observe the backend — keep running rather than suicide
+
+    def loop():
+        kernel32.WaitForSingleObject(handle, INFINITE)  # blocks until the backend exits
+        _terminate_group()
+        os._exit(0)
 
     threading.Thread(target=loop, daemon=True).start()
 
