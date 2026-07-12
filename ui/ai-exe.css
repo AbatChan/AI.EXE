@@ -681,24 +681,14 @@ body.resizing-panels .panel-resizer {
   min-height: 30px;
 }
 
+/* Brand mark is now the app logo SVG (self-contained tile + gradient) */
 .sidebar-brand-mark {
   width: 26px;
   height: 26px;
-  border-radius: 8px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  /* brand gradient ring around a dark glass tile */
-  background:
-    linear-gradient(rgba(15, 19, 28, 0.95), rgba(15, 19, 28, 0.95)) padding-box,
-    linear-gradient(135deg, rgba(0, 229, 255, 0.7), rgba(124, 58, 237, 0.7)) border-box;
-  color: rgba(236, 246, 255, 0.95);
-  border: 1px solid transparent;
+  border-radius: 6px;
+  display: block;
+  flex-shrink: 0;
   box-shadow: 0 0 14px rgba(0, 229, 255, 0.12);
-  font-family: var(--font-display);
-  font-size: 11px;
-  font-weight: 900;
-  letter-spacing: 0.6px;
 }
 
 .sidebar-brand-copy {
@@ -8308,7 +8298,7 @@ body.right-panel-collapsed #rightResizer {
   align-items: center;
   gap: 10px;
   padding: 12px 0;
-  padding-top: 44px;
+  padding-top: var(--sidebar-chrome-pad);   /* clears macOS traffic-lights; small on Windows */
 }
 
 .left-sidebar.collapsed .collapsed-icons {

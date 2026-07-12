@@ -91,6 +91,22 @@ void EnableHighDpiAwareness() {
   if (auto old = reinterpret_cast<OldFn>(GetProcAddress(user32, "SetProcessDPIAware"))) old();
 }
 
+// Grow a client-area rect to the full window rect for the given window's style at
+// the given DPI (adds caption + borders). Pass hwnd=nullptr to assume the default
+// WS_OVERLAPPEDWINDOW style used at creation.
+void AdjustWindowRectForDpi(RECT *rc, HWND hwnd, UINT dpi) {
+  const DWORD style = hwnd ? static_cast<DWORD>(GetWindowLongPtrW(hwnd, GWL_STYLE))
+                           : static_cast<DWORD>(WS_OVERLAPPEDWINDOW);
+  const DWORD exstyle = hwnd ? static_cast<DWORD>(GetWindowLongPtrW(hwnd, GWL_EXSTYLE)) : 0u;
+  if (HMODULE u = GetModuleHandleW(L"user32.dll")) {
+    if (auto fn = reinterpret_cast<BOOL(WINAPI *)(LPRECT, DWORD, BOOL, DWORD, UINT)>(
+            GetProcAddress(u, "AdjustWindowRectExForDpi"))) {
+      if (fn(rc, style, FALSE, exstyle, dpi)) return;
+    }
+  }
+  AdjustWindowRectEx(rc, style, FALSE, exstyle);
+}
+
 std::filesystem::path ExecutableDir() {
   wchar_t buf[MAX_PATH] = {};
   const DWORD len = GetModuleFileNameW(nullptr, buf, MAX_PATH);
@@ -1252,7 +1268,9 @@ bool LaunchUpdater(const std::string &url, const std::string &version,
      << L"$f.Add_Paint({ param($s,$e) $e.Graphics.SmoothingMode='AntiAlias'; $pen=New-Object Drawing.Pen($acc,1.6); $e.Graphics.DrawPath($pen,(RoundPath 1 1 ($s.Width-3) ($s.Height-3) 19)); $pen.Dispose() })\r\n"
      // Gradient 'AI' badge (owner-drawn) instead of a flat label.
      << L"$logo=New-Object Windows.Forms.Panel; $logo.SetBounds(28,30,54,54); $logo.BackColor=$bg\r\n"
-     << L"$logo.Add_Paint({ param($s,$e) $g=$e.Graphics; $g.SmoothingMode='AntiAlias'; $rp=RoundPath 0 0 $s.Width $s.Height 15; $lb=New-Object Drawing.Drawing2D.LinearGradientBrush((New-Object Drawing.Point(0,0)),(New-Object Drawing.Point($s.Width,$s.Height)),$acc,$acc2); $g.FillPath($lb,$rp); $lb.Dispose(); $tf=New-Object Drawing.Font('Segoe UI',17,[Drawing.FontStyle]::Bold); $sf=New-Object Drawing.StringFormat; $sf.Alignment='Center'; $sf.LineAlignment='Center'; $g.DrawString('AI',$tf,[Drawing.Brushes]::White,(New-Object Drawing.RectangleF(0,0,$s.Width,$s.Height)),$sf) })\r\n"
+     // Draw the app's own icon (the AI.EXE logo embedded in the exe) so the updater
+     // badge matches the app/header icon. Falls back to a gradient 'AI' tile.
+     << L"$logo.Add_Paint({ param($s,$e) $g=$e.Graphics; $g.SmoothingMode='AntiAlias'; $g.InterpolationMode='HighQualityBicubic'; try { $ic=[System.Drawing.Icon]::ExtractAssociatedIcon($exe); if($ic){ $bmp=$ic.ToBitmap(); $g.DrawImage($bmp,0,0,$s.Width,$s.Height); $bmp.Dispose(); $ic.Dispose(); return } } catch {}; $rp=RoundPath 0 0 $s.Width $s.Height 15; $lb=New-Object Drawing.Drawing2D.LinearGradientBrush((New-Object Drawing.Point(0,0)),(New-Object Drawing.Point($s.Width,$s.Height)),$acc,$acc2); $g.FillPath($lb,$rp); $lb.Dispose(); $tf=New-Object Drawing.Font('Segoe UI',17,[Drawing.FontStyle]::Bold); $sf=New-Object Drawing.StringFormat; $sf.Alignment='Center'; $sf.LineAlignment='Center'; $g.DrawString('AI',$tf,[Drawing.Brushes]::White,(New-Object Drawing.RectangleF(0,0,$s.Width,$s.Height)),$sf) })\r\n"
      << L"$h=New-Object Windows.Forms.Label; $h.Text='Updating AI.EXE'; $h.ForeColor=[Drawing.Color]::White; $h.BackColor=$bg\r\n"
      << L"$h.Font=New-Object Drawing.Font('Segoe UI Semibold',15,[Drawing.FontStyle]::Bold); $h.AutoSize=$false; $h.SetBounds(98,32,356,28)\r\n"
      << L"$lbl=New-Object Windows.Forms.Label; $lbl.Text='Preparing update...'; $lbl.ForeColor=$muted; $lbl.BackColor=$bg\r\n"
@@ -1399,12 +1417,19 @@ public:
     const int x = has_restored ? restored.left : CW_USEDEFAULT;
     const int y = has_restored ? restored.top : CW_USEDEFAULT;
     // Now that the process is DPI-aware, the default size is in physical pixels —
-    // scale it by the system DPI so first run isn't tiny on a high-DPI display.
+    // scale by system DPI, and treat it as a CLIENT size (add the frame) so the
+    // content area matches the intended size instead of being clipped by the caption.
     const UINT sys_dpi = SystemDpi();
-    const int w = has_restored ? (restored.right - restored.left)
-                               : MulDiv(kUiDefaultWindowWidth, sys_dpi, 96);
-    const int h = has_restored ? (restored.bottom - restored.top)
-                               : MulDiv(kUiDefaultWindowHeight, sys_dpi, 96);
+    int w = has_restored ? (restored.right - restored.left)
+                         : MulDiv(kUiDefaultWindowWidth, sys_dpi, 96);
+    int h = has_restored ? (restored.bottom - restored.top)
+                         : MulDiv(kUiDefaultWindowHeight, sys_dpi, 96);
+    if (!has_restored) {
+      RECT rc{0, 0, w, h};
+      AdjustWindowRectForDpi(&rc, nullptr, sys_dpi);
+      w = rc.right - rc.left;
+      h = rc.bottom - rc.top;
+    }
 
     hwnd_ = CreateWindowExW(
         0, cls, L"AI.EXE",
@@ -1553,10 +1578,15 @@ private:
     if (!mmi) {
       return;
     }
-    // DPI-scale the minimum so it stays the same apparent size at any scale factor.
+    // kMinWindow* are the minimum CLIENT (content) size the UI needs (matches the
+    // CSS --ui-min-*). Windows has a native caption + borders, so add that frame at
+    // the current DPI — otherwise the WebView2 content is clipped (input bar / right
+    // edge cut). macOS is frameless, so window==client and it already matched.
     const UINT dpi = WindowDpi(hwnd_);
-    mmi->ptMinTrackSize.x = MulDiv(kMinWindowWidth, dpi, 96);
-    mmi->ptMinTrackSize.y = MulDiv(kMinWindowHeight, dpi, 96);
+    RECT rc{0, 0, MulDiv(kMinWindowWidth, dpi, 96), MulDiv(kMinWindowHeight, dpi, 96)};
+    AdjustWindowRectForDpi(&rc, hwnd_, dpi);
+    mmi->ptMinTrackSize.x = rc.right - rc.left;
+    mmi->ptMinTrackSize.y = rc.bottom - rc.top;
   }
 
   std::filesystem::path PromptModelImportPath() {

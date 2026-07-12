@@ -24,8 +24,8 @@ option(AI_EXE_UI_REMEMBER_LAYOUT "Remember panel layout in local storage" ON)
 option(AI_EXE_ENABLE_REMOTE_PROVIDERS "Enable hosted/API inference providers in the UI" ON)
 option(AI_EXE_ENABLE_DEV_PLANNER "Enable localhost development planner endpoint in the UI" OFF)
 set(AI_EXE_WEBVIEW2_DIR "" CACHE PATH "Microsoft.Web.WebView2 NuGet package root (provides WebView2.h + WebView2Loader.dll for the Windows GUI). Without it the GUI builds in a non-rendering fallback mode.")
-set(AI_EXE_APP_VERSION "7.9.7" CACHE STRING "AI.EXE app and UI version" FORCE)
-set(AI_EXE_BUILD_TAG "adapter-sync-and-win-dpi" CACHE STRING "Human-readable AI.EXE build tag" FORCE)
+set(AI_EXE_APP_VERSION "7.9.8" CACHE STRING "AI.EXE app and UI version" FORCE)
+set(AI_EXE_BUILD_TAG "logo-unify-and-win-minsize" CACHE STRING "Human-readable AI.EXE build tag" FORCE)
 set(AI_EXE_BUILD_LABEL "v${AI_EXE_APP_VERSION} (${AI_EXE_BUILD_TAG} 2026-07-11)")
 
 if(AI_EXE_UI_ANIMATIONS_DEFAULT)
@@ -249,10 +249,14 @@ if(APPLE)
   set_source_files_properties(${MAC_UI_CONFIG_JS} PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
   set_source_files_properties(${MAC_UI_PROMPT_FILES} PROPERTIES MACOSX_PACKAGE_LOCATION Resources/prompts)
 
+  set(MAC_APP_ICON "${CMAKE_SOURCE_DIR}/src/AppIcon.icns")
+  set_source_files_properties(${MAC_APP_ICON} PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
+
   add_executable(ai_exe_gui_mac MACOSX_BUNDLE
     src/gui_main_mac_web.mm
     src/web_runtime_bridge.cpp
     src/local_app_server.cpp
+    ${MAC_APP_ICON}
     ${AI_EXE_RUNTIME_SOURCES}
     ${MAC_UI_HTML}
     ${MAC_UI_CSS}
