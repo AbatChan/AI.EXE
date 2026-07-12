@@ -1252,65 +1252,79 @@ bool LaunchUpdater(const std::string &url, const std::string &version,
      << L"Add-Type -AssemblyName System.Windows.Forms,System.Drawing\r\n"
      << L"[Windows.Forms.Application]::EnableVisualStyles()\r\n"
      << L"$acc=[Drawing.Color]::FromArgb(0,229,255)\r\n"
-     << L"$acc2=[Drawing.Color]::FromArgb(99,102,241)\r\n"
-     << L"$bg=[Drawing.Color]::FromArgb(18,20,27)\r\n"
-     << L"$track=[Drawing.Color]::FromArgb(38,42,54)\r\n"
-     << L"$muted=[Drawing.Color]::FromArgb(150,157,170)\r\n"
-     // Background job writes the current phase here; the UI timer reads it. Decouples
-     // the (blocking) download/install work from the UI thread so the loader animates.
+     << L"$bg=[Drawing.Color]::FromArgb(22,25,31)\r\n"
+     << L"$bg2=[Drawing.Color]::FromArgb(26,30,38)\r\n"
+     << L"$line=[Drawing.Color]::FromArgb(46,50,60)\r\n"
+     << L"$track=[Drawing.Color]::FromArgb(34,38,48)\r\n"
+     << L"$text=[Drawing.Color]::FromArgb(245,247,250)\r\n"
+     << L"$muted=[Drawing.Color]::FromArgb(143,151,162)\r\n"
+     << L"$success=[Drawing.Color]::FromArgb(86,240,170)\r\n"
+     // Background job writes 'phase|percent' here; the UI timer reads it. Decouples the
+     // blocking download/install work from the UI thread so the loader stays live and
+     // shows real download progress.
      << L"$status=Join-Path $env:TEMP ('aiexe_up_st_'+[guid]::NewGuid().ToString('N')+'.txt')\r\n"
-     << L"Set-Content -LiteralPath $status -Value 'Preparing update...' -Encoding UTF8\r\n"
+     << L"Set-Content -LiteralPath $status -Value 'prep|-1' -Encoding UTF8\r\n"
+     << L"$script:phase='prep'; $script:pct=-1; $script:spin=0; $script:anim=0.0; $script:done=$false; $script:tc=0\r\n"
      << L"function RoundPath($x,$y,$w,$h,$r){ $p=New-Object Drawing.Drawing2D.GraphicsPath; $d=$r*2; $p.AddArc($x,$y,$d,$d,180,90); $p.AddArc($x+$w-$d-1,$y,$d,$d,270,90); $p.AddArc($x+$w-$d-1,$y+$h-$d-1,$d,$d,0,90); $p.AddArc($x,$y+$h-$d-1,$d,$d,90,90); $p.CloseAllFigures(); $p }\r\n"
      << L"$f=New-Object Windows.Forms.Form\r\n"
-     << L"$f.FormBorderStyle='None'; $f.Size=New-Object Drawing.Size(480,176)\r\n"
+     << L"$f.FormBorderStyle='None'; $f.Size=New-Object Drawing.Size(560,176)\r\n"
      << L"$f.StartPosition='CenterScreen'; $f.TopMost=$true; $f.BackColor=$bg\r\n"
      << L"$f.Region=New-Object Drawing.Region((RoundPath 0 0 $f.Width $f.Height 20))\r\n"
-     << L"$f.Add_Paint({ param($s,$e) $e.Graphics.SmoothingMode='AntiAlias'; $pen=New-Object Drawing.Pen($acc,1.6); $e.Graphics.DrawPath($pen,(RoundPath 1 1 ($s.Width-3) ($s.Height-3) 19)); $pen.Dispose() })\r\n"
-     // Gradient 'AI' badge (owner-drawn) instead of a flat label.
-     << L"$logo=New-Object Windows.Forms.Panel; $logo.SetBounds(28,30,54,54); $logo.BackColor=$bg\r\n"
-     // Draw the app's own icon (the AI.EXE logo embedded in the exe) so the updater
-     // badge matches the app/header icon. Falls back to a gradient 'AI' tile.
-     << L"$logo.Add_Paint({ param($s,$e) $g=$e.Graphics; $g.SmoothingMode='AntiAlias'; $g.InterpolationMode='HighQualityBicubic'; try { $ic=[System.Drawing.Icon]::ExtractAssociatedIcon($exe); if($ic){ $bmp=$ic.ToBitmap(); $g.DrawImage($bmp,0,0,$s.Width,$s.Height); $bmp.Dispose(); $ic.Dispose(); return } } catch {}; $rp=RoundPath 0 0 $s.Width $s.Height 15; $lb=New-Object Drawing.Drawing2D.LinearGradientBrush((New-Object Drawing.Point(0,0)),(New-Object Drawing.Point($s.Width,$s.Height)),$acc,$acc2); $g.FillPath($lb,$rp); $lb.Dispose(); $tf=New-Object Drawing.Font('Segoe UI',17,[Drawing.FontStyle]::Bold); $sf=New-Object Drawing.StringFormat; $sf.Alignment='Center'; $sf.LineAlignment='Center'; $g.DrawString('AI',$tf,[Drawing.Brushes]::White,(New-Object Drawing.RectangleF(0,0,$s.Width,$s.Height)),$sf) })\r\n"
-     << L"$h=New-Object Windows.Forms.Label; $h.Text='Updating AI.EXE'; $h.ForeColor=[Drawing.Color]::White; $h.BackColor=$bg\r\n"
-     << L"$h.Font=New-Object Drawing.Font('Segoe UI Semibold',15,[Drawing.FontStyle]::Bold); $h.AutoSize=$false; $h.SetBounds(98,32,356,28)\r\n"
-     << L"$lbl=New-Object Windows.Forms.Label; $lbl.Text='Preparing update...'; $lbl.ForeColor=$muted; $lbl.BackColor=$bg\r\n"
-     << L"$lbl.Font=New-Object Drawing.Font('Segoe UI',10); $lbl.AutoSize=$false; $lbl.SetBounds(98,62,356,22)\r\n"
-     // Indeterminate loader: a rounded gradient pill that slides across a dark track,
-     // repainted every timer tick so it moves continuously.
-     << L"$bar=New-Object Windows.Forms.Panel; $bar.SetBounds(28,120,424,8); $bar.BackColor=$bg\r\n"
-     << L"$script:anim=0.0\r\n"
-     << L"$bar.Add_Paint({ param($s,$e) $g=$e.Graphics; $g.SmoothingMode='AntiAlias'; $bw=$s.Width; $bh=$s.Height; $tp=RoundPath 0 0 $bw $bh ($bh/2); $tb=New-Object Drawing.SolidBrush($track); $g.FillPath($tb,$tp); $tb.Dispose(); $pw=[int]($bw*0.36); $span=$bw+$pw; $x=[int]($script:anim*$span)-$pw; $g.SetClip($tp); $pp=RoundPath $x 0 $pw $bh ($bh/2); $gb=New-Object Drawing.Drawing2D.LinearGradientBrush((New-Object Drawing.Point($x,0)),(New-Object Drawing.Point(($x+$pw+1),0)),$acc2,$acc); $g.FillPath($gb,$pp); $gb.Dispose(); $g.ResetClip() })\r\n"
-     << L"$f.Controls.AddRange(@($logo,$h,$lbl,$bar))\r\n"
-     // Heavy work off the UI thread so the message loop keeps animating the loader.
+     // Left panel: the app's own icon (AI.EXE logo) + a divider — matches the template.
+     << L"$left=New-Object Windows.Forms.Panel; $left.SetBounds(0,0,140,176); $left.BackColor=$bg2\r\n"
+     << L"$left.Add_Paint({ param($s,$e) $g=$e.Graphics; $g.SmoothingMode='AntiAlias'; $g.InterpolationMode='HighQualityBicubic'; $pen=New-Object Drawing.Pen($line,1); $g.DrawLine($pen,($s.Width-1),14,($s.Width-1),($s.Height-14)); $pen.Dispose(); $sz=64; $ix=[int](($s.Width-$sz)/2); $iy=[int](($s.Height-$sz)/2); try { $ic=[System.Drawing.Icon]::ExtractAssociatedIcon($exe); if($ic){ $bmp=$ic.ToBitmap(); $g.DrawImage($bmp,$ix,$iy,$sz,$sz); $bmp.Dispose(); $ic.Dispose() } } catch {} })\r\n"
+     // Status-icon box: rounded border + a spinning accent arc + a per-phase glyph.
+     << L"$si=New-Object Windows.Forms.Panel; $si.SetBounds(168,30,44,44); $si.BackColor=$bg\r\n"
+     << L"$si.Add_Paint({ param($s,$e) $g=$e.Graphics; $g.SmoothingMode='AntiAlias'; $rp=RoundPath 0 0 ($s.Width-1) ($s.Height-1) 13; $pen=New-Object Drawing.Pen($line,1); $g.DrawPath($pen,$rp); $pen.Dispose(); $cx=$s.Width/2; $cy=$s.Height/2; if($script:phase -ne 'reopen'){ $sp=New-Object Drawing.Pen($acc,2); $sp.StartCap='Round'; $sp.EndCap='Round'; $g.DrawArc($sp,8,8,($s.Width-16),($s.Height-16),$script:spin,90); $sp.Dispose() }; $gc= if($script:phase -eq 'reopen'){$success}else{$acc}; $gp=New-Object Drawing.Pen($gc,2); $gp.StartCap='Round'; $gp.EndCap='Round'; $gp.LineJoin='Round'; if($script:phase -eq 'reopen'){ $g.DrawLines($gp,@((New-Object Drawing.PointF([single]($cx-6),[single]$cy)),(New-Object Drawing.PointF([single]($cx-1.5),[single]($cy+4.5))),(New-Object Drawing.PointF([single]($cx+6),[single]($cy-5))))) } elseif($script:phase -eq 'install'){ $g.DrawLine($gp,[single]($cx-6),[single]$cy,[single]($cx+6),[single]$cy); $g.DrawLine($gp,[single]$cx,[single]($cy-6),[single]$cx,[single]($cy+6)) } else { $g.DrawLine($gp,[single]$cx,[single]($cy-6),[single]$cx,[single]($cy+4)); $g.DrawLines($gp,@((New-Object Drawing.PointF([single]($cx-4),[single]$cy)),(New-Object Drawing.PointF([single]$cx,[single]($cy+4))),(New-Object Drawing.PointF([single]($cx+4),[single]$cy)))) }; $gp.Dispose() })\r\n"
+     << L"$title=New-Object Windows.Forms.Label; $title.Text='Preparing update'; $title.ForeColor=$text; $title.BackColor=$bg; $title.Font=New-Object Drawing.Font('Segoe UI Semibold',14,[Drawing.FontStyle]::Bold); $title.AutoSize=$false; $title.SetBounds(226,30,314,26)\r\n"
+     << L"$sub=New-Object Windows.Forms.Label; $sub.Text='Getting things ready...'; $sub.ForeColor=$muted; $sub.BackColor=$bg; $sub.Font=New-Object Drawing.Font('Segoe UI',9.5); $sub.AutoSize=$false; $sub.SetBounds(226,56,314,20)\r\n"
+     // Progress: real % fill when known, sliding pill while indeterminate.
+     << L"$bar=New-Object Windows.Forms.Panel; $bar.SetBounds(168,104,364,7); $bar.BackColor=$bg\r\n"
+     << L"$bar.Add_Paint({ param($s,$e) $g=$e.Graphics; $g.SmoothingMode='AntiAlias'; $bw=$s.Width; $bh=$s.Height; $tp=RoundPath 0 0 $bw $bh ($bh/2); $tb=New-Object Drawing.SolidBrush($track); $g.FillPath($tb,$tp); $tb.Dispose(); $g.SetClip($tp); if($script:pct -ge 0){ $fw=[int]($bw*[Math]::Min($script:pct,100)/100); if($fw -gt 0){ $fp=RoundPath 0 0 ([Math]::Max($fw,$bh)) $bh ($bh/2); $fb=New-Object Drawing.SolidBrush($acc); $g.FillPath($fb,$fp); $fb.Dispose() } } else { $pw=[int]($bw*0.4); $span=$bw+$pw; $x=[int]($script:anim*$span)-$pw; $pp=RoundPath $x 0 $pw $bh ($bh/2); $pb=New-Object Drawing.SolidBrush($acc); $g.FillPath($pb,$pp); $pb.Dispose() }; $g.ResetClip() })\r\n"
+     << L"$phaseLbl=New-Object Windows.Forms.Label; $phaseLbl.Text='Prepare'; $phaseLbl.ForeColor=$muted; $phaseLbl.BackColor=$bg; $phaseLbl.Font=New-Object Drawing.Font('Segoe UI',8.5); $phaseLbl.AutoSize=$false; $phaseLbl.SetBounds(168,118,180,18)\r\n"
+     << L"$pctLbl=New-Object Windows.Forms.Label; $pctLbl.Text=''; $pctLbl.ForeColor=$muted; $pctLbl.BackColor=$bg; $pctLbl.Font=New-Object Drawing.Font('Segoe UI',8.5); $pctLbl.TextAlign='MiddleRight'; $pctLbl.AutoSize=$false; $pctLbl.SetBounds(352,118,180,18)\r\n"
+     << L"$f.Controls.AddRange(@($left,$si,$title,$sub,$bar,$phaseLbl,$pctLbl))\r\n"
+     // Heavy work off the UI thread; streamed download reports real percent via $status.
      << L"$script:job=Start-Job -ScriptBlock {\r\n"
-     << L"  param($u,$app,$exe,$ver,$oldpid,$status)\r\n"
+     << L"  param($u,$app,$exe,$oldpid,$status)\r\n"
      << L"  $ErrorActionPreference='SilentlyContinue'\r\n"
      << L"  function St($t){ Set-Content -LiteralPath $status -Value $t -Encoding UTF8 }\r\n"
-     << L"  $suffix= if($ver){\" to v$ver\"}else{''}\r\n"
-     << L"  St('Preparing update'+$suffix+'...')\r\n"
+     << L"  St('prep|-1')\r\n"
      << L"  try { Wait-Process -Id $oldpid -Timeout 120 } catch {}\r\n"
-     << L"  Start-Sleep -Milliseconds 300; St('Downloading the new version...')\r\n"
+     << L"  Start-Sleep -Milliseconds 250\r\n"
      << L"  $t=Join-Path $env:TEMP ('aiexe_up_'+[guid]::NewGuid().ToString('N'))\r\n"
      << L"  New-Item -ItemType Directory -Force $t | Out-Null\r\n"
      << L"  $zip=Join-Path $t 'u.zip'\r\n"
-     << L"  curl.exe -L -o $zip $u\r\n"
-     << L"  St('Installing...')\r\n"
+     << L"  St('download|0'); $ok=$false\r\n"
+     << L"  try {\r\n"
+     << L"    $req=[System.Net.HttpWebRequest]::Create($u); $req.UserAgent='AIEXE-Updater'; $req.AllowAutoRedirect=$true\r\n"
+     << L"    $resp=$req.GetResponse(); $total=$resp.ContentLength; $rs=$resp.GetResponseStream()\r\n"
+     << L"    $fs=[System.IO.File]::Create($zip); $buf=New-Object byte[] 1048576; $sofar=0; $last=-1\r\n"
+     << L"    while(($n=$rs.Read($buf,0,$buf.Length)) -gt 0){ $fs.Write($buf,0,$n); $sofar+=$n; if($total -gt 0){ $p=[int](($sofar*100)/$total); if($p -ne $last){ $last=$p; St('download|'+$p) } } }\r\n"
+     << L"    $fs.Close(); $rs.Close(); $resp.Close(); $ok=$true\r\n"
+     << L"  } catch { $ok=$false }\r\n"
+     << L"  if(-not $ok){ St('download|-1'); curl.exe -L -o $zip $u }\r\n"
+     << L"  St('install|-1')\r\n"
      << L"  $x=Join-Path $t 'x'\r\n"
      << L"  Expand-Archive -Path $zip -DestinationPath $x -Force\r\n"
      << L"  Copy-Item -Path (Join-Path $x '*') -Destination $app -Recurse -Force\r\n"
-     << L"  St('Restarting AI.EXE...'); Start-Sleep -Milliseconds 500\r\n"
+     << L"  St('reopen|100')\r\n"
+     << L"  Start-Sleep -Milliseconds 600\r\n"
      << L"  Start-Process -FilePath $exe -WorkingDirectory $app\r\n"
      << L"  Remove-Item -Recurse -Force $t -ErrorAction SilentlyContinue\r\n"
-     << L"} -ArgumentList $u,$app,$exe,$ver," << pid << L",$status\r\n"
+     << L"} -ArgumentList $u,$app,$exe," << pid << L",$status\r\n"
      << L"$timer=New-Object Windows.Forms.Timer; $timer.Interval=16\r\n"
-     << L"$script:done=$false; $script:tc=0\r\n"
      << L"$timer.Add_Tick({\r\n"
-     << L"  $script:anim+=0.014; if($script:anim -ge 1){ $script:anim-=1 }; $bar.Invalidate()\r\n"
+     << L"  $script:spin=($script:spin+11)%360; if($script:pct -lt 0){ $script:anim+=0.02; if($script:anim -ge 1){ $script:anim-=1 } }\r\n"
+     << L"  $si.Invalidate(); $bar.Invalidate()\r\n"
      << L"  $script:tc++\r\n"
-     << L"  if($script:tc % 6 -eq 0){\r\n"
-     << L"    $txt=Get-Content -LiteralPath $status -Raw -ErrorAction SilentlyContinue\r\n"
-     << L"    if($txt){ $txt=$txt.Trim(); if($txt -and $lbl.Text -ne $txt){ $lbl.Text=$txt } }\r\n"
-     << L"    if(-not $script:done -and $script:job){ $st=(Get-Job -Id $script:job.Id).State; if($st -eq 'Completed' -or $st -eq 'Failed' -or $st -eq 'Stopped'){ $script:done=$true; $timer.Stop(); $f.Close() } }\r\n"
+     << L"  if($script:tc % 5 -eq 0){\r\n"
+     << L"    $raw=Get-Content -LiteralPath $status -Raw -ErrorAction SilentlyContinue\r\n"
+     << L"    if($raw){ $pp=$raw.Trim().Split('|'); $ph=$pp[0]; $pc= if($pp.Length -gt 1){ [int]$pp[1] } else { -1 }\r\n"
+     << L"      if($ph -ne $script:phase){ $script:phase=$ph; switch($ph){ 'prep' { $title.Text='Preparing update'; $sub.Text='Getting things ready...'; $phaseLbl.Text='Prepare' } 'download' { $title.Text='Downloading update'; $sub.Text='Please keep this window open.'; $phaseLbl.Text='Download' } 'install' { $title.Text='Installing update'; $sub.Text='This may take a moment.'; $phaseLbl.Text='Install' } 'reopen' { $title.Text='Reopening AI.EXE'; $sub.Text='Update complete.'; $phaseLbl.Text='Reopen' } } }\r\n"
+     << L"      $script:pct=$pc; if($pc -ge 0){ $pctLbl.Text=(''+$pc+'%') } else { $pctLbl.Text='' }\r\n"
+     << L"    }\r\n"
+     << L"    if(-not $script:done -and $script:job){ $stt=(Get-Job -Id $script:job.Id).State; if($stt -eq 'Completed' -or $stt -eq 'Failed' -or $stt -eq 'Stopped'){ $script:done=$true; $timer.Stop(); $f.Close() } }\r\n"
      << L"  }\r\n"
      << L"})\r\n"
      << L"$f.Add_Shown({ $timer.Start() })\r\n"
@@ -1429,6 +1443,18 @@ public:
       AdjustWindowRectForDpi(&rc, nullptr, sys_dpi);
       w = rc.right - rc.left;
       h = rc.bottom - rc.top;
+    }
+    // Never launch below the enforced minimum — a saved placement from an older
+    // (pre-DPI-aware) build can restore a window too small to fit the content, which
+    // clipped the input bar/right edge until the user manually resized.
+    {
+      RECT minrc{0, 0, MulDiv(kMinWindowWidth, sys_dpi, 96),
+                 MulDiv(kMinWindowHeight, sys_dpi, 96)};
+      AdjustWindowRectForDpi(&minrc, nullptr, sys_dpi);
+      const int minW = minrc.right - minrc.left;
+      const int minH = minrc.bottom - minrc.top;
+      if (w < minW) w = minW;
+      if (h < minH) h = minH;
     }
 
     hwnd_ = CreateWindowExW(

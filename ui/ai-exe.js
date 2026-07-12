@@ -14969,7 +14969,10 @@ async function refreshAdapterStatus() {
     if (serving) {
       refreshAdapterStatus._loginWaiting = false;
       setStatus(`● Adapter running on port ${s.port} — Venice Pro is ready`, 'var(--success, #22c55e)');
-    } else if (procAlive) {
+    } else if (procAlive || _adapterStartingForSend) {
+      // Include _adapterStartingForSend so the status text matches the button/toast
+      // while a start is in flight (before the poll first sees the process running) —
+      // otherwise it briefly read "Adapter not running" mid-start.
       // Set the text from CACHED login-waiting state so it's decided synchronously (no per-cycle
       // async override → no flash). The log fetch below only updates the cache for next cycle.
       const msg = adapterStartupMessageFromStatus(s);
