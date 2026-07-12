@@ -1383,9 +1383,10 @@ bool LaunchUpdater(const std::string &url, const std::string &version,
   return true;
 }
 
-// Create a Desktop shortcut to the app on first run (skipped if one already
-// exists). Assumes COM is initialized by the caller (wWinMain does).
-void CreateDesktopShortcutIfMissing() {
+// Create or refresh AI.EXE's Desktop shortcut. The updater replaces the .exe in
+// place, and Explorer can retain a stale/blank cached icon unless the shortcut is
+// saved again and the shell is notified after the new process starts.
+void EnsureDesktopShortcut() {
   wchar_t exe_buf[MAX_PATH] = {};
   if (GetModuleFileNameW(nullptr, exe_buf, MAX_PATH) == 0) return;
   const std::filesystem::path exe_path(exe_buf);
@@ -1401,23 +1402,28 @@ void CreateDesktopShortcutIfMissing() {
       std::filesystem::path(desktop) / L"AI.EXE.lnk";
   CoTaskMemFree(desktop);
 
-  std::error_code ec;
-  if (std::filesystem::exists(lnk, ec)) return; // user keeps control after first run
-
   IShellLinkW *link = nullptr;
   if (SUCCEEDED(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER,
                                  IID_IShellLinkW,
                                  reinterpret_cast<void **>(&link))) &&
       link) {
-    link->SetPath(exe_path.wstring().c_str());
-    link->SetWorkingDirectory(app_dir.wstring().c_str());
-    link->SetIconLocation(exe_path.wstring().c_str(), 0);
-    link->SetDescription(L"AI.EXE");
     IPersistFile *pf = nullptr;
     if (SUCCEEDED(link->QueryInterface(IID_IPersistFile,
                                        reinterpret_cast<void **>(&pf))) &&
         pf) {
-      pf->Save(lnk.wstring().c_str(), TRUE);
+      std::error_code ec;
+      if (std::filesystem::exists(lnk, ec)) {
+        // Preserve the shortcut object while refreshing the fields AI.EXE owns.
+        pf->Load(lnk.wstring().c_str(), STGM_READWRITE);
+      }
+      link->SetPath(exe_path.wstring().c_str());
+      link->SetWorkingDirectory(app_dir.wstring().c_str());
+      link->SetIconLocation(exe_path.wstring().c_str(), 0);
+      link->SetDescription(L"AI.EXE");
+      if (SUCCEEDED(pf->Save(lnk.wstring().c_str(), TRUE))) {
+        SHChangeNotify(SHCNE_UPDATEITEM, SHCNF_PATHW, lnk.wstring().c_str(),
+                       nullptr);
+      }
       pf->Release();
     }
     link->Release();
@@ -2310,7 +2316,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   const bool com_initialized =
       SUCCEEDED(com_hr) || com_hr == RPC_E_CHANGED_MODE;
 
-  CreateDesktopShortcutIfMissing();
+  EnsureDesktopShortcut();
 
   AppWindow app;
   if (!app.Create(instance)) {
