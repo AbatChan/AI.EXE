@@ -1446,34 +1446,63 @@ try {
     try { if (typeof recordDebugTrace === 'function') recordDebugTrace(event, fields || {}, fields || {}); } catch (_) {}
     try { console.log(`[update] ${event}`, fields || {}); } catch (_) {}
   };
+  async function latestFromRawVersion() {
+    const raw = `https://raw.githubusercontent.com/${REPO}/main/CMakeLists.txt?t=${Date.now()}`;
+    const res = await fetch(raw, { cache: 'no-store' });
+    if (!res || !res.ok) throw new Error(`raw version HTTP ${res && res.status}`);
+    const source = await res.text();
+    const match = source.match(/AI_EXE_APP_VERSION\s+"([0-9]+(?:\.[0-9]+){2})"/);
+    if (!match) throw new Error('raw version marker missing');
+    const latest = match[1];
+    return {
+      latest,
+      url: `https://github.com/${REPO}/releases/download/v${latest}/AI.EXE-Windows.zip`,
+      page: `https://github.com/${REPO}/releases/tag/v${latest}`,
+      source: 'raw',
+    };
+  }
+  async function latestFromReleaseApi() {
+    const res = await fetch(`https://api.github.com/repos/${REPO}/releases/latest`, {
+      headers: { Accept: 'application/vnd.github+json' }, cache: 'no-store',
+    });
+    if (!res || !res.ok) throw new Error(`release API HTTP ${res && res.status}`);
+    const data = await res.json();
+    const latest = String(data.tag_name || '').replace(/^v/i, '').trim();
+    const asset = Array.isArray(data.assets)
+      ? data.assets.find((a) => /\.zip$/i.test(a && a.name || ''))
+      : null;
+    return {
+      latest,
+      url: asset ? asset.browser_download_url : '',
+      page: data.html_url || '',
+      source: 'api',
+    };
+  }
   async function checkForUpdate() {
     ulog('update_check_start', { current: AI_EXE_VERSION, repo: REPO });
     try {
-      const res = await fetch(`https://api.github.com/repos/${REPO}/releases/latest`, {
-        headers: { Accept: 'application/vnd.github+json' },
-      });
-      if (!res || !res.ok) {
-        ulog('update_check_http_fail', { status: String(res && res.status), ok: String(res && res.ok) });
-        return;
+      let release = null;
+      try {
+        release = await latestFromRawVersion();
+      } catch (rawErr) {
+        ulog('update_raw_version_fail', { error: String(rawErr && rawErr.message ? rawErr.message : rawErr) });
+        release = await latestFromReleaseApi();
       }
-      const data = await res.json();
-      const latest = String(data.tag_name || '').replace(/^v/i, '').trim();
+      const latest = String(release && release.latest || '').trim();
       const newer = latest ? cmpVer(latest, AI_EXE_VERSION) : 0;
-      const asset = Array.isArray(data.assets)
-        ? data.assets.find((a) => /\.zip$/i.test(a && a.name || ''))
-        : null;
       ulog('update_check_result', {
         current: AI_EXE_VERSION,
         latest: latest || '(none)',
         isNewer: String(newer > 0),
-        hasAsset: String(Boolean(asset)),
+        hasAsset: String(Boolean(release && release.url)),
+        source: String(release && release.source || 'unknown'),
         badgeEl: String(Boolean(document.getElementById('updateBadge'))),
       });
       if (!latest || newer <= 0) return;
       updateInfo = {
         version: latest,
-        url: asset ? asset.browser_download_url : '',
-        page: data.html_url || '',
+        url: String(release.url || ''),
+        page: String(release.page || ''),
       };
       const badge = document.getElementById('updateBadge');
       const text = document.getElementById('updateBadgeText');
@@ -1506,7 +1535,7 @@ try {
     const badge = document.getElementById('updateBadge');
     if (badge) badge.addEventListener('click', onBadgeClick);
     setTimeout(checkForUpdate, 2500);
-    setInterval(checkForUpdate, 30 * 60 * 1000);
+    setInterval(checkForUpdate, 5 * 60 * 1000);
   };
   // Run even if 'load' already fired before this script executed (otherwise the
   // listener never fires and the check never runs).
