@@ -51,6 +51,46 @@ constexpr UINT kMsgPostWebResponse = WM_APP + 2;
 constexpr LONG kMinWindowWidth = static_cast<LONG>(kUiMinWindowWidth);
 constexpr LONG kMinWindowHeight = static_cast<LONG>(kUiMinWindowHeight);
 
+// --- High-DPI support (resolved at runtime; no manifest / SDK-version dependency) ---
+// Without process DPI awareness Windows bitmap-stretches the whole window on a
+// high-DPI display, which is why the UI looked blurry. 96 dpi = 100% scale.
+UINT SystemDpi() {
+  if (HMODULE u = GetModuleHandleW(L"user32.dll")) {
+    if (auto fn = reinterpret_cast<UINT(WINAPI *)(void)>(GetProcAddress(u, "GetDpiForSystem"))) {
+      const UINT d = fn();
+      if (d) return d;
+    }
+  }
+  return 96;
+}
+
+UINT WindowDpi(HWND hwnd) {
+  if (hwnd) {
+    if (HMODULE u = GetModuleHandleW(L"user32.dll")) {
+      if (auto fn = reinterpret_cast<UINT(WINAPI *)(HWND)>(GetProcAddress(u, "GetDpiForWindow"))) {
+        const UINT d = fn(hwnd);
+        if (d) return d;
+      }
+    }
+  }
+  return SystemDpi();
+}
+
+void EnableHighDpiAwareness() {
+  HMODULE user32 = GetModuleHandleW(L"user32.dll");
+  if (!user32) return;
+  using SetCtxFn = BOOL(WINAPI *)(HANDLE);
+  if (auto set_ctx = reinterpret_cast<SetCtxFn>(GetProcAddress(user32, "SetProcessDpiAwarenessContext"))) {
+    // (HANDLE)-4 = DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 (Win10 1703+)
+    if (set_ctx(reinterpret_cast<HANDLE>(static_cast<INT_PTR>(-4)))) return;
+    // (HANDLE)-3 = PER_MONITOR_AWARE (v1) fallback
+    if (set_ctx(reinterpret_cast<HANDLE>(static_cast<INT_PTR>(-3)))) return;
+  }
+  // Legacy Windows: at least system-DPI aware (still crisper than stretched).
+  using OldFn = BOOL(WINAPI *)(void);
+  if (auto old = reinterpret_cast<OldFn>(GetProcAddress(user32, "SetProcessDPIAware"))) old();
+}
+
 std::filesystem::path ExecutableDir() {
   wchar_t buf[MAX_PATH] = {};
   const DWORD len = GetModuleFileNameW(nullptr, buf, MAX_PATH);
@@ -1358,10 +1398,13 @@ public:
     const bool has_restored = LoadWindowPlacementFromIni(&restored);
     const int x = has_restored ? restored.left : CW_USEDEFAULT;
     const int y = has_restored ? restored.top : CW_USEDEFAULT;
-    const int w =
-        has_restored ? (restored.right - restored.left) : kUiDefaultWindowWidth;
+    // Now that the process is DPI-aware, the default size is in physical pixels —
+    // scale it by the system DPI so first run isn't tiny on a high-DPI display.
+    const UINT sys_dpi = SystemDpi();
+    const int w = has_restored ? (restored.right - restored.left)
+                               : MulDiv(kUiDefaultWindowWidth, sys_dpi, 96);
     const int h = has_restored ? (restored.bottom - restored.top)
-                               : kUiDefaultWindowHeight;
+                               : MulDiv(kUiDefaultWindowHeight, sys_dpi, 96);
 
     hwnd_ = CreateWindowExW(
         0, cls, L"AI.EXE",
@@ -1510,8 +1553,10 @@ private:
     if (!mmi) {
       return;
     }
-    mmi->ptMinTrackSize.x = kMinWindowWidth;
-    mmi->ptMinTrackSize.y = kMinWindowHeight;
+    // DPI-scale the minimum so it stays the same apparent size at any scale factor.
+    const UINT dpi = WindowDpi(hwnd_);
+    mmi->ptMinTrackSize.x = MulDiv(kMinWindowWidth, dpi, 96);
+    mmi->ptMinTrackSize.y = MulDiv(kMinWindowHeight, dpi, 96);
   }
 
   std::filesystem::path PromptModelImportPath() {
@@ -2171,6 +2216,9 @@ private:
 } // namespace
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
+  // Must run before any window is created so WebView2 renders at native DPI (crisp).
+  EnableHighDpiAwareness();
+
   const HRESULT com_hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
   const bool com_initialized =
       SUCCEEDED(com_hr) || com_hr == RPC_E_CHANGED_MODE;

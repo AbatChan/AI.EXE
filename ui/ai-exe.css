@@ -26,6 +26,9 @@
   --ui-min-w: 1050px;
   --ui-min-h: 760px;
   --window-chrome-h: 0px;
+  /* Top offset in the sidebar that clears the macOS traffic-light buttons. Windows
+     has no such controls, so it's small there (no empty band at the top). */
+  --sidebar-chrome-pad: 14px;
   --font-sans: "Avenir Next", "Segoe UI", "Helvetica Neue", "SF Pro Text", sans-serif;
   --font-mono: "SFMono-Regular", "Consolas", "Menlo", "Liberation Mono", monospace;
   --font-display: "Avenir Next Demi Bold", "Segoe UI Semibold", "Trebuchet MS", sans-serif;
@@ -66,6 +69,7 @@ body::after {
 
 html.platform-mac {
   --window-chrome-h: 0px;
+  --sidebar-chrome-pad: 42px;   /* clear the traffic-light buttons */
 }
 
 body {
@@ -563,7 +567,7 @@ body.resizing-panels .panel-resizer {
   justify-content: flex-end;
   gap: 2px;
   position: absolute;
-  top: 42px;
+  top: var(--sidebar-chrome-pad);
   right: 12px;
   padding: 0;
   z-index: 12;
@@ -595,7 +599,7 @@ body.resizing-panels .panel-resizer {
   flex-direction: column;
   flex: 1;
   overflow: hidden;
-  padding-top: 42px;
+  padding-top: var(--sidebar-chrome-pad);
   opacity: 1;
   transition: opacity 0.2s;
 }

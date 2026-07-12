@@ -14962,6 +14962,10 @@ async function refreshAdapterStatus() {
     const s = await res.json();
     procAlive = Boolean(s.running);
     const serving = Boolean(s.serving);
+    // Keep the shared flags (read by BOTH the composer button and the Settings buttons)
+    // in sync with server truth from this poll too, so the two pages never disagree.
+    veniceAdapterLastKnownServing = serving;
+    veniceAdapterLastKnownStarting = procAlive && !serving;
     if (serving) {
       refreshAdapterStatus._loginWaiting = false;
       setStatus(`● Adapter running on port ${s.port} — Venice Pro is ready`, 'var(--success, #22c55e)');
@@ -14995,10 +14999,12 @@ async function refreshAdapterStatus() {
     }
   } catch (_) {
     setStatus('AI.EXE backend not reachable — start the backend to manage the adapter.', 'var(--danger, #ef4444)');
+    veniceAdapterLastKnownServing = false;
+    veniceAdapterLastKnownStarting = false;
   }
-  // Show the red Stop as soon as the process is up (so a stuck login can be cancelled).
-  if (settingsAdapterStartBtn) settingsAdapterStartBtn.style.display = procAlive ? 'none' : '';
-  if (settingsAdapterStopBtn) settingsAdapterStopBtn.style.display = procAlive ? '' : 'none';
+  // Render both the composer and Settings adapter buttons from the shared flags above,
+  // so Start / Starting… / Stop stay in lock-step no matter which page is showing.
+  if (typeof renderComposerModelPill === 'function') renderComposerModelPill();
 }
 // ---- In-chat model pill (composer) -----------------------------------------
 // Sits after the + button; lets the user switch the provider model without opening
@@ -15022,7 +15028,31 @@ function composerModelChoices() {
   return { provider, def, list };
 }
 
+// Single source of truth for the Settings adapter Start/Stop buttons, driven by the
+// same shared flags as the composer button so the two pages never disagree: while
+// starting, Start shows a spinner (disabled) and Stop stays available to cancel a
+// stuck login; when serving, only Stop; when stopped, only Start.
+function syncSettingsAdapterButtons() {
+  if (!settingsAdapterStartBtn || !settingsAdapterStopBtn) return;
+  const serving = Boolean(veniceAdapterLastKnownServing);
+  const starting = Boolean(_adapterStartingForSend || veniceAdapterLastKnownStarting);
+  if (serving) {
+    settingsAdapterStartBtn.style.display = 'none';
+    settingsAdapterStopBtn.style.display = '';
+    setButtonLoading(settingsAdapterStartBtn, false);
+  } else if (starting) {
+    settingsAdapterStartBtn.style.display = '';
+    setButtonLoading(settingsAdapterStartBtn, true);
+    settingsAdapterStopBtn.style.display = '';
+  } else {
+    settingsAdapterStartBtn.style.display = '';
+    setButtonLoading(settingsAdapterStartBtn, false);
+    settingsAdapterStopBtn.style.display = 'none';
+  }
+}
+
 function renderComposerModelPill() {
+  if (typeof syncSettingsAdapterButtons === 'function') syncSettingsAdapterButtons();
   if (!composerModelWrap || !composerModelPill) return;
   const adapterOffline = isVeniceAdapterSelected() && !veniceAdapterLastKnownServing;
   if (composerAdapterStartBtn) {
@@ -15370,46 +15400,19 @@ if (settingsAdapterPassToggle && settingsAdapterPass) {
   });
 }
 if (settingsAdapterStartBtn) {
-  settingsAdapterStartBtn.addEventListener('click', async () => {
+  settingsAdapterStartBtn.addEventListener('click', () => {
     const user = settingsAdapterUser ? settingsAdapterUser.value.trim() : '';
     const pass = settingsAdapterPass ? settingsAdapterPass.value : '';
     appSettings.veniceAdapterUsername = user; appSettings.veniceAdapterPassword = pass; saveAppSettings();
-    const backend = getAIExeBackendUrl();
-    setButtonLoading(settingsAdapterStartBtn, true);
     // Immediate honest feedback — the adapter takes ~30s to open Chrome + log in before it's ready.
     if (settingsAdapterStatus) {
       settingsAdapterStatus.textContent = '◐ Starting adapter — a Chrome window is opening (~30s). Sign in if prompted; it stays logged in after.';
       settingsAdapterStatus.style.color = 'var(--warning, #f59e0b)';
     }
-    try {
-      const st = await (await fetchBackendWhenReady(backend + '/api/adapter/status')).json();
-      if (!st.installed) {
-        const installed = await ensureAdapterInstalledWithFeedback(backend);
-        if (!installed) return;
-      }
-      const r = await (await fetchBackendWhenReady(backend + '/api/adapter/start', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        // Visible browser: Venice's login is behind Cloudflare, which blocks headless. The
-        // window also lets you complete an email verification code once (profile persists).
-        body: JSON.stringify({
-          username: user, password: pass, port: adapterTargetPort(), headless: false,
-          hide_prompt: veniceHidePromptOn(),
-          model: String(getProviderModel(VENICE_ADAPTER_PROVIDER_ID) || '').replace(/:latest$/i, ''),
-        }),
-      })).json();
-      if (r.ok && r.detail === 'already running') {
-        showAppNotification({ title: 'Adapter', message: 'Adapter already running.', kind: 'success' });
-      } else if (r.ok) {
-        beginAdapterStartupProgress();   // sticky progress toast → "✓ Adapter ready"
-      } else {
-        showAppNotification({ title: "Couldn't start", message: r.detail || 'Failed to start.', kind: 'error' });
-      }
-    } catch (err) {
-      showAppNotification({ title: 'Adapter', message: 'AI.EXE backend not reachable: ' + String(err && err.message ? err.message : err), kind: 'error' });
-    } finally {
-      setButtonLoading(settingsAdapterStartBtn, false);
-      setTimeout(refreshAdapterStatus, 1500);
-    }
+    // Route through the SAME flow as the composer Start button: one shared starting
+    // state, one polling loop, one set of toasts — so Settings and Chat stay in sync
+    // (button spinner, status, and notifications all match on both pages).
+    void startVeniceAdapterThenResend({ resendPending: false });
   });
 }
 if (settingsAdapterStopBtn) {
@@ -17116,7 +17119,7 @@ async function ensureVeniceAdapterReady() {
 // the user is carried along without ever looking at the Chrome window.
 let _adapterProgressActive = false;
 function beginAdapterStartupProgress(opts = {}) {
-  if (_adapterProgressActive) return;
+  if (_adapterProgressActive) return true;   // a loop already owns the lifecycle
   const announceReady = opts.announceReady !== false;
   const toast = showAppNotification({
     title: 'Starting Venice adapter',
@@ -17124,7 +17127,12 @@ function beginAdapterStartupProgress(opts = {}) {
     kind: 'info',
     sticky: true,
   });
-  if (!toast) return;
+  if (!toast) {
+    // No toast host — don't leave the Start buttons stuck showing "Starting…".
+    _adapterStartingForSend = false;
+    if (typeof renderComposerModelPill === 'function') renderComposerModelPill();
+    return false;
+  }
   _adapterProgressActive = true;
   toast.classList.add('progress');
   const icon = toast.querySelector('.app-toast-icon');
@@ -17172,9 +17180,14 @@ function beginAdapterStartupProgress(opts = {}) {
         }
         if (st && st.serving) {
           closeToast();
+          _adapterStartingForSend = false;
+          veniceAdapterLastKnownServing = true;
+          veniceAdapterLastKnownStarting = false;
           if (typeof refreshAdapterStatus === 'function') refreshAdapterStatus();
           if (typeof refreshComposerModelsFromProvider === 'function') void refreshComposerModelsFromProvider();
-          if (announceReady) {
+          if (typeof renderComposerModelPill === 'function') renderComposerModelPill();
+          if (typeof opts.onReady === 'function') { try { opts.onReady(); } catch (_) {} }
+          else if (announceReady) {
             showAppNotification({ title: 'Adapter ready', message: 'Venice Pro is ready — send your message.', kind: 'success' });
           }
           return;
@@ -17241,8 +17254,13 @@ function beginAdapterStartupProgress(opts = {}) {
       showAppNotification({ title: 'Adapter is taking long', message: 'Still not serving — check the Chrome window (sign-in/captcha?) or Settings → Provider.', kind: 'warning', durationMs: 9000 });
     } finally {
       _adapterProgressActive = false;
+      // Whatever the outcome (ready / failed / timed out), the start is no longer in
+      // flight — clear the shared flag and re-render so both Start buttons reset in sync.
+      _adapterStartingForSend = false;
+      if (typeof renderComposerModelPill === 'function') renderComposerModelPill();
     }
   })();
+  return true;
 }
 
 async function ensureAdapterInstalledWithFeedback(backend) {
@@ -17311,7 +17329,9 @@ async function startVeniceAdapterThenResend(options = {}) {
   if (typeof renderComposerModelPill === 'function') renderComposerModelPill();
   try {
     let st = null;
-    try { st = await (await fetch(backend + '/api/adapter/status')).json(); } catch (_) {}
+    // fetchBackendWhenReady waits up to ~25s for the bundled backend to finish booting,
+    // so a Start click right after launch doesn't fail with "backend not reachable".
+    try { st = await (await fetchBackendWhenReady(backend + '/api/adapter/status')).json(); } catch (_) {}
     if (st && !st.installed) {
       const installed = await ensureAdapterInstalledWithFeedback(backend);
       if (!installed) {
@@ -17320,7 +17340,7 @@ async function startVeniceAdapterThenResend(options = {}) {
         return;
       }
     }
-    const startRes = await fetch(backend + '/api/adapter/start', {
+    const startRes = await fetchBackendWhenReady(backend + '/api/adapter/start', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         username: user, password: pass, port: adapterTargetPort(), headless: false,
@@ -17340,40 +17360,24 @@ async function startVeniceAdapterThenResend(options = {}) {
       });
       return;
     }
-    beginAdapterStartupProgress({ announceReady: false });   // this flow announces ready itself (with the resend)
-    let resendStatusRetries = 0;
-    for (let i = 0; i < 90; i++) {                    // up to ~135s (manual login/captcha)
-      await new Promise((r) => setTimeout(r, 1500));
-      try {
-        const statusRes = await fetch(backend + '/api/adapter/status');
-        if (!statusRes.ok) throw new Error('HTTP ' + statusRes.status);
-        const s = await statusRes.json();
-        resendStatusRetries = 0;
-        if (s && s.serving) {
-          _adapterStartingForSend = false;
-          veniceAdapterLastKnownServing = true;
-          veniceAdapterLastKnownStarting = false;
-          if (typeof refreshAdapterStatus === 'function') refreshAdapterStatus();
-          const nowText = String((mainInput && mainInput.value) || '').trim();
-          // Only auto-send if the box still holds exactly what the user sent — if they've kept
-          // typing (or cleared it), leave their draft alone and just say it's ready.
-          const autoSend = Boolean(resendPending && nowText && nowText === pendingAtStart);
-          showAppNotification({ title: 'Adapter ready', message: autoSend ? 'Sending your message…' : 'Venice Pro is ready — press send.', kind: 'success' });
-          if (typeof refreshComposerModelsFromProvider === 'function') void refreshComposerModelsFromProvider();
-          if (typeof renderComposerModelPill === 'function') renderComposerModelPill();
-          if (autoSend && typeof sendMessage === 'function') void sendMessage();  // resend only the unchanged snapshot
-          return;
-        }
-      } catch (_) {
-        resendStatusRetries += 1;
-        if (resendStatusRetries <= 10) {
-          showComposerNotice(`Checking adapter connection — retrying ${resendStatusRetries}/10…`);
-        }
-      }
+    // Single progress poller for BOTH pages — it narrates progress, detects failure,
+    // owns _adapterStartingForSend, and calls onReady when serving. No second poll loop
+    // here (that produced racing, inconsistent toasts). onReady handles the auto-resend.
+    const started = beginAdapterStartupProgress({
+      announceReady: false,
+      onReady: () => {
+        const nowText = String((mainInput && mainInput.value) || '').trim();
+        // Only auto-send if the box still holds exactly what the user sent — if they've kept
+        // typing (or cleared it), leave their draft alone and just say it's ready.
+        const autoSend = Boolean(resendPending && nowText && nowText === pendingAtStart);
+        showAppNotification({ title: 'Adapter ready', message: autoSend ? 'Sending your message…' : 'Venice Pro is ready — press send.', kind: 'success' });
+        if (autoSend && typeof sendMessage === 'function') void sendMessage();  // resend only the unchanged snapshot
+      },
+    });
+    if (!started) {
+      _adapterStartingForSend = false;
+      if (typeof renderComposerModelPill === 'function') renderComposerModelPill();
     }
-    _adapterStartingForSend = false;
-    if (typeof renderComposerModelPill === 'function') renderComposerModelPill();
-    showAppNotification({ title: "Adapter didn't start", message: 'Check Settings → Provider (Chrome installed? login/captcha?). Then resend.', kind: 'error', durationMs: 8000 });
   } catch (err) {
     _adapterStartingForSend = false;
     if (typeof renderComposerModelPill === 'function') renderComposerModelPill();
