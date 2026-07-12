@@ -499,7 +499,9 @@ std::filesystem::path ResolveRuntimeRoot(const std::filesystem::path &ui_html) {
   return exe_dir;
 }
 
-HANDLE StartBundledBackend(const std::filesystem::path &runtime_root) {
+HANDLE StartBundledBackend(const std::filesystem::path &runtime_root,
+                           HANDLE *job_out) {
+  if (job_out) *job_out = nullptr;
   const auto backend = runtime_root / "backend" / "AI.EXE Backend.exe";
   if (!FileExists(backend)) {
     return nullptr;
@@ -514,6 +516,21 @@ HANDLE StartBundledBackend(const std::filesystem::path &runtime_root) {
     return nullptr;
   }
   CloseHandle(process.hThread);
+  // Own the complete backend -> adapter -> chromedriver -> Chrome tree. Windows does
+  // not naturally cascade child termination; a kill-on-close Job Object makes app
+  // close/crash cleanup deterministic without touching the user's normal Chrome.
+  HANDLE job = CreateJobObjectW(nullptr, nullptr);
+  if (job) {
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if (SetInformationJobObject(job, JobObjectExtendedLimitInformation,
+                                &limits, sizeof(limits)) &&
+        AssignProcessToJobObject(job, process.hProcess)) {
+      if (job_out) *job_out = job;
+    } else {
+      CloseHandle(job);
+    }
+  }
   return process.hProcess;
 }
 
@@ -1491,7 +1508,7 @@ public:
 
     std::string runtime_err;
     const auto runtime_root = ResolveRuntimeRoot(ui_html_);
-    backend_process_ = StartBundledBackend(runtime_root);
+    backend_process_ = StartBundledBackend(runtime_root, &backend_job_);
     runtime_.Initialize(runtime_root, false, &runtime_err);
     if (!runtime_err.empty()) {
       runtime_init_error_ = runtime_err;
@@ -1566,8 +1583,12 @@ private:
     }
     case WM_DESTROY:
       DevServerManager::Instance().StopAll();
+      if (self->backend_job_) {
+        TerminateJobObject(self->backend_job_, 0);
+        CloseHandle(self->backend_job_);
+        self->backend_job_ = nullptr;
+      }
       if (self->backend_process_) {
-        // Its parent watchdog retires the adapter and backend after this app exits.
         CloseHandle(self->backend_process_);
         self->backend_process_ = nullptr;
       }
@@ -2271,6 +2292,7 @@ private:
   WebRuntimeBridge runtime_;
   std::string runtime_init_error_;
   HANDLE backend_process_ = nullptr;
+  HANDLE backend_job_ = nullptr;
 
 #if AI_EXE_HAVE_WEBVIEW2_HEADER
   Microsoft::WRL::ComPtr<ICoreWebView2Controller> controller_;

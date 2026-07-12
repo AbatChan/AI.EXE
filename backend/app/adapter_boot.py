@@ -14,6 +14,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 
 
 def _terminate_group() -> None:
@@ -96,11 +97,22 @@ def main() -> None:
     # Rebuild argv exactly as the adapter's argparse expects.
     sys.argv = [script, "--port", str(port), "--ensure-pro",
                 "--headless" if headless == "1" else "--no-headless"]
+    print("AIEXE_ADAPTER_BOOT loading %s" % script, flush=True)
     try:
         runpy.run_path(script, run_name="__main__")
-    finally:
-        # Covers a startup exception before Selenium has returned a driver object;
-        # the adapter-level atexit cleanup cannot see those orphaned children.
+    except BaseException:
+        # taskkill includes this Python process. Emit and flush the real failure first;
+        # older builds killed themselves here before the traceback reached adapter.log.
+        traceback.print_exc()
+        try:
+            sys.stdout.flush()
+            sys.stderr.flush()
+        except Exception:
+            pass
+        time.sleep(0.15)
+        _terminate_group()
+        raise
+    else:
         _terminate_group()
 
 
