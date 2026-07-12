@@ -14910,6 +14910,8 @@ function friendlyAdapterError(log) {
     return 'Network looks slow or unavailable while reaching Venice or installing dependencies. Try a stronger internet connection if it keeps retrying.';
   if (/incorrect|invalid password|wrong password|authentication failed|invalid credentials/.test(lower))
     return 'Venice rejected the login — double-check your email and password.';
+  if (/aiexe_driver chrome_launch_failed/.test(lower))
+    return 'Chrome opened, but ChromeDriver could not establish its session. The Adapter log now includes the exact driver diagnosis.';
   if (/chromedriver|session not created|cannot find chrome|chrome not reachable|devtoolsactiveport|no chrome binary/.test(lower))
     return "ChromeDriver couldn't launch Chrome. Open Settings → Provider and check the Adapter log for the exact error.";
   if (/identifier-field|password-field|no such element|element not (found|interactable|visible)/.test(lower))

@@ -252,6 +252,31 @@ def _aiexe_windows_chromedriver(chrome_version):
         raise RuntimeError("Could not download the Chrome driver: %s" % exc) from exc
 
 
+def _aiexe_windows_chrome_service(driver_path):
+    """Start ChromeDriver with a persistent verbose log beside adapter.log."""
+    driver_log = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "chromedriver.log")
+    try:
+        os.remove(driver_log)
+    except OSError:
+        pass
+    print("AIEXE_DRIVER chromedriver_log=%r" % driver_log, flush=True)
+    return Service(driver_path, service_args=["--verbose"], log_output=driver_log)
+
+
+def _aiexe_windows_log_driver_failure(error):
+    """Append ChromeDriver's own explanation to the one log the UI exposes."""
+    print("AIEXE_DRIVER chrome_launch_failed: %s" % error, flush=True)
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "chromedriver.log")
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            tail = fh.read()[-6000:].strip()
+        if tail:
+            print("AIEXE_DRIVER chromedriver_tail:\n" + tail, flush=True)
+    except OSError as exc:
+        print("AIEXE_DRIVER chromedriver_log_unavailable: %s" % exc, flush=True)
+
+
 def get_webdriver(headless=True, debug_browser=False, docker=False):
     chrome_options = webdriver.ChromeOptions()
     chrome_options.add_argument("--user-data-dir=" + os.path.join(os.path.dirname(os.path.abspath(__file__)), ".chrome-profile"))
@@ -318,7 +343,8 @@ def get_webdriver(headless=True, debug_browser=False, docker=False):
         try:
             if os.name == "nt":
                 chrome_version = _aiexe_windows_chrome_version()
-                service = Service(_aiexe_windows_chromedriver(chrome_version))
+                service = _aiexe_windows_chrome_service(
+                    _aiexe_windows_chromedriver(chrome_version))
             else:
                 print("AIEXE_DRIVER resolving chromedriver...", flush=True)
                 service = Service(ChromeDriverManager().install())
@@ -327,6 +353,12 @@ def get_webdriver(headless=True, debug_browser=False, docker=False):
             print("AIEXE_DRIVER chrome_ready", flush=True)
             return driver
         except WebDriverException as e:
+            if os.name == "nt":
+                # Chrome is present and its matching driver was resolved. Do not hide
+                # this useful failure behind the old Chromium/webdriver-manager fallback;
+                # that starts another unbounded download and loses the real diagnosis.
+                _aiexe_windows_log_driver_failure(e)
+                raise RuntimeError("ChromeDriver could not establish a Chrome session") from e
             print(f"Chrome not found ({e}), trying Chromium", flush=True)
 
         try:
