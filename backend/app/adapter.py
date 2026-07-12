@@ -576,10 +576,14 @@ class AdapterManager:
         serving = self._port_alive()  # port bound = login done + server up (ready)
         log = self.read_log(6000)
         lower = log.lower()
+        # Do not treat startup narration such as "resolving chromedriver" as proof
+        # of a bad connection.  Only concrete transport failures (or the adapter's
+        # explicit driver-download marker) should put the UI into its network state.
         network_issue = bool(re.search(
             r"(network|internet|connection (?:reset|refused|timed out|timeout)|temporary failure|name or service not known|"
             r"nodename nor servname|could not resolve|dns|ssl|proxy|github\.com|pypi|read timed out|"
-            r"err_internet_disconnected|err_network_changed|err_name_not_resolved|err_connection_timed_out|err_timed_out)",
+            r"err_internet_disconnected|err_network_changed|err_name_not_resolved|err_connection_timed_out|err_timed_out|"
+            r"aiexe_driver driver_download_failed)",
             lower))
         stage = "ready" if serving else ("starting" if proc_alive else ("stopped" if self.is_installed() else "not_installed"))
         detail = ""
@@ -597,6 +601,9 @@ class AdapterManager:
             stage = "error"
             detail = "Google Chrome is not installed on this machine."
             retry_hint = "Install Chrome from google.com/chrome, then press Start adapter again."
+        elif proc_alive and re.search(r"aiexe_driver (fetching matching driver metadata|downloading chromedriver)", lower):
+            stage = "starting"
+            detail = "Preparing the Chrome driver for this browser version."
         elif network_issue:
             stage = "network"
             detail = "Network looks slow or unavailable while reaching Venice or installing dependencies."

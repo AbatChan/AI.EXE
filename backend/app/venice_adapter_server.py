@@ -26,6 +26,10 @@ from enum import Enum
 import array
 import base64
 import tempfile
+import shutil
+import zipfile
+from urllib.error import URLError
+from urllib.request import Request, urlopen
 
 # --- Venice site config: all fragile selectors/URLs live in venice_config.py (copied next to
 # this file). Edit that file when Venice changes their site; inline fallbacks below keep the
@@ -154,6 +158,89 @@ def _aiexe_find_chrome():
     return ""
 
 
+def _aiexe_windows_chrome_version():
+    """Read Chrome's installed version without webdriver-manager's opaque probing.
+
+    Chrome records this in BLBeacon on normal Windows installs.  Keeping this lookup
+    small and explicit lets the adapter fetch the matching Chrome-for-Testing driver
+    directly and makes a failed first-run download visible in adapter.log.
+    """
+    try:
+        import winreg
+        for root in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+            try:
+                with winreg.OpenKey(root, r"SOFTWARE\Google\Chrome\BLBeacon") as key:
+                    version, _ = winreg.QueryValueEx(key, "version")
+                    if re.fullmatch(r"\d+(?:\.\d+){3}", str(version or "").strip()):
+                        return str(version).strip()
+            except OSError:
+                continue
+    except Exception:
+        pass
+    raise RuntimeError("Could not read the installed Google Chrome version from Windows.")
+
+
+def _aiexe_windows_chromedriver(chrome_version):
+    """Return a cached matching ChromeDriver, downloading it with bounded stdlib I/O.
+
+    webdriver-manager's first-run version discovery can wait indefinitely in a frozen
+    Windows app.  Chrome for Testing publishes an exact driver by Chrome major version;
+    use that documented endpoint directly, cache it under AI.EXE data, and narrate each
+    network step in the adapter log.
+    """
+    cache_dir = os.path.join(os.environ.get("LOCALAPPDATA", tempfile.gettempdir()),
+                             "AI_EXE", "backend", "chromedriver")
+    driver_path = os.path.join(cache_dir, "chromedriver.exe")
+    version_path = os.path.join(cache_dir, "version.txt")
+    try:
+        with open(version_path, "r", encoding="utf-8") as fh:
+            cached_version = fh.read().strip()
+        if cached_version == chrome_version and os.path.isfile(driver_path):
+            print("AIEXE_DRIVER using cached chromedriver %s" % chrome_version, flush=True)
+            return driver_path
+    except OSError:
+        pass
+
+    major = chrome_version.split(".", 1)[0]
+    metadata_url = "https://googlechromelabs.github.io/chrome-for-testing/LATEST_RELEASE_" + major
+    try:
+        print("AIEXE_DRIVER fetching matching driver metadata for Chrome %s..." % chrome_version,
+              flush=True)
+        request = Request(metadata_url, headers={"User-Agent": "AI.EXE/1.0"})
+        with urlopen(request, timeout=20) as response:
+            driver_version = response.read().decode("utf-8", "replace").strip()
+        if not re.fullmatch(r"\d+(?:\.\d+){3}", driver_version):
+            raise RuntimeError("Chrome driver metadata returned an invalid version: %r" % driver_version)
+
+        zip_url = ("https://storage.googleapis.com/chrome-for-testing-public/"
+                   + driver_version + "/win64/chromedriver-win64.zip")
+        print("AIEXE_DRIVER downloading ChromeDriver %s..." % driver_version, flush=True)
+        os.makedirs(cache_dir, exist_ok=True)
+        zip_path = os.path.join(cache_dir, "chromedriver-download.zip")
+        with urlopen(Request(zip_url, headers={"User-Agent": "AI.EXE/1.0"}), timeout=120) as response:
+            with open(zip_path, "wb") as out:
+                shutil.copyfileobj(response, out, length=1024 * 256)
+        with zipfile.ZipFile(zip_path) as archive:
+            member = next((name for name in archive.namelist()
+                           if name.lower().endswith("/chromedriver.exe")), "")
+            if not member:
+                raise RuntimeError("ChromeDriver archive did not contain chromedriver.exe")
+            with archive.open(member) as source, open(driver_path + ".tmp", "wb") as out:
+                shutil.copyfileobj(source, out, length=1024 * 256)
+        os.replace(driver_path + ".tmp", driver_path)
+        with open(version_path, "w", encoding="utf-8") as fh:
+            fh.write(chrome_version)
+        try:
+            os.remove(zip_path)
+        except OSError:
+            pass
+        print("AIEXE_DRIVER chromedriver_ready %s" % driver_version, flush=True)
+        return driver_path
+    except (OSError, URLError, RuntimeError, zipfile.BadZipFile) as exc:
+        print("AIEXE_DRIVER driver_download_failed: %s" % exc, flush=True)
+        raise RuntimeError("Could not download the Chrome driver: %s" % exc) from exc
+
+
 def get_webdriver(headless=True, debug_browser=False, docker=False):
     chrome_options = webdriver.ChromeOptions()
     chrome_options.add_argument("--user-data-dir=" + os.path.join(os.path.dirname(os.path.abspath(__file__)), ".chrome-profile"))
@@ -218,8 +305,12 @@ def get_webdriver(headless=True, debug_browser=False, docker=False):
             print("AIEXE_DRIVER chrome_binary=%r" % chrome_bin, flush=True)
 
         try:
-            print("AIEXE_DRIVER resolving chromedriver (first run downloads it — needs internet)...", flush=True)
-            service = Service(ChromeDriverManager().install())
+            if os.name == "nt":
+                chrome_version = _aiexe_windows_chrome_version()
+                service = Service(_aiexe_windows_chromedriver(chrome_version))
+            else:
+                print("AIEXE_DRIVER resolving chromedriver...", flush=True)
+                service = Service(ChromeDriverManager().install())
             print("AIEXE_DRIVER launching Chrome...", flush=True)
             driver = webdriver.Chrome(service=service, options=chrome_options)
             print("AIEXE_DRIVER chrome_ready", flush=True)
