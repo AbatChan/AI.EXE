@@ -558,7 +558,12 @@ class AdapterManager:
                         "port": self._port}
             try:
                 if os.name == "nt":
-                    proc.terminate()
+                    # Windows does not terminate ChromeDriver/Chrome when its Python
+                    # parent exits. Kill this adapter's entire process tree, never the
+                    # user's normal Chrome processes.
+                    subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                   timeout=8, check=False)
                 else:
                     os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
                 try:

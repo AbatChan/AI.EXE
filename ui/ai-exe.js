@@ -17331,6 +17331,9 @@ async function startVeniceAdapterThenResend(options = {}) {
   // the box is still exactly that snapshot.
   const pendingAtStart = resendPending ? String((mainInput && mainInput.value) || '').trim() : '';
   _adapterStartingForSend = true;
+  // Give both entry points immediate feedback while the local backend accepts the
+  // start request; the richer sticky progress toast takes over once it is spawned.
+  showComposerNotice('Starting Venice adapter…', 6000);
   if (typeof renderComposerModelPill === 'function') renderComposerModelPill();
   try {
     let st = null;

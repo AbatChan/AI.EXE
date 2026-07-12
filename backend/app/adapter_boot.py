@@ -10,6 +10,7 @@ Usage:  python adapter_boot.py <adapter_script> <port> <headless_flag>
 """
 import os
 import runpy
+import subprocess
 import sys
 import threading
 import time
@@ -17,9 +18,15 @@ import time
 
 def _terminate_group() -> None:
     # POSIX: we're a session leader (spawned with start_new_session) — SIGTERM the
-    # whole group so Chrome/chromedriver children die too. Windows: best-effort;
-    # exiting usually cascades to the driver-launched browser.
+    # whole group so Chrome/chromedriver children die too. Windows does NOT cascade
+    # child termination, so taskkill the adapter's process tree explicitly.
     if os.name == "nt":
+        try:
+            subprocess.run(["taskkill", "/PID", str(os.getpid()), "/T", "/F"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           timeout=8, check=False)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
         return
     try:
         import signal
@@ -89,7 +96,12 @@ def main() -> None:
     # Rebuild argv exactly as the adapter's argparse expects.
     sys.argv = [script, "--port", str(port), "--ensure-pro",
                 "--headless" if headless == "1" else "--no-headless"]
-    runpy.run_path(script, run_name="__main__")
+    try:
+        runpy.run_path(script, run_name="__main__")
+    finally:
+        # Covers a startup exception before Selenium has returned a driver object;
+        # the adapter-level atexit cleanup cannot see those orphaned children.
+        _terminate_group()
 
 
 if __name__ == "__main__":
