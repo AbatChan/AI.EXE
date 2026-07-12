@@ -14911,7 +14911,7 @@ function friendlyAdapterError(log) {
   if (/incorrect|invalid password|wrong password|authentication failed|invalid credentials/.test(lower))
     return 'Venice rejected the login — double-check your email and password.';
   if (/chromedriver|session not created|cannot find chrome|chrome not reachable|devtoolsactiveport|no chrome binary/.test(lower))
-    return "Chrome couldn't start — make sure Google Chrome is installed on this machine.";
+    return "ChromeDriver couldn't launch Chrome. Open Settings → Provider and check the Adapter log for the exact error.";
   if (/identifier-field|password-field|no such element|element not (found|interactable|visible)/.test(lower))
     return "Couldn't find the Venice login fields — Venice may have changed their sign-in page again.";
   if (/not installed/.test(lower))

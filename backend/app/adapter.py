@@ -44,8 +44,8 @@ _PATCHED_ENSURE = '''def ensure_logged_in(driver):
 _PATCHED_LOGIN = '''def login_to_venice_with_username(username, password):
     global driver, args
     import time as _t
-    print("Logging in to venice with username and password...")
     driver = get_webdriver(headless=args.headless, debug_browser=args.debug_browser, docker=args.docker)
+    print("Logging in to Venice with username and password...", flush=True)
     driver.get("https://venice.ai/sign-in")
     _t.sleep(3)
     _submit = "//button[@type='submit' or contains(., 'Continue') or contains(., 'Sign in') or contains(., 'Log in')]"

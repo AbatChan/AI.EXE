@@ -27,9 +27,8 @@ import array
 import base64
 import tempfile
 import shutil
+import subprocess
 import zipfile
-from urllib.error import URLError
-from urllib.request import Request, urlopen
 
 # --- Venice site config: all fragile selectors/URLs live in venice_config.py (copied next to
 # this file). Edit that file when Venice changes their site; inline fallbacks below keep the
@@ -181,12 +180,12 @@ def _aiexe_windows_chrome_version():
 
 
 def _aiexe_windows_chromedriver(chrome_version):
-    """Return a cached matching ChromeDriver, downloading it with bounded stdlib I/O.
+    """Return a cached matching ChromeDriver via Windows' proven curl transport.
 
-    webdriver-manager's first-run version discovery can wait indefinitely in a frozen
-    Windows app.  Chrome for Testing publishes an exact driver by Chrome major version;
-    use that documented endpoint directly, cache it under AI.EXE data, and narrate each
-    network step in the adapter log.
+    webdriver-manager's first-run version discovery, and Python HTTPS from the frozen
+    backend, can stall despite Windows itself reaching the same endpoints.  curl.exe is
+    inbox on supported Windows and follows the user's network stack; use it with explicit
+    connection and overall time limits, then cache the extracted official driver.
     """
     cache_dir = os.path.join(os.environ.get("LOCALAPPDATA", tempfile.gettempdir()),
                              "AI_EXE", "backend", "chromedriver")
@@ -204,22 +203,34 @@ def _aiexe_windows_chromedriver(chrome_version):
     major = chrome_version.split(".", 1)[0]
     metadata_url = "https://googlechromelabs.github.io/chrome-for-testing/LATEST_RELEASE_" + major
     try:
-        print("AIEXE_DRIVER fetching matching driver metadata for Chrome %s..." % chrome_version,
+        curl = shutil.which("curl.exe") or shutil.which("curl")
+        if not curl:
+            raise RuntimeError("Windows curl.exe is unavailable; cannot fetch ChromeDriver")
+        print("AIEXE_DRIVER fetching matching driver metadata with Windows curl for Chrome %s..." % chrome_version,
               flush=True)
-        request = Request(metadata_url, headers={"User-Agent": "AI.EXE/1.0"})
-        with urlopen(request, timeout=20) as response:
-            driver_version = response.read().decode("utf-8", "replace").strip()
+        metadata = subprocess.run(
+            [curl, "--fail", "--location", "--silent", "--show-error", "--connect-timeout", "12",
+             "--max-time", "30", metadata_url], capture_output=True, text=True, timeout=35,
+        )
+        if metadata.returncode:
+            raise RuntimeError("metadata curl failed (%d): %s" %
+                               (metadata.returncode, (metadata.stderr or "").strip()))
+        driver_version = metadata.stdout.strip()
         if not re.fullmatch(r"\d+(?:\.\d+){3}", driver_version):
             raise RuntimeError("Chrome driver metadata returned an invalid version: %r" % driver_version)
 
         zip_url = ("https://storage.googleapis.com/chrome-for-testing-public/"
                    + driver_version + "/win64/chromedriver-win64.zip")
-        print("AIEXE_DRIVER downloading ChromeDriver %s..." % driver_version, flush=True)
+        print("AIEXE_DRIVER downloading ChromeDriver %s with Windows curl..." % driver_version, flush=True)
         os.makedirs(cache_dir, exist_ok=True)
         zip_path = os.path.join(cache_dir, "chromedriver-download.zip")
-        with urlopen(Request(zip_url, headers={"User-Agent": "AI.EXE/1.0"}), timeout=120) as response:
-            with open(zip_path, "wb") as out:
-                shutil.copyfileobj(response, out, length=1024 * 256)
+        download = subprocess.run(
+            [curl, "--fail", "--location", "--silent", "--show-error", "--connect-timeout", "12",
+             "--max-time", "180", "--output", zip_path, zip_url], capture_output=True, text=True, timeout=185,
+        )
+        if download.returncode:
+            raise RuntimeError("driver download curl failed (%d): %s" %
+                               (download.returncode, (download.stderr or "").strip()))
         with zipfile.ZipFile(zip_path) as archive:
             member = next((name for name in archive.namelist()
                            if name.lower().endswith("/chromedriver.exe")), "")
@@ -236,7 +247,7 @@ def _aiexe_windows_chromedriver(chrome_version):
             pass
         print("AIEXE_DRIVER chromedriver_ready %s" % driver_version, flush=True)
         return driver_path
-    except (OSError, URLError, RuntimeError, zipfile.BadZipFile) as exc:
+    except (OSError, subprocess.TimeoutExpired, RuntimeError, zipfile.BadZipFile) as exc:
         print("AIEXE_DRIVER driver_download_failed: %s" % exc, flush=True)
         raise RuntimeError("Could not download the Chrome driver: %s" % exc) from exc
 
@@ -348,8 +359,8 @@ def ensure_logged_in(driver):
 def login_to_venice_with_username(username, password):
     global driver, args
     import time as _t
-    print("Logging in to venice with username and password...")
     driver = get_webdriver(headless=args.headless, debug_browser=args.debug_browser, docker=args.docker)
+    print("Logging in to Venice with username and password...", flush=True)
     driver.get("https://venice.ai/sign-in")
     _t.sleep(3)
     _submit = "//button[@type='submit' or contains(., 'Continue') or contains(., 'Sign in') or contains(., 'Log in')]"
