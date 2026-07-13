@@ -124,6 +124,9 @@ jobs:
 
           # Main app, renamed to AI.EXE.exe (Ninja single-config: exe is in build/)
           Copy-Item "build/ai_exe_gui.exe" "$out/AI.EXE.exe"
+          # A standalone icon is copied into Windows-local storage at launch. Desktop
+          # shortcuts cannot reliably extract icons from Parallels/UNC-hosted executables.
+          Copy-Item "src/app.ico" "$out/app.ico"
 
           # UI files (HTML/CSS/JS + prompts + CodeMirror vendor) copied by CMake post-build
           if (Test-Path "build/ui") {

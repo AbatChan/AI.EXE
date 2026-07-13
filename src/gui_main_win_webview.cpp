@@ -1438,6 +1438,35 @@ void EnsureDesktopShortcut() {
       std::filesystem::path(desktop) / L"AI.EXE.lnk";
   CoTaskMemFree(desktop);
 
+  // Explorer frequently refuses to extract a Desktop shortcut icon when AI.EXE is
+  // launched from a Parallels/macOS UNC share (\\Mac\Home\...). Keep a real .ico in
+  // Windows-local storage and point only the icon there; the shortcut target remains
+  // the user's actual executable, so portable/shared-folder launches still work.
+  std::filesystem::path icon_path = exe_path;
+  wchar_t *local_app_data = nullptr;
+  if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr,
+                                     &local_app_data)) &&
+      local_app_data) {
+    const std::filesystem::path icon_dir =
+        std::filesystem::path(local_app_data) / L"AI_EXE" / L"shell";
+    CoTaskMemFree(local_app_data);
+    std::error_code icon_ec;
+    std::filesystem::create_directories(icon_dir, icon_ec);
+    const std::filesystem::path packaged_icon = app_dir / L"app.ico";
+    const std::filesystem::path local_icon = icon_dir / L"AI.EXE.ico";
+    if (std::filesystem::exists(packaged_icon, icon_ec)) {
+      std::filesystem::copy_file(packaged_icon, local_icon,
+                                 std::filesystem::copy_options::overwrite_existing,
+                                 icon_ec);
+      if (!icon_ec && std::filesystem::exists(local_icon, icon_ec) &&
+          std::filesystem::file_size(local_icon, icon_ec) > 0) {
+        icon_path = local_icon;
+      }
+    }
+  } else if (local_app_data) {
+    CoTaskMemFree(local_app_data);
+  }
+
   IShellLinkW *link = nullptr;
   if (SUCCEEDED(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER,
                                  IID_IShellLinkW,
@@ -1454,7 +1483,7 @@ void EnsureDesktopShortcut() {
       }
       link->SetPath(exe_path.wstring().c_str());
       link->SetWorkingDirectory(app_dir.wstring().c_str());
-      link->SetIconLocation(exe_path.wstring().c_str(), 0);
+      link->SetIconLocation(icon_path.wstring().c_str(), 0);
       link->SetDescription(L"AI.EXE");
       if (SUCCEEDED(pf->Save(lnk.wstring().c_str(), TRUE))) {
         SHChangeNotify(SHCNE_UPDATEITEM, SHCNF_PATHW, lnk.wstring().c_str(),
