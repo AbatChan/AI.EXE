@@ -163,6 +163,7 @@
     const norm = typeof normalizeWorkspacePath === 'function' ? normalizeWorkspacePath : (p) => String(p || '');
     const path = norm(rawPath || '');
     if (!path) return 0;
+    const comparablePath = path.toLowerCase();
     const activeIndex = Math.max(0, Math.min(phaseState.phases.length - 1, Number(phaseState.activeIndex) || 0));
     const phase = phaseState.phases[activeIndex];
     const tasks = Array.isArray(phase && phase.tasks) ? phase.tasks : [];
@@ -170,7 +171,7 @@
     tasks.forEach((task) => {
       if (!task || task.done || task.liveDone) return;
       const matches = extractFileLikeTaskPaths(task.text || task, norm);
-      if (matches.includes(path)) {
+      if (matches.some((candidate) => String(candidate || '').toLowerCase() === comparablePath)) {
         task.liveDone = true;
         changed += 1;
       }
@@ -206,7 +207,7 @@
     const paths = [];
     tasks.forEach((task) => {
       extractFileLikeTaskPaths(task && (task.text || task), norm).forEach((p) => {
-        if (p && !paths.includes(p)) paths.push(p);
+        if (p && !paths.some((known) => known.toLowerCase() === p.toLowerCase())) paths.push(p);
       });
     });
     return paths;
@@ -223,7 +224,7 @@
       const tasks = Array.isArray(phase && phase.tasks) ? phase.tasks : [];
       tasks.forEach((task) => {
         extractFileLikeTaskPaths(task && (task.text || task), norm).forEach((p) => {
-          if (p && !paths.includes(p)) paths.push(p);
+          if (p && !paths.some((known) => known.toLowerCase() === p.toLowerCase())) paths.push(p);
         });
       });
     });
@@ -244,6 +245,15 @@
       `Finished with ${doneName}. Press Continue when you want me to move on to ${nextName}.`,
     ];
     return variants[Math.abs(Number(doneIdx) || 0) % variants.length];
+  }
+
+  function shouldForcePhaseValidation(decision, phaseState, missingFiles, validationFailure, validationPassed) {
+    const finishing = !decision || decision.action !== 'tool' || decision.tool === 'none';
+    return Boolean(finishing
+      && phaseState
+      && Array.isArray(missingFiles) && missingFiles.length === 0
+      && !validationFailure
+      && !validationPassed);
   }
 
   // Cross-run done-work memory per chat: survives Continue/stream crashes so
@@ -1259,6 +1269,28 @@
             projectDisplayName = fileProjectName;
           }
         }
+        // Repair legacy/model-authored phase casing against the authoritative
+        // expected-file list. On Windows `/Src/app/layout.tsx` and
+        // `/src/app/layout.tsx` are one file, but case-sensitive UI comparisons
+        // treated them as separate deliverables and wrote the layout twice.
+        const expectedCaseMap = new Map((Array.isArray(planSpec.expectedFiles) ? planSpec.expectedFiles : [])
+          .map((path) => deps.normalizeWorkspacePath(path || ''))
+          .filter(Boolean)
+          .map((path) => [path.toLowerCase(), path]));
+        phases.forEach((phase) => {
+          (Array.isArray(phase && phase.tasks) ? phase.tasks : []).forEach((task) => {
+            if (!task) return;
+            let text = String(task.text || task || '');
+            extractFileLikeTaskPaths(text, deps.normalizeWorkspacePath).forEach((candidate) => {
+              const canonical = expectedCaseMap.get(String(candidate || '').toLowerCase());
+              if (!canonical || canonical === candidate) return;
+              const from = String(candidate).replace(/^\//, '');
+              const to = String(canonical).replace(/^\//, '');
+              text = text.replace(new RegExp(from.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i'), to);
+            });
+            if (typeof task === 'object') task.text = text;
+          });
+        });
         let activeIndex = typeof deps.firstUnfinishedPhaseIndex === 'function'
           ? deps.firstUnfinishedPhaseIndex(phases) : 0;
         if (activeIndex < 0) activeIndex = phases.length - 1;
@@ -1480,11 +1512,13 @@
       const phasePathKnownPresent = (rawPath) => {
         const target = deps.normalizeWorkspacePath(rawPath || '');
         if (!target) return false;
+        const comparableTarget = target.toLowerCase();
         return toolEvents.some((event) => {
           if (!event || event.ok === false) return false;
           const tool = String(event.tool || '').toLowerCase();
           if (!['read_file', 'write_file', 'edit_file'].includes(tool)) return false;
-          return deps.normalizeWorkspacePath(event.path || '') === target;
+          if (String(event.structuralIssue || '').trim()) return false;
+          return deps.normalizeWorkspacePath(event.path || '').toLowerCase() === comparableTarget;
         });
       };
       const getKnownActivePhaseFileTaskGaps = () => {
@@ -2147,6 +2181,29 @@
           setAgentProgress('Continuing...');
           continue;
           }
+        }
+
+        // Validation is a deterministic harness responsibility. If a phased
+        // project has all files and the model tries to finish, run the check now
+        // instead of asking the model the same question again every step.
+        if (shouldForcePhaseValidation(
+          decision,
+          phaseState,
+          getKnownActivePhaseFileTaskGaps(),
+          latestValidationFailureSinceLatestMutation(),
+          hasValidationPassedSinceLatestMutation(),
+        )) {
+          decision = {
+            action: 'tool',
+            tool: 'validate_files',
+            path: '/',
+            message: 'Checking the phase files before finishing.',
+            _deterministic: true,
+          };
+          recordDebugTrace('agent_phase_validation_forced', {
+            chatId: String(chatId || ''), step: String(step),
+            phase: String(phaseState.activeIndex + 1),
+          }, { chatId: String(chatId || ''), step, phaseState, toolEvents });
         }
 
         if (decision.action !== 'tool' || decision.tool === 'none') {
@@ -3215,8 +3272,8 @@
         if (phaseState && toolResult && toolResult.ok && toolResult.mutated
           && countRunMutations() >= phaseMutationBudget()) {
           const isLastPhase = phaseState.activeIndex >= phaseState.phases.length - 1;
-          const lastPhaseHasAllFileTasks = isLastPhase && !getKnownActivePhaseFileTaskGaps().length;
-          if (lastPhaseHasAllFileTasks) {
+          const phaseHasAllFileTasks = !getKnownActivePhaseFileTaskGaps().length;
+          if (phaseHasAllFileTasks && !hasValidationPassedSinceLatestMutation()) {
             toolEvents.push({
               tool: 'phase_check',
               ok: true,
@@ -3766,5 +3823,6 @@
     markPhaseTaskLiveProgressForPath,
     getActivePhaseFileTaskGaps,
     activePhaseFilePaths,
+    shouldForcePhaseValidation,
   };
 })(window);

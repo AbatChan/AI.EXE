@@ -46,6 +46,11 @@ assert.match(plannerFn, /requestedPlannerTokens <= 1200/);
 assert.match(plannerFn, /\? 3500/);
 assert.match(plannerFn, /Math\.min\(24000/);
 
+const selectedRemoteFn = sliceFrom('async function requestSelectedRemoteTextCompletion');
+assert.match(selectedRemoteFn, /const owningChatId = String\(\(activeInferenceRequest && activeInferenceRequest\.chatId\)/);
+assert.match(selectedRemoteFn, /requestExtra\.adapterChatId = owningChatId/);
+assert.match(selectedRemoteFn, /delete requestExtra\.isolatedAdapterChat/);
+
 assert.match(backendModels, /structured_output: bool = False/);
 assert.match(backendModels, /max_output_chars: int = 0/);
 assert.match(backendUsage, /body\["aiexe_structured_output"\] = True/);

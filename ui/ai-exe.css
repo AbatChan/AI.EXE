@@ -2959,16 +2959,58 @@ html.platform-mac .settings-sidebar {
   background: rgba(82, 174, 255, 0.24);
 }
 
+.file-viewer-highlight,
+.file-viewer-editor,
+.file-viewer-cm-host .cm-scroller {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(70, 190, 215, 0.46) rgba(7, 12, 20, 0.36);
+}
+
 .file-viewer-highlight::-webkit-scrollbar,
-.file-viewer-editor::-webkit-scrollbar {
-  width: 4px;
-  height: 4px;
+.file-viewer-editor::-webkit-scrollbar,
+.file-viewer-cm-host .cm-scroller::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+  background: transparent;
+}
+
+.file-viewer-highlight::-webkit-scrollbar-track,
+.file-viewer-editor::-webkit-scrollbar-track,
+.file-viewer-cm-host .cm-scroller::-webkit-scrollbar-track {
+  background: rgba(7, 12, 20, 0.42);
+  border: 1px solid rgba(110, 150, 190, 0.08);
+  border-radius: 999px;
 }
 
 .file-viewer-highlight::-webkit-scrollbar-thumb,
-.file-viewer-editor::-webkit-scrollbar-thumb {
-  background: var(--border2);
-  border-radius: 4px;
+.file-viewer-editor::-webkit-scrollbar-thumb,
+.file-viewer-cm-host .cm-scroller::-webkit-scrollbar-thumb {
+  min-width: 28px;
+  min-height: 28px;
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background: linear-gradient(180deg, rgba(84, 213, 232, 0.72), rgba(60, 117, 180, 0.72)) padding-box;
+  box-shadow: inset 0 0 0 1px rgba(176, 242, 250, 0.13);
+}
+
+.file-viewer-highlight::-webkit-scrollbar-thumb:hover,
+.file-viewer-editor::-webkit-scrollbar-thumb:hover,
+.file-viewer-cm-host .cm-scroller::-webkit-scrollbar-thumb:hover {
+  background: linear-gradient(180deg, rgba(95, 231, 245, 0.9), rgba(63, 149, 207, 0.9)) padding-box;
+}
+
+.file-viewer-highlight::-webkit-scrollbar-button,
+.file-viewer-editor::-webkit-scrollbar-button,
+.file-viewer-cm-host .cm-scroller::-webkit-scrollbar-button {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+.file-viewer-highlight::-webkit-scrollbar-corner,
+.file-viewer-editor::-webkit-scrollbar-corner,
+.file-viewer-cm-host .cm-scroller::-webkit-scrollbar-corner {
+  background: transparent;
 }
 
 .chat-area {

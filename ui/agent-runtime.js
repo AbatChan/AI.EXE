@@ -48,6 +48,44 @@
     // "unclosed CSS blocks" / mid-function truncation that then traps the agent in a
     // repair loop). Brace/bracket imbalance or an obviously mid-token ending are
     // strong, language-agnostic signals.
+    function scanCodeStructure(content) {
+      const text = String(content || '');
+      const stack = [];
+      let mode = 'code';
+      let escaped = false;
+      const matching = { ')': '(', ']': '[', '}': '{' };
+      for (let i = 0; i < text.length; i += 1) {
+        const ch = text[i];
+        const next = text[i + 1] || '';
+        if (mode === 'line') { if (ch === '\n') mode = 'code'; continue; }
+        if (mode === 'block') {
+          if (ch === '*' && next === '/') { mode = 'code'; i += 1; }
+          continue;
+        }
+        if (mode !== 'code') {
+          if (escaped) { escaped = false; continue; }
+          if (ch === '\\') { escaped = true; continue; }
+          if ((mode === 'single' && ch === "'") || (mode === 'double' && ch === '"') || (mode === 'template' && ch === '`')) mode = 'code';
+          continue;
+        }
+        if (ch === "'") { mode = 'single'; continue; }
+        if (ch === '"') { mode = 'double'; continue; }
+        if (ch === '`') { mode = 'template'; continue; }
+        if (ch === '/' && next === '/') { mode = 'line'; i += 1; continue; }
+        if (ch === '/' && next === '*') { mode = 'block'; i += 1; continue; }
+        if ('([{'.includes(ch)) stack.push(ch);
+        else if (matching[ch]) {
+          if (stack[stack.length - 1] === matching[ch]) stack.pop();
+          else return { invalidCloser: ch, unclosed: stack, unterminatedBlockComment: false, unterminatedString: false };
+        }
+      }
+      return {
+        invalidCloser: '', unclosed: stack,
+        unterminatedBlockComment: mode === 'block',
+        unterminatedString: ['single', 'double', 'template'].includes(mode),
+      };
+    }
+
     function looksTruncatedFileContent(content, path) {
       const text = String(content || '');
       if (!text.trim()) return false;
@@ -69,8 +107,11 @@
         if (bal('{', '}') > 0 || bal('[', ']') > 0) return true;
       }
       if (['css', 'scss', 'less', 'js', 'mjs', 'cjs', 'ts', 'jsx', 'tsx'].includes(ext)) {
-        // Unterminated /* block comment */ — a common mid-comment truncation.
-        if ((text.match(/\/\*/g) || []).length > (text.match(/\*\//g) || []).length) return true;
+        const structure = scanCodeStructure(text);
+        // Quote-aware scanning prevents globs such as "./src/**/*.{ts,tsx}"
+        // from looking like comments and catches TSX cut after a plausible </div>
+        // while its enclosing return/function delimiters are still open.
+        if (structure.unterminatedBlockComment || structure.unterminatedString || structure.invalidCloser || structure.unclosed.length) return true;
       }
       if (['html', 'htm'].includes(ext)) {
         if (/<html[\s>]/i.test(text) && !/<\/html\s*>/i.test(text)) return true;
@@ -183,7 +224,7 @@
       // pass can be model prose/refusal, and writing it clobbers the real file
       // before the executor's revert/structure guards ever see it (this is how
       // a 43K app.js became its own rewrite-refusal text).
-      const persistPartials = !options || options.persistPartials !== false;
+      const persistPartials = Boolean(options && options.persistPartials === true);
       const promptChars = String(prompt || '').length;
       // Heartbeat so the loop's idle-timeout knows this slow multi-pass generation
       // is actually progressing (not hung) and lets it finish a large file.

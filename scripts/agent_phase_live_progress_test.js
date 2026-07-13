@@ -62,6 +62,25 @@ assert.equal(
 assert.equal(phaseState.phases[0].tasks[2].liveDone, true, 'sets liveDone on the matching task');
 assert.equal(phaseState.phases[0].tasks[2].done, false, 'does not mutate source-of-truth done');
 
+const windowsCasePhase = {
+  activeIndex: 0,
+  phases: [{ title: 'Layout', tasks: [{ text: '/Src/app/layout.tsx', done: false }] }],
+};
+assert.equal(
+  loop.markPhaseTaskLiveProgressForPath(windowsCasePhase, '/src/app/layout.tsx', normalizeWorkspacePath),
+  1,
+  'Windows path casing differences do not create a duplicate phase deliverable',
+);
+assert.deepEqual(
+  loop.getActivePhaseFileTaskGaps(
+    { activeIndex: 0, phases: [{ title: 'Layout', tasks: [{ text: '/Src/app/layout.tsx', done: false }] }] },
+    normalizeWorkspacePath,
+    (candidate) => candidate.toLowerCase() === '/src/app/layout.tsx',
+  ),
+  [],
+  'case-insensitive filesystem evidence satisfies a differently-cased phase path',
+);
+
 assert.equal(
   loop.markPhaseTaskLiveProgressForPath(phaseState, '/features.html', normalizeWorkspacePath),
   0,
@@ -82,6 +101,17 @@ assert.deepEqual(
   loop.getActivePhaseFileTaskGaps(phaseState, normalizeWorkspacePath).map((gap) => gap.path),
   ['/index.html', '/js/script.js'],
   'reports active phase file tasks that are not done or live-done',
+);
+
+assert.equal(
+  loop.shouldForcePhaseValidation({ action: 'final', tool: 'none' }, phaseState, [], null, false),
+  true,
+  'a phased final with complete files deterministically runs validation instead of re-prompting the model',
+);
+assert.equal(
+  loop.shouldForcePhaseValidation({ action: 'final', tool: 'none' }, phaseState, [], null, true),
+  false,
+  'a phase with fresh passing validation may finish normally',
 );
 
 assert.equal(

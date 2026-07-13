@@ -9085,6 +9085,17 @@ async function requestSelectedRemoteTextCompletion(prompt, maxTokens, systemProm
     ? extra.abortController
     : new AbortController();
   const requestExtra = { ...(extra || {}) };
+  // Every inference belonging to an active AI.EXE turn—including planning,
+  // file generation, repair, and validation narration—must reuse that chat's
+  // single Venice conversation. Previously planner calls forced an `internal:`
+  // thread while file generation used the owning thread, producing two Venice
+  // chats for one visible AI.EXE chat.
+  const owningChatId = String((activeInferenceRequest && activeInferenceRequest.chatId) || '').trim();
+  if (isVeniceAdapterSelected() && owningChatId) {
+    requestExtra.adapterChatId = owningChatId;
+    delete requestExtra.isolatedAdapterChat;
+    delete requestExtra.adapterChatScope;
+  }
   if (
     isVeniceAdapterSelected()
     && !requestExtra.keepAdapterChatContext
@@ -12073,7 +12084,9 @@ let _workspaceTreeSummaryCache = { at: 0, text: '', paths: new Set() };
 // refreshes it just before pending requirements are computed).
 function workspaceTreeHasFile(path) {
   const normalized = normalizeWorkspacePath(path || '');
-  return Boolean(normalized) && _workspaceTreeSummaryCache.paths.has(normalized);
+  if (!normalized) return false;
+  const comparable = normalized.toLowerCase();
+  return Array.from(_workspaceTreeSummaryCache.paths).some((known) => String(known || '').toLowerCase() === comparable);
 }
 async function getWorkspaceFileTreeSummary() {
   const ctx = typeof getWorkspaceContext === 'function' ? getWorkspaceContext() || {} : {};

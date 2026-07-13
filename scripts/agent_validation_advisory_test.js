@@ -47,6 +47,25 @@ console.log('PASS: static architecture and DOM checks are advisory');
   assert.match(result.observation, /requirements\.txt automatically synchronized from imports: requests/);
   assert.match(result.observation, /static scan could not resolve/);
   console.log('PASS: dependency and import scans are advisory');
+
+  const missingAliasFiles = {
+    '/src/app/layout.tsx': "import { Providers } from '@/components/providers';\nexport default function Layout({ children }) { return children; }\n",
+  };
+  const aliasExecutor = global.AIExeAgentExecutor.createAgentExecutor({
+    normalizeWorkspacePath: (value) => String(value || '/').replace(/\\/g, '/').replace(/^\/?/, '/'),
+    invokeWorkspaceAction: async (action, data) => action === 'workspaceReadFile'
+      ? { ok: Object.prototype.hasOwnProperty.call(missingAliasFiles, data.path), output: missingAliasFiles[data.path] || '' }
+      : { ok: true },
+    isLikelyCompletePrimarySource: () => true,
+    reviewAgentProjectCoherence: async () => [],
+  });
+  const aliasResult = await aliasExecutor.executeDeveloperToolCall('test', { tool: 'validate_files' }, '', [], {
+    expectedFiles: ['/src/app/layout.tsx'],
+    _allExpectedFiles: ['/src/app/layout.tsx'],
+  });
+  assert.equal(aliasResult.validationPassed, false);
+  assert.match(aliasResult.observation, /imports @\/components\/providers, but none of its local files exist/);
+  console.log('PASS: unresolved @/ aliases are blocking build errors');
 })().catch((error) => {
   console.error(error);
   process.exit(1);

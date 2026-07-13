@@ -201,6 +201,24 @@ const completeTsWithHtmlString = [
 ok('complete TS that builds HTML strings is NOT flagged as truncated',
   looksTruncatedFileContent(completeTsWithHtmlString, '/markup.ts') === false);
 
+const truncatedTsxAfterPlausibleClosingTag = [
+  'export default function Layout({ children }) {',
+  '  return (',
+  '    <html><body><div>',
+  '      {children}',
+  '    </div>',
+].join('\n');
+ok('TSX cut after a plausible closing div is still detected from open code delimiters',
+  looksTruncatedFileContent(truncatedTsxAfterPlausibleClosingTag, '/src/app/layout.tsx') === true);
+
+const completeTailwindGlob = [
+  "import type { Config } from 'tailwindcss';",
+  "const config: Config = { content: ['./src/**/*.{ts,tsx}'] };",
+  'export default config;',
+].join('\n');
+ok('glob strings containing slash-star-star do not look like block comments',
+  looksTruncatedFileContent(completeTailwindGlob, '/tailwind.config.ts') === false);
+
 const unterminatedComment = `/* Ledgerly stylesheet */\n:root { --x: 1px; }\n.card { color: red; }\n/* TODO: dark theme`;
 ok('CSS with an unterminated /* comment is detected as truncated',
   looksTruncatedFileContent(unterminatedComment, '/style.css') === true);

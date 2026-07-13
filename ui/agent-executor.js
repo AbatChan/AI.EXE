@@ -573,10 +573,12 @@ export default config;
     // continuation, or an unterminated block comment. Catches saves truncated before
     // completion (e.g. vite.config.ts saved ending at "server: {") that .ts/.tsx would
     // otherwise pass silently. Complete files end on } ; ) etc. and don't trip this.
-    function hasUnterminatedBlockComment(text) {
+    function scanCodeStructure(text) {
       const source = String(text || '');
       let mode = 'code';
       let escaped = false;
+      const stack = [];
+      const matching = { ')': '(', ']': '[', '}': '{' };
       for (let i = 0; i < source.length; i += 1) {
         const ch = source[i];
         const next = source[i + 1] || '';
@@ -598,9 +600,18 @@ export default config;
         if (ch === '"') { mode = 'double'; continue; }
         if (ch === '`') { mode = 'template'; continue; }
         if (ch === '/' && next === '/') { mode = 'line'; i += 1; continue; }
-        if (ch === '/' && next === '*') { mode = 'block'; i += 1; }
+        if (ch === '/' && next === '*') { mode = 'block'; i += 1; continue; }
+        if ('([{'.includes(ch)) stack.push(ch);
+        else if (matching[ch]) {
+          if (stack[stack.length - 1] === matching[ch]) stack.pop();
+          else return { invalidCloser: ch, unclosed: stack, unterminatedBlockComment: false, unterminatedString: false };
+        }
       }
-      return mode === 'block';
+      return {
+        invalidCloser: '', unclosed: stack,
+        unterminatedBlockComment: mode === 'block',
+        unterminatedString: ['single', 'double', 'template'].includes(mode),
+      };
     }
 
     function looksTruncatedCodeTail(text) {
@@ -610,7 +621,7 @@ export default config;
       if (/[([{,:]$/.test(tail)) return true;
       // Raw delimiter counting mistakes glob strings such as
       // "./app/**/*.{ts,tsx}" for an opening block comment.
-      if (hasUnterminatedBlockComment(tail)) return true;
+      if (scanCodeStructure(tail).unterminatedBlockComment) return true;
       return false;
     }
 
@@ -618,8 +629,11 @@ export default config;
     function getStructuralIssueForPath(path, content) {
       const normalized = deps.normalizeWorkspacePath(path || '');
       const text = String(content || '');
-      if (/\.(ts|tsx|js|jsx|mjs|cjs)$/i.test(normalized) && text.trim() && looksTruncatedCodeTail(text)) {
-        return 'looks truncated — it ends mid-statement (on an opener/separator), so it was cut off before completion; append the remainder so the file is complete';
+      if (/\.(ts|tsx|js|jsx|mjs|cjs)$/i.test(normalized) && text.trim()) {
+        const structure = scanCodeStructure(text);
+        if (structure.unterminatedBlockComment || structure.unterminatedString || structure.invalidCloser || structure.unclosed.length || looksTruncatedCodeTail(text)) {
+          return 'looks truncated or structurally incomplete — a comment, parenthesis, bracket, or code block was not closed; regenerate or append the missing tail before saving';
+        }
       }
       if (/\.html?$/i.test(normalized)) return getHtmlStructureIssue(text);
       if (/\.css$/i.test(normalized)) return getCssSyntaxIssue(text);
@@ -1640,6 +1654,35 @@ export default config;
       return imports;
     }
 
+    function extractAliasCodeImports(source) {
+      const imports = [];
+      const text = String(source || '');
+      const patterns = [
+        /\bimport\s+(?:[^'"\n]+\s+from\s+)?['"](@\/[^'"]+)['"]/g,
+        /\bexport\s+[^'"\n]+\s+from\s+['"](@\/[^'"]+)['"]/g,
+        /\bimport\s*\(\s*['"](@\/[^'"]+)['"]\s*\)/g,
+      ];
+      patterns.forEach((pattern) => {
+        for (const match of text.matchAll(pattern)) {
+          const lineStart = text.lastIndexOf('\n', match.index) + 1;
+          const prefix = text.slice(lineStart, match.index).trimStart();
+          if (prefix.startsWith('//')) continue;
+          const spec = String(match[1] || '').trim();
+          if (spec && !imports.includes(spec)) imports.push(spec);
+        }
+      });
+      return imports;
+    }
+
+    function resolveAliasImportCandidates(specifier) {
+      const spec = String(specifier || '').split('?')[0].split('#')[0];
+      if (!spec.startsWith('@/')) return [];
+      const base = deps.normalizeWorkspacePath(`/src/${spec.slice(2)}`);
+      if (/\.[a-z0-9]+$/i.test(base)) return [base];
+      return ['.ts', '.tsx', '.js', '.jsx', '.json'].map((ext) => `${base}${ext}`)
+        .concat(['.ts', '.tsx', '.js', '.jsx'].map((ext) => `${base}/index${ext}`));
+    }
+
     function resolveRelativeImportCandidates(fromPath, specifier) {
       const from = deps.normalizeWorkspacePath(fromPath || '');
       let spec = String(specifier || '').split('?')[0].split('#')[0];
@@ -2417,16 +2460,16 @@ export default config;
               len: String(String(content || '').length),
             }, { path, issue, stage: stageLabel, len: String(content || '').length });
           }
-          const generated = await deps.generateAgentWriteFileContent(taskText, toolEvents, path, prior, planSpec, { persistPartials: creatingNewFile });
+          const generated = await deps.generateAgentWriteFileContent(taskText, toolEvents, path, prior, planSpec, { persistPartials: false });
           if (generated) content = generated;
           return getStructuralIssueForPath(path, content);
         };
         if (shouldAutoGenerate && !modelSuppliedComplete && !(packageJsonTarget && String(content).trim())) {
-          const generated = await deps.generateAgentWriteFileContent(taskText, toolEvents, path, content, planSpec, { persistPartials: creatingNewFile });
+          const generated = await deps.generateAgentWriteFileContent(taskText, toolEvents, path, content, planSpec, { persistPartials: false });
           if (generated) content = generated;
           await repairStructuralIssueOnce('initial generated content');
         } else if (!shouldAutoGenerate && !String(content).trim()) {
-          const generated = await deps.generateAgentWriteFileContent(taskText, toolEvents, path, '', planSpec, { persistPartials: creatingNewFile });
+          const generated = await deps.generateAgentWriteFileContent(taskText, toolEvents, path, '', planSpec, { persistPartials: false });
           if (generated) content = generated;
         }
         if (tailwindConfigTarget && (getStructuralIssueForPath(path, content) || String(content || '').length > 8000)) {
@@ -3397,6 +3440,20 @@ export default config;
             }
             if (!found) {
               mechanicalAdvisory.push(`${path}: static scan could not resolve ${spec} to ${candidates.slice(0, 5).join(', ')}${candidates.length > 5 ? ', ...' : ''}. Confirm it is not generated, aliased, or a commented example.`);
+            }
+          }
+          const aliasSpecs = extractAliasCodeImports(source);
+          for (const spec of aliasSpecs) {
+            const candidates = resolveAliasImportCandidates(spec);
+            let found = candidates.some((candidate) => Object.prototype.hasOwnProperty.call(fileContents, candidate));
+            if (!found) {
+              for (const candidate of candidates) {
+                const res = await deps.invokeWorkspaceAction('workspaceReadFile', { path: candidate });
+                if (res && res.ok) { found = true; break; }
+              }
+            }
+            if (!found) {
+              issues.push(`${path}: imports ${spec}, but none of its local files exist (${candidates.slice(0, 5).join(', ')}). Remove the invented import or create the explicitly planned module.`);
             }
           }
         }

@@ -694,6 +694,9 @@
         && planFiles.some((p) => /\.html?$/i.test(p))
         && !planFiles.some((p) => /\.(css|scss|sass|less|js|mjs|cjs|ts|jsx|tsx)$/i.test(p));
       const generationHints = buildAgentFileGenerationHints(taskText, normalizedPath, { selfContained, frameworkWeb });
+      if (/\.(?:js|mjs|cjs|ts|tsx|jsx)$/i.test(normalizedPath) && frameworkWeb) {
+        generationHints.push('Import local modules/components only when their files already exist in PROJECT_STATE or are explicitly listed in Expected files. Do not invent imports such as @/components/providers, sidebar, mobile-nav, or command-palette unless those exact files are planned; keep this file self-contained when its support components are not part of the project contract.');
+      }
       // New page in a site with shared CSS: consume it + reuse the shared header/footer
       // (consistent from first write, not generate-then-repair). Mirrors the edit path.
       const sharedSourceHints = (() => {
