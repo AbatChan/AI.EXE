@@ -1284,11 +1284,12 @@ const inferenceProviderDefs = {
     modelField: 'anthropicModel',
     keyLabel: 'Anthropic API Key',
     keyPlaceholder: 'sk-ant-...',
-    modelPlaceholder: 'claude-opus-4-1-20250805',
-    defaultModel: 'claude-opus-4-1-20250805',
-    helpText: 'Uses Anthropic Messages streaming. Token stays in local app settings on this machine.',
+    modelPlaceholder: 'claude-opus-4-8',
+    defaultModel: 'claude-opus-4-8',
+    helpText: 'Uses Anthropic Messages API with native tool calling. Token stays in local app settings on this machine.',
     endpointUrl: 'https://api.anthropic.com/v1/messages',
     protocol: 'anthropic',
+    supportsToolCalling: true,
   },
   gemini: {
     label: 'Gemini API',
@@ -8802,27 +8803,37 @@ async function streamOllamaChatCompletion(provider, prompt, handlers = {}, optio
     let output = '';
     const completeJsonEnd = (text) => {
       const source = String(text || '');
-      const start = source.indexOf('{');
-      if (start < 0) return -1;
-      let depth = 0;
-      let inString = false;
-      let escaped = false;
-      for (let i = start; i < source.length; i += 1) {
-        const ch = source[i];
-        if (inString) {
-          if (escaped) escaped = false;
-          else if (ch === '\\') escaped = true;
-          else if (ch === '"') inString = false;
-          continue;
+      // Find the end of the first brace-balanced substring that PARSES as JSON.
+      // A plain first-'{' scan stops on prose/citation braces (web-augmented
+      // replies prepend text) and truncates output to garbage → empty decision.
+      let scanFrom = 0;
+      for (;;) {
+        const start = source.indexOf('{', scanFrom);
+        if (start < 0) return -1;
+        let depth = 0;
+        let inString = false;
+        let escaped = false;
+        for (let i = start; i < source.length; i += 1) {
+          const ch = source[i];
+          if (inString) {
+            if (escaped) escaped = false;
+            else if (ch === '\\') escaped = true;
+            else if (ch === '"') inString = false;
+            continue;
+          }
+          if (ch === '"') { inString = true; continue; }
+          if (ch === '{') depth += 1;
+          else if (ch === '}') {
+            depth -= 1;
+            if (depth === 0) {
+              const cand = source.slice(start, i + 1);
+              try { JSON.parse(cand); return i + 1; }
+              catch (_) { break; } // balanced but not JSON — try next '{'
+            }
+          }
         }
-        if (ch === '"') { inString = true; continue; }
-        if (ch === '{') depth += 1;
-        else if (ch === '}') {
-          depth -= 1;
-          if (depth === 0) return i + 1;
-        }
+        scanFrom = start + 1;
       }
-      return -1;
     };
     for (;;) {
       const { done, value } = await reader.read();
@@ -9012,13 +9023,17 @@ async function requestOpenAiCompatibleTextCompletion(provider, prompt, maxTokens
   }
 }
 
-async function requestAnthropicTextCompletion(prompt, maxTokens) {
+async function requestAnthropicTextCompletion(prompt, maxTokens, systemPrompt = '') {
   if (!remoteProvidersEnabled) return null;
   const provider = 'anthropic';
   const def = getInferenceProviderDef(provider);
   const apiKey = getProviderApiKey(provider);
   const model = getProviderModel(provider);
   if (!apiKey || !model) return null;
+  // Agent decision calls carry a systemPrompt — offer the agent_step tool so Claude
+  // returns a typed tool_use block (guaranteed-valid JSON, no brace-parsing). Mirrors
+  // the OpenAI-compatible path: offer, don't force, so text calls fall through cleanly.
+  const useTools = Boolean(systemPrompt && def && def.supportsToolCalling);
   try {
     const response = await fetch(def.endpointUrl, {
       method: 'POST',
@@ -9030,16 +9045,28 @@ async function requestAnthropicTextCompletion(prompt, maxTokens) {
       body: JSON.stringify({
         model,
         max_tokens: Math.max(1, Number(maxTokens) || agentFileContentMaxTokens),
+        ...(systemPrompt ? { system: String(systemPrompt) } : {}),
         messages: [{ role: 'user', content: String(prompt || '') }],
+        ...(useTools ? {
+          tools: [{
+            name: agentStepFunctionSchema.function.name,
+            description: agentStepFunctionSchema.function.description,
+            input_schema: agentStepFunctionSchema.function.parameters,
+          }],
+        } : {}),
       }),
     });
     if (!response.ok) return null;
     const payload = await response.json().catch(() => null);
     const blocks = Array.isArray(payload && payload.content) ? payload.content : [];
-    const text = blocks
-      .filter((block) => block && block.type === 'text' && typeof block.text === 'string')
-      .map((block) => block.text)
-      .join('');
+    // Prefer the structured tool_use decision (already a valid object) over prose.
+    const toolUse = blocks.find((block) => block && block.type === 'tool_use' && block.input && typeof block.input === 'object');
+    const text = toolUse
+      ? JSON.stringify(toolUse.input)
+      : blocks
+        .filter((block) => block && block.type === 'text' && typeof block.text === 'string')
+        .map((block) => block.text)
+        .join('');
     const truncated = String((payload && payload.stop_reason) || '').toLowerCase() === 'max_tokens';
     return text ? { ok: true, output: text, truncated } : null;
   } catch (_) {
@@ -9236,7 +9263,7 @@ async function requestRemoteTextCompletionForCapability(capability, prompt, maxT
     return result ? { ...result, workerId: worker.id } : result;
   }
   if (provider === 'anthropic') {
-    const result = await requestAnthropicTextCompletion(prompt, maxTokens);
+    const result = await requestAnthropicTextCompletion(prompt, maxTokens, completionOptions && completionOptions.systemPrompt ? completionOptions.systemPrompt : '');
     return result ? { ...result, workerId: worker.id, provider, model: getProviderModel(provider) } : result;
   }
   const abortSignal = completionOptions && completionOptions.abortController instanceof AbortController

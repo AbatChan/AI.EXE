@@ -3103,31 +3103,40 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
             return None
 
         def _complete_json_prefix(txt):
-            """Return the first balanced JSON object, or ''. Handles braces in strings."""
+            """First brace-balanced substring that PARSES as JSON, or ''.
+            Prose/citation braces before the real object (web-augmented replies
+            prepend text) used to poison a first-'{' scan → empty capture."""
             source = str(txt or "")
-            start = source.find("{")
-            if start < 0:
-                return ""
-            depth, in_string, escaped = 0, False, False
-            for idx in range(start, len(source)):
-                ch = source[idx]
-                if in_string:
-                    if escaped:
-                        escaped = False
-                    elif ch == "\\":
-                        escaped = True
-                    elif ch == '"':
-                        in_string = False
-                    continue
-                if ch == '"':
-                    in_string = True
-                elif ch == "{":
-                    depth += 1
-                elif ch == "}":
-                    depth -= 1
-                    if depth == 0:
-                        return source[start:idx + 1]
-            return ""
+            scan_from = 0
+            while True:
+                start = source.find("{", scan_from)
+                if start < 0:
+                    return ""
+                depth, in_string, escaped = 0, False, False
+                for idx in range(start, len(source)):
+                    ch = source[idx]
+                    if in_string:
+                        if escaped:
+                            escaped = False
+                        elif ch == "\\":
+                            escaped = True
+                        elif ch == '"':
+                            in_string = False
+                        continue
+                    if ch == '"':
+                        in_string = True
+                    elif ch == "{":
+                        depth += 1
+                    elif ch == "}":
+                        depth -= 1
+                        if depth == 0:
+                            cand = source[start:idx + 1]
+                            try:
+                                json.loads(cand)
+                                return cand
+                            except Exception:
+                                break  # balanced but not JSON — try next '{'
+                scan_from = start + 1
 
         while True:
             if _aiexe_cancel_key_requested(_chat_key):
