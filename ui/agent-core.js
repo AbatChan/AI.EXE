@@ -1864,6 +1864,7 @@
     function normalizeAgentPlanSpec(parsed, taskText = '', options = {}) {
       const lower = String(taskText || '').toLowerCase();
       const explicitViteReactTask = isExplicitViteReactTask(taskText);
+      const explicitPythonStackTask = isExplicitPythonStackTask(taskText);
       const parsedObj = parsed && typeof parsed === 'object' ? parsed : {};
       const hasAgentPlanShape = ['task_kind', 'project_name', 'primary_stack', 'expected_files', 'affected_files', 'done_criteria', 'validation', 'summary']
         .some((key) => Object.prototype.hasOwnProperty.call(parsedObj, key));
@@ -1915,6 +1916,10 @@
       let primaryStack = ['python', 'web', 'generic'].includes(String(parsed && parsed.primary_stack || '').toLowerCase())
         ? String(parsed.primary_stack).toLowerCase()
         : (/python|pygame|\.py\b/.test(lower) ? 'python' : ((WEB_TASK_HINT_REGEX.test(lower) || /\bcalculator\b/.test(lower)) ? 'web' : 'generic'));
+      // Explicit runtime evidence outranks a planner's broad association between
+      // "UI" and web. CustomTkinter/PyInstaller desktop requests are Python even
+      // if a model mistakenly labels the plan as web.
+      if (explicitPythonStackTask && !explicitViteReactTask) primaryStack = 'python';
       const parsedProjectName = normalizeWorkspaceName(parsed && parsed.project_name ? parsed.project_name : '');
       // Trust the model's project name when it is usable. It knows the subject
       // (e.g. "tetris") far better than any keyword rule; deriveProjectNameFromTask
@@ -1933,12 +1938,23 @@
         .replace(/\.(?:pdf|docx?|rtf|odt|pptx?)$/i, '.html')
         .replace(/\.(?:xlsx?|ods)$/i, '.csv');
       expectedFiles = expectedFiles.map(mapBinaryDocPath);
+      if (taskKind === 'project' && primaryStack === 'python') {
+        const explicitlyNamed = new Set(extractExplicitTaskFilePaths(taskText));
+        // Keep an HTML/JS companion only when the user actually named it. This
+        // removes invented index.html previews that hijack a desktop app's Run.
+        expectedFiles = expectedFiles.filter((path) => (
+          !/\.(?:html?|css|scss|sass|less|js|mjs|cjs|ts|jsx|tsx)$/i.test(path)
+          || explicitlyNamed.has(path)
+        ));
+      }
       let affectedFiles = parseAgentPlanPathList(parsed && parsed.affected_files ? parsed.affected_files : '').map(mapBinaryDocPath);
       let filesToInspect = parseAgentPlanPathList(parsed && parsed.files_to_inspect ? parsed.files_to_inspect : '');
       let doneCriteria = parseAgentPlanTextList(parsed && parsed.done_criteria ? parsed.done_criteria : '', 5); // cap 5
       let phases = parseAgentPlanPhases(parsed && parsed.phases ? parsed.phases : ''); // [{title,tasks}]
       const validationSteps = parseAgentPlanTextList(parsed && parsed.validation ? parsed.validation : '', 6);
-      const looksLikeWebProjectTask = taskKind === 'project' && (WEB_TASK_HINT_REGEX.test(lower) || /\bcalculator\b/.test(lower));
+      const looksLikeWebProjectTask = taskKind === 'project'
+        && !explicitPythonStackTask
+        && (WEB_TASK_HINT_REGEX.test(lower) || /\bcalculator\b/.test(lower));
       // Trust the model's multi-file plan over the "single html file" keyword match:
       // collapsing a parsed /index.html|/style.css|/app.js plan to one file mutated
       // the project contract after the planner had already honored the user's files.
@@ -2136,6 +2152,11 @@
       return /\bvite\b/.test(lower) && /\breact\b/.test(lower);
     }
 
+    function isExplicitPythonStackTask(taskText = '') {
+      const lower = String(taskText || '').toLowerCase();
+      return /\bpython\b|\.py\b|\b(?:customtkinter|tkinter|pyinstaller|pygame|pyqt\d*|pyside\d*)\b/.test(lower);
+    }
+
     function buildViteReactExpectedFiles() {
       return [
         '/package.json',
@@ -2165,6 +2186,7 @@
     function buildFallbackAgentPlanSpec(taskText = '', options = {}) {
       const lower = String(taskText || '').toLowerCase();
       const explicitViteReactTask = isExplicitViteReactTask(taskText);
+      const explicitPythonStackTask = isExplicitPythonStackTask(taskText);
       const explicitDocsTask = isExplicitReadmeOrDocsTask(taskText);
       const docsOnlyTask = isDocsOnlyTask(taskText);
       const workspaceScopedMutation = hasOpenWorkspaceContext() && isExistingProjectMutationRequest(taskText);
@@ -2194,6 +2216,7 @@
       let primaryStack = /python|pygame|\.py\b/.test(lower)
         ? 'python'
         : (((WEB_TASK_HINT_REGEX.test(lower) || /\bcalculator\b/.test(lower))) ? 'web' : 'generic');
+      if (explicitPythonStackTask && !explicitViteReactTask) primaryStack = 'python';
       const needsReadme = shouldFallbackPlanNeedReadme(taskText);
       const projectName = deriveProjectNameFromTask(taskText);
       const fallbackSummary = (() => {

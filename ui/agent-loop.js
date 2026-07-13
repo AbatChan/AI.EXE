@@ -765,7 +765,8 @@
         if (!runnableMutation) return { note: '', runHint: null };
         // Fresh build (new entry page written this run) → launch it now; native
         // Smart Run serves web projects over http:// and opens the browser.
-        const wroteEntryHtml = toolEvents.some((e) => e && e.ok && e.createdNewFile
+        const webPlan = String(planSpec && planSpec.primaryStack || '').toLowerCase() === 'web';
+        const wroteEntryHtml = webPlan && toolEvents.some((e) => e && e.ok && e.createdNewFile
           && String(e.tool || '').toLowerCase() === 'write_file'
           && /(?:^|\/)index\.html?$/i.test(String(e.path || '')));
         if (wroteEntryHtml && autoOpen) {

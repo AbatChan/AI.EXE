@@ -62,16 +62,19 @@ inline RunTarget DetectRunTarget(const std::filesystem::path& root) {
     return body.find(n) != std::string::npos;
   };
 
-  // Web wins when there is an HTML entry — that is the case the localhost server
-  // handles and the one generated web apps use.
+  // A Vite manifest is unambiguous and wins immediately. Plain index.html is
+  // not: a generator may leave one beside a Python desktop entry point, so defer
+  // plain HTML until Python has been considered.
   if (fs::exists(root / "index.html", ec)) {
     const bool vite_project = fs::exists(root / "package.json", ec)
       && (fs::exists(root / "vite.config.ts", ec)
         || fs::exists(root / "vite.config.js", ec)
         || file_contains_ci(root / "package.json", "\"vite\""));
-    target.kind = vite_project ? RunTargetKind::kViteWeb : RunTargetKind::kWeb;
-    target.entry = root / "index.html";
-    return target;
+    if (vite_project) {
+      target.kind = RunTargetKind::kViteWeb;
+      target.entry = root / "index.html";
+      return target;
+    }
   }
 
   fs::path first_html;
@@ -110,11 +113,6 @@ inline RunTarget DetectRunTarget(const std::filesystem::path& root) {
     }
   }
 
-  if (!first_html.empty()) {
-    target.kind = RunTargetKind::kWeb;
-    target.entry = first_html;
-    return target;
-  }
   if (have_newest) {
     // Conventional entry points win; otherwise run whatever was edited most
     // recently — i.e. the script the user just built/worked on.
@@ -124,6 +122,11 @@ inline RunTarget DetectRunTarget(const std::filesystem::path& root) {
                    : !entry_py.empty() ? entry_py
                    : have_newest_app ? newest_app_py
                                      : newest_py;
+    return target;
+  }
+  if (!first_html.empty()) {
+    target.kind = RunTargetKind::kWeb;
+    target.entry = first_html;
     return target;
   }
   return target;

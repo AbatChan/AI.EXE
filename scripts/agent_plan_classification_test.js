@@ -44,6 +44,20 @@ const opts = { chatId: 'chat_owns_ws' };
 
 const cases = [
   {
+    name: 'explicit Python desktop stack rejects planner-added HTML preview files',
+    run: () => core.normalizeAgentPlanSpec({
+      task_kind: 'project',
+      primary_stack: 'web',
+      expected_files: '/index.html|/main.py|/requirements.txt',
+    }, 'Build a Python desktop app using CustomTkinter. File structure: main.py, requirements.txt. Build with pyinstaller.', { forceProjectScope: true }),
+    expect: (spec) => {
+      assert.equal(spec.primaryStack, 'python');
+      assert.deepEqual(spec.expectedFiles, ['/main.py', '/requirements.txt']);
+      assert.match(spec.projectContract, /Python project contract/);
+      assert.doesNotMatch(spec.projectContract, /Web project contract/);
+    },
+  },
+  {
     name: 'question misclassified as edit does NOT fabricate mutation targets',
     run: () => core.normalizeAgentPlanSpec({ task_kind: 'edit', affected_files: '' }, 'so how do i run to test?', opts),
     expect: (spec) => {
