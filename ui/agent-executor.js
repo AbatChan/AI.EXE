@@ -1470,18 +1470,43 @@
       tqdm: 'tqdm', dotenv: 'python-dotenv', openai: 'openai', anthropic: 'anthropic',
       selenium: 'selenium', plotly: 'plotly', seaborn: 'seaborn', kivy: 'kivy',
       pyglet: 'pyglet', arcade: 'arcade', pytest: 'pytest', websockets: 'websockets',
+      httpx: 'httpx', boto3: 'boto3', cryptography: 'cryptography', jwt: 'PyJWT',
+      customtkinter: 'customtkinter', tkinterdnd2: 'tkinterdnd2', PyQt5: 'PyQt5',
+      PySide6: 'PySide6', redis: 'redis', pymongo: 'pymongo', psycopg: 'psycopg',
     };
+
+    const PY_STDLIB = new Set(`abc argparse array asyncio atexit base64 binascii bisect
+      builtins calendar cgi cgitb cmd code codecs collections colorsys compileall concurrent
+      configparser contextlib contextvars copy csv ctypes dataclasses datetime decimal difflib
+      dis email enum errno faulthandler filecmp fileinput fnmatch fractions ftplib functools gc
+      getopt getpass gettext glob graphlib gzip hashlib heapq hmac html http imaplib importlib
+      inspect io ipaddress itertools json keyword linecache locale logging lzma mailbox math
+      mimetypes mmap multiprocessing netrc numbers operator os pathlib pdb pickle pickletools
+      pkgutil platform plistlib poplib pprint profile pstats pty py_compile queue quopri random
+      re readline reprlib resource rlcompleter runpy sched secrets select selectors shelve shlex
+      shutil signal site smtpd smtplib socket socketserver sqlite3 ssl stat statistics string
+      stringprep struct subprocess sys sysconfig tabnanny tarfile tempfile textwrap threading time
+      timeit tkinter token tokenize tomllib trace traceback tracemalloc tty turtle types typing
+      unicodedata unittest urllib uuid venv warnings wave weakref webbrowser xml xmlrpc zipapp
+      zipfile zipimport zlib`.split(/\s+/).filter(Boolean));
 
     // Third-party imports not in requirements.txt (the venv won't have them).
     function getPythonMissingDependencies(fileContents, requirementsText) {
       const reqLower = String(requirementsText || '').toLowerCase();
       const missing = new Set();
+      const localModules = new Set();
+      Object.keys(fileContents || {}).filter((path) => /\.py$/i.test(String(path || ''))).forEach((path) => {
+        const parts = String(path || '').split('/').filter(Boolean);
+        if (parts.length) localModules.add(parts[0]);
+        if (parts.length) localModules.add(parts[parts.length - 1].replace(/\.py$/i, ''));
+      });
       Object.keys(fileContents || {}).forEach((path) => {
         if (!/\.py$/i.test(String(path || ''))) return;
         const src = String(fileContents[path] || '');
         for (const m of src.matchAll(/^\s*(?:import|from)\s+([a-zA-Z0-9_]+)/gm)) {
           const mod = m[1];
-          const pkg = PY_THIRD_PARTY[mod];
+          if (PY_STDLIB.has(mod) || localModules.has(mod)) continue;
+          const pkg = PY_THIRD_PARTY[mod] || mod.replace(/_/g, '-');
           if (pkg && !reqLower.includes(pkg.toLowerCase())) missing.add(pkg);
         }
       });
@@ -3107,6 +3132,7 @@
         }
         const issues = [];
         const fileContents = {};
+        const autoWrittenFiles = [];
         const completenessAdvisory = [];
         let readableCount = 0;
         for (const path of targets) {
@@ -3138,16 +3164,40 @@
         const mechanicalAdvisory = completenessAdvisory;
         const webConsistencyIssues = validateWebProjectConsistency(fileContents, planSpec, mechanicalAdvisory);
         webConsistencyIssues.forEach((issue) => issues.push(issue));
-        // Best-effort package declaration hint.
+        // Deterministic package declaration: derive requirements from actual imports and
+        // write/merge the file ourselves instead of trusting the model to remember it.
         if (Object.keys(fileContents).some((p) => /\.py$/i.test(p))) {
           let reqText = fileContents['/requirements.txt'] || '';
+          let reqExisted = Boolean(reqText);
           if (!reqText) {
             const reqRes = await deps.invokeWorkspaceAction('workspaceReadFile', { path: '/requirements.txt' });
-            if (reqRes && reqRes.ok) reqText = String(reqRes.output || '');
+            if (reqRes && reqRes.ok) {
+              reqText = String(reqRes.output || '');
+              reqExisted = true;
+            }
           }
           const missingDeps = getPythonMissingDependencies(fileContents, reqText);
           if (missingDeps.length) {
-            mechanicalAdvisory.push(`Python project imports package(s) not found in requirements.txt: ${missingDeps.join(', ')}. Confirm they are declared in requirements.txt, pyproject.toml, or another intentional install path.`);
+            const existing = String(reqText || '').replace(/\s+$/, '');
+            const nextReq = `${existing}${existing ? '\n' : ''}${missingDeps.join('\n')}\n`;
+            const reqWrite = await deps.invokeWorkspaceAction('workspaceWriteFile', {
+              path: '/requirements.txt', content: nextReq,
+            });
+            if (reqWrite && reqWrite.ok) {
+              mutated = true;
+              fileContents['/requirements.txt'] = nextReq;
+              autoWrittenFiles.push({
+                path: '/requirements.txt', content: nextReq, originalContent: reqText,
+                createdNewFile: !reqExisted,
+              });
+              deps.upsertWorkspaceTreeEntry({
+                kind: 'file', path: '/requirements.txt', name: 'requirements.txt',
+                sizeBytes: nextReq.length, updatedAt: deps.nowTs(), optimisticUntil: deps.nowTs() + 5000,
+              });
+              mechanicalAdvisory.push(`requirements.txt automatically synchronized from imports: ${missingDeps.join(', ')}.`);
+            } else {
+              issues.push(`/requirements.txt: could not declare imported package(s): ${missingDeps.join(', ')}`);
+            }
           }
         }
         const codePaths = Object.keys(fileContents).filter((path) => /\.(js|mjs|cjs|ts|jsx|tsx)$/i.test(path));
@@ -3190,6 +3240,7 @@
             observation: `validate_files ok: no obvious file-role, syntax, or MVP completeness issues found in ${targets.join(', ')}${advisoryBlock}`,
             validationPassed: true,
             validationAdvisory: advisoryNotes.slice(0, 5),
+            autoWrittenFiles,
           };
         }
         return {
@@ -3198,6 +3249,7 @@
           observation: `validate_files found issues:\n- ${issues.join('\n- ')}\n\nIMPORTANT: Do NOT call validate_files again right now. Read and fix these specific files using edit_file first.`,
           validationPassed: false,
           validationIssues: issues,
+          autoWrittenFiles,
         };
       }
 

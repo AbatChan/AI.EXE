@@ -23,7 +23,13 @@
       .replace(/^[a-z_]+ (?:blocked|failed) for [^:]+:\s*/i, '')
       .trim()
       .slice(0, 140) || 'it did not pass the check';
-    const normIssue = shortReason.replace(/`[^`]*`/g, '').replace(/\d+/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
+    // Preserve semantic numbers/model/package names. Normalize only volatile source
+    // locations; deleting every digit used to conflate genuinely different failures.
+    const normIssue = shortReason
+      .replace(/`[^`]*`/g, '')
+      .replace(/\b(line|column|offset|position)\s*[:#]?\s*\d+\b/gi, '$1 #')
+      .replace(/:\d+(?::\d+)?\b/g, ':#')
+      .replace(/\s+/g, ' ').trim().toLowerCase();
     return { streakPath, shortReason, normIssue, rawIssue, streakKey: `${streakPath}|${normIssue}` };
   }
 
@@ -1931,6 +1937,8 @@
             tool: decision.tool,
             ok: false,
             _guardBlock: true,
+            _guardKind: 'duplicate_no_progress',
+            _guardSignature: JSON.stringify(buildDecisionSignature(decision)),
             path: normalizeDecisionPath(decision.path || ''),
             srcPath: normalizeDecisionPath(decision.srcPath || ''),
             dstPath: normalizeDecisionPath(decision.dstPath || ''),
@@ -1998,11 +2006,8 @@
             const duplicateBlockedCount = toolEvents.filter((event) => (
               event
               && !event.ok
-              && String(event.tool || '').toLowerCase() === duplicateTool
-              && normalizeDecisionPath(event.path || '') === duplicatePath
-              // Different read_files path sets are different attempts, not a streak.
-              && String(event.pathsSig || '') === decisionPathsSignature(decision)
-              && /same tool\/target already failed|already read and no workspace changes|already listed|already ran this exact search|nothing changed since/i.test(String(event.observation || ''))
+              && event._guardKind === 'duplicate_no_progress'
+              && event._guardSignature === JSON.stringify(buildDecisionSignature(decision))
             )).length;
             if (duplicateBlockedCount >= 2) {
               const targetLabel = (duplicatePath && duplicatePath !== '/')
@@ -2075,9 +2080,8 @@
               const duplicateBlockedCount = toolEvents.filter((event) => (
                 event
                 && !event.ok
-                && String(event.tool || '').toLowerCase() === duplicateTool
-                && normalizeDecisionPath(event.path || '') === duplicatePath
-                && /same tool\/target already failed|already read and no workspace changes|made no change/i.test(String(event.observation || ''))
+                && event._guardKind === 'duplicate_no_progress'
+                && event._guardSignature === JSON.stringify(buildDecisionSignature(decision))
               )).length;
               if (duplicateBlockedCount >= 2) {
                 const blockerNote = duplicateTool === 'edit_file'
@@ -3055,6 +3059,25 @@
           pathsSig: decisionPathsSignature(decision),
           observation: clippedObservation,
         });
+        // validate_files may deterministically synchronize support files (currently
+        // requirements.txt from real Python imports). Register those writes as normal
+        // mutations so summaries, revert, phase progress, and later guards see them.
+        if (Array.isArray(toolResult && toolResult.autoWrittenFiles)) {
+          for (const autoFile of toolResult.autoWrittenFiles) {
+            const autoPath = deps.normalizeWorkspacePath(autoFile && autoFile.path || '');
+            if (!autoPath) continue;
+            toolEvents.push({
+              tool: 'write_file', ok: true, path: autoPath, srcPath: '', dstPath: '',
+              content: String(autoFile.content || ''),
+              originalContent: String(autoFile.originalContent || ''),
+              createdNewFile: Boolean(autoFile.createdNewFile), mutated: true,
+              validationPassed: false, validationIssues: [], runErrorCount: 0,
+              startLine: 0, endLine: 0, offset: 0, searchQuery: '', pathsSig: '',
+              observation: `write_file ok: ${autoPath} (synchronized automatically from project imports).`,
+              _automaticSupportFile: true,
+            });
+          }
+        }
         // Track the run's dev server + staleness (source mutated after start).
         if (toolResult && toolResult.devServer && toolResult.devServer.running && Number(toolResult.devServer.id) > 0) {
           runDevServer = {
