@@ -1723,19 +1723,23 @@ def _aiexe_collect_models_from_modal(driver):
     return names
 
 
-def _aiexe_sweep_models_by_search(driver):
-    """Full-catalog discovery. The picker only RENDERS a curated slice (~18 rows —
-    the scroll container's whole content IS that slice), but its search box queries
-    the FULL catalog. Sweeping a-z and 0-9 surfaces every model, including ones
-    Venice added after our fallback list was written."""
+def _aiexe_sweep_models_by_search(driver, initial=None):
+    """Full-catalog discovery using high-coverage queries first, stopping as soon as
+    Venice's displayed Text count is satisfied."""
     import time as _t
     box = _aiexe_search_input(driver)
     if box is None:
         print("AIEXE_MODELS sweep: search input unavailable", flush=True)
         return []
-    found = []
-    seen = set()
-    for ch in "abcdefghijklmnopqrstuvwxyz0123456789":
+    found = list(initial or [])
+    seen = set(found)
+    expected = _aiexe_text_model_count(driver)
+    query_order = "aeioulmrgptnsdchkwqvfbxyzj0123456789"
+    max_queries = len(query_order) if expected else 12
+    print("AIEXE_MODELS adaptive search target=%s" % (expected or "unknown"), flush=True)
+    for ch in query_order[:max_queries]:
+        if expected and len(seen) >= expected:
+            break
         try:
             _aiexe_set_native_value(driver, box, ch, "HTMLInputElement")
         except Exception:
@@ -1744,9 +1748,9 @@ def _aiexe_sweep_models_by_search(driver):
                 box.send_keys(ch)
             except Exception:
                 continue
-        _t.sleep(0.35)
+        _t.sleep(0.18)
         stagnant = 0
-        for _ in range(8):
+        for _ in range(6):
             new = 0
             for t in _aiexe_model_titles(driver):
                 if t and t not in seen:
@@ -1763,7 +1767,7 @@ def _aiexe_sweep_models_by_search(driver):
                     "return e.scrollTop + e.clientHeight >= e.scrollHeight - 4;", scroller))
             except Exception:
                 at_bottom = True
-            _t.sleep(0.15)
+            _t.sleep(0.08)
             stagnant = stagnant + 1 if new == 0 else 0
             if at_bottom and stagnant >= 2:
                 break
@@ -2570,6 +2574,7 @@ def aiexe_scrape_models(driver):
     import time as _t
     global AIEXE_PRICED_MODELS, AIEXE_PRICED_CHECKED_MODELS, AIEXE_LAST_SCRAPE_SWEPT
     try:
+        print("AIEXE_MODELS scraping catalog and credits", flush=True)
         AIEXE_PRICED_MODELS = set()
         AIEXE_PRICED_CHECKED_MODELS = set()
         if 'venice.ai/chat' not in driver.current_url:
@@ -2602,7 +2607,7 @@ def aiexe_scrape_models(driver):
             AIEXE_LAST_SCRAPE_SWEPT = True
             print("AIEXE_MODELS reused swept catalog (%d total) — cache fresh" % len(names), flush=True)
         else:
-            swept = _aiexe_sweep_models_by_search(driver)
+            swept = _aiexe_sweep_models_by_search(driver, names)
             for n in swept:
                 if n not in names:
                     names.append(n)
@@ -2623,15 +2628,18 @@ def aiexe_scrape_models(driver):
 
 
 def _aiexe_restore_unobtrusive(driver):
-    """Un-minimize for reliable interaction WITHOUT popping a window in the user's face:
-    restore into a small window parked at the bottom-right. Keep a REAL strip of the
-    window (incl. the title bar) on-screen: the old 80x60 sliver left users unable to
-    drag the window back whenever a code path failed to re-minimize it."""
+    """Restore into the normal compact adapter window, always fully on-screen."""
     try:
-        dims = driver.execute_script("return [screen.width || 1440, screen.height || 900];") or [1440, 900]
-        # >=1180 wide keeps Venice on desktop layout (sidebar inline, not a drawer);
-        # only a 320x140 strip stays on-screen so it doesn't pop in the user's face.
-        driver.set_window_rect(x=int(dims[0]) - 320, y=int(dims[1]) - 140, width=1180, height=760)
+        dims = driver.execute_script("return [screen.availWidth || screen.width || 1440, screen.availHeight || screen.height || 900];") or [1440, 900]
+        rect = driver.get_window_rect() or {}
+        x, y = int(rect.get("x", 20)), int(rect.get("y", 20))
+        # Minimized Windows commonly reports -32000; stale coordinates can also belong
+        # to a disconnected monitor. In either case, restore near the top-left.
+        if x < 0 or x > int(dims[0]) - 120:
+            x = 20
+        if y < 0 or y > int(dims[1]) - 80:
+            y = 20
+        driver.set_window_rect(x=x, y=y, width=670, height=570)
         return True
     except Exception:
         try:

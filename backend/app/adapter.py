@@ -726,6 +726,9 @@ class AdapterManager:
             stage = "network"
             detail = "Network looks slow or unavailable while reaching Venice or installing dependencies."
             retry_hint = "Try a stronger internet connection if this keeps retrying."
+        elif proc_alive and re.search(r"AIEXE_MODELS|AIEXE_PRICED|AIEXE_CREDITS|AIEXE_MODEL ", log):
+            stage = "syncing"
+            detail = "Reading models and credits from Venice."
         elif proc_alive and "aiexe_login waiting_for_user" in lower:
             stage = "login"
             detail = "Waiting for Venice sign-in in the Chrome window."
@@ -738,9 +741,6 @@ class AdapterManager:
         elif proc_alive and re.search(r"logging in to venice|already logged in", lower):
             stage = "login"
             detail = "Logging in to Venice."
-        elif proc_alive and re.search(r"AIEXE_MODELS|AIEXE_PRICED|AIEXE_CREDITS|AIEXE_MODEL ", log):
-            stage = "syncing"
-            detail = "Reading models and credits from Venice."
         elif proc_alive and not serving:
             detail = "Chrome is opening and the adapter is getting ready."
         return {"installed": self.is_installed(), "running": proc_alive or serving,
