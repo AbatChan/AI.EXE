@@ -3102,6 +3102,33 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
                                    "response": txt, "done": False}) + "\r\n"
             return None
 
+        def _complete_json_prefix(txt):
+            """Return the first balanced JSON object, or ''. Handles braces in strings."""
+            source = str(txt or "")
+            start = source.find("{")
+            if start < 0:
+                return ""
+            depth, in_string, escaped = 0, False, False
+            for idx in range(start, len(source)):
+                ch = source[idx]
+                if in_string:
+                    if escaped:
+                        escaped = False
+                    elif ch == "\\":
+                        escaped = True
+                    elif ch == '"':
+                        in_string = False
+                    continue
+                if ch == '"':
+                    in_string = True
+                elif ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        return source[start:idx + 1]
+            return ""
+
         while True:
             if _aiexe_cancel_key_requested(_chat_key):
                 _aiexe_stop_generation(driver, "cancel during stream")
@@ -3229,6 +3256,7 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
         # transport). Poll the last assistant bubble until it stabilizes, emit deltas.
         if eval_count == 0 and not streamed_content:
             _prev, _stable = "", 0
+            _structured_dom_result = ""
             for _i in range(int(max(timeout, 30) / 0.8)):
                 if _aiexe_cancel_key_requested(_chat_key):
                     _aiexe_stop_generation(driver, "cancel during DOM fallback")
@@ -3236,8 +3264,20 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
                     return
                 _txt = _aiexe_read_last_assistant_text(
                     driver, include_reasoning=(response_format != ResponseFormat.COMPLETION_AS_STRING))
-                if _structured_limit and _txt and len(_txt) > _structured_limit:
-                    _aiexe_stop_generation(driver, "structured DOM output limit")
+                if _structured_limit and _txt:
+                    # A rendered DOM is a SNAPSHOT, not an append-only stream. Venice can
+                    # rerender earlier text nodes while generating; slicing by old length
+                    # corrupts structured JSON. Capture one balanced object atomically.
+                    _structured_dom_result = _complete_json_prefix(_txt)
+                    if _structured_dom_result:
+                        _prev = _structured_dom_result
+                        break
+                    if len(_txt) > _structured_limit:
+                        _aiexe_stop_generation(driver, "structured DOM output limit")
+                        break
+                    # Never emit a partial structured DOM snapshot. Wait for balance.
+                    time.sleep(0.2)
+                    continue
                 if _txt and _txt == _prev:
                     _stable += 1
                     if _stable >= 3:
@@ -3260,6 +3300,16 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
                 if driver.execute_script("return window.streamComplete;"):
                     _stable += 1
                 time.sleep(0.8)
+            if _structured_dom_result:
+                eval_count += 1
+                if response_format == ResponseFormat.CHAT_NON_STREAMED:
+                    streamed_content += _structured_dom_result
+                elif response_format == ResponseFormat.COMPLETION_AS_STRING:
+                    yield _structured_dom_result
+                else:
+                    _m = _emit(_structured_dom_result)
+                    if _m: yield _m
+                print("AIEXE_STRUCTURED DOM captured complete JSON (%d chars)" % len(_structured_dom_result), flush=True)
             if eval_count:
                 print("AIEXE_ATTACH DOM fallback captured %d chars" % len(_prev), flush=True)
 
