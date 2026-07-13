@@ -2245,7 +2245,7 @@ def _aiexe_strip_reply_chrome(text):
     return "\n".join(kept).strip()
 
 
-def _aiexe_read_last_assistant_text(driver):
+def _aiexe_read_last_assistant_text(driver, include_reasoning=True):
     """Read only the latest Venice assistant message body.
 
     This avoids page/header chrome leaks like model name + timing by targeting the
@@ -2291,9 +2291,30 @@ def _aiexe_read_last_assistant_text(driver):
             || Array.from(document.querySelectorAll(assistantSelector)).filter(visible).at(-1);
 
           if (latest) {
-            const body =
-              latest.querySelector('[class*="prose"], [class*="whitespace-normal"]')
-              || latest.querySelector('p, [data-message-content], [class*="markdown"]')
+            // Reasoning models now render TWO prose blocks in the same assistant node:
+            // the first lives in .chakra-collapse ("Thought Process"), while the last
+            // outside the collapse is the real answer. querySelector() used to take the
+            // first block and return private reasoning as the visible response.
+            const prose = Array.from(latest.querySelectorAll(
+              '[class*="prose"], [class*="whitespace-normal"], [data-message-content], [class*="markdown"]'
+            ));
+            const reasoningBodies = prose.filter((node) => node.closest('.chakra-collapse'));
+            const finalBodies = prose.filter((node) => !node.closest('.chakra-collapse') && visible(node));
+
+            if (reasoningBodies.length) {
+              const finalBody = finalBodies.at(-1);
+              // While Venice is still reasoning there is no final prose node yet. Returning
+              // an empty string prevents the DOM stability detector from completing early.
+              if (!finalBody) return '';
+              const finalText = stripControls(finalBody);
+              if (!finalText) return '';
+              if (!arguments[1]) return finalText;
+              const thoughtText = reasoningBodies.map(stripControls).filter(Boolean).join('\n\n');
+              return thoughtText ? `<thinking>${thoughtText}</thinking>${finalText}` : finalText;
+            }
+
+            const body = finalBodies.at(-1)
+              || latest.querySelector('p')
               || latest;
 
             const bodyText = stripControls(body);
@@ -2318,7 +2339,7 @@ def _aiexe_read_last_assistant_text(driver):
             || root;
 
           return stripControls(fallbackBody);
-        """, VC_USER_MESSAGE_MARKER_CSS) or ""
+        """, VC_USER_MESSAGE_MARKER_CSS, bool(include_reasoning)) or ""
         return str(text or "").strip()
     except Exception:
         return ""
@@ -3001,7 +3022,8 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
         # DOM's "last assistant bubble" is still the previous turn until the new
         # reply renders, so an early DOM probe must only trust text that differs.
         try:
-            _pre_send_reply = _aiexe_read_last_assistant_text(driver) or ""
+            _pre_send_reply = _aiexe_read_last_assistant_text(
+                driver, include_reasoning=(response_format != ResponseFormat.COMPLETION_AS_STRING)) or ""
         except Exception:
             _pre_send_reply = ""
 
@@ -3132,7 +3154,8 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
             if eval_count == 0 and time.time() - last_data_time > 10 and time.time() - _dom_probe_ts >= 3:
                 _dom_probe_ts = time.time()
                 try:
-                    _probe = _aiexe_read_last_assistant_text(driver) or ""
+                    _probe = _aiexe_read_last_assistant_text(
+                        driver, include_reasoning=(response_format != ResponseFormat.COMPLETION_AS_STRING)) or ""
                 except Exception:
                     _probe = ""
                 if _probe and _probe != _pre_send_reply:
@@ -3167,7 +3190,8 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
                     _aiexe_stop_generation(driver, "cancel during DOM fallback")
                     _aiexe_clear_cancel_key(_chat_key)
                     return
-                _txt = _aiexe_read_last_assistant_text(driver)
+                _txt = _aiexe_read_last_assistant_text(
+                    driver, include_reasoning=(response_format != ResponseFormat.COMPLETION_AS_STRING))
                 if _structured_limit and _txt and len(_txt) > _structured_limit:
                     _aiexe_stop_generation(driver, "structured DOM output limit")
                 if _txt and _txt == _prev:
