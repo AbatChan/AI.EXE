@@ -114,6 +114,7 @@
     }
     const priorReads = events.filter((e, i) => e && e.ok && i > lastMutationIndex
       && String(e.tool || '').toLowerCase() === 'read_file'
+      && !e._fromBatchRead
       && String(e.path || '') === readPath);
     if (priorReads.length === 0) return null;
     if (priorReads.some((e) => summarizeReadRange(e) === currentSig)) return 'exact-repeat';
@@ -902,6 +903,10 @@
         if (lastIndex < 0) return '';
         const lastEvent = toolEvents[lastIndex];
         if (!lastEvent) return '';
+        if (signature.tool === 'read_file' && lastEvent.ok
+          && lastEvent._fromBatchRead && lastEvent._batchPreviewClipped) {
+          return '';
+        }
         if (signature.tool === 'read_file' && lastEvent.ok && !hasWorkspaceMutationSince(lastIndex)) {
           const truncLimit = Number(deps.agentMaxToolOutputChars) || 8000;
           const obs = String(lastEvent.observation || '');
@@ -934,6 +939,14 @@
           return '';
         }
         if (!lastEvent.ok && !hasWorkspaceMutationSince(lastIndex)) {
+          // The overwrite guard explicitly permits the same complete write_file
+          // once more as confirmation that a corrupted existing file genuinely
+          // needs regeneration. Let that documented escape hatch reach the
+          // executor instead of treating it as an ordinary no-progress duplicate.
+          if (signature.tool === 'write_file'
+            && /same complete write_file again|accepted as a deliberate full regeneration/i.test(String(lastEvent.observation || ''))) {
+            return '';
+          }
           if (signature.tool === 'edit_file') {
             const hasRefreshedRead = toolEvents.slice(lastIndex + 1).some((e) => (
               e && e.ok
@@ -971,6 +984,37 @@
       // deleted read-before-edit hijack used them.)
       const repairDecisionBeforeExecution = (decision, step) => {
         if (!decision || decision.action !== 'tool') return decision;
+        // read_files deliberately previews large files to keep one batch inside the
+        // context budget. Never let a model convert "preview ended" into a destructive
+        // whole-file rewrite: ground that decision with one dedicated read_file first.
+        if (String(decision.tool || '').toLowerCase() === 'write_file') {
+          const targetPath = deps.normalizeWorkspacePath(decision.path || '');
+          const batchReadIndex = findLastToolEventIndex((event) => (
+            event && event.ok && event._fromBatchRead && event._batchPreviewClipped
+            && deps.normalizeWorkspacePath(event.path || '') === targetPath
+          ));
+          const fullReadAfterBatch = batchReadIndex >= 0 && toolEvents.slice(batchReadIndex + 1).some((event) => (
+            event && event.ok && String(event.tool || '').toLowerCase() === 'read_file'
+            && !event._fromBatchRead && deps.normalizeWorkspacePath(event.path || '') === targetPath
+          ));
+          if (targetPath && batchReadIndex >= 0 && !fullReadAfterBatch) {
+            recordDebugTrace('agent_batch_preview_rewrite_redirected', {
+              chatId: String(chatId || ''), step: String(step), path: targetPath,
+            }, { chatId: String(chatId || ''), step, originalDecision: decision });
+            return {
+              action: 'tool',
+              tool: 'read_file',
+              path: targetPath,
+              content: '',
+              srcPath: '',
+              dstPath: '',
+              message: `Read the complete ${targetPath} before deciding whether it needs replacement; the earlier batched output was only a clipped display preview.`,
+              thought: `The batched view of ${targetPath} ended at its preview limit, not at end-of-file. Reading the complete file before any rewrite.`,
+              raw: '[redirect-batch-preview-rewrite-to-full-read]',
+              _deterministic: true,
+            };
+          }
+        }
         // Coerce raw edit_file payloads only while creating planned project files.
         if (String(decision.tool || '').toLowerCase() === 'edit_file') {
           const rawContent = String(decision.content || '').trim();
@@ -3189,8 +3233,12 @@
               startLine: 0,
               endLine: 0,
               offset: 0,
-              observation: `read_file ${rp} (read in this step's read_files batch — full content is in that result).`,
+              observation: rf && rf.previewClipped
+                ? `read_file ${rp} metadata: ${String(rf.content || '').length} chars exist on disk. The read_files display was only a ${Number(rf.previewChars) || 0}-char preview; the source file itself is complete. Use a dedicated read_file before judging its ending or replacing it.`
+                : `read_file ${rp} (read completely in this step's read_files batch).`,
               _fromBatchRead: true,
+              _batchPreviewClipped: Boolean(rf && rf.previewClipped),
+              _batchPreviewChars: Number(rf && rf.previewChars) || 0,
             });
           }
         }

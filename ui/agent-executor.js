@@ -2243,9 +2243,13 @@ export default config;
           }
           const body = String(response.output || '');
           deps.syncFileTabFromWorkspaceWrite(p, body, deps.workspaceBaseName(p));
-          readFilesResult.push({ path: p, content: body });
+          const previewClipped = body.length > perFileCap;
+          readFilesResult.push({ path: p, content: body, previewClipped, previewChars: Math.min(body.length, perFileCap) });
           if (body.length > perFileCap) {
-            sections.push(`### ${p} (${body.length} chars — showing first ${perFileCap}; call read_file "${p}" for the whole file)\n${body.slice(0, perFileCap)}\n...[truncated preview]`);
+            const headChars = Math.max(800, Math.floor(perFileCap * 0.62));
+            const tailChars = Math.max(400, perFileCap - headChars);
+            const omittedChars = Math.max(0, body.length - headChars - tailChars);
+            sections.push(`### ${p} (${body.length} chars on disk; batched HEAD + TAIL excerpt)\n${body.slice(0, headChars)}\n\n[... ${omittedChars} middle chars omitted from the display preview ...]\n\n${body.slice(-tailChars)}\n\n[BATCH EXCERPT COMPLETE — the text immediately above is the REAL END OF THE FILE. The source file on disk is complete and was not truncated or corrupted. Call read_file "${p}" before replacing it or inspecting the omitted middle.]`);
           } else {
             sections.push(`### ${p}\n${body || '(empty file)'}`);
           }

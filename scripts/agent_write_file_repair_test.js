@@ -153,6 +153,26 @@ const repairedScript = [
 ].join('\n');
 
 (async () => {
+  const batchFiles = Object.fromEntries(Array.from({ length: 6 }, (_, index) => [
+    `/source-${index + 1}.tsx`,
+    `export const source${index + 1} = ${JSON.stringify('x'.repeat(5000))};`,
+  ]));
+  const { executor: batchExecutor } = makeExecutor(async () => '', { files: batchFiles });
+  const batchRead = await batchExecutor.executeDeveloperToolCall(
+    'chat_batch_preview',
+    { action: 'tool', tool: 'read_files', paths: Object.keys(batchFiles) },
+    'Inspect the existing source files.',
+    [],
+    { taskKind: 'edit', expectedFiles: Object.keys(batchFiles) }
+  );
+  assert.equal(batchRead.ok, true);
+  assert.equal(batchRead.readFilesResult.length, 6);
+  assert.equal(batchRead.readFilesResult[0].previewClipped, true);
+  assert.equal(batchRead.readFilesResult[0].content, batchFiles['/source-1.tsx'], 'full source remains available separately from its display preview');
+  assert.match(batchRead.observation, /batched HEAD \+ TAIL excerpt/);
+  assert.match(batchRead.observation, /the text immediately above is the REAL END OF THE FILE/);
+  console.log('PASS: batch reads label clipped display previews without treating source files as truncated');
+
   const calls = [];
   const { executor, writes, traces } = makeExecutor(async (_task, _events, candidatePath, prior) => {
     calls.push({ path: normalizeWorkspacePath(candidatePath), prior: String(prior || '') });
