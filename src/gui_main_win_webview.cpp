@@ -772,32 +772,70 @@ bool BuildWorkspaceListOutput(const WebRuntimeBridge &runtime,
   }
 
   std::vector<WorkspaceEntryInfo> entries;
-  for (std::filesystem::directory_iterator it(target, ec), end;
-       !ec && it != end; it.increment(ec)) {
+  std::error_code iter_ec;
+  std::filesystem::directory_iterator it(target, iter_ec), end;
+  if (iter_ec) {
+    if (err) *err = "Failed to read workspace folder: " + iter_ec.message();
+    return false;
+  }
+  for (; it != end; it.increment(iter_ec)) {
     const auto &p = it->path();
-    const bool is_dir = it->is_directory(ec);
-    const bool is_file = !is_dir && it->is_regular_file(ec);
+    std::error_code entry_ec;
+    const bool is_dir = it->is_directory(entry_ec);
+    if (entry_ec) {
+      if (err) *err = "Failed to inspect workspace entry: " + entry_ec.message();
+      return false;
+    }
+    const bool is_file = !is_dir && it->is_regular_file(entry_ec);
+    if (entry_ec) {
+      if (err) *err = "Failed to inspect workspace entry: " + entry_ec.message();
+      return false;
+    }
     if (!is_dir && !is_file)
       continue;
 
     WorkspaceEntryInfo info;
     info.name = p.filename().string();
     info.kind = is_dir ? "folder" : "file";
-    const auto rel = std::filesystem::relative(p, root, ec);
-    const std::string rel_path = ec ? info.name : rel.generic_string();
+    const auto rel = std::filesystem::relative(p, root, entry_ec);
+    if (entry_ec) {
+      if (err) *err = "Failed to resolve workspace entry: " + entry_ec.message();
+      return false;
+    }
+    const std::string rel_path = rel.generic_string();
     info.path = rel_path.empty() ? "/" : ("/" + rel_path);
     if (is_file) {
-      info.size_bytes = static_cast<std::uint64_t>(it->file_size(ec));
+      info.size_bytes = static_cast<std::uint64_t>(it->file_size(entry_ec));
+      if (entry_ec) {
+        if (err) *err = "Failed to read workspace file metadata: " + entry_ec.message();
+        return false;
+      }
     } else {
       std::uint64_t count = 0;
-      for (std::filesystem::directory_iterator child(p, ec), child_end;
-           !ec && child != child_end; child.increment(ec)) {
+      std::filesystem::directory_iterator child(p, entry_ec), child_end;
+      if (entry_ec) {
+        if (err) *err = "Failed to read workspace subfolder: " + entry_ec.message();
+        return false;
+      }
+      for (; child != child_end; child.increment(entry_ec)) {
         ++count;
+      }
+      if (entry_ec) {
+        if (err) *err = "Failed to finish reading workspace subfolder: " + entry_ec.message();
+        return false;
       }
       info.child_count = count;
     }
-    info.updated_at_ms = FileTimeToUnixMs(it->last_write_time(ec));
+    info.updated_at_ms = FileTimeToUnixMs(it->last_write_time(entry_ec));
+    if (entry_ec) {
+      if (err) *err = "Failed to read workspace timestamp: " + entry_ec.message();
+      return false;
+    }
     entries.push_back(std::move(info));
+  }
+  if (iter_ec) {
+    if (err) *err = "Failed to finish reading workspace folder: " + iter_ec.message();
+    return false;
   }
 
   std::sort(
@@ -816,9 +854,13 @@ bool BuildWorkspaceListOutput(const WebRuntimeBridge &runtime,
         return an < bn;
       });
 
+  ec.clear();
   const auto rel_target = std::filesystem::relative(target, root, ec);
-  const std::string rel_target_path =
-      ec ? std::string() : rel_target.generic_string();
+  if (ec) {
+    if (err) *err = "Failed to resolve workspace folder: " + ec.message();
+    return false;
+  }
+  const std::string rel_target_path = rel_target.generic_string();
   const std::string view_path =
       rel_target_path.empty() ? "/" : ("/" + rel_target_path);
 

@@ -602,6 +602,12 @@
         await deps.loadWorkspaceChildren('/', true);
       }
       if (token !== deps.getWorkspaceRenderToken()) return;
+      if (!rootNode.loaded && rootNode.error) {
+        deps.folderArea.querySelectorAll('.workspace-tree').forEach((el) => el.remove());
+        updateFolderEmptyState('error');
+        if (deps.emptyFolder) deps.emptyFolder.style.display = 'flex';
+        return;
+      }
 
       if (deps.emptyFolder) deps.emptyFolder.style.display = 'none';
       deps.folderArea.querySelectorAll('.workspace-tree').forEach((el) => el.remove());

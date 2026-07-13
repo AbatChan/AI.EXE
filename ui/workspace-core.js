@@ -142,6 +142,7 @@
           expanded: key === '/',
           loaded: false,
           loading: false,
+          loadPromise: null,
           error: '',
           children: [],
         };
@@ -221,45 +222,67 @@
     async function loadWorkspaceChildren(path, force = false) {
       const key = normalizeWorkspacePath(path);
       const node = getWorkspaceNodeState(key);
-      if (node.loading) return node;
+      // Concurrent renders must share the same native list request. Returning the node
+      // immediately while it was still loading allowed the newer render token to paint an
+      // empty tree, then discard the older render that actually received the files.
+      if (node.loading && node.loadPromise) return node.loadPromise;
       if (node.loaded && !force) return node;
 
       node.loading = true;
       node.error = '';
-      const response = await invokeWorkspaceAction('workspaceList', { path: key });
-      node.loading = false;
-      if (!response || !response.ok) {
-        node.children = [];
-        node.loaded = false;
-        node.error = (response && response.message) || 'Failed to load folder.';
-        return node;
-      }
-
-      let parsed = {};
-      try {
-        parsed = JSON.parse(String(response.output || '{}'));
-      } catch (_) {
-        parsed = {};
-      }
-      // .aiexe/ holds the agent's phased-build plan (source of truth) — hidden from the user.
-      const hiddenSystemFiles = new Set(['.DS_Store', 'Thumbs.db', 'desktop.ini', '.Spotlight-V100', '.Trashes', '.fseventsd', '.aiexe']);
-      const fetchedChildren = Array.isArray(parsed.entries)
-        ? parsed.entries.map(mapWorkspaceEntry).filter((e) => !hiddenSystemFiles.has(e.name) && !e.name.startsWith('._'))
-        : [];
-      const optimisticCarry = (node.children || []).filter((entry) => {
-        const optimisticUntil = Number(entry && entry.optimisticUntil) || 0;
-        if (!optimisticUntil || optimisticUntil < deps.nowTs()) return false;
-        return !fetchedChildren.some((fetched) => normalizeWorkspacePath(fetched.path) === normalizeWorkspacePath(entry.path));
-      });
-      node.children = sortWorkspaceEntries([...fetchedChildren, ...optimisticCarry]);
-      node.loaded = true;
-      node.error = '';
-      node.children.forEach((entry) => {
-        if (entry.kind === 'folder') {
-          getWorkspaceNodeState(entry.path);
+      node.loadPromise = (async () => {
+        let response = null;
+        // Shared/network folders can fail a directory read for a moment. Retry without
+        // clearing the last good tree; Run uses the real folder and should never disagree
+        // with Explorer merely because one refresh raced the filesystem.
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          response = await invokeWorkspaceAction('workspaceList', { path: key });
+          if (response && response.ok) break;
+          if (attempt < 2) {
+            await new Promise((resolve) => window.setTimeout(resolve, attempt === 0 ? 100 : 250));
+          }
         }
-      });
-      return node;
+        if (!response || !response.ok) {
+          // Preserve the last successful snapshot. A transient refresh failure is not proof
+          // that the directory became empty.
+          node.error = (response && response.message) || 'Failed to load folder.';
+          return node;
+        }
+
+        let parsed = {};
+        try {
+          parsed = JSON.parse(String(response.output || '{}'));
+        } catch (_) {
+          parsed = {};
+        }
+        if (!Array.isArray(parsed.entries)) {
+          node.error = 'Workspace returned an invalid folder listing.';
+          return node;
+        }
+        // .aiexe/ holds the agent's phased-build plan (source of truth) — hidden from the user.
+        const hiddenSystemFiles = new Set(['.DS_Store', 'Thumbs.db', 'desktop.ini', '.Spotlight-V100', '.Trashes', '.fseventsd', '.aiexe']);
+        const fetchedChildren = parsed.entries
+          .map(mapWorkspaceEntry)
+          .filter((e) => !hiddenSystemFiles.has(e.name) && !e.name.startsWith('._'));
+        const optimisticCarry = (node.children || []).filter((entry) => {
+          const optimisticUntil = Number(entry && entry.optimisticUntil) || 0;
+          if (!optimisticUntil || optimisticUntil < deps.nowTs()) return false;
+          return !fetchedChildren.some((fetched) => normalizeWorkspacePath(fetched.path) === normalizeWorkspacePath(entry.path));
+        });
+        node.children = sortWorkspaceEntries([...fetchedChildren, ...optimisticCarry]);
+        node.loaded = true;
+        node.error = '';
+        node.children.forEach((entry) => {
+          if (entry.kind === 'folder') getWorkspaceNodeState(entry.path);
+        });
+        return node;
+      })();
+      try {
+        return await node.loadPromise;
+      } finally {
+        node.loading = false;
+        node.loadPromise = null;
+      }
     }
 
     function setWorkspaceSelection(path, kind = 'folder', keepMulti = false, includePath = true) {
