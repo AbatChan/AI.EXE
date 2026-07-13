@@ -7116,6 +7116,40 @@ function isProviderModelPriced(provider, model) {
   return priced.some((m) => normalizeProviderModelName(m) === clean);
 }
 
+// Advisory only: models observed to struggle with multi-file agent/tool-calling
+// builds (weak instruction-following, malformed decisions). Flags the picker so
+// the user can choose a stronger model — NEVER changes agent behavior. Add a
+// lowercased name fragment here when a model proves unreliable for builds.
+const WEAK_AGENT_MODEL_HINTS = [
+  'deepseek v4 flash',
+];
+function isModelWeakForAgent(model) {
+  const clean = String(normalizeProviderModelName(model) || '').toLowerCase();
+  if (!clean) return false;
+  return WEAK_AGENT_MODEL_HINTS.some((hint) => clean.includes(hint));
+}
+
+function createModelWeakIcon() {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('class', 'model-weak-icon');
+  svg.setAttribute('viewBox', '0 0 24 24');
+  svg.setAttribute('fill', 'none');
+  svg.setAttribute('stroke', 'currentColor');
+  svg.setAttribute('stroke-width', '2');
+  svg.setAttribute('stroke-linecap', 'round');
+  svg.setAttribute('stroke-linejoin', 'round');
+  svg.setAttribute('aria-hidden', 'true');
+  [
+    'M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z',
+    'M4 22v-7',
+  ].forEach((d) => {
+    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    path.setAttribute('d', d);
+    svg.appendChild(path);
+  });
+  return svg;
+}
+
 function createModelCreditIcon() {
   const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
   svg.setAttribute('class', 'model-credit-icon');
@@ -7144,6 +7178,14 @@ function setModelButtonContent(button, model, priced) {
   label.className = 'model-name-text';
   label.textContent = normalizeProviderModelName(model) || 'Model';
   button.appendChild(label);
+  if (isModelWeakForAgent(model)) {
+    // Flag on the icon only (tooltip system needs an HTMLElement anchor).
+    const warn = document.createElement('span');
+    warn.className = 'model-weak-hint';
+    warn.appendChild(createModelWeakIcon());
+    setAppTooltip(warn, 'May struggle with multi-file builds — best for chat. Pick a stronger model for agent tasks.');
+    button.appendChild(warn);
+  }
   if (priced) {
     // Tooltip lives on the coin only (span wrapper: the tooltip system needs an
     // HTMLElement anchor, and an <svg> isn't one) — model rows stay tooltip-free.

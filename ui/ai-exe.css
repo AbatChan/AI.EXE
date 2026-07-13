@@ -6592,6 +6592,17 @@ html.platform-mac .settings-sidebar {
   align-items: center;
   flex: 0 0 auto;
 }
+.model-weak-icon {
+  width: 13px;
+  height: 13px;
+  flex: 0 0 auto;
+  color: #e0894a;
+}
+.model-weak-hint {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+}
 .composer-model-pop {
   /* fixed (positioned by JS at open): escapes the left cluster's overflow:hidden clip */
   position: fixed;
