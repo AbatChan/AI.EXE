@@ -307,6 +307,43 @@ def _aiexe_windows_clear_profile_owner(profile_dir):
             pass
 
 
+def _aiexe_mark_profile_clean(profile_dir):
+    """The adapter browser is disposable UI, so never offer to restore its old tabs.
+
+    Windows Job Objects correctly kill the whole backend/browser tree when AI.EXE exits,
+    but Chrome records that forced tree shutdown as a crash. Reset only Chrome's clean-exit
+    markers before launch; preserve cookies/session data used for Venice login.
+    """
+    import json as _json
+    try:
+        names = os.listdir(profile_dir)
+    except OSError:
+        names = []
+    profile_names = ["Default"] + [n for n in names if n.startswith("Profile ")]
+    for name in dict.fromkeys(profile_names):
+        pref_path = os.path.join(profile_dir, name, "Preferences")
+        try:
+            with open(pref_path, "r", encoding="utf-8") as fh:
+                prefs = _json.load(fh)
+            if not isinstance(prefs, dict):
+                continue
+            profile = prefs.setdefault("profile", {})
+            if not isinstance(profile, dict):
+                profile = {}
+                prefs["profile"] = profile
+            profile["exit_type"] = "Normal"
+            profile["exited_cleanly"] = True
+            temp_path = pref_path + ".aiexe.tmp"
+            with open(temp_path, "w", encoding="utf-8") as fh:
+                _json.dump(prefs, fh, separators=(",", ":"))
+            os.replace(temp_path, pref_path)
+        except (OSError, ValueError, TypeError):
+            try:
+                os.remove(pref_path + ".aiexe.tmp")
+            except OSError:
+                pass
+
+
 def get_webdriver(headless=True, debug_browser=False, docker=False):
     chrome_options = webdriver.ChromeOptions()
     profile_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".chrome-profile")
@@ -315,7 +352,14 @@ def get_webdriver(headless=True, debug_browser=False, docker=False):
         # ChromeDriver's own verbose log recommends pipe transport; it avoids the
         # DevToolsActivePort/loopback handoff that is fragile in Windows ARM VMs.
         chrome_options.add_argument("--remote-debugging-pipe")
+    _aiexe_mark_profile_clean(profile_dir)
     chrome_options.add_argument("--user-data-dir=" + profile_dir)
+    # This dedicated automation profile is never a user's browsing session. Suppress
+    # Chrome's noisy "Restore pages? Chrome didn't shut down correctly" UI after the
+    # owning app intentionally terminates its process tree.
+    chrome_options.add_argument("--hide-crash-restore-bubble")
+    chrome_options.add_argument("--disable-session-crashed-bubble")
+    chrome_options.add_argument("--noerrdialogs")
     try:
         chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
         chrome_options.add_argument("--disable-blink-features=AutomationControlled")
