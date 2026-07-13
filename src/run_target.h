@@ -76,9 +76,10 @@ inline RunTarget DetectRunTarget(const std::filesystem::path& root) {
 
   fs::path first_html;
   fs::path main_py, app_py, entry_py;  // entry_py = __main__.py
-  fs::path newest_py;                  // fallback: most-recently-modified .py
-  fs::file_time_type newest_time{};
-  bool have_newest = false;
+  fs::path newest_py;                  // absolute fallback when every script is tooling
+  fs::path newest_app_py;              // newest script that is not build/test/setup tooling
+  fs::file_time_type newest_time{}, newest_app_time{};
+  bool have_newest = false, have_newest_app = false;
   for (const auto& e : fs::directory_iterator(root, ec)) {
     if (!e.is_regular_file(ec)) continue;
     const std::string ext = lower_ext(e.path());
@@ -96,6 +97,16 @@ inline RunTarget DetectRunTarget(const std::filesystem::path& root) {
         newest_py = e.path();
         have_newest = true;
       }
+      const bool tooling = name == "setup.py" || name == "build.py"
+        || name.rfind("build_", 0) == 0 || name.rfind("build-", 0) == 0
+        || name.rfind("test_", 0) == 0 || name.rfind("test-", 0) == 0
+        || name.rfind("install_", 0) == 0 || name.rfind("package_", 0) == 0
+        || name.rfind("helper", 0) == 0 || name.rfind("util", 0) == 0;
+      if (!tooling && !te && (!have_newest_app || t > newest_app_time)) {
+        newest_app_time = t;
+        newest_app_py = e.path();
+        have_newest_app = true;
+      }
     }
   }
 
@@ -111,7 +122,8 @@ inline RunTarget DetectRunTarget(const std::filesystem::path& root) {
     target.entry = !main_py.empty() ? main_py
                    : !app_py.empty() ? app_py
                    : !entry_py.empty() ? entry_py
-                                       : newest_py;
+                   : have_newest_app ? newest_app_py
+                                     : newest_py;
     return target;
   }
   return target;

@@ -1112,7 +1112,8 @@ bool LaunchPythonConsoleWin(const std::filesystem::path &root,
   // `where` picks the interpreter; the chosen one is used for venv + run.
   std::ostringstream bat;
   bat << "@echo off\r\n"
-      << "cd /d \"" << root.string() << "\"\r\n"
+      << "pushd \"" << root.string() << "\"\r\n"
+      << "if errorlevel 1 (echo Could not open the project folder. & goto finish)\r\n"
       << "set \"PY=\"\r\n"
       << "where python >nul 2>nul && set \"PY=python\"\r\n"
       << "if not defined PY (where py >nul 2>nul && set \"PY=py\")\r\n"
@@ -1132,6 +1133,8 @@ bool LaunchPythonConsoleWin(const std::filesystem::path &root,
       << ")\r\n"
       << "\"%VPY%\" \"" << entry_filename << "\"\r\n"
       << ":end\r\n"
+      << "popd\r\n"
+      << ":finish\r\n"
       << "echo.\r\n"
       << "pause\r\n";
 
@@ -1152,7 +1155,7 @@ bool LaunchPythonConsoleWin(const std::filesystem::path &root,
   out.close();
 
   HINSTANCE result = ShellExecuteW(nullptr, L"open", bat_path.c_str(), nullptr,
-                                   root.wstring().c_str(), SW_SHOWNORMAL);
+                                   temp_dir, SW_SHOWNORMAL);
   if (reinterpret_cast<INT_PTR>(result) <= 32) {
     if (err) *err = "Could not open a console to run the project.";
     return false;
@@ -1165,7 +1168,8 @@ bool LaunchViteDevServerWin(const std::filesystem::path &root, int port,
   const std::string url = "http://127.0.0.1:" + std::to_string(port) + "/";
   std::ostringstream bat;
   bat << "@echo off\r\n"
-      << "cd /d \"" << root.string() << "\"\r\n"
+      << "pushd \"" << root.string() << "\"\r\n"
+      << "if errorlevel 1 (echo Could not open the project folder. & goto finish)\r\n"
       << "where npm >nul 2>nul\r\n"
       << "if errorlevel 1 (\r\n"
       << "  echo Node.js/npm is required to run this Vite project. Install Node.js, then run again.\r\n"
@@ -1185,6 +1189,8 @@ bool LaunchViteDevServerWin(const std::filesystem::path &root, int port,
       << "set BROWSER=none\r\n"
       << "call npm run dev -- --host 127.0.0.1 --port " << port << " --strictPort\r\n"
       << ":end\r\n"
+      << "popd\r\n"
+      << ":finish\r\n"
       << "echo.\r\n"
       << "pause\r\n";
 
@@ -1205,7 +1211,7 @@ bool LaunchViteDevServerWin(const std::filesystem::path &root, int port,
   out.close();
 
   HINSTANCE result = ShellExecuteW(nullptr, L"open", bat_path.c_str(), nullptr,
-                                   root.wstring().c_str(), SW_SHOWNORMAL);
+                                   temp_dir, SW_SHOWNORMAL);
   if (reinterpret_cast<INT_PTR>(result) <= 32) {
     if (err) *err = "Could not open a console to run the Vite project.";
     return false;
