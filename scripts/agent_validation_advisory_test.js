@@ -44,7 +44,7 @@ console.log('PASS: static architecture and DOM checks are advisory');
     _allExpectedFiles: Object.keys(files),
   });
   assert.equal(result.validationPassed, true);
-  assert.match(result.observation, /Python project imports package/);
+  assert.match(result.observation, /requirements\.txt automatically synchronized from imports: requests/);
   assert.match(result.observation, /static scan could not resolve/);
   console.log('PASS: dependency and import scans are advisory');
 })().catch((error) => {

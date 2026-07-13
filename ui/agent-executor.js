@@ -491,16 +491,126 @@
       }, null, 2)}\n`;
     }
 
+    function buildDeterministicTailwindConfig(path) {
+      const normalized = deps.normalizeWorkspacePath(path || '');
+      if (!/(?:^|\/)tailwind\.config\.ts$/i.test(normalized)) return '';
+      return `import type { Config } from "tailwindcss";
+
+const config: Config = {
+  darkMode: ["class"],
+  content: [
+    "./pages/**/*.{ts,tsx}",
+    "./components/**/*.{ts,tsx}",
+    "./app/**/*.{ts,tsx}",
+    "./src/**/*.{ts,tsx}",
+  ],
+  theme: {
+    extend: {
+      colors: {
+        border: "hsl(var(--border))",
+        input: "hsl(var(--input))",
+        ring: "hsl(var(--ring))",
+        background: "hsl(var(--background))",
+        foreground: "hsl(var(--foreground))",
+        primary: {
+          DEFAULT: "hsl(var(--primary))",
+          foreground: "hsl(var(--primary-foreground))",
+        },
+        secondary: {
+          DEFAULT: "hsl(var(--secondary))",
+          foreground: "hsl(var(--secondary-foreground))",
+        },
+        destructive: {
+          DEFAULT: "hsl(var(--destructive))",
+          foreground: "hsl(var(--destructive-foreground))",
+        },
+        muted: {
+          DEFAULT: "hsl(var(--muted))",
+          foreground: "hsl(var(--muted-foreground))",
+        },
+        accent: {
+          DEFAULT: "hsl(var(--accent))",
+          foreground: "hsl(var(--accent-foreground))",
+        },
+        popover: {
+          DEFAULT: "hsl(var(--popover))",
+          foreground: "hsl(var(--popover-foreground))",
+        },
+        card: {
+          DEFAULT: "hsl(var(--card))",
+          foreground: "hsl(var(--card-foreground))",
+        },
+      },
+      borderRadius: {
+        lg: "var(--radius)",
+        md: "calc(var(--radius) - 2px)",
+        sm: "calc(var(--radius) - 4px)",
+      },
+      keyframes: {
+        "accordion-down": {
+          from: { height: "0" },
+          to: { height: "var(--radix-accordion-content-height)" },
+        },
+        "accordion-up": {
+          from: { height: "var(--radix-accordion-content-height)" },
+          to: { height: "0" },
+        },
+      },
+      animation: {
+        "accordion-down": "accordion-down 0.2s ease-out",
+        "accordion-up": "accordion-up 0.2s ease-out",
+      },
+    },
+  },
+  plugins: [require("tailwindcss-animate")],
+};
+
+export default config;
+`;
+    }
+
     // A code file cut mid-statement: ends on an opener/separator, a dangling line
     // continuation, or an unterminated block comment. Catches saves truncated before
     // completion (e.g. vite.config.ts saved ending at "server: {") that .ts/.tsx would
     // otherwise pass silently. Complete files end on } ; ) etc. and don't trip this.
+    function hasUnterminatedBlockComment(text) {
+      const source = String(text || '');
+      let mode = 'code';
+      let escaped = false;
+      for (let i = 0; i < source.length; i += 1) {
+        const ch = source[i];
+        const next = source[i + 1] || '';
+        if (mode === 'line') {
+          if (ch === '\n') mode = 'code';
+          continue;
+        }
+        if (mode === 'block') {
+          if (ch === '*' && next === '/') { mode = 'code'; i += 1; }
+          continue;
+        }
+        if (mode !== 'code') {
+          if (escaped) { escaped = false; continue; }
+          if (ch === '\\') { escaped = true; continue; }
+          if ((mode === 'single' && ch === "'") || (mode === 'double' && ch === '"') || (mode === 'template' && ch === '`')) mode = 'code';
+          continue;
+        }
+        if (ch === "'") { mode = 'single'; continue; }
+        if (ch === '"') { mode = 'double'; continue; }
+        if (ch === '`') { mode = 'template'; continue; }
+        if (ch === '/' && next === '/') { mode = 'line'; i += 1; continue; }
+        if (ch === '/' && next === '*') { mode = 'block'; i += 1; }
+      }
+      return mode === 'block';
+    }
+
     function looksTruncatedCodeTail(text) {
       const tail = String(text || '').replace(/\s+$/, '');
       if (!tail) return false;
       if (/\\$/.test(tail)) return true;
       if (/[([{,:]$/.test(tail)) return true;
-      if ((tail.match(/\/\*/g) || []).length > (tail.match(/\*\//g) || []).length) return true;
+      // Raw delimiter counting mistakes glob strings such as
+      // "./app/**/*.{ts,tsx}" for an opening block comment.
+      if (hasUnterminatedBlockComment(tail)) return true;
       return false;
     }
 
@@ -2257,12 +2367,21 @@
         const shouldAutoGenerate = deps.isAgentGeneratedContentTarget(path, taskText);
         const initialInlineContent = content;
         const packageJsonTarget = /(?:^|\/)package\.json$/i.test(path);
+        const tailwindConfigTarget = /(?:^|\/)tailwind\.config\.ts$/i.test(path);
         let primaryQualityNote = '';
         if (packageJsonTarget && !String(content || '').trim()) {
           const deterministicPackage = buildDeterministicPackageJson(path, taskText, planSpec);
           if (deterministicPackage) {
             content = deterministicPackage;
             primaryQualityNote = ' Note: generated deterministic Vite React package.json.';
+          }
+        }
+        if (tailwindConfigTarget) {
+          const tailwindFallback = buildDeterministicTailwindConfig(path);
+          const suppliedIssue = String(content || '').trim() ? getStructuralIssueForPath(path, content) : 'empty';
+          if (!String(content || '').trim() || suppliedIssue || String(content || '').length > 8000) {
+            content = tailwindFallback;
+            primaryQualityNote = ' Note: used the bounded canonical Tailwind/shadcn configuration to avoid truncated or repeated generated blocks.';
           }
         }
         const inlineStructureIssue = String(content).trim() ? getStructuralIssueForPath(path, content) : '';
@@ -2272,6 +2391,14 @@
         const modelSuppliedComplete = shouldAutoGenerate
           && content.trim().length >= (packageJsonTarget ? 20 : 80)
           && !inlineStructureIssue;
+        if (tailwindConfigTarget && typeof deps.recordDebugTrace === 'function') {
+          deps.recordDebugTrace('agent_tailwind_config_candidate', {
+            chars: String(content.length),
+            structuralIssue: String(inlineStructureIssue || 'none'),
+            modelSuppliedComplete: String(Boolean(modelSuppliedComplete)),
+            tail: deps.debugPreview(content.slice(-40), 40),
+          }, { path, tail: content.slice(-120) });
+        }
         let structuralRepairAttempted = false;
         const repairStructuralIssueOnce = async (stageLabel) => {
           const issue = getStructuralIssueForPath(path, content);
@@ -2301,6 +2428,10 @@
         } else if (!shouldAutoGenerate && !String(content).trim()) {
           const generated = await deps.generateAgentWriteFileContent(taskText, toolEvents, path, '', planSpec, { persistPartials: creatingNewFile });
           if (generated) content = generated;
+        }
+        if (tailwindConfigTarget && (getStructuralIssueForPath(path, content) || String(content || '').length > 8000)) {
+          content = buildDeterministicTailwindConfig(path);
+          primaryQualityNote = ' Note: replaced an invalid/oversized generation with the bounded canonical Tailwind/shadcn configuration.';
         }
         if (!String(content).trim()) {
           return {
@@ -2408,6 +2539,15 @@
           }
         }
         const newContentStructureIssue = getStructuralIssueForPath(path, content);
+        const boundedConfigTarget = /(?:^|\/)(?:(?:tailwind|postcss|next|vite)\.config\.[cm]?[jt]s|(?:package|tsconfig(?:\.[^/]*)?|components)\.json)$/i.test(path);
+        if (boundedConfigTarget && (newContentStructureIssue || content.length > 8000)) {
+          return {
+            ok: false,
+            mutated,
+            structuralIssue: newContentStructureIssue || `exceeds the 8,000-character configuration-file limit (${content.length} chars)`,
+            observation: `write_file rejected for ${path}: configuration files must be complete and under 8,000 characters. Nothing was saved. Generate one compact complete configuration and retry this same file.`,
+          };
+        }
         if (newContentStructureIssue) {
           const priorKnownContent = creatingNewFile ? '' : getLatestKnownContentForPath(toolEvents, path);
           const priorBroken = Boolean(priorKnownContent && getStructuralIssueForPath(path, priorKnownContent));
@@ -2484,6 +2624,7 @@
           writtenContent: content,
           originalContent,
           createdNewFile: creatingNewFile,
+          structuralIssue: newContentStructureIssue || '',
         };
       }
 
@@ -2545,6 +2686,38 @@
           return { ok: false, mutated, observation: `edit_file failed for ${path}: could not read existing file.` };
         }
         const originalContent = String(readResponse.output || '');
+        const brokenTailwindConfig = /(?:^|\/)tailwind\.config\.ts$/i.test(path)
+          && originalContent.length > 8000
+          && Boolean(getStructuralIssueForPath(path, originalContent));
+        if (brokenTailwindConfig) {
+          const content = buildDeterministicTailwindConfig(path);
+          const response = await deps.invokeWorkspaceAction('workspaceWriteFile', { path, content });
+          if (!response || !response.ok) {
+            return { ok: false, mutated, observation: `edit_file failed for ${path}: could not save the recovered configuration.` };
+          }
+          deps.setWorkspaceSelection(path, 'file');
+          deps.upsertWorkspaceTreeEntry({
+            kind: 'file', path, name: deps.workspaceBaseName(path),
+            sizeBytes: deps.estimateTextBytes(content), updatedAt: deps.nowTs(),
+            optimisticUntil: deps.nowTs() + 5000,
+          });
+          deps.syncFileTabFromWorkspaceWrite(path, content, deps.workspaceBaseName(path));
+          if (typeof deps.recordDebugTrace === 'function') {
+            deps.recordDebugTrace('agent_tailwind_config_recovered', {
+              path, originalLen: String(originalContent.length), recoveredLen: String(content.length),
+            }, { path });
+          }
+          return {
+            ok: true,
+            mutated: true,
+            observation: `edit_file ok: ${path} was structurally corrupted and oversized, so it was atomically replaced with the bounded canonical Tailwind/shadcn configuration.`,
+            writtenPath: path,
+            writtenContent: content,
+            originalContent,
+            createdNewFile: false,
+            structuralIssue: '',
+          };
+        }
         deps.setActiveAgentStreamStatus(chatId, `Editing file ${path}...`);
         let program = deps.parseAgentEditProgram(decision.content || '');
         let editProgramSource = program ? 'inline-decision' : '';
@@ -2730,6 +2903,7 @@
           writtenContent: applied.output,
           originalContent,
           createdNewFile: false,
+          structuralIssue: editAfterIssue || '',
         };
       }
 
@@ -3190,10 +3364,13 @@
                 path: '/requirements.txt', content: nextReq, originalContent: reqText,
                 createdNewFile: !reqExisted,
               });
-              deps.upsertWorkspaceTreeEntry({
-                kind: 'file', path: '/requirements.txt', name: 'requirements.txt',
-                sizeBytes: nextReq.length, updatedAt: deps.nowTs(), optimisticUntil: deps.nowTs() + 5000,
-              });
+              const timestamp = typeof deps.nowTs === 'function' ? deps.nowTs() : Date.now();
+              if (typeof deps.upsertWorkspaceTreeEntry === 'function') {
+                deps.upsertWorkspaceTreeEntry({
+                  kind: 'file', path: '/requirements.txt', name: 'requirements.txt',
+                  sizeBytes: nextReq.length, updatedAt: timestamp, optimisticUntil: timestamp + 5000,
+                });
+              }
               mechanicalAdvisory.push(`requirements.txt automatically synchronized from imports: ${missingDeps.join(', ')}.`);
             } else {
               issues.push(`/requirements.txt: could not declare imported package(s): ${missingDeps.join(', ')}`);

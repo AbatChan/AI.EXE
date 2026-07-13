@@ -4,6 +4,7 @@ Example — for a /script.js the response begins straight with code, e.g.: docum
 Do NOT do: a ```javascript fence, a "Here is the file:" preamble, or contract/requirement/date lines pasted into the code.
 
 File path: {{FILE_PATH}}
+File budget: {{FILE_BUDGET}}
 
 Rules:
 - Write a usable MVP, not a placeholder.

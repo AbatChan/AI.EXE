@@ -178,6 +178,24 @@ const cases = [
     },
   },
   {
+    name: 'Next App Router plans drop phantom index.html and start with a runnable slice',
+    run: () => core.normalizeAgentPlanSpec({
+      task_kind: 'project',
+      primary_stack: 'web',
+      expected_files: '/index.html|/package.json|/tsconfig.json|/next.config.ts|/postcss.config.mjs|/tailwind.config.ts|/components.json|/app/layout.tsx|/app/page.tsx|/app/globals.css|/app/transactions/page.tsx|/README.md',
+      phases: 'Foundation :: /package.json ; /tsconfig.json ; /next.config.ts ; /postcss.config.mjs ; /tailwind.config.ts ; /components.json ; /index.html | Dashboard :: /app/layout.tsx ; /app/page.tsx ; /app/globals.css | Transactions :: /app/transactions/page.tsx | Documentation :: /README.md',
+    }, 'Build a Next.js 15 App Router finance dashboard with Tailwind and shadcn/ui.', { chatId: 'chat_owns_ws', forceProjectScope: true }),
+    expect: (spec) => {
+      assert.ok(!spec.expectedFiles.includes('/index.html'), 'Next App Router must not inherit a static index.html');
+      const firstTasks = spec.phases[0].tasks.map((task) => task.text);
+      assert.ok(firstTasks.includes('app/layout.tsx'), 'first phase includes the App Router layout');
+      assert.ok(firstTasks.includes('app/page.tsx'), 'first phase includes a runnable route');
+      assert.ok(firstTasks.includes('app/globals.css'), 'first phase includes global styling');
+      assert.ok(firstTasks.includes('tailwind.config.ts'), 'first phase includes required Tailwind config');
+      assert.ok(!firstTasks.includes('README.md'), 'README remains a final-phase deliverable');
+    },
+  },
+  {
     name: 'single-page web apps keep semantic feature phases',
     run: () => core.normalizeAgentPlanSpec({
       task_kind: 'project',

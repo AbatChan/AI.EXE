@@ -250,6 +250,71 @@ const repairedScript = [
   assert.match(deterministicPackageSaved.observation, /deterministic Vite React package\.json/);
   console.log('PASS: Vite React package.json is generated deterministically without model repair');
 
+  const tailwindGeneratorCalls = [];
+  const { executor: tailwindExecutor, writes: tailwindWrites, traces: tailwindTraces } = makeExecutor(async (...args) => {
+    tailwindGeneratorCalls.push(args);
+    return 'export default { theme: { extend: { colors: { repeated: {'.repeat(900);
+  });
+  const tailwindSaved = await tailwindExecutor.executeDeveloperToolCall(
+    'chat_write_repair',
+    { action: 'tool', tool: 'write_file', path: '/tailwind.config.ts', content: '' },
+    'Create a Next.js 15 App Router finance dashboard using Tailwind and shadcn/ui.',
+    [],
+    { ...planSpec, expectedFiles: ['/tailwind.config.ts', '/app/layout.tsx', '/app/page.tsx'] }
+  );
+
+  assert.equal(tailwindSaved.ok, true, `empty Tailwind config is generated deterministically: ${tailwindSaved.observation}; issue=${tailwindSaved.structuralIssue || ''}; traces=${JSON.stringify(tailwindTraces.slice(-2))}`);
+  assert.equal(tailwindGeneratorCalls.length, 0, 'Tailwind config does not spend a separate generation pass');
+  assert.equal(tailwindWrites.length, 1, 'Tailwind config is written atomically once');
+  assert.ok(tailwindWrites[0].content.length < 8000, 'Tailwind config stays within the hard config budget');
+  assert.match(tailwindWrites[0].content, /export default config;/);
+  assert.match(tailwindWrites[0].content, /\.\/app\/\*\*\/\*\.\{ts,tsx\}/);
+  assert.equal((tailwindWrites[0].content.match(/export default config;/g) || []).length, 1, 'Tailwind config has no duplicated tail');
+  console.log('PASS: Tailwind config is bounded and deterministic');
+
+  const corruptedTailwind = `${'const repeated = { theme: { extend: {} } };\n'.repeat(700)}export default {`;
+  const recoveryFiles = { '/tailwind.config.ts': corruptedTailwind };
+  const { executor: tailwindRecoveryExecutor, writes: tailwindRecoveryWrites } = makeExecutor(
+    async () => '',
+    { files: recoveryFiles, isLikelyNewAgentFileTarget: () => false }
+  );
+  const tailwindRecovered = await tailwindRecoveryExecutor.executeDeveloperToolCall(
+    'chat_write_repair',
+    { action: 'tool', tool: 'edit_file', path: '/tailwind.config.ts', content: '' },
+    'Repair the Tailwind configuration.',
+    [{ tool: 'read_file', ok: true, path: '/tailwind.config.ts', content: corruptedTailwind }],
+    { ...planSpec, expectedFiles: ['/tailwind.config.ts'] }
+  );
+  assert.equal(tailwindRecovered.ok, true, 'oversized broken Tailwind config is recoverable');
+  assert.equal(tailwindRecoveryWrites.length, 1, 'recovery is one atomic replacement');
+  assert.ok(tailwindRecoveryWrites[0].content.length < 8000);
+  assert.match(tailwindRecovered.observation, /atomically replaced/i);
+  console.log('PASS: oversized broken Tailwind config escapes the edit/rewrite deadlock');
+
+  const phasedPlan = {
+    ...planSpec,
+    needsReadme: true,
+    needsRunInstructions: true,
+    expectedFiles: ['/tailwind.config.ts', '/app/page.tsx', '/README.md'],
+    _activePhase: {
+      number: 1,
+      total: 3,
+      title: 'Foundation',
+      tasks: ['tailwind.config.ts', 'app/page.tsx'],
+    },
+  };
+  const pendingPhase = planner.summarizeAgentPendingRequirements(
+    'Create a Next.js dashboard.',
+    [{ tool: 'write_file', ok: true, path: '/tailwind.config.ts', structuralIssue: 'looks truncated' }],
+    phasedPlan
+  );
+  assert.match(pendingPhase, /tailwind\.config\.ts/, 'a structurally broken saved config remains pending');
+  assert.doesNotMatch(pendingPhase, /README\.md|run instructions/i, 'future-phase README cannot block the current phase');
+  const nextAction = planner.buildImmediateNextAction('Create a Next.js dashboard.', [], phasedPlan, 9);
+  assert.match(nextAction, /Execution budget: 7 tool steps remain/);
+  assert.match(nextAction, /NOW: create \/tailwind\.config\.ts/i, 'the next phase task is repeated at the prompt tail');
+  console.log('PASS: phased prompt focus excludes future docs and names the immediate task plus remaining budget');
+
   const brokenPackageJson = JSON.stringify({
     name: 'amora-dating-platform',
     private: true,

@@ -1663,6 +1663,34 @@
       if (!isWeb || list.length < 2) return list;
       const expected = expectedFiles.map((path) => normalizeWorkspacePath(path || '')).filter(Boolean);
       const expectedSet = new Set(expected);
+      const nextAppRouter = expected.some((path) => /(?:^|\/)next\.config\.[cm]?[jt]s$/i.test(path))
+        || expected.some((path) => /^\/app\/(?:layout|page)\.tsx$/i.test(path));
+      if (nextAppRouter) {
+        // A runnable Next.js vertical slice needs its App Router shell, not only
+        // package/config files. Keep the first phase deterministic and file-grounded.
+        const foundation = expected.filter((path) => (
+          /^(?:\/package\.json|\/tsconfig(?:\.[^/]*)?\.json|\/next\.config\.[cm]?[jt]s|\/postcss\.config\.[cm]?[jt]s|\/tailwind\.config\.[cm]?[jt]s|\/components\.json)$/i.test(path)
+          || /^\/app\/(?:layout|page)\.tsx$/i.test(path)
+          || /^\/app\/globals\.(?:css|scss|sass|less)$/i.test(path)
+        ));
+        const foundationSet = new Set(foundation);
+        const normalized = [Object.assign({}, list[0], { tasks: foundation.map(phaseTaskForPath) })];
+        const assigned = new Set(foundation);
+        list.slice(1).forEach((phase) => {
+          const tasks = (Array.isArray(phase.tasks) ? phase.tasks : [])
+            .map((task) => {
+              const path = extractPlannedPathFromPhaseTask(task);
+              return path && expectedSet.has(path) && !foundationSet.has(path) && !assigned.has(path)
+                ? phaseTaskForPath(path) : null;
+            })
+            .filter(Boolean);
+          tasks.forEach((task) => assigned.add(extractPlannedPathFromPhaseTask(task)));
+          if (tasks.length) normalized.push(Object.assign({}, phase, { tasks }));
+        });
+        const remaining = expected.filter((path) => !assigned.has(path)).map(phaseTaskForPath);
+        if (remaining.length) normalized.push({ title: 'Remaining deliverables', tasks: remaining });
+        return normalized;
+      }
       const htmlFiles = expected.filter((path) => /\.html?$/i.test(path));
       if (htmlFiles.length < 2) return list;
       const cssFiles = expected.filter((path) => /\.(css|scss|sass|less)$/i.test(path));
@@ -1938,8 +1966,19 @@
         .replace(/\.(?:pdf|docx?|rtf|odt|pptx?)$/i, '.html')
         .replace(/\.(?:xlsx?|ods)$/i, '.csv');
       expectedFiles = expectedFiles.map(mapBinaryDocPath);
+      const explicitTaskFiles = new Set(extractExplicitTaskFilePaths(taskText));
+      const nextAppRouterProject = taskKind === 'project' && (
+        /\bnext(?:\.js)?\b/i.test(taskText)
+        || expectedFiles.some((path) => /(?:^|\/)next\.config\.[cm]?[jt]s$/i.test(path))
+        || expectedFiles.some((path) => /^\/app\/(?:layout|page)\.tsx$/i.test(path))
+      );
+      if (nextAppRouterProject && !explicitTaskFiles.has('/index.html')) {
+        // Next App Router owns the document shell through app/layout.tsx. A root
+        // index.html is a Vite/static-web artifact and must not enter the plan.
+        expectedFiles = expectedFiles.filter((path) => path !== '/index.html');
+      }
       if (taskKind === 'project' && primaryStack === 'python') {
-        const explicitlyNamed = new Set(extractExplicitTaskFilePaths(taskText));
+        const explicitlyNamed = explicitTaskFiles;
         // Keep an HTML/JS companion only when the user actually named it. This
         // removes invented index.html previews that hijack a desktop app's Run.
         expectedFiles = expectedFiles.filter((path) => (
@@ -1951,6 +1990,13 @@
       let filesToInspect = parseAgentPlanPathList(parsed && parsed.files_to_inspect ? parsed.files_to_inspect : '');
       let doneCriteria = parseAgentPlanTextList(parsed && parsed.done_criteria ? parsed.done_criteria : '', 5); // cap 5
       let phases = parseAgentPlanPhases(parsed && parsed.phases ? parsed.phases : ''); // [{title,tasks}]
+      if (nextAppRouterProject && !explicitTaskFiles.has('/index.html')) {
+        phases = phases.map((phase) => Object.assign({}, phase, {
+          tasks: (Array.isArray(phase && phase.tasks) ? phase.tasks : []).filter((task) => (
+            extractPlannedPathFromPhaseTask(task) !== '/index.html'
+          )),
+        }));
+      }
       const validationSteps = parseAgentPlanTextList(parsed && parsed.validation ? parsed.validation : '', 6);
       const looksLikeWebProjectTask = taskKind === 'project'
         && !explicitPythonStackTask
@@ -2093,7 +2139,7 @@
       if (taskKind === 'project' && doneCriteria.length === 0) {
         doneCriteria = buildFallbackDoneCriteria(taskText, expectedFiles);
       }
-      if (taskKind === 'project' && !singleHtmlFileProject && !simpleSingleFileProject && (primaryStack === 'web' || looksLikeWebProjectTask)) {
+      if (taskKind === 'project' && !nextAppRouterProject && !singleHtmlFileProject && !simpleSingleFileProject && (primaryStack === 'web' || looksLikeWebProjectTask)) {
         // Ensure the project has an HTML entry point. Default is a single self-contained
         // index.html; only honor separate style.css/script.js when the model planned them
         // (so a multi-file structure is opt-in, not forced — single files run from file://

@@ -67,5 +67,7 @@ TOOL_RESULTS:
 {{TOOL_RESULTS}}
 TASK:
 {{TASK}}
+IMMEDIATE NEXT ACTION (highest-priority instruction for this step):
+{{IMMEDIATE_NEXT_ACTION}}
 Reminder: reply with exactly ONE ```json block (keys and format defined at the top); put the user-facing progress note in its `message` field.
 JSON:

@@ -3047,6 +3047,9 @@
             : undefined,
           createdNewFile: Boolean(toolResult && toolResult.createdNewFile),
           mutated: Boolean(toolResult && toolResult.mutated),
+          // Preserve structural validation state so phased requirements do not
+          // count a saved-but-incomplete file as a completed deliverable.
+          structuralIssue: String((toolResult && toolResult.structuralIssue) || ''),
           // Approval/blocked policy — drives awaiting_approval/blocked run-log states.
           commandPolicy: String((toolResult && toolResult.commandPolicy) || ''),
           terminalCommand: String((toolResult && toolResult.terminalCommand) || ''),

@@ -122,6 +122,8 @@
         if (!event || !['write_file', 'edit_file'].includes(String(event.tool || '').toLowerCase()) || !event.ok) continue;
         const normalized = normalizeWorkspacePath(event.path || '');
         if (!normalized || normalized === '/README.md') continue;
+        if (/(?:^|\/)(?:package|tsconfig(?:\.[^/]*)?|components)\.json$/i.test(normalized)
+          || /(?:^|\/)(?:next|vite|tailwind|postcss)\.config\.[cm]?[jt]s$/i.test(normalized)) continue;
         if (!/\.(py|js|ts|tsx|jsx|html|css|json|md)$/i.test(normalized) && !normalized.startsWith('/src/')) continue;
         if (predicate && !predicate(event, normalized)) continue;
         return event;
@@ -204,9 +206,14 @@
       const priorMutated = (p) => Boolean(priorDone && priorDone.mutated && priorDone.mutated.has(p));
       const priorRead = (p) => Boolean(priorDone && ((priorDone.read && priorDone.read.has(p)) || priorMutated(p)));
       const priorValidatePassed = Boolean(priorDone && priorDone.validatePassed === true);
+      const activePhaseTaskText = plan._activePhase && Array.isArray(plan._activePhase.tasks)
+        ? plan._activePhase.tasks.join(' ') : '';
+      const readmeInCurrentScope = !plan._activePhase || /(?:^|[\s/])readme\.md\b/i.test(activePhaseTaskText);
       const affectedFileSatisfied = (targetPath) => hasSuccessfulAgentTool(
         toolEvents,
-        (event) => ['write_file', 'edit_file'].includes(String(event.tool || '').toLowerCase()) && normalizeWorkspacePath(event.path || '') === targetPath,
+        (event) => ['write_file', 'edit_file'].includes(String(event.tool || '').toLowerCase())
+          && normalizeWorkspacePath(event.path || '') === targetPath
+          && !String(event.structuralIssue || '').trim(),
       ) || priorMutated(targetPath) || hasNoOpEditAttempt(targetPath) || verifiedNoDefects;
 
       const readmeWrite = getLatestSuccessfulAgentWrite(toolEvents, (event) => normalizeWorkspacePath(event.path || '') === '/README.md');
@@ -232,7 +239,7 @@
         });
       }
 
-      if (isSoftwareProject && plan.needsReadme) {
+      if (isSoftwareProject && plan.needsReadme && readmeInCurrentScope) {
         requirements.push({
           id: 'readme_file',
           label: 'write /README.md',
@@ -242,7 +249,7 @@
 
       // Only when a README is actually planned — without one, run instructions are
       // delivered in the final message (never demand a file the plan didn't include).
-      if (isSoftwareProject && plan.needsReadme && plan.needsRunInstructions) {
+      if (isSoftwareProject && plan.needsReadme && plan.needsRunInstructions && readmeInCurrentScope) {
         requirements.push({
           id: 'readme_run_instructions',
           label: 'add run instructions to /README.md',
@@ -264,7 +271,7 @@
         });
       }
 
-      if (plan.finalRequiresRealFiles) {
+      if (plan.finalRequiresRealFiles && !plan._activePhase) {
         requirements.push({
           id: 'main_source_file',
           label: 'create the main implementation file',
@@ -272,7 +279,7 @@
         });
       }
 
-      if (plan.finalRequiresRealFiles && primarySourceWrite) {
+      if (plan.finalRequiresRealFiles && primarySourceWrite && !plan._activePhase) {
         const primaryPath = normalizeWorkspacePath(primarySourceWrite.path || '');
         requirements.push({
           id: 'main_source_complete',
@@ -289,7 +296,10 @@
       const activePhasePaths = [];
       if (plan._activePhase && Array.isArray(plan._activePhase.tasks)) {
         plan._activePhase.tasks.forEach((task) => {
-          (String(task || '').match(/\/[^\s"'`|,;]+/g) || []).forEach((raw) => {
+          // Normalized phase tasks commonly store `tailwind.config.ts` or
+          // `app/page.tsx` without a leading slash. Accept both forms; requiring
+          // `/` silently dropped root config tasks from the phase contract.
+          (String(task || '').match(/(?:^|\s)(?:\/)?[A-Za-z0-9_.@-]+(?:\/[A-Za-z0-9_.@-]+)*\.[A-Za-z0-9]+(?=$|[\s,;])/g) || []).forEach((raw) => {
             const p = normalizeWorkspacePath(String(raw).replace(/[.,;:]+$/, ''));
             if (p && /\.[A-Za-z0-9]+$/.test(p) && !activePhasePaths.includes(p)) activePhasePaths.push(p);
           });
@@ -330,7 +340,7 @@
         });
       }
 
-      const expectedNonReadmeFiles = plan.expectedFiles
+      const expectedNonReadmeFiles = (activePhasePaths.length ? activePhasePaths : plan.expectedFiles)
         .filter((path) => !isDocsTask && path && path !== '/README.md' && path !== '/src');
       const allExpectedFilesWritten = expectedNonReadmeFiles.length > 0
         && expectedNonReadmeFiles.every((path) => affectedFileSatisfied(path));
@@ -350,7 +360,7 @@
       // a "fixed" file that still fails to parse must block, not ship.
       const codeMutated = hasSuccessfulAgentTool(toolEvents, (event) => (
         ['write_file', 'edit_file'].includes(String(event.tool || '').toLowerCase())
-        && /\.(?:js|mjs|cjs|html?|css)$/i.test(normalizeWorkspacePath(event.path || ''))
+        && /\.(?:js|mjs|cjs|ts|tsx|jsx|html?|css|json)$/i.test(normalizeWorkspacePath(event.path || ''))
       ));
       if (codeMutated && !requirements.some((item) => /^validate/.test(String(item.id || '')))) {
         requirements.push({
@@ -400,6 +410,19 @@
       return missing.length ? missing.join('\n') : '- none';
     }
 
+    function buildImmediateNextAction(taskText, toolEvents = [], planSpec = null, stepIndex = 0) {
+      const missing = buildAgentTaskRequirements(taskText, toolEvents, planSpec).filter((item) => !item.met);
+      const remainingSteps = Math.max(0, agentMaxSteps - Math.max(0, Number(stepIndex) || 0));
+      if (!missing.length) {
+        return `Execution budget: ${remainingSteps} tool step${remainingSteps === 1 ? '' : 's'} remain. NOW: return the final result; do not invent optional work.`;
+      }
+      const label = String(missing[0].label || 'finish the next pending requirement').trim();
+      let action = label;
+      if (/^write\s+\//i.test(label)) action = label.replace(/^write\s+/i, 'create ');
+      else if (/^make\s+\//i.test(label)) action = label.replace(/^make\s+/i, 'repair ');
+      return `Execution budget: ${remainingSteps} tool step${remainingSteps === 1 ? '' : 's'} remain. NOW: ${action}. Take exactly one grounded tool action for this requirement; do not polish earlier completed files.`;
+    }
+
     function validateAgentFinalDecision(taskText, toolEvents = [], planSpec = null) {
       const requirements = buildAgentTaskRequirements(taskText, toolEvents, planSpec);
       const missing = requirements.filter((item) => !item.met).map((item) => item.label);
@@ -423,6 +446,7 @@
           PENDING_REQUIREMENTS: summarizeAgentPendingRequirements(taskText, toolEvents, planSpec),
           TOOL_RESULTS: toolLog || '(none yet)',
           INVALID_OUTPUT_TO_AVOID: String(badOutput || '').slice(0, 1200),
+          IMMEDIATE_NEXT_ACTION: buildImmediateNextAction(taskText, toolEvents, planSpec, stepIndex),
         });
       }
       return [
@@ -447,6 +471,8 @@
         toolLog || '(none yet)',
         'INVALID_OUTPUT_TO_AVOID:',
         String(badOutput || '').slice(0, 1200),
+        'IMMEDIATE NEXT ACTION:',
+        buildImmediateNextAction(taskText, toolEvents, planSpec, stepIndex),
         'JSON:',
       ].join('\n');
     }
@@ -652,6 +678,11 @@
         return `ToolResult ${index + 1}: ${String(event && event.tool ? event.tool : 'unknown')}\n${observation}`;
       }).join('\n\n');
       const normalizedPath = normalizeWorkspacePath(path || '');
+      const fileBudget = /(?:^|\/)(?:tailwind|postcss|next|vite)\.config\.[cm]?[jt]s$/i.test(normalizedPath)
+        ? 'Target 2,500 characters; hard maximum 8,000 characters. This is a configuration file: include only required configuration, never decorative variants or repeated blocks.'
+        : /(?:^|\/)(?:package|tsconfig(?:\.[^/]*)?|components)\.json$/i.test(normalizedPath)
+        ? 'Target 3,000 characters; hard maximum 8,000 characters. Include only valid configuration fields required by this project.'
+        : 'Keep this file focused on its own role. Finish all opened syntax before adding optional polish.';
       // Single planned HTML, no separate css/js → inline everything.
       const planFiles = Array.isArray(planSpec && planSpec.expectedFiles) ? planSpec.expectedFiles.map((p) => String(p || '')) : [];
       const frameworkWeb = planFiles.some((p) => (
@@ -715,12 +746,14 @@
           TASK: String(taskText || '').trim(),
           RECENT_TOOL_RESULTS: toolLog || '(none yet)',
           PREVIOUS_ATTEMPT_TO_IMPROVE: priorAttempt ? String(priorAttempt).slice(0, 1800) : '',
+          FILE_BUDGET: fileBudget,
         }) + designFoundation + foundationBlock;
       }
       return [
         'Write the complete final contents for one project file.',
         'Return only the file contents. No markdown fences. No explanation.',
         `File path: ${normalizedPath}`,
+        `FILE BUDGET: ${fileBudget}`,
         'Rules:',
         '- Write a usable MVP, not a placeholder.',
         '- Keep the file internally consistent and runnable for its role.',
@@ -1380,6 +1413,7 @@
         TOOL_RESULTS: toolLog || '(none yet)',
         TASK: String(taskText || '').trim(),
         PLAN_SUMMARY: phaseScope ? `${planSummary}\n${phaseScope}` : planSummary,
+        IMMEDIATE_NEXT_ACTION: buildImmediateNextAction(taskText, toolEvents, planSpec, stepIndex),
       };
       const prompt = renderPromptTemplate(template, vars);
       // Split at the dynamic section so remote APIs receive proper system/user roles.
@@ -1400,6 +1434,7 @@
       hasSuccessfulAgentTool,
       buildAgentTaskRequirements,
       summarizeAgentPendingRequirements,
+      buildImmediateNextAction,
       validateAgentFinalDecision,
       buildAgentDecisionRepairPrompt,
       sanitizeAgentGeneratedFileContent,
