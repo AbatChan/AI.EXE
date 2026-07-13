@@ -57,6 +57,43 @@
 
     // Count-up tween for diff stats (+A / -R), animated once per logical row.
     const animatedDiffKeys = new Set();
+    // Live agent messages are rebuilt as each activity arrives. Keep subgroup
+    // disclosure outside the DOM so those rebuilds cannot undo a user's click.
+    const activitySubgroupDisclosure = new Map();
+
+    function resolveActivitySubgroupDisclosure(key, options = {}) {
+      const disclosureKey = String(key || '');
+      const finished = Boolean(options.finished);
+      const hasError = Boolean(options.hasError);
+      const startExpanded = Boolean(options.startExpanded);
+      let state = activitySubgroupDisclosure.get(disclosureKey);
+      if (!state) {
+        state = {
+          expanded: hasError || (!finished && startExpanded),
+          finished,
+        };
+        activitySubgroupDisclosure.set(disclosureKey, state);
+        if (activitySubgroupDisclosure.size > 600) {
+          const oldestKey = activitySubgroupDisclosure.keys().next().value;
+          if (oldestKey !== undefined) activitySubgroupDisclosure.delete(oldestKey);
+        }
+      } else if (!state.finished && finished) {
+        // A successful phase closes exactly once when work moves on. Errors stay
+        // visible. Subsequent renders preserve whatever the user chooses.
+        state.expanded = hasError;
+        state.finished = true;
+      } else {
+        state.finished = finished;
+      }
+      return Boolean(state.expanded);
+    }
+
+    function setActivitySubgroupDisclosure(key, expanded) {
+      const disclosureKey = String(key || '');
+      const state = activitySubgroupDisclosure.get(disclosureKey) || { finished: false };
+      state.expanded = Boolean(expanded);
+      activitySubgroupDisclosure.set(disclosureKey, state);
+    }
     function setAnimatedCount(el, target, prefix, key) {
       const end = Math.max(0, Number(target) || 0);
       if (!el) return;
@@ -1766,7 +1803,7 @@
       return groups;
     }
 
-    function buildActivitySubgroup(chatId, group, startExpanded) {
+    function buildActivitySubgroup(chatId, group, disclosureOptions = {}) {
       const { phase, items } = group;
       const runningItem = items.find((a) => a && a.status === 'running');
       const errorItem = items.find((a) => a && a.status === 'error');
@@ -1828,7 +1865,12 @@
       };
       const labels = labelsByPhase[phase] || { running: 'Working', done: `${count} steps` };
       const label = groupStatus === 'running' ? labels.running : labels.done;
-      const expanded = Boolean(startExpanded);
+      const disclosureKey = String(disclosureOptions.key || `${chatId}:${phase}`);
+      const expanded = resolveActivitySubgroupDisclosure(disclosureKey, {
+        finished: disclosureOptions.finished,
+        hasError: groupStatus === 'error',
+        startExpanded: disclosureOptions.startExpanded,
+      });
 
       const subgroup = document.createElement('div');
       subgroup.className = `msg-agent-subgroup${groupStatus === 'error' ? ' error' : ''}`;
@@ -1863,6 +1905,7 @@
       toggle.addEventListener('click', () => {
         const isExpanded = subgroup.dataset.expanded === 'true';
         const next = !isExpanded;
+        setActivitySubgroupDisclosure(disclosureKey, next);
         subgroup.dataset.expanded = next ? 'true' : 'false';
         toggle.setAttribute('aria-expanded', next ? 'true' : 'false');
         if (next) {
@@ -1939,19 +1982,38 @@
         if (completed) wrapper.appendChild(buildAgentActivitySummaryToggle(chatId, Number(options.messageTs) || 0, meta));
         const alwaysGroupPhases = new Set(['setup', 'validate', 'cleanup']);
         const groups = groupActivitiesByPhase(rows);
+        let activeStructuredGroupIndex = -1;
+        if (!completed) {
+          for (let index = groups.length - 1; index >= 0; index -= 1) {
+            if (groups[index].phase !== 'other') {
+              activeStructuredGroupIndex = index;
+              break;
+            }
+          }
+        }
         groups.forEach((group, groupIndex) => {
-          const isLastGroup = groupIndex === groups.length - 1;
           const groupHasRunning = group.items.some((a) => a && a.status === 'running');
           const groupHasError = group.items.some((a) => a && a.status === 'error');
-          // While streaming, keep every group expanded so completed steps stay visible
-          // and the worked log accumulates — collapsing a finished group the instant work
-          // moves on reads as "the steps got removed". On the finalized message, collapse
-          // as usual (errors stay open).
-          const groupStartExpanded = completed ? groupHasError : true;
+          const groupFinished = completed || (!groupHasRunning && groupIndex !== activeStructuredGroupIndex);
+          const firstItem = group.items[0] || {};
+          // Do not key on normalized timestamps: legacy rows without a persisted
+          // timestamp receive a fresh fallback timestamp on every render.
+          const groupIdentity = [
+            groupIndex,
+            firstItem.kind || '',
+            firstItem.openPath || '',
+            firstItem.title || '',
+            firstItem.detail || '',
+          ].join('|');
+          const disclosureKey = [chatId, Number(options.messageTs) || 0, group.phase, groupIdentity].join(':');
           if (group.phase === 'other' || (group.items.length < 2 && !alwaysGroupPhases.has(group.phase))) {
             group.items.forEach((activity) => list.appendChild(buildAgentActivityRow(chatId, activity)));
           } else {
-            list.appendChild(buildActivitySubgroup(chatId, group, groupStartExpanded));
+            list.appendChild(buildActivitySubgroup(chatId, group, {
+              key: disclosureKey,
+              finished: groupFinished,
+              startExpanded: !completed || groupHasError,
+            }));
           }
         });
         if (completed) {
@@ -2860,6 +2922,8 @@
       buildAgentPendingActivity,
       buildAgentPlanActivity,
       buildAgentCorrectionActivity,
+      resolveActivitySubgroupDisclosure,
+      setActivitySubgroupDisclosure,
       buildAgentActivityPanel,
       hasCanvasTokenStarted,
       buildCanvasLoader,
