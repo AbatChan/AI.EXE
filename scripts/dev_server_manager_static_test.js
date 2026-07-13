@@ -49,6 +49,9 @@ assert.match(renderer, /devServer: item\.devServer && typeof item\.devServer ===
 assert.match(aiExe, /function handleDevServerCardClick/);
 assert.match(aiExe, /devServerStop', \{ serverId \}/);
 assert.match(css, /\.msg-agent-devserver-btn/);
+assert.match(aiExe, /classList\.add\('platform-windows'\)/);
+assert.match(css, /html\.platform-windows \*::\-webkit-scrollbar/);
+assert.match(css, /html\.platform-windows \*::\-webkit-scrollbar-button/);
 
 // Adapter: idle-time cleanup of internal one-shot Venice threads.
 assert.match(adapter, /_aiexe_internal_cleanup_loop/);

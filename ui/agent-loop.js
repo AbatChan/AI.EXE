@@ -344,6 +344,7 @@
       // Decision replies that inlined a whole file and blew the structured-output
       // cap: recover by steering (content belongs to the dedicated content step).
       let outputLimitNudges = 0;
+      let incompleteJsonNudges = 0;
       let runAppFinishNudges = 0;
       let autoFinalSummaryNudgeUsed = false;
       // Block completing a phase when the model wrote nothing that run.
@@ -1753,6 +1754,28 @@
                 nudge: String(outputLimitNudges),
               }, { chatId: String(chatId || ''), step, nudge: outputLimitNudges, rawPreview: deps.debugPreview(String(res.output || ''), 240) });
               setAgentProgress('Continuing...');
+              continue;
+            }
+            // Venice occasionally ends a structured planner stream mid-object even
+            // after its transport retries. This is not a workspace blocker: retain
+            // every completed tool result and ask for one tiny decision again instead
+            // of terminating a long repair run and making the user press Continue.
+            const incompleteStructuredJson = Boolean(res && !res.timedOut && !res.hardFail
+              && /structured stream ended (?:with incomplete JSON|without a complete JSON object)/i.test(String(res.message || '')));
+            if (incompleteStructuredJson && incompleteJsonNudges < 2) {
+              incompleteJsonNudges += 1;
+              toolEvents.push({
+                tool: '_invalid_output',
+                ok: false,
+                path: '',
+                observation: 'The provider cut off your previous structured decision. Continue from the saved tool results. Return ONLY one short decision JSON object with action/tool/path; do not include file content or repeat a file that was already written successfully.',
+              });
+              recordDebugTrace('agent_incomplete_json_recovered', {
+                chatId: String(chatId || ''),
+                step: String(step),
+                nudge: String(incompleteJsonNudges),
+              }, { chatId: String(chatId || ''), step, nudge: incompleteJsonNudges, reason: String(res.message || '') });
+              setAgentProgress('Structured reply was cut off — continuing from saved work...');
               continue;
             }
             setAgentProgress('Stopped.');

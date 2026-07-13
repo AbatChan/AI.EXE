@@ -6,6 +6,7 @@ const aiExe = fs.readFileSync(path.join(__dirname, '..', 'ui', 'ai-exe.js'), 'ut
 const backendModels = fs.readFileSync(path.join(__dirname, '..', 'backend', 'app', 'models.py'), 'utf8');
 const backendUsage = fs.readFileSync(path.join(__dirname, '..', 'backend', 'app', 'routers', 'usage.py'), 'utf8');
 const adapterServer = fs.readFileSync(path.join(__dirname, '..', 'backend', 'app', 'venice_adapter_server.py'), 'utf8');
+const agentLoop = fs.readFileSync(path.join(__dirname, '..', 'ui', 'agent-loop.js'), 'utf8');
 const cmake = fs.readFileSync(path.join(__dirname, '..', 'CMakeLists.txt'), 'utf8');
 const pkg = require('../package.json');
 
@@ -58,6 +59,9 @@ assert.match(adapterServer, /AIEXE_STRUCTURED output exceeded/);
 assert.match(adapterServer, /structured output limit/);
 assert.match(adapterServer, /if not _aiexe_generation_running\(driver\):\s+_stable \+= 1/);
 assert.match(adapterServer, /_aiexe_stop_generation\(driver, "stream boundary cleanup"\)/);
+assert.match(agentLoop, /incompleteJsonNudges/);
+assert.match(agentLoop, /agent_incomplete_json_recovered/);
+assert.match(agentLoop, /Continue from the saved tool results/);
 
 assert.equal(pkg.version, (cmake.match(/AI_EXE_APP_VERSION "([^"]+)"/) || [])[1]);
 

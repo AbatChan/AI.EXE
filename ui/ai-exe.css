@@ -8669,3 +8669,45 @@ mark.search-term-hit {
   opacity: 0.65;
   cursor: default;
 }
+
+/* WebView2 otherwise exposes the legacy white Windows scrollbars (including
+   arrow buttons) in every nested overflow container. Keep macOS overlay
+   scrolling untouched and give all Windows drawers, code blocks, tables,
+   settings panes, editors, and future scrollers one consistent app theme. */
+html.platform-windows * {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(88, 157, 181, 0.72) rgba(8, 13, 21, 0.48);
+}
+
+html.platform-windows *::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+  background: transparent;
+}
+
+html.platform-windows *::-webkit-scrollbar-track {
+  background: rgba(8, 13, 21, 0.48);
+  border-radius: 999px;
+}
+
+html.platform-windows *::-webkit-scrollbar-thumb {
+  min-width: 26px;
+  min-height: 26px;
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background: linear-gradient(180deg, rgba(76, 193, 211, 0.78), rgba(58, 112, 170, 0.78)) padding-box;
+}
+
+html.platform-windows *::-webkit-scrollbar-thumb:hover {
+  background: linear-gradient(180deg, rgba(91, 224, 237, 0.94), rgba(62, 145, 201, 0.94)) padding-box;
+}
+
+html.platform-windows *::-webkit-scrollbar-button {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+html.platform-windows *::-webkit-scrollbar-corner {
+  background: transparent;
+}

@@ -17,6 +17,8 @@ const authStorageKey = 'ai_exe_auth_v1';
 const settingsStorageKey = 'ai_exe_settings_v1';
 if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.aiexe) {
   document.documentElement.classList.add('platform-mac');
+} else if (window.chrome && window.chrome.webview && typeof window.chrome.webview.postMessage === 'function') {
+  document.documentElement.classList.add('platform-windows');
 }
 
 const nativeBridge = (() => {
