@@ -32,6 +32,21 @@ int main() {
   target = DetectRunTarget(base);
   assert(target.kind == RunTargetKind::kViteWeb);
 
+  fs::remove(base / "index.html", ec);
+  Write(base / "package.json", "{\"scripts\":{\"dev\":\"next dev\"},\"dependencies\":{\"next\":\"15.0.0\"}}");
+  Write(base / "next.config.ts", "export default {};");
+  fs::create_directories(base / "src" / "app", ec);
+  Write(base / "src" / "app" / "page.tsx", "export default function Page(){return null;}");
+  target = DetectRunTarget(base);
+  assert(target.kind == RunTargetKind::kNextWeb);
+  assert(target.entry.filename() == "package.json");
+
+  // A stale Next config must not override an explicitly Vite package.
+  Write(base / "package.json", "{\"scripts\":{\"dev\":\"vite\"},\"devDependencies\":{\"vite\":\"latest\"}}");
+  Write(base / "index.html", "<!doctype html>");
+  target = DetectRunTarget(base);
+  assert(target.kind == RunTargetKind::kViteWeb);
+
   fs::remove_all(base, ec);
   return 0;
 }

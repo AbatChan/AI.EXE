@@ -56,6 +56,8 @@ assert.match(backendModels, /max_output_chars: int = 0/);
 assert.match(backendUsage, /body\["aiexe_structured_output"\] = True/);
 assert.match(adapterServer, /AIEXE_STRUCTURED output exceeded/);
 assert.match(adapterServer, /structured output limit/);
+assert.match(adapterServer, /if not _aiexe_generation_running\(driver\):\s+_stable \+= 1/);
+assert.match(adapterServer, /_aiexe_stop_generation\(driver, "stream boundary cleanup"\)/);
 
 assert.equal(pkg.version, (cmake.match(/AI_EXE_APP_VERSION "([^"]+)"/) || [])[1]);
 

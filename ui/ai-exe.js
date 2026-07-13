@@ -1575,7 +1575,9 @@ try {
 // agent finished every item. The mechanical guards (inspection-budget, read-loop,
 // circuit breaker) still bound bad loops, so the extra headroom mostly helps
 // legitimate multi-step work reach completion.
-const agentMaxSteps = 24;
+// Large framework phases can consume the old ceiling just writing their planned
+// files, leaving no step to validate the final repair.
+const agentMaxSteps = 28;
 // Read window. Sized so a typical single app file (HTML/CSS/JS up to ~25KB) is
 // returned whole in one read instead of being truncated — truncation forced the
 // model to page through the tail, which the read-loop guard then blocked, so it

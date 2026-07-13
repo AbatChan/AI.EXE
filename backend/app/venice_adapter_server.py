@@ -3279,9 +3279,16 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
                     time.sleep(0.2)
                     continue
                 if _txt and _txt == _prev:
-                    _stable += 1
-                    if _stable >= 3:
-                        break
+                    # Text can pause for several seconds while Venice is still
+                    # generating. Treating three identical snapshots as "done"
+                    # returned partial files, released the lock, and let the next
+                    # prompt interrupt/bleed into the unfinished response.
+                    if not _aiexe_generation_running(driver):
+                        _stable += 1
+                        if _stable >= 3:
+                            break
+                    else:
+                        _stable = 0
                 else:
                     _stable = 0
                 if _txt and len(_txt) > len(_prev):
@@ -3312,6 +3319,13 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
                 print("AIEXE_STRUCTURED DOM captured complete JSON (%d chars)" % len(_structured_dom_result), flush=True)
             if eval_count:
                 print("AIEXE_ATTACH DOM fallback captured %d chars" % len(_prev), flush=True)
+
+        # A timeout/client-side early boundary must never leave Venice producing
+        # after this request releases selenium_lock. The next request is allowed
+        # to type only after the previous generation is definitively stopped.
+        if _aiexe_generation_running(driver):
+            _aiexe_stop_generation(driver, "stream boundary cleanup")
+            time.sleep(0.25)
 
         if _reasoning_open:  # stream ended still inside a reasoning block — close it
             if response_format == ResponseFormat.CHAT_NON_STREAMED:

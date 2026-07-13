@@ -13,7 +13,7 @@
 // Detection is shallow (project root only) — matches how the agent lays out the
 // generated projects this targets.
 
-enum class RunTargetKind { kNone, kWeb, kViteWeb, kPython };
+enum class RunTargetKind { kNone, kWeb, kViteWeb, kNextWeb, kPython };
 
 struct RunTarget {
   RunTargetKind kind = RunTargetKind::kNone;
@@ -61,6 +61,27 @@ inline RunTarget DetectRunTarget(const std::filesystem::path& root) {
                    [](unsigned char c) { return static_cast<char>(::tolower(c)); });
     return body.find(n) != std::string::npos;
   };
+
+  // Next.js has no root index.html: App Router projects start from app/page.tsx
+  // (usually src/app/page.tsx). Detect the package/config before looking for
+  // standalone HTML or Python entry points.
+  if (fs::exists(root / "package.json", ec)) {
+    const bool package_has_next = file_contains_ci(root / "package.json", "\"next\"")
+      || file_contains_ci(root / "package.json", "next dev");
+    const bool package_has_vite = file_contains_ci(root / "package.json", "\"vite\"")
+      || file_contains_ci(root / "package.json", "vite --");
+    const bool has_next_config = fs::exists(root / "next.config.ts", ec)
+      || fs::exists(root / "next.config.js", ec)
+      || fs::exists(root / "next.config.mjs", ec);
+    // The package manifest is authoritative when a stale/misnamed Next config
+    // sits beside an explicitly Vite project.
+    const bool next_project = package_has_next || (has_next_config && !package_has_vite);
+    if (next_project) {
+      target.kind = RunTargetKind::kNextWeb;
+      target.entry = root / "package.json";
+      return target;
+    }
+  }
 
   // A Vite manifest is unambiguous and wins immediately. Plain index.html is
   // not: a generator may leave one beside a Python desktop entry point, so defer

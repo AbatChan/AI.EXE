@@ -1468,8 +1468,8 @@ bool LaunchPythonConsoleMac(const std::filesystem::path &root,
   return true;
 }
 
-bool LaunchViteDevServerMac(const std::filesystem::path &root, int port,
-                            std::string *err) {
+bool LaunchNodeDevServerMac(const std::filesystem::path &root, int port,
+                            bool nextProject, std::string *err) {
   auto sh_quote = [](const std::string &s) {
     std::string out = "'";
     for (char c : s) {
@@ -1485,7 +1485,7 @@ bool LaunchViteDevServerMac(const std::filesystem::path &root, int port,
   script << "#!/bin/bash\n"
          << "cd " << sh_quote(root.string()) << " || exit 1\n"
          << "if ! command -v npm >/dev/null 2>&1; then\n"
-         << "  echo 'Node.js/npm is required to run this Vite project. Install Node.js, then run again.'\n"
+         << "  echo 'Node.js/npm is required to run this web project. Install Node.js, then run again.'\n"
          << "  read -n 1 -s -r -p 'Press any key to close this window...'\n"
          << "  exit 1\n"
          << "fi\n"
@@ -1496,10 +1496,12 @@ bool LaunchViteDevServerMac(const std::filesystem::path &root, int port,
          << "    npm install --legacy-peer-deps || { read -n 1 -s -r -p 'Install failed. Press any key to close...'; exit 1; }\n"
          << "  }\n"
          << "fi\n"
-         << "echo 'Starting Vite dev server at " << url << "'\n"
+         << "echo 'Starting dev server at " << url << "'\n"
          // The app opens the URL when the port is up (smart browser routing);
          // BROWSER=none stops Vite's server.open from adding a second tab.
-         << "BROWSER=none npm run dev -- --host 127.0.0.1 --port " << port << " --strictPort\n";
+         << "BROWSER=none npm run dev -- "
+         << (nextProject ? "--hostname 127.0.0.1 --port " : "--host 127.0.0.1 --port ")
+         << port << (nextProject ? "" : " --strictPort") << "\n";
 
   NSString *tmpDir = NSTemporaryDirectory();
   NSString *scriptPath = [tmpDir stringByAppendingPathComponent:
@@ -1529,8 +1531,8 @@ bool LaunchViteDevServerMac(const std::filesystem::path &root, int port,
 // Run the Vite project inside the app via the tracked dev-server manager:
 // no Terminal window, logs land in the server record, and the process group
 // dies with the app (StopAll + kill-on-close) so nothing lingers.
-bool LaunchViteDevServerInApp(const std::filesystem::path &root, int port,
-                              std::string *err) {
+bool LaunchNodeDevServerInApp(const std::filesystem::path &root, int port,
+                              bool nextProject, std::string *err) {
   std::ostringstream script;
   script << "if ! command -v npm >/dev/null 2>&1; then"
          << " echo 'Node.js/npm is required to run this Vite project.'; exit 1; fi\n"
@@ -1538,8 +1540,9 @@ bool LaunchViteDevServerInApp(const std::filesystem::path &root, int port,
          << "  echo 'Installing npm dependencies...'\n"
          << "  npm install || npm install --legacy-peer-deps || exit 1\n"
          << "fi\n"
-         << "exec npm run dev -- --host 127.0.0.1 --port " << port
-         << " --strictPort\n";
+         << "exec npm run dev -- "
+         << (nextProject ? "--hostname 127.0.0.1 --port " : "--host 127.0.0.1 --port ")
+         << port << (nextProject ? "" : " --strictPort") << "\n";
   std::vector<std::string> args = {"-lc", script.str()};
   std::string start_err;
   const int sid = DevServerManager::Instance().Start(
@@ -2275,14 +2278,30 @@ std::string BuildStreamEvent(const std::string &id, bool done,
           OpenUrlInDefaultBrowserSmart(
               [NSString stringWithUTF8String:output.c_str()]);
           message = "Vite dev server already running.";
-        } else if (LaunchViteDevServerInApp(root, port, &op_err)
-                   || LaunchViteDevServerMac(root, port, &op_err)) {
+        } else if (LaunchNodeDevServerInApp(root, port, false, &op_err)
+                   || LaunchNodeDevServerMac(root, port, false, &op_err)) {
           OpenViteUrlWhenReady(
               port, [NSString stringWithUTF8String:output.c_str()], 240);
           message = "Starting the dev server — the app opens when it's ready.";
         } else {
           ok = false;
           message = op_err.empty() ? "Could not run the Vite project." : op_err;
+        }
+      } else if (target.kind == RunTargetKind::kNextWeb) {
+        const int port = StableVitePortForRoot(root);
+        output = "http://127.0.0.1:" + std::to_string(port) + "/";
+        if (IsLoopbackTcpPortOpen(port)) {
+          OpenUrlInDefaultBrowserSmart(
+              [NSString stringWithUTF8String:output.c_str()]);
+          message = "Next.js dev server already running.";
+        } else if (LaunchNodeDevServerInApp(root, port, true, &op_err)
+                   || LaunchNodeDevServerMac(root, port, true, &op_err)) {
+          OpenViteUrlWhenReady(
+              port, [NSString stringWithUTF8String:output.c_str()], 240);
+          message = "Starting the Next.js dev server — the app opens when it's ready.";
+        } else {
+          ok = false;
+          message = op_err.empty() ? "Could not run the Next.js project." : op_err;
         }
       } else if (target.kind == RunTargetKind::kWeb) {
         std::string url = StartLocalAppServer(root, &op_err);
@@ -2308,7 +2327,7 @@ std::string BuildStreamEvent(const std::string &id, bool done,
         }
       } else {
         ok = false;
-        message = "Nothing to run here — add an index.html (web app) or a .py file (Python).";
+        message = "Nothing runnable was detected — add a package.json dev script, index.html, or Python entry file.";
       }
     }
   } else if (action == "runCommand") {

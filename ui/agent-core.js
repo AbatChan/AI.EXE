@@ -1434,7 +1434,9 @@
         .split('|')
         .map((item) => normalizeWorkspacePath(item))
         .filter((item) => item && item !== '/')
-        .slice(0, 16);
+        // Large framework apps routinely exceed 16 files. Clipping here silently
+        // removed stores/components that later source files legitimately import.
+        .slice(0, 40);
     }
 
     function parseAgentPlanPathList(raw) {
@@ -1659,19 +1661,42 @@
     function normalizeWebProjectPhases(phases = [], expectedFiles = [], primaryStack = '') {
       const isWeb = String(primaryStack || '').toLowerCase() === 'web'
         || expectedFiles.some((path) => /\.html?$/i.test(String(path || '')));
-      const list = Array.isArray(phases) ? phases.filter((phase) => phase && phase.title) : [];
-      if (!isWeb || list.length < 2) return list;
+      let list = Array.isArray(phases) ? phases.filter((phase) => phase && phase.title) : [];
+      if (!isWeb) return list;
       const expected = expectedFiles.map((path) => normalizeWorkspacePath(path || '')).filter(Boolean);
       const expectedSet = new Set(expected);
       const nextAppRouter = expected.some((path) => /(?:^|\/)next\.config\.[cm]?[jt]s$/i.test(path))
-        || expected.some((path) => /^\/app\/(?:layout|page)\.tsx$/i.test(path));
+        || expected.some((path) => /^\/(?:src\/)?app\/(?:layout|page)\.tsx$/i.test(path));
+      if (nextAppRouter && list.length < 2 && expected.length > 16) {
+        const isFeaturePath = (path, names) => names.some((name) => (
+          path.startsWith(`/src/app/${name}/`)
+          || path.startsWith(`/app/${name}/`)
+          || new RegExp(`/(?:${name.replace(/s$/, '')}|${name})[-_.]`, 'i').test(path)
+        ));
+        const transactionsAndBudgets = expected.filter((path) => (
+          isFeaturePath(path, ['transactions', 'budgets'])
+          || /\/(?:csv-parser|categories)\.[^/]+$/i.test(path)
+        ));
+        const insightsAndSettings = expected.filter((path) => (
+          isFeaturePath(path, ['insights', 'settings'])
+          || /\/README\.md$/i.test(path)
+        ));
+        const deferred = new Set([...transactionsAndBudgets, ...insightsAndSettings]);
+        const foundation = expected.filter((path) => !deferred.has(path));
+        list = [
+          { title: 'Foundation and dashboard', tasks: foundation.map(phaseTaskForPath) },
+          { title: 'Transactions and budgets', tasks: transactionsAndBudgets.map(phaseTaskForPath) },
+          { title: 'Insights, settings, and guide', tasks: insightsAndSettings.map(phaseTaskForPath) },
+        ].filter((phase) => phase.tasks.length > 0);
+      }
+      if (list.length < 2) return list;
       if (nextAppRouter) {
         // A runnable Next.js vertical slice needs its App Router shell, not only
         // package/config files. Keep the first phase deterministic and file-grounded.
         const foundation = expected.filter((path) => (
           /^(?:\/package\.json|\/tsconfig(?:\.[^/]*)?\.json|\/next\.config\.[cm]?[jt]s|\/postcss\.config\.[cm]?[jt]s|\/tailwind\.config\.[cm]?[jt]s|\/components\.json)$/i.test(path)
-          || /^\/app\/(?:layout|page)\.tsx$/i.test(path)
-          || /^\/app\/globals\.(?:css|scss|sass|less)$/i.test(path)
+          || /^\/(?:src\/)?app\/(?:layout|page)\.tsx$/i.test(path)
+          || /^\/(?:src\/)?app\/globals\.(?:css|scss|sass|less)$/i.test(path)
         ));
         const foundationSet = new Set(foundation);
         const normalized = [Object.assign({}, list[0], { tasks: foundation.map(phaseTaskForPath) })];

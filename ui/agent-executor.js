@@ -309,6 +309,21 @@
           if (constIssue) issues.push(constIssue);
         }
       }
+      if (/(?:^|\/)package\.json$/i.test(normalized)) {
+        try {
+          const pkg = JSON.parse(text);
+          const expected = getAllPlannedFiles(planSpec);
+          const nextPlanned = expected.some((p) => /(?:^|\/)next\.config\.[cm]?[jt]s$/i.test(String(p || '')))
+            || /\bnext(?:\.js)?\b/i.test(String(taskText || ''));
+          const dev = String(pkg && pkg.scripts && pkg.scripts.dev || '');
+          const depsMap = { ...((pkg && pkg.dependencies) || {}), ...((pkg && pkg.devDependencies) || {}) };
+          if (nextPlanned && (!depsMap.next || !/\bnext\s+dev\b/i.test(dev))) {
+            issues.push('declares a different runtime than the planned Next.js app — use next/next dev instead of Vite or another scaffold');
+          }
+        } catch (_) {
+          // JSON syntax is reported by the structural validator/write guard.
+        }
+      }
       // "Looks incomplete" is a subjective heuristic — advisory only, never a
       // blocking issue (it false-flagged a finished 20KB app and looped a run).
       return issues;
@@ -458,15 +473,56 @@
       const normalized = deps.normalizeWorkspacePath(path || '');
       if (!/(?:^|\/)package\.json$/i.test(normalized)) return '';
       const expectedFiles = getAllPlannedFiles(planSpec);
+      const task = String(taskText || '');
+      const hasNext = expectedFiles.some((p) => /(?:^|\/)next\.config\.[cm]?[jt]s$/i.test(String(p || '')))
+        || expectedFiles.some((p) => /^\/(?:src\/)?app\/(?:layout|page)\.tsx$/i.test(String(p || '')))
+        || /\bnext(?:\.js)?\b/i.test(task);
       const hasVite = expectedFiles.some((p) => /(?:^|\/)vite\.config\.[cm]?[jt]s$/i.test(String(p || '')))
-        || /(?:^|\s)(vite|react|tsx|typescript)\b/i.test(String(taskText || ''));
+        || /\bvite\b/i.test(task);
       const hasReact = expectedFiles.some((p) => /\.(jsx|tsx)$/i.test(String(p || '')))
-        || /\breact\b/i.test(String(taskText || ''));
-      if (!hasVite || !hasReact) return '';
+        || /\breact\b/i.test(task);
+      if (!hasNext && (!hasVite || !hasReact)) return '';
       const rawName = String((planSpec && planSpec.projectName) || deps.deriveProjectNameFromTask(taskText) || 'app')
         .toLowerCase()
         .replace(/[^a-z0-9]+/g, '-')
         .replace(/^-+|-+$/g, '') || 'app';
+      if (hasNext) {
+        const dependencies = {
+          next: 'latest',
+          react: packageJsonSafeVersions.react,
+          'react-dom': packageJsonSafeVersions['react-dom'],
+        };
+        const requestedDependencies = {
+          'framer-motion': 'framer-motion',
+          zustand: 'zustand',
+          recharts: 'recharts',
+          dexie: 'dexie',
+          'lucide-react': 'lucide-react',
+          clsx: 'clsx',
+          'tailwind-merge': 'tailwind-merge',
+          'class-variance-authority': 'class-variance-authority',
+          '@radix-ui/react-slot': '@radix-ui/react-slot',
+        };
+        Object.entries(requestedDependencies).forEach(([needle, name]) => {
+          if (task.toLowerCase().includes(needle)) dependencies[name] = packageJsonSafeVersions[name] || 'latest';
+        });
+        return `${JSON.stringify({
+          name: rawName,
+          private: true,
+          version: '0.1.0',
+          scripts: { dev: 'next dev', build: 'next build', start: 'next start' },
+          dependencies,
+          devDependencies: {
+            '@types/node': 'latest',
+            '@types/react': packageJsonSafeVersions['@types/react'],
+            '@types/react-dom': packageJsonSafeVersions['@types/react-dom'],
+            typescript: packageJsonSafeVersions.typescript,
+            tailwindcss: packageJsonSafeVersions.tailwindcss,
+            postcss: packageJsonSafeVersions.postcss,
+            autoprefixer: packageJsonSafeVersions.autoprefixer,
+          },
+        }, null, 2)}\n`;
+      }
       return `${JSON.stringify({
         name: rawName,
         private: true,
@@ -2416,7 +2472,9 @@ export default config;
           const deterministicPackage = buildDeterministicPackageJson(path, taskText, planSpec);
           if (deterministicPackage) {
             content = deterministicPackage;
-            primaryQualityNote = ' Note: generated deterministic Vite React package.json.';
+            primaryQualityNote = /"next"\s*:/.test(deterministicPackage)
+              ? ' Note: generated deterministic Next.js package.json.'
+              : ' Note: generated deterministic Vite React package.json.';
           }
         }
         if (tailwindConfigTarget) {
@@ -3368,7 +3426,7 @@ export default config;
           }
         }
         const contextTargets = allExpectedFiles
-          .filter((path) => path && !fileContents[path] && /\.(html?|css|scss|sass|less|js|mjs|cjs|ts|jsx|tsx)$/i.test(path))
+          .filter((path) => path && !fileContents[path] && /\.(html?|css|scss|sass|less|js|mjs|cjs|ts|jsx|tsx|md)$/i.test(path))
           .slice(0, 24);
         for (const path of contextTargets) {
           const response = await deps.invokeWorkspaceAction('workspaceReadFile', { path });
@@ -3381,6 +3439,17 @@ export default config;
         const mechanicalAdvisory = completenessAdvisory;
         const webConsistencyIssues = validateWebProjectConsistency(fileContents, planSpec, mechanicalAdvisory);
         webConsistencyIssues.forEach((issue) => issues.push(issue));
+        try {
+          const pkg = JSON.parse(String(fileContents['/package.json'] || '{}'));
+          const depsMap = { ...((pkg && pkg.dependencies) || {}), ...((pkg && pkg.devDependencies) || {}) };
+          const readme = String(fileContents['/README.md'] || '');
+          if (readme && depsMap.next && /\bvite\b/i.test(readme)) {
+            issues.push('/README.md: describes Vite, but package.json runs Next.js; document the real framework and npm commands');
+          }
+          if (readme && depsMap.vite && /\bnext(?:\.js)?\b/i.test(readme)) {
+            issues.push('/README.md: describes Next.js, but package.json runs Vite; document the real framework and npm commands');
+          }
+        } catch (_) { }
         // Deterministic package declaration: derive requirements from actual imports and
         // write/merge the file ourselves instead of trusting the model to remember it.
         if (Object.keys(fileContents).some((p) => /\.py$/i.test(p))) {

@@ -1163,8 +1163,8 @@ bool LaunchPythonConsoleWin(const std::filesystem::path &root,
   return true;
 }
 
-bool LaunchViteDevServerWin(const std::filesystem::path &root, int port,
-                            std::string *err) {
+bool LaunchNodeDevServerWin(const std::filesystem::path &root, int port,
+                            bool next_project, std::string *err) {
   const std::string url = "http://127.0.0.1:" + std::to_string(port) + "/";
   std::ostringstream bat;
   bat << "@echo off\r\n"
@@ -1172,7 +1172,7 @@ bool LaunchViteDevServerWin(const std::filesystem::path &root, int port,
       << "if errorlevel 1 (echo Could not open the project folder. & goto finish)\r\n"
       << "where npm >nul 2>nul\r\n"
       << "if errorlevel 1 (\r\n"
-      << "  echo Node.js/npm is required to run this Vite project. Install Node.js, then run again.\r\n"
+      << "  echo Node.js/npm is required to run this web project. Install Node.js, then run again.\r\n"
       << "  pause\r\n"
       << "  exit /b 1\r\n"
       << ")\r\n"
@@ -1184,10 +1184,12 @@ bool LaunchViteDevServerWin(const std::filesystem::path &root, int port,
       << "  )\r\n"
       << ")\r\n"
       << "start \"\" \"" << url << "\"\r\n"
-      << "echo Starting Vite dev server at " << url << "\r\n"
-      << "rem The launcher opened the URL; BROWSER=none stops Vite's server.open second tab.\r\n"
+      << "echo Starting dev server at " << url << "\r\n"
+      << "rem The launcher opened the URL; BROWSER=none prevents a second browser tab.\r\n"
       << "set BROWSER=none\r\n"
-      << "call npm run dev -- --host 127.0.0.1 --port " << port << " --strictPort\r\n"
+      << "call npm run dev -- "
+      << (next_project ? "--hostname 127.0.0.1 --port " : "--host 127.0.0.1 --port ")
+      << port << (next_project ? "" : " --strictPort") << "\r\n"
       << ":end\r\n"
       << "popd\r\n"
       << ":finish\r\n"
@@ -2056,11 +2058,25 @@ private:
             ShellExecuteW(nullptr, L"open", url_w.c_str(), nullptr, nullptr,
                           SW_SHOWNORMAL);
             message = "Vite dev server already running.";
-          } else if (LaunchViteDevServerWin(root, port, &op_err)) {
+          } else if (LaunchNodeDevServerWin(root, port, false, &op_err)) {
             message = "Starting Vite dev server.";
           } else {
             ok = false;
             message = op_err.empty() ? "Could not run the Vite project." : op_err;
+          }
+        } else if (target.kind == RunTargetKind::kNextWeb) {
+          const int port = StableVitePortForRoot(root);
+          output = "http://127.0.0.1:" + std::to_string(port) + "/";
+          if (IsLoopbackTcpPortOpen(port)) {
+            const std::wstring url_w(output.begin(), output.end());
+            ShellExecuteW(nullptr, L"open", url_w.c_str(), nullptr, nullptr,
+                          SW_SHOWNORMAL);
+            message = "Next.js dev server already running.";
+          } else if (LaunchNodeDevServerWin(root, port, true, &op_err)) {
+            message = "Starting Next.js dev server.";
+          } else {
+            ok = false;
+            message = op_err.empty() ? "Could not run the Next.js project." : op_err;
           }
         } else if (target.kind == RunTargetKind::kWeb) {
           std::string url = StartLocalAppServer(root, &op_err);
@@ -2087,7 +2103,7 @@ private:
           }
         } else {
           ok = false;
-          message = "Nothing to run here — add an index.html (web app) or a .py file (Python).";
+          message = "Nothing runnable was detected — add a package.json dev script, index.html, or Python entry file.";
         }
       }
     } else if (action == "runCommand") {

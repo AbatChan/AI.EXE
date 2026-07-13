@@ -3660,7 +3660,7 @@
           // The run ended on a write with no validate/run_app after it. For a
           // browser-runnable file that means the final state was never verified —
           // say so instead of implying it works.
-          if (/\.(html?|js|mjs|cjs)$/i.test(String(event.path || ''))) {
+          if (/\.(html?|css|scss|sass|less|js|mjs|cjs|ts|jsx|tsx|json|py|php|java|c|cc|cpp|h|hpp|cs|go|rs)$/i.test(String(event.path || ''))) {
             unresolvedValidationClause = ' Note: I made the change but ran out of steps before verifying it runs — press Continue and I\'ll run it and fix anything that breaks.';
           }
           break;

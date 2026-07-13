@@ -196,6 +196,33 @@ const cases = [
     },
   },
   {
+    name: 'large Next plans retain support modules and synthesize phases when the model omits them',
+    run: () => core.normalizeAgentPlanSpec({
+      task_kind: 'project',
+      primary_stack: 'web',
+      expected_files: [
+        '/package.json', '/tsconfig.json', '/next.config.ts', '/postcss.config.mjs', '/tailwind.config.ts', '/components.json',
+        '/src/app/layout.tsx', '/src/app/page.tsx', '/src/app/globals.css', '/src/app/transactions/page.tsx',
+        '/src/app/budgets/page.tsx', '/src/app/insights/page.tsx', '/src/app/settings/page.tsx',
+        '/src/lib/db.ts', '/src/lib/types.ts', '/src/lib/ai-insights.ts', '/src/lib/csv-parser.ts', '/src/lib/categories.ts',
+        '/src/store/use-store.ts', '/src/components/sidebar.tsx', '/src/components/mobile-nav.tsx',
+        '/src/components/command-palette.tsx', '/src/components/theme-toggle.tsx', '/src/components/count-up.tsx',
+        '/src/components/skeleton-card.tsx', '/src/components/transaction-form.tsx', '/src/components/transaction-table.tsx',
+        '/src/components/budget-ring.tsx', '/src/components/dashboard-charts.tsx', '/src/components/insight-card.tsx',
+        '/src/components/providers.tsx', '/README.md',
+      ].join('|'),
+      phases: '',
+    }, 'Build a Next.js 15 App Router finance dashboard with Zustand, Recharts, Dexie, Tailwind and shadcn/ui.', { chatId: 'chat_owns_ws', forceProjectScope: true }),
+    expect: (spec) => {
+      assert.equal(spec.expectedFiles.length, 32, 'the plan must not be clipped to the old 16-file ceiling');
+      assert.ok(spec.expectedFiles.includes('/src/store/use-store.ts'));
+      assert.ok(spec.expectedFiles.includes('/src/components/providers.tsx'));
+      assert.ok(spec.phases.length >= 3, 'large Next builds should be split into resumable phases');
+      const phaseFiles = spec.phases.flatMap((phase) => phase.tasks.map((task) => normalizeWorkspacePath(task.text)));
+      assert.equal(new Set(phaseFiles).size, spec.expectedFiles.length, 'each planned file appears in exactly one synthesized phase');
+    },
+  },
+  {
     name: 'single-page web apps keep semantic feature phases',
     run: () => core.normalizeAgentPlanSpec({
       task_kind: 'project',

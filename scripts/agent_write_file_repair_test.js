@@ -250,6 +250,30 @@ const repairedScript = [
   assert.match(deterministicPackageSaved.observation, /deterministic Vite React package\.json/);
   console.log('PASS: Vite React package.json is generated deterministically without model repair');
 
+  const { executor: nextPackageExecutor, writes: nextPackageWrites } = makeExecutor(async () => '');
+  const nextPackageSaved = await nextPackageExecutor.executeDeveloperToolCall(
+    'chat_next_package',
+    { action: 'tool', tool: 'write_file', path: '/package.json', content: '' },
+    'Build a Next.js 15 App Router dashboard using Tailwind, Zustand, Recharts, Dexie, Framer Motion, and shadcn/ui.',
+    [],
+    {
+      ...planSpec,
+      projectName: 'vault-finance-dashboard',
+      expectedFiles: ['/package.json', '/next.config.ts', '/src/app/layout.tsx', '/src/app/page.tsx', '/src/store/use-store.ts'],
+    }
+  );
+  assert.equal(nextPackageSaved.ok, true);
+  const nextPackage = JSON.parse(nextPackageWrites[0].content);
+  assert.equal(nextPackage.scripts.dev, 'next dev');
+  assert.equal(nextPackage.scripts.build, 'next build');
+  assert.equal(nextPackage.dependencies.next, 'latest');
+  assert.ok(nextPackage.dependencies.zustand);
+  assert.ok(nextPackage.dependencies.recharts);
+  assert.ok(nextPackage.dependencies.dexie);
+  assert.equal(nextPackage.devDependencies.vite, undefined, 'Next scaffolds must never be rewritten as Vite');
+  assert.match(nextPackageSaved.observation, /deterministic Next\.js package\.json/);
+  console.log('PASS: Next App Router package.json preserves the requested runtime and libraries');
+
   const tailwindGeneratorCalls = [];
   const { executor: tailwindExecutor, writes: tailwindWrites, traces: tailwindTraces } = makeExecutor(async (...args) => {
     tailwindGeneratorCalls.push(args);

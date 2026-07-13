@@ -30,6 +30,8 @@ for (const src of [mac, win]) {
   assert.match(src, /devServerStop/);
   assert.match(src, /devServerList/);
   assert.match(src, /DevServerManager::Instance\(\)\.StopAll\(\)/);
+  assert.match(src, /RunTargetKind::kNextWeb/);
+  assert.match(src, /LaunchNodeDevServer/);
 }
 
 // Executor: dev-server commands bypass the blocking runner, stay tracked, and
@@ -70,7 +72,7 @@ assert.match(releaseWorkflow, /PyInstaller/);
 assert.match(releaseWorkflow, /AI\.EXE Backend\.exe/);
 assert.match(releaseWorkflow, /Smoke-test bundled backend/);
 assert.match(releaseWorkflow, /Bundled AI\.EXE backend did not become healthy/);
-assert.match(win, /Downloading the new version\.\.\./);
-assert.doesNotMatch(win, /Downloading the new version…/);
+assert.match(win, /Downloading update/);
+assert.doesNotMatch(win, /Downloading update…/);
 
 console.log('PASS: dev-server process manager (tracked start/stop, bridge actions, UI card, adapter thread cleanup)');
