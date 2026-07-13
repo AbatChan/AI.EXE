@@ -2347,10 +2347,17 @@ def _aiexe_read_last_assistant_text(driver, include_reasoning=True):
 
             if (reasoningBodies.length) {
               const finalBody = finalBodies.at(-1);
-              // While Venice is still reasoning there is no final prose node yet. Returning
-              // an empty string prevents the DOM stability detector from completing early.
-              if (!finalBody) return '';
-              const finalText = stripControls(finalBody);
+              let finalText = finalBody ? stripControls(finalBody) : '';
+              if (!finalText) {
+                // No matched final PROSE node — the answer may be a code block / JSON
+                // (a <pre>, not [class*="prose"]). Read the whole bubble minus the
+                // reasoning collapse so structured/code answers are still captured.
+                // (The old path returned '' here, which hung capture on decision JSON.)
+                const clone = latest.cloneNode(true);
+                clone.querySelectorAll('.chakra-collapse').forEach((n) => n.remove());
+                finalText = stripControls(clone);
+              }
+              // Still nothing outside reasoning → the model is still thinking; wait.
               if (!finalText) return '';
               if (!arguments[1]) return finalText;
               const thoughtText = reasoningBodies.map(stripControls).filter(Boolean).join('\n\n');

@@ -1189,9 +1189,11 @@ const VENICE_HIDE_PROMPT_DEFAULT = false;
 // start payloads, and port parsing all derive from these).
 const VENICE_ADAPTER_PROVIDER_ID = 'veniceadapter';
 const VENICE_ADAPTER_DEFAULT_URL = 'http://127.0.0.1:9999';
-// Per-decision agent budgets: API providers answer in seconds; the adapter drives a real
-// browser and reasoning models can think for minutes before the JSON.
-const AGENT_STEP_TIMEOUT_MS = 45000;
+// Per-step agent budgets: API providers answer in seconds for small decisions, but the
+// PLAN step is one big structured output (40+ files, phases) and a thinking model can
+// legitimately run past a minute — 45s wrongly timed it out twice → degraded fallback
+// plan. 120s covers a large plan while staying well under the adapter's browser budget.
+const AGENT_STEP_TIMEOUT_MS = 120000;
 const AGENT_STEP_TIMEOUT_ADAPTER_MS = 300000;
 
 function isVeniceAdapterSelected() {
