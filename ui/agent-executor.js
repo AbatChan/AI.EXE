@@ -765,8 +765,16 @@ export default config;
       return Boolean((viteTs || viteJs || viteMjs).trim());
     }
 
+    // ANSI color codes render as garbage in the terminal card — strip them.
+    function stripAnsiSequences(text) {
+      return String(text || '')
+        .replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '')
+        .replace(/\x1b[()][A-Z0-9]/g, '')
+        .replace(/\x1b/g, '');
+    }
+
     function commandOutputTail(output, maxChars = 5000) {
-      const raw = String(output || '').trim();
+      const raw = stripAnsiSequences(output).trim();
       if (!raw) return '';
       return raw.length > maxChars ? `...(truncated)\n${raw.slice(-maxChars)}` : raw;
     }
@@ -780,7 +788,7 @@ export default config;
 
     function buildTerminalProof(command, res, status = null, maxPreviewChars = 1600) {
       const parsed = status || parseRunCommandExitStatus(res && res.message);
-      const output = String((res && res.output) || '').trim();
+      const output = stripAnsiSequences((res && res.output) || '').trim();
       return {
         command: String(command || '').trim(),
         exitCode: parsed.exitCode == null ? null : Number(parsed.exitCode),
@@ -2370,10 +2378,7 @@ export default config;
       }
 
       if (tool === 'write_files') {
-        // Batch creation of several SMALL brand-new files in ONE generation pass.
-        // Each file still goes through the plan/binary/existing guards and the
-        // structural check; anything that trips a guard is skipped with a note
-        // steering back to single write_file (which has the full repair machinery).
+        // Batch small new files in one pass; guard-tripped files fall back to write_file.
         const requested = Array.isArray(decision.paths)
           ? decision.paths.map((p) => deps.normalizeWorkspacePath(p || '')).filter((p) => p && p !== '/')
           : [];
@@ -3054,9 +3059,7 @@ export default config;
             observation: `edit_file rejected for ${path}: applying it would have broken the file — it ${editAfterIssue}. The file was left unchanged. Re-issue a corrected edit that keeps opening and closing tags/braces paired, or use write_file with the complete corrected file if a larger restructure is needed.`,
           };
         }
-        // An edit that deletes an import while the file still USES the imported name
-        // makes the file strictly worse (undefined identifier the syntax scan cannot
-        // see — e.g. the ThemeProvider import removed while <ThemeProvider> stayed).
+        // Block edits that delete an import whose identifier is still used.
         if (/\.(?:js|mjs|cjs|ts|tsx|jsx)$/i.test(path)) {
           const isImportLine = (line) => /^\s*import\s.*\bfrom\s*['"][^'"]+['"];?\s*$/.test(line);
           const importedNames = (line) => {
@@ -3410,7 +3413,7 @@ export default config;
           const running = /^running/.test(statusMsg);
           const exitMatch = statusMsg.match(/exit_code=(-?\d+)/);
           const exitCode = exitMatch ? Number(exitMatch[1]) : -1;
-          const rawLog = String((lastStatus && lastStatus.output) || '').trim();
+          const rawLog = stripAnsiSequences((lastStatus && lastStatus.output) || '').trim();
           const logTail = rawLog.length > 2500 ? `…(truncated)\n${rawLog.slice(-2500)}` : rawLog;
           const terminalProof = {
             command: rawCommand,

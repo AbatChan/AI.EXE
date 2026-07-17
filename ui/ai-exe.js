@@ -6351,7 +6351,16 @@ function resolveChatNamingFallback(chatId, fallbackName = 'New Chat') {
   if (smartTitleRenamePending.has(String(chatId || ''))) {
     return false;
   }
-  chat.name = normalizeChatName(fallbackName || 'New Chat');
+  // Never downgrade a seeded/derived name to "New Chat".
+  const nextName = normalizeChatName(fallbackName || 'New Chat');
+  if (/^new chat$/i.test(nextName) && !/^new chat$/i.test(String(chat.name || '').trim())) {
+    chat.isNaming = false;
+    chat.updatedAt = nowTs();
+    saveChats();
+    renderHistory();
+    return true;
+  }
+  chat.name = nextName;
   chat.isNaming = false;
   chat.updatedAt = nowTs();
   saveChats();
@@ -6630,7 +6639,26 @@ function scheduleSmartChatRename(chatId) {
           `User: ${String(firstUser.text || '').trim().slice(0, 1200)}`,
           `Assistant: ${String(firstAssistant.text || '').trim().slice(0, 1200)}`,
         ].join('\n');
-        const result = await requestRemoteTextCompletionForCapability('chat.reply', prompt, 40, { preferStreaming: true });
+        // One adapter, one Venice tab: a title request mid-run switches threads
+        // under a live capture. Wait for idle; give up to the derived fallback.
+        for (let waits = 0; activeInferenceRequest && waits < 6; waits += 1) {
+          await new Promise((resolve) => window.setTimeout(resolve, 15000));
+        }
+        if (activeInferenceRequest) {
+          pushDebugTrace('smart_chat_title_deferred_busy', { chatId: key });
+          settleSmartChatTitleFallback(key, 'adapter_busy');
+          return;
+        }
+        // A stalled adapter left chats as "New Chat" for minutes — cap the wait.
+        const result = await Promise.race([
+          requestRemoteTextCompletionForCapability('chat.reply', prompt, 40, { preferStreaming: true }),
+          new Promise((resolve) => window.setTimeout(() => resolve(null), 60000)),
+        ]);
+        if (!result) {
+          pushDebugTrace('smart_chat_title_timeout', { chatId: key });
+          settleSmartChatTitleFallback(key, 'remote_title_timeout');
+          return;
+        }
         const nextTitle = extractSmartChatTitle(result && result.ok ? result.output : '');
         const current = String(latestChat.name || '').trim();
         if (!nextTitle) {
@@ -17025,9 +17053,11 @@ function renderActiveChat(...args) {
 function createChat(seedText) {
   const ts = nowTs();
   const id = makeChatId();
+  // Instant name from the first message; the smart namer refines it after the reply.
+  const seededName = sanitizeUserRequestTitle(String(seedText || ''));
   const chat = {
     id,
-    name: 'New Chat',
+    name: seededName ? makeUniqueChatName(seededName, id, seededName) : 'New Chat',
     customName: false,
     isNaming: true,
     autoNamed: false,

@@ -808,6 +808,21 @@
       const ok = Boolean(toolResult && toolResult.ok);
       const targetInfo = d.describeAgentToolTarget ? d.describeAgentToolTarget(decision) : '';
       const observation = String((toolResult && toolResult.observation) || '').trim();
+      // Failed/blocked steps rendered NOTHING, leaving their narration orphaned
+      // ("Checking the sidebar..." then silence). Permission holds keep their card.
+      if (!ok && !(toolResult && toolResult.permissionRequired)) {
+        const notFound = /file not found/i.test(observation);
+        const guardSkip = /\bblocked\b/i.test(observation) && !notFound;
+        const failKind = (tool === 'read_file' || tool === 'read_files' || tool === 'search_files') ? 'read'
+          : ((tool === 'write_file' || tool === 'write_files' || tool === 'edit_file') ? 'edit' : 'scan');
+        return buildInlineAgentActivityBase({
+          kind: failKind,
+          title: notFound ? 'Not found' : (guardSkip ? 'Skipped' : 'Failed'),
+          detail: formatAgentActivityPathLabel(targetInfo || (decision && decision.path) || '') || 'this step',
+          meta: guardSkip ? 'already covered' : '',
+          status: guardSkip ? 'done' : 'error',
+        });
+      }
       if (!ok) return null;
       if (tool === 'new_project') {
         const projectName = String((toolResult && toolResult.projectName) || (typeof d.getWorkspaceRootName === 'function' && d.getWorkspaceRootName()) || 'New project').trim();

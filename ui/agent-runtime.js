@@ -220,10 +220,7 @@
       return { output: String(res.output || ''), truncated: Boolean(res.truncated) };
     }
 
-    // Continuation passes used to re-send the ENTIRE build prompt (sibling echoes,
-    // tool results, design guide) once per pass — pure replay bulk: the tail of the
-    // partial file is the real anchor. Blank the bulky sections, keep task/contract/
-    // rules/vocab so the continuation stays grounded.
+    // Continuations don't need the bulky prompt sections; the tail is the anchor.
     function slimContinuationBasePrompt(prompt) {
       let text = String(prompt || '');
       const OMIT = '(omitted for this continuation — the PARTIAL_OUTPUT tail below is the ground truth)';
@@ -452,9 +449,7 @@
       return files;
     }
 
-    // Batch generation for write_files: several SMALL new files in ONE inference
-    // (each tiny shadcn-style component used to cost a full ~15K-char decision
-    // round-trip). Same block format + parser as single-pass project generation.
+    // write_files: several small new files in one inference (single-pass format).
     async function generateAgentBatchFileContents(taskText, toolEvents, paths, planSpec) {
       const expected = (Array.isArray(paths) ? paths : []).map((p) => String(p || '')).filter(Boolean);
       if (!expected.length) return [];

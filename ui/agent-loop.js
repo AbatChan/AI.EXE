@@ -1372,9 +1372,7 @@
         keepPhaseTrackerPinned = true;
         planSpec.taskKind = 'project'; // re-planner reclassifies Continue as 'edit'; force back
         const active = phases[activeIndex] || {};
-        // Seed the checklist from DISK: on a Continue, files built by earlier runs
-        // already exist, but liveDone only tracked THIS run's tool events — the
-        // tracker rendered 0/N until the model happened to touch each file again.
+        // Seed checklist from disk: earlier runs' files count without a re-touch.
         try {
           const seedTasks = (Array.isArray(active.tasks) ? active.tasks : [])
             .filter((t) => t && !t.done)
@@ -1779,7 +1777,9 @@
             plannerHeartbeatTimer = setInterval(() => {
               const elapsed = Math.max(1, Math.round((Date.now() - started) / 1000));
               if (elapsed >= 20) {
-                setAgentProgress('Still working...');
+                // Ticking elapsed time: a 40s+ slow-provider wait reads as alive,
+                // not frozen (a static label looked like a hang).
+                setAgentProgress(`Still working — ${elapsed}s...`);
               }
             }, 5000);
           };
@@ -1854,10 +1854,8 @@
           if (!deps.isInferenceActive(requestToken)) return true;
           if (!res || !res.ok) {
             if (runLog) runLog.emitDecisionFailure(step, (res && res.message) || 'agent infer failed', Boolean(res && res.timedOut));
-            // Salvage a cut-off inline-file decision: the truncated head already
-            // names the tool + path, and the dedicated content step regenerates the
-            // file with its big budget — discarding the round (twice in one run)
-            // burned full generations and left the user staring at "Still working".
+            // Cut-off inline-file decision: salvage tool+path from the truncated
+            // head; the content step regenerates the file.
             if (res && res.outputLimitExceeded) {
               const head = String(res.output || '').slice(0, 3000);
               const toolMatch = head.match(/"tool"\s*:\s*"(write_file|edit_file)"/);
@@ -1948,14 +1946,13 @@
               agentActivities,
               agentMeta: agentMetaWithRevert({ startedAt, completedAt: Date.now(), collapsed: false }),
               forceNeedsContinue: true,
+              inferenceFailure: true,
             });
             if (runLog) runLog.end({ errored: !(res && res.timedOut), timedOut: Boolean(res && res.timedOut), message: (res && res.message) || 'agent step failed' });
             return true;
           }
 
-          // Consecutive-failure caps, not lifetime caps: a long repair run on a
-          // flaky adapter exhausted 2 nudges early, then a later hiccup killed the
-          // whole run ("Adapter structured stream ended without a complete JSON").
+          // Consecutive-failure caps: reset on every good decision.
           outputLimitNudges = 0;
           incompleteJsonNudges = 0;
           rawPlannerOutput = String(res.output || '');
@@ -2065,6 +2062,7 @@
             agentActivities,
             agentMeta: agentMetaWithRevert({ startedAt, completedAt: Date.now(), collapsed: false }),
             forceNeedsContinue: true,
+            inferenceFailure: true,
           });
           return true;
         }
@@ -2273,6 +2271,8 @@
                   duplicateDecisionObservation,
                   toolEvents,
                 });
+                // The model's narration already rendered for the OLD target.
+                appendAgentNarration(`That's already handled — moving to ${deps.normalizeWorkspacePath(fallbackDecision.path || '') || 'the next step'}.`);
                 decision = fallbackDecision;
                 duplicateRepairedToFallback = true;
               }
@@ -2340,6 +2340,7 @@
                 duplicateDecisionObservation,
                 toolEvents,
               });
+              appendAgentNarration(`That's already handled — moving to ${deps.normalizeWorkspacePath(fallbackDecision.path || '') || 'the next step'}.`);
               decision = fallbackDecision;
             } else {
               setAgentProgress('Continuing...');

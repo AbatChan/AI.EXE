@@ -511,21 +511,25 @@
       };
       const wantedLanguages = languageAliases[String(extension || '').toLowerCase()] || [String(extension || '').toLowerCase()];
 
-      // 1) Unwrap a markdown code fence (WRAPPER extraction — keeps inner whole).
-      //    Prefer the block whose language matches this file; else first/unlabeled.
-      const fencedBlocks = [];
-      for (const match of text.matchAll(/```([a-z0-9_+\-]*)\s*([\s\S]*?)```/gi)) {
-        const language = String(match[1] || '').trim().toLowerCase();
-        const body = String(match[2] || '').trim();
-        if (body) fencedBlocks.push({ language, body });
+      // 1) Fence unwrap, WRAPPER-FIRST: reply starting with ``` gets head/tail
+      //    peeled only — interior ``` is real code (pair-scan amputated files).
+      if (/^```/.test(text)) {
+        text = text.replace(/^```[a-z0-9_+\-]*[^\S\n]*\n?/i, '');
+        text = text.replace(/\n?```\s*$/, '').trim();
+      } else {
+        // Prose-wrapped reply: extract the matching-language block.
+        const fencedBlocks = [];
+        for (const match of text.matchAll(/```([a-z0-9_+\-]*)\s*([\s\S]*?)```/gi)) {
+          const language = String(match[1] || '').trim().toLowerCase();
+          const body = String(match[2] || '').trim();
+          if (body) fencedBlocks.push({ language, body });
+        }
+        if (fencedBlocks.length) {
+          const matched = fencedBlocks.find((b) => wantedLanguages.includes(b.language))
+            || fencedBlocks.find((b) => !b.language) || fencedBlocks[0];
+          if (matched && matched.body) text = matched.body;
+        }
       }
-      if (fencedBlocks.length) {
-        const matched = fencedBlocks.find((b) => wantedLanguages.includes(b.language))
-          || fencedBlocks.find((b) => !b.language) || fencedBlocks[0];
-        if (matched && matched.body) text = matched.body;
-      }
-      // A lone unpaired fence (stream cut mid-block) — peel leading/trailing ```.
-      if (/^```/.test(text)) text = text.replace(/^```[a-z0-9_+\-]*\s*/i, '').replace(/\s*```$/, '').trim();
 
       // 2) JSON-escaped blob (literal \n, ~no real newlines) → unescape so it parses.
       if ((text.match(/\\n/g) || []).length >= 3 && (text.match(/\n/g) || []).length <= 2) {
@@ -548,9 +552,8 @@
       // 4) A single leading prose lead-in ("Here's the file:", "Below is the file:").
       text = text.replace(/^(?:Sure[,!.]?\s*)?(?:Here(?:'|’)?s|Here is|Below is)\b[^\n]{0,40}?\bfile(?:\s+content)?\b[^\n]{0,20}?[:\-]\s*\n?/i, '').trim();
 
-      // 5) JSX-text `\${expr}` quirk (models escape $ Markdown-style): renders a
-      //    literal stray backslash in the browser. Fix ONLY outside strings/
-      //    templates/comments — `\${` inside a template literal is a real escape.
+      // 5) JSX-text `\${expr}` quirk: fix only outside strings/comments
+      //    (`\${` inside a template literal is a real escape).
       if (/^(?:jsx|tsx)$/i.test(String(extension || ''))) {
         let out = '';
         let mode = '';                // '' code/JSX-text, else the open quote or comment kind

@@ -1864,7 +1864,10 @@
     }
 
     function isExplicitReadmeOrDocsTask(taskText = '') {
-      const lower = String(taskText || '').toLowerCase();
+      // Pasted error output quotes URLs like nextjs.org/docs/messages/... — a
+      // quoted link is not a docs request (it made every Next.js build-error fix
+      // demand a phantom "write /README.md"). Match intent outside URLs only.
+      const lower = String(taskText || '').toLowerCase().replace(/https?:\/\/\S+/g, ' ');
       return /\b(readme|documentation|docs?|contributing|code of conduct|developer guide|getting started|onboarding|usage guide|setup guide)\b/.test(lower)
         || (/self-explanatory/.test(lower) && /\b(project|workspace|repo|codebase|app|code)\b/.test(lower));
     }
