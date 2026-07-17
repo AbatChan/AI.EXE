@@ -65,10 +65,16 @@
         if (mode !== 'code') {
           if (escaped) { escaped = false; continue; }
           if (ch === '\\') { escaped = true; continue; }
+          // '/" strings cannot span a raw newline in JS — reaching one means the
+          // opener was prose (a JSX-text apostrophe like "Here's"), not a string.
+          // Flagging it as unterminated sent complete files into continuation loops.
+          if (ch === '\n' && (mode === 'single' || mode === 'double')) { mode = 'code'; continue; }
           if ((mode === 'single' && ch === "'") || (mode === 'double' && ch === '"') || (mode === 'template' && ch === '`')) mode = 'code';
           continue;
         }
-        if (ch === "'") { mode = 'single'; continue; }
+        // Apostrophe directly after a letter/digit = contraction (Here's, don't),
+        // never a valid string opener in JS.
+        if (ch === "'") { if (!/[A-Za-z0-9]/.test(text[i - 1] || '')) mode = 'single'; continue; }
         if (ch === '"') { mode = 'double'; continue; }
         if (ch === '`') { mode = 'template'; continue; }
         if (ch === '/' && next === '/') { mode = 'line'; i += 1; continue; }
@@ -214,6 +220,22 @@
       return { output: String(res.output || ''), truncated: Boolean(res.truncated) };
     }
 
+    // Continuation passes used to re-send the ENTIRE build prompt (sibling echoes,
+    // tool results, design guide) once per pass — pure replay bulk: the tail of the
+    // partial file is the real anchor. Blank the bulky sections, keep task/contract/
+    // rules/vocab so the continuation stays grounded.
+    function slimContinuationBasePrompt(prompt) {
+      let text = String(prompt || '');
+      const OMIT = '(omitted for this continuation — the PARTIAL_OUTPUT tail below is the ground truth)';
+      const NEXT = '(?=\\n(?:MVP_REQUIREMENTS|PROJECT_CONTRACT|PROJECT_STATE|TASK|RECENT_TOOL_RESULTS|PREVIOUS_ATTEMPT_TO_IMPROVE|CURRENT_FILE|FILE_CONTENT):|\\n=== |$)';
+      for (const section of ['PROJECT_STATE', 'RECENT_TOOL_RESULTS', 'CURRENT_FILE']) {
+        text = text.replace(new RegExp(`(^|\\n)${section}:\\n[\\s\\S]*?${NEXT}`), `$1${section}:\n${OMIT}`);
+      }
+      // Design brief shapes the initial pass; a mid-file continuation doesn't restyle.
+      text = text.replace(/\n*=== DESIGN FOUNDATION[^\n]*\n[\s\S]*?\n===\s*(?=\n|$)/, '\n');
+      return text;
+    }
+
     // Generate a full file, continuing across multiple capped calls when a large
     // file overflows a single response, then sanitize the stitched result once.
     // Continues on either the provider's truncation signal or a structural check.
@@ -263,11 +285,14 @@
         if (typeof deps.persistAgentFile === 'function') deps.persistAgentFile(path, deps.sanitizeAgentGeneratedFileContent(text, path));
       };
       persistPartial(raw);
+      // Slim base + a LONGER tail: the removed echoes are replaced by more of the
+      // file's own tail, which is the only grounding a continuation actually uses.
+      const slimBase = slimContinuationBasePrompt(prompt);
       // Append until whole instead of regenerating from scratch on truncation.
       while (guard < 6 && (wasTruncated || looksTruncatedFileContent(raw, path))) {
         guard += 1;
         const reason = wasTruncated ? 'provider_truncated' : 'looks_truncated';
-        const continuationPrompt = `${prompt}\n\nPARTIAL_OUTPUT_ALREADY_SAVED (do NOT repeat any of this):\n${raw.slice(-1600)}\n\nContinue the file from exactly where it stopped. Output ONLY the remaining content — no repetition, no commentary, no code fences.`;
+        const continuationPrompt = `${slimBase}\n\nPARTIAL_OUTPUT_ALREADY_SAVED (do NOT repeat any of this):\n${raw.slice(-4000)}\n\nContinue the file from exactly where it stopped. Output ONLY the remaining content — no repetition, no commentary, no code fences.`;
         const carried = raw;
         const next = await runRawAgentFileInference(continuationPrompt, (partial) => emitPartial(stitchFileContinuation(carried, partial)), `${path} (continue ${guard})`);
         beat();
@@ -297,7 +322,7 @@
         raw = stitchFileContinuation(raw, next.output);
         wasTruncated = next.truncated;
         persistPartial(raw);
-        passTrace(guard, { reason, beforeLen: before, addedLen: raw.length - before, nextChunkLen: next.output.length, nextTruncated: Boolean(next.truncated), tail: raw.slice(-120) });
+        passTrace(guard, { reason, beforeLen: before, addedLen: raw.length - before, nextChunkLen: next.output.length, nextTruncated: Boolean(next.truncated), promptChars: continuationPrompt.length, tail: raw.slice(-120) });
         if (raw.length <= before) break;
       }
       if (typeof deps.clearAgentStreamingFile === 'function') deps.clearAgentStreamingFile(path);
@@ -420,6 +445,59 @@
       })).filter((f) => f.content && f.content.trim());
       if (typeof deps.recordDebugTrace === 'function') {
         deps.recordDebugTrace('agent_project_onepass', {
+          expected: String(expected.length), parsed: String(files.length),
+          files: files.map((f) => f.path).join(', '), rawLen: String(raw.length),
+        }, { expected, parsed: files.map((f) => f.path), rawLen: raw.length });
+      }
+      return files;
+    }
+
+    // Batch generation for write_files: several SMALL new files in ONE inference
+    // (each tiny shadcn-style component used to cost a full ~15K-char decision
+    // round-trip). Same block format + parser as single-pass project generation.
+    async function generateAgentBatchFileContents(taskText, toolEvents, paths, planSpec) {
+      const expected = (Array.isArray(paths) ? paths : []).map((p) => String(p || '')).filter(Boolean);
+      if (!expected.length) return [];
+      const contract = String(planSpec && planSpec.projectContract ? planSpec.projectContract : '');
+      const recentTools = (toolEvents || []).slice(-4).map((event, index) => {
+        const observation = String(event && event.observation ? event.observation : '').slice(0, 1200);
+        return `ToolResult ${index + 1}: ${String(event && event.tool ? event.tool : 'unknown')}\n${observation}`;
+      }).join('\n\n');
+      const prompt = [
+        `Write the complete final contents for ${expected.length} project files in ONE response.`,
+        `TASK:\n${String(taskText || '').trim()}`,
+        contract ? `\nPROJECT CONTRACT:\n${contract}` : '',
+        recentTools ? `\nRECENT_TOOL_RESULTS:\n${recentTools}` : '',
+        `\nProduce EVERY one of these files, each COMPLETE and final — no placeholders, no TODOs, no truncation. These are SMALL focused files; keep each one lean and coherent with its siblings:`,
+        expected.map((p) => `- ${p}`).join('\n'),
+        '',
+        'FORMAT: for EACH file, write a header line `=== <path> ===` then the full file in a fenced code block. Example:',
+        `=== ${expected[0]} ===`,
+        '```tsx',
+        '...complete file...',
+        '```',
+        '',
+        'Output the files in the order listed. No commentary before, between, or after the blocks.',
+      ].filter(Boolean).join('\n');
+      const budget = Math.max(1, Number(getAgentFileOutputBudget()) || agentFileContentMaxTokens);
+      const beat = () => { if (typeof deps.markAgentToolProgress === 'function') deps.markAgentToolProgress(); };
+      let streamed = '';
+      const remote = await deps.requestSelectedRemoteTextCompletion(prompt, budget, '', {
+        preferStreaming: true,
+        onDelta: (delta) => { beat(); if (delta) streamed += String(delta); },
+      });
+      let raw = (remote && remote.ok && String(remote.output || '').trim()) ? String(remote.output || '') : streamed;
+      if (!raw.trim()) {
+        const external = await requestExternalAgentPlanner(prompt, budget, agentFileGenerationRequestTimeoutMs);
+        if (external && external.ok) raw = String(external.output || '');
+      }
+      if (!raw.trim()) return [];
+      const files = parseMultiFileBlocks(raw, expected).map((f) => ({
+        path: f.path,
+        content: deps.sanitizeAgentGeneratedFileContent(f.content, f.path),
+      })).filter((f) => f.content && f.content.trim());
+      if (typeof deps.recordDebugTrace === 'function') {
+        deps.recordDebugTrace('agent_batch_file_write', {
           expected: String(expected.length), parsed: String(files.length),
           files: files.map((f) => f.path).join(', '), rawLen: String(raw.length),
         }, { expected, parsed: files.map((f) => f.path), rawLen: raw.length });
@@ -620,7 +698,7 @@
     // Model-driven cross-file review for the functional-incoherence class static
     // checks can't express (unit mismatches, conflicting defaults, dead wiring).
     // Advisory: returns short issue strings, never blocks.
-    async function reviewAgentProjectCoherence(fileContents, taskText) {
+    async function reviewAgentProjectCoherence(fileContents, taskText, phaseNote = '') {
       const entries = Object.entries(fileContents || {})
         .filter(([path, content]) => /\.(html?|css|js|mjs|cjs|ts|jsx|tsx|json)$/i.test(path) && String(content || '').trim())
         .slice(0, 4);
@@ -644,6 +722,7 @@
         '- At most 5 issues, ordered by user-visible impact.',
         '- Only report defects you can point to in the provided code. No style opinions, no speculation.',
         '- If nothing qualifies, return {"issues":[]}.',
+        String(phaseNote || '').trim(),
         taskText ? `TASK CONTEXT:\n${String(taskText).trim().slice(0, 600)}` : '',
         `PROJECT FILES:\n${filesBlock}`,
         'JSON:',
@@ -823,7 +902,7 @@
       const dstPath = deps.normalizeWorkspacePath(decision && (decision.dstPath || decision.dst_path) ? (decision.dstPath || decision.dst_path) : '');
       if (tool === 'new_project') return 'new project';
       if (tool === 'run_command') return String((decision && decision.command) || '').trim();
-      if (tool === 'read_files' && Array.isArray(decision && decision.paths) && decision.paths.length) {
+      if ((tool === 'read_files' || tool === 'write_files') && Array.isArray(decision && decision.paths) && decision.paths.length) {
         const n = decision.paths.length;
         return n === 1 ? deps.normalizeWorkspacePath(decision.paths[0]) : `${n} files`;
       }
@@ -838,6 +917,7 @@
       requestExternalAgentPlanner,
       generateAgentWriteFileContent,
       generateAgentProjectFiles,
+      generateAgentBatchFileContents,
       generateAgentEditFileProgram,
       generateAgentRewriteExistingFileContent,
       looksTruncatedFileContent,

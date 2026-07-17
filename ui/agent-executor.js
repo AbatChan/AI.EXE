@@ -649,10 +649,15 @@ export default config;
         if (mode !== 'code') {
           if (escaped) { escaped = false; continue; }
           if (ch === '\\') { escaped = true; continue; }
+          // '/" strings cannot span a raw newline in JS — reaching one means the
+          // opener was prose (a JSX-text apostrophe like "Here's"), not a string.
+          if (ch === '\n' && (mode === 'single' || mode === 'double')) { mode = 'code'; continue; }
           if ((mode === 'single' && ch === "'") || (mode === 'double' && ch === '"') || (mode === 'template' && ch === '`')) mode = 'code';
           continue;
         }
-        if (ch === "'") { mode = 'single'; continue; }
+        // Apostrophe directly after a letter/digit = contraction (Here's, don't),
+        // never a valid string opener in JS.
+        if (ch === "'") { if (!/[A-Za-z0-9]/.test(source[i - 1] || '')) mode = 'single'; continue; }
         if (ch === '"') { mode = 'double'; continue; }
         if (ch === '`') { mode = 'template'; continue; }
         if (ch === '/' && next === '/') { mode = 'line'; i += 1; continue; }
@@ -2364,6 +2369,85 @@ export default config;
         };
       }
 
+      if (tool === 'write_files') {
+        // Batch creation of several SMALL brand-new files in ONE generation pass.
+        // Each file still goes through the plan/binary/existing guards and the
+        // structural check; anything that trips a guard is skipped with a note
+        // steering back to single write_file (which has the full repair machinery).
+        const requested = Array.isArray(decision.paths)
+          ? decision.paths.map((p) => deps.normalizeWorkspacePath(p || '')).filter((p) => p && p !== '/')
+          : [];
+        const batchPaths = Array.from(new Set(requested)).slice(0, 8);
+        if (!batchPaths.length) {
+          return { ok: false, mutated, observation: 'write_files requires a paths array of new file paths.' };
+        }
+        if (typeof deps.generateAgentBatchFileContents !== 'function') {
+          return { ok: false, mutated, observation: 'write_files is unavailable — create the files one at a time with write_file.' };
+        }
+        if (needsProjectWorkspaceFirst || (projectTask && explicitSeparateWorkspaceIntent && hasOpenWorkspace && !workspaceCreatedThisTurn)) {
+          return { ok: false, mutated, observation: 'write_files blocked: create the project workspace first with new_project, then write the planned files inside it.' };
+        }
+        const batchSkipped = [];
+        const batchEligible = [];
+        for (const p of batchPaths) {
+          if (!planAllowsPath(p)) { batchSkipped.push(`${p}: outside the current plan`); continue; }
+          if (isUnsupportedBinaryAssetPath(p) || /\.(?:pdf|docx?|rtf|odt|pptx?|xlsx?|ods)$/i.test(p)) {
+            batchSkipped.push(`${p}: not a plain text file — create it individually with write_file`); continue;
+          }
+          if (!(deps.isLikelyNewAgentFileTarget(toolEvents, p) && !listedExistingFiles.has(p))) {
+            batchSkipped.push(`${p}: already exists — read it and use edit_file`); continue;
+          }
+          batchEligible.push(p);
+        }
+        if (!batchEligible.length) {
+          return { ok: false, mutated, observation: `write_files: nothing to create.\n- ${batchSkipped.join('\n- ')}` };
+        }
+        deps.setActiveAgentStreamStatus(chatId, `Writing ${batchEligible.length} files...`);
+        const generatedFiles = await deps.generateAgentBatchFileContents(taskText, toolEvents, batchEligible, planSpec) || [];
+        const generatedByPath = new Map(generatedFiles.map((f) => [deps.normalizeWorkspacePath(f.path || ''), String(f.content || '')]));
+        const batchWritten = [];
+        for (const p of batchEligible) {
+          const content = String(generatedByPath.get(p) || '');
+          if (!content.trim()) { batchSkipped.push(`${p}: no complete content came back for it`); continue; }
+          const structuralIssue = getStructuralIssueForPath(p, content);
+          if (structuralIssue) { batchSkipped.push(`${p}: generated content ${structuralIssue}`); continue; }
+          const writeRes = await deps.invokeWorkspaceAction('workspaceWriteFile', { path: p, content });
+          if (!writeRes || !writeRes.ok) { batchSkipped.push(`${p}: ${(writeRes && writeRes.message) || 'write failed'}`); continue; }
+          deps.upsertWorkspaceTreeEntry({
+            kind: 'file', path: p, name: deps.workspaceBaseName(p),
+            sizeBytes: deps.estimateTextBytes(content), updatedAt: deps.nowTs(), optimisticUntil: deps.nowTs() + 5000,
+          });
+          deps.syncFileTabFromWorkspaceWrite(p, content, deps.workspaceBaseName(p));
+          mutated = true;
+          batchWritten.push({ path: p, content });
+        }
+        if (!batchWritten.length) {
+          return {
+            ok: false,
+            mutated,
+            observation: `write_files: no files were written.\n- ${batchSkipped.join('\n- ')}\nCreate the remaining files individually with write_file.`,
+          };
+        }
+        deps.setWorkspaceSelection(batchWritten[batchWritten.length - 1].path, 'file');
+        return {
+          ok: true,
+          mutated,
+          observation: [
+            `write_files ok: created ${batchWritten.length} file(s):`,
+            ...batchWritten.map((f) => `- ${f.path} (${f.content.length} chars)`),
+            batchSkipped.length ? `Skipped (create individually with write_file if still needed):\n- ${batchSkipped.join('\n- ')}` : '',
+            'The saved files match the generated content exactly — do not re-read them to verify.',
+          ].filter(Boolean).join('\n'),
+          writtenPath: batchWritten[0].path,
+          writtenContent: batchWritten[0].content,
+          originalContent: '',
+          createdNewFile: true,
+          autoWrittenFiles: batchWritten.slice(1).map((f) => ({
+            path: f.path, content: f.content, originalContent: '', createdNewFile: true,
+            note: '(created in the same batch).',
+          })),
+        };
+      }
       if (tool === 'write_file') {
         let path = deps.normalizeWorkspacePath(decision.path || '');
         if (!path || path === '/') {
@@ -2970,6 +3054,41 @@ export default config;
             observation: `edit_file rejected for ${path}: applying it would have broken the file — it ${editAfterIssue}. The file was left unchanged. Re-issue a corrected edit that keeps opening and closing tags/braces paired, or use write_file with the complete corrected file if a larger restructure is needed.`,
           };
         }
+        // An edit that deletes an import while the file still USES the imported name
+        // makes the file strictly worse (undefined identifier the syntax scan cannot
+        // see — e.g. the ThemeProvider import removed while <ThemeProvider> stayed).
+        if (/\.(?:js|mjs|cjs|ts|tsx|jsx)$/i.test(path)) {
+          const isImportLine = (line) => /^\s*import\s.*\bfrom\s*['"][^'"]+['"];?\s*$/.test(line);
+          const importedNames = (line) => {
+            const m = String(line || '').match(/import\s+(?:type\s+)?(.+?)\s+from/);
+            if (!m) return [];
+            return m[1].replace(/[{}]/g, ' ').split(',')
+              .map((part) => part.split(/\s+as\s+/i).pop().trim())
+              .filter((n) => /^[A-Za-z_$][\w$]*$/.test(n));
+          };
+          const afterText = String(applied.output || '');
+          const orphaned = [];
+          for (const line of originalContent.split('\n')) {
+            if (!isImportLine(line) || afterText.includes(line.trim())) continue;
+            for (const name of importedNames(line)) {
+              const escaped = name.replace(/\$/g, '\\$');
+              const stillImported = new RegExp(`import[^\\n]*\\b${escaped}\\b[^\\n]*from`).test(afterText);
+              if (!stillImported && new RegExp(`\\b${escaped}\\b`).test(afterText)) orphaned.push(name);
+            }
+          }
+          if (orphaned.length) {
+            if (typeof deps.recordDebugTrace === 'function') {
+              deps.recordDebugTrace('agent_edit_orphaned_import_reject', {
+                path, names: orphaned.join(', '),
+              }, { path, names: orphaned, program });
+            }
+            return {
+              ok: false,
+              mutated,
+              observation: `edit_file rejected for ${path}: the edit removes the import of ${orphaned.join(', ')} but the file still uses ${orphaned.length > 1 ? 'them' : 'it'}, which leaves undefined references. The file was left unchanged. Either keep the import (the module may belong to a later phase) or remove the usages together with the import in one edit.`,
+            };
+          }
+        }
         if (applied.fuzzyCount > 0 && typeof deps.recordDebugTrace === 'function') {
           deps.recordDebugTrace('agent_edit_fuzzy_applied', {
             path, fuzzyCount: String(applied.fuzzyCount), appliedCount: String(applied.appliedCount),
@@ -3526,7 +3645,30 @@ export default config;
               }
             }
             if (!found) {
-              issues.push(`${path}: imports ${spec}, but none of its local files exist (${candidates.slice(0, 5).join(', ')}). Remove the invented import or create the explicitly planned module.`);
+              // Planned files that later phases will build are NOT invented imports —
+              // blocking on them mid-phase forced pointless repairs. Match exact
+              // planned paths and glob-ish planned entries like /src/components/ui/*.
+              const plannedMatch = candidates.some((candidate) => allExpectedFiles.some((planned) => {
+                if (planned === candidate) return true;
+                if (planned.includes('*')) return candidate.startsWith(planned.slice(0, planned.indexOf('*')));
+                // Extension-less planned entry (a glob whose * was normalized away,
+                // e.g. /src/components/ui) counts as a directory prefix.
+                if (!/\.[a-z0-9]+$/i.test(planned)) return candidate.startsWith(`${planned.replace(/\/+$/, '')}/`);
+                return false;
+              }));
+              const activePhase = planSpec && planSpec._activePhase;
+              const phasesRemain = Boolean(activePhase && Number(activePhase.number) < Number(activePhase.total));
+              if (plannedMatch) {
+                mechanicalAdvisory.push(`${path}: imports ${spec}, which is planned but not built yet (a later phase creates it) — not a blocker for this phase.`);
+              } else if (phasesRemain) {
+                // Vague later-phase task lists ("Remaining deliverables") can't
+                // enumerate every module, so an in-project import is not "invented"
+                // mid-phase — blocking here made models amputate imports the next
+                // phase needed. The FINAL phase still blocks on it.
+                mechanicalAdvisory.push(`${path}: imports ${spec}, which does not exist yet and is not in the plan's file list. Create it in a later phase — the final phase will treat it as an error if it is still missing.`);
+              } else {
+                issues.push(`${path}: imports ${spec}, but none of its local files exist (${candidates.slice(0, 5).join(', ')}). Remove the invented import or create the explicitly planned module.`);
+              }
             }
           }
         }
@@ -3535,7 +3677,11 @@ export default config;
           let advisoryNotes = mechanicalAdvisory.slice();
           if (typeof deps.reviewAgentProjectCoherence === 'function') {
             try {
-              advisoryNotes = advisoryNotes.concat(await deps.reviewAgentProjectCoherence(fileContents, taskText) || []);
+              const ap = planSpec && planSpec._activePhase;
+              const phaseNote = ap && Number(ap.number) < Number(ap.total)
+                ? `NOTE: this is Phase ${ap.number} of ${ap.total} of a larger phased build — later phases will add the remaining files. Do NOT report unused imports/exports/helpers, or references to planned files that do not exist yet; they are consumed or created by later phases.`
+                : '';
+              advisoryNotes = advisoryNotes.concat(await deps.reviewAgentProjectCoherence(fileContents, taskText, phaseNote) || []);
             } catch (_) { }
           }
           const advisoryBlock = advisoryNotes.length
@@ -3698,8 +3844,10 @@ export default config;
         if (name === 'list_dir') return withTarget('Scanning folder');
         if (name === 'search_files') return withTarget('Searching files');
         if (name === 'read_file') return withTarget('Reading file');
-        if (name === 'read_files') return withTarget('Reading files');
+        // Batch targets already read "N files" — a bare verb avoids "Writing files 4 files".
+        if (name === 'read_files') return withTarget('Reading');
         if (name === 'write_file') return withTarget('Writing file');
+        if (name === 'write_files') return withTarget('Writing');
         if (name === 'edit_file') return withTarget('Editing file');
         if (name === 'validate_files') return 'Checking written files';
         if (name === 'check_code') return 'Checking syntax';
@@ -3718,6 +3866,7 @@ export default config;
         if (name === 'read_file') return withTarget('Read');
         if (name === 'read_files') return withTarget('Read');
         if (name === 'write_file') return withTarget('Wrote');
+        if (name === 'write_files') return withTarget('Wrote');
         if (name === 'edit_file') return withTarget('Edited');
         if (name === 'validate_files') return 'Checked files';
         if (name === 'check_code') return 'Checked syntax';

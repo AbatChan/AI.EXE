@@ -454,7 +454,7 @@ def ensure_logged_in(driver):
     # Venice changed the post-login UI; logged-in = we left /sign-in. Wait up to ~5 min so a
     # one-time email verification code (or Cloudflare check) can be done in the visible window.
     print("AIEXE_LOGIN waiting_for_completion", flush=True)
-    for _ in range(300):
+    for _i in range(300):
         try:
             url = driver.current_url
         except Exception:
@@ -462,6 +462,15 @@ def ensure_logged_in(driver):
         if url and "/sign-in" not in url:
             _t.sleep(2)
             return
+        # Splash-stuck (logo only, no inputs) leaves the user NOTHING to type into —
+        # refresh once a minute. Never refresh while a form is visible (mid-typing).
+        if _i and _i % 60 == 0:
+            try:
+                if not [e for e in driver.find_elements(By.TAG_NAME, "input") if e.is_displayed()]:
+                    print("AIEXE_LOGIN splash_stuck_refresh t=%ds" % _i, flush=True)
+                    driver.refresh()
+            except Exception:
+                pass
         _t.sleep(1)
     try:
         driver.save_screenshot(_os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "login_stuck.png"))
@@ -538,11 +547,38 @@ def login_to_venice_with_username(username, password):
     # (a far more stable signal than any field id) either way.
     try:
         email_field = None
-        for _ in range(12):
-            email_field = _find_visible(_email_sel)
+        for _attempt in range(3):
+            for _ in range(12):
+                email_field = _find_visible(_email_sel)
+                if email_field or "/sign-in" not in driver.current_url:
+                    break
+                _t.sleep(1)
             if email_field or "/sign-in" not in driver.current_url:
                 break
+            # Splash-stuck: the SPA sometimes never renders the form (logo only, zero
+            # inputs) — usually a stale service worker / cached shell in the persisted
+            # profile. Unregister SWs, clear cache, reload, rescan.
+            try:
+                _n_inputs = len([e for e in driver.find_elements(By.TAG_NAME, "input") if e.is_displayed()])
+            except Exception:
+                _n_inputs = -1
+            print("AIEXE_LOGIN splash_stuck reload=%d visible_inputs=%d" % (_attempt + 1, _n_inputs), flush=True)
+            try:
+                driver.execute_script(
+                    "if (navigator.serviceWorker) { navigator.serviceWorker.getRegistrations()"
+                    ".then(function(rs){ rs.forEach(function(r){ r.unregister(); }); }); }")
+            except Exception:
+                pass
+            try:
+                driver.execute_cdp_cmd("Network.clearBrowserCache", {})
+            except Exception:
+                pass
             _t.sleep(1)
+            try:
+                driver.get("https://venice.ai/sign-in")
+            except Exception:
+                pass
+            _t.sleep(3)
         if email_field:
             if not (email_field.get_attribute("value") or "").strip():
                 email_field.send_keys(username)
@@ -1823,6 +1859,83 @@ def _aiexe_sweep_models_by_search(driver, initial=None):
     return found
 
 
+def _aiexe_catalog_from_page_api(driver, dom_names):
+    """Full catalog WITHOUT the search sweep: replay the models request the webapp
+    itself already made (found via performance resource entries) and pull the name
+    field whose values best overlap the DOM rows. Self-calibrating — no hardcoded
+    endpoint or schema; any failure returns [] and the DOM sweep still runs."""
+    try:
+        bodies = driver.execute_async_script("""
+            const done = arguments[arguments.length - 1];
+            (async () => {
+              try {
+                const urls = [...new Set(performance.getEntriesByType('resource')
+                  .map(e => String(e.name || ''))
+                  .filter(u => /model/i.test(u)
+                    && u.startsWith(location.origin)
+                    && !/\\.(js|mjs|css|map|png|jpe?g|svg|webp|gif|woff2?|ttf|ico)([?#]|$)/i.test(u)))];
+                const out = [];
+                for (const u of urls.reverse()) {
+                  if (out.length >= 3) break;
+                  try {
+                    const r = await fetch(u, { credentials: 'include' });
+                    if (!r.ok || !/json/i.test(String(r.headers.get('content-type') || ''))) continue;
+                    const t = await r.text();
+                    if (t.length < 200 || t.length > 8000000) continue;
+                    out.push(t);
+                  } catch (e) {}
+                }
+                done(out);
+              } catch (e) { done([]); }
+            })();
+        """) or []
+    except Exception as exc:
+        print("AIEXE_MODELS page-api probe failed: %s" % exc, flush=True)
+        return []
+    wanted = set((n or "").strip().lower() for n in (dom_names or []) if n)
+    if not wanted:
+        return []
+    candidates = []  # (score, values) per string-field of each list-of-dicts
+
+    def _walk(node):
+        if isinstance(node, dict):
+            for v in node.values():
+                _walk(v)
+        elif isinstance(node, list):
+            if node and all(isinstance(x, dict) for x in node):
+                fields = {}
+                for x in node:
+                    for k, v in x.items():
+                        if isinstance(v, str) and v.strip():
+                            fields.setdefault(k, []).append(v.strip())
+                for vals in fields.values():
+                    score = len(set(v.lower() for v in vals) & wanted)
+                    if score:
+                        candidates.append((score, vals))
+            for x in node:
+                _walk(x)
+
+    for body in bodies:
+        try:
+            _walk(json.loads(body))
+        except Exception:
+            continue
+    if not candidates:
+        return []
+    score, vals = max(candidates, key=lambda c: (c[0], len(c[1])))
+    # Demand real overlap with the curated rows before trusting an unknown field.
+    if score < max(3, len(wanted) // 3):
+        print("AIEXE_MODELS page-api rejected (overlap %d of %d)" % (score, len(wanted)), flush=True)
+        return []
+    out, seen = [], set()
+    for v in vals:
+        if v not in seen:
+            seen.add(v)
+            out.append(v)
+    print("AIEXE_MODELS page-api catalog: %d names (overlap %d of %d curated)" % (len(out), score, len(wanted)), flush=True)
+    return out
+
+
 def _aiexe_find_visible_model_title(driver, name):
     target = (name or "").strip().lower()
     if not target:
@@ -2571,6 +2684,43 @@ def _aiexe_rename_chat(driver, slug, name):
     return ok
 
 
+def _aiexe_visible_alert_text(driver):
+    """Text of a visible Venice warning/error alert banner (e.g. 'You've exceeded the
+    number of Chat requests you can make today'), or ''. Venice renders refusals like
+    the daily limit as a chakra alert, NOT an assistant message — no chunks ever come."""
+    try:
+        txt = driver.execute_script("""
+            var els = document.querySelectorAll("div[role='alert']");
+            for (var i = 0; i < els.length; i++) {
+              var el = els[i];
+              var status = el.getAttribute('data-status') || '';
+              if (status && status !== 'warning' && status !== 'error') continue;
+              var r = el.getBoundingClientRect();
+              if (r.width === 0 && r.height === 0) continue;
+              var t = (el.textContent || '').trim();
+              if (t) return t;
+            }
+            return '';
+        """)
+        return str(txt or "").strip()
+    except Exception:
+        return ""
+
+
+def _aiexe_rename_after_stream(slug, name):
+    """Deferred-rename worker (gevent greenlet): waits for the streaming request to
+    release selenium_lock, so the final done message is never blocked behind the
+    sidebar rename dance (restore/thread-nav retries cost 20s+ worst case)."""
+    global driver
+    try:
+        with selenium_lock:
+            if not _aiexe_driver_alive(driver):
+                return
+            _aiexe_sidebar_op_with_restore(driver, lambda: _aiexe_rename_chat(driver, slug, name), "RENAME")
+    except Exception as _e:
+        print("AIEXE_RENAME background failed: %s" % _e, flush=True)
+
+
 def _aiexe_sidebar_op_with_restore(driver, op, label):
     """Run a sidebar operation; if it fails, restore the window and retry once, then
     re-minimize. A minimized Chrome often leaves the virtualized sidebar rowless
@@ -2661,34 +2811,52 @@ def aiexe_scrape_models(driver):
             return []
         _t.sleep(1)
         names = _aiexe_collect_models_from_modal(driver)
-        # The curated slice above misses everything Venice doesn't feature. Merge the
-        # FULL catalog: reuse the last swept list when it's fresh (<24h) and still
-        # contains every curated name; otherwise sweep the search box (a-z0-9).
         cache = _aiexe_load_model_cache()
         cached_models = [m for m in (cache.get("models") or []) if m]
-        swept_cache_fresh = (
-            bool(cached_models)
-            and bool(cache.get("swept"))
-            and (_t.time() - float(cache.get("ts") or 0)) < 24 * 3600
-            and all(n in cached_models for n in names)
-        )
-        if swept_cache_fresh:
-            for n in cached_models:
+        # The curated slice above misses everything Venice doesn't feature. Best path:
+        # the webapp's own catalog request (complete, instant, includes same-day
+        # releases the 24h cache would hide). Fallbacks: fresh swept cache, then the
+        # a-z0-9 search sweep (slow AND lossy for deep search results).
+        api_names = _aiexe_catalog_from_page_api(driver, names)
+        if api_names:
+            added = 0
+            for n in api_names:
                 if n not in names:
                     names.append(n)
+                    added += 1
             AIEXE_LAST_SCRAPE_SWEPT = True
-            print("AIEXE_MODELS reused swept catalog (%d total) — cache fresh" % len(names), flush=True)
+            print("AIEXE_MODELS merged page-api catalog: %d total (%d beyond curated)" % (len(names), added), flush=True)
         else:
-            swept = _aiexe_sweep_models_by_search(driver, names)
-            for n in swept:
-                if n not in names:
-                    names.append(n)
-            AIEXE_LAST_SCRAPE_SWEPT = bool(swept)
+            swept_cache_fresh = (
+                bool(cached_models)
+                and cache.get("version") == AIEXE_MODEL_CACHE_VERSION
+                and bool(cache.get("swept"))
+                and (_t.time() - float(cache.get("ts") or 0)) < 24 * 3600
+                and all(n in cached_models for n in names)
+            )
+            if swept_cache_fresh:
+                for n in cached_models:
+                    if n not in names:
+                        names.append(n)
+                AIEXE_LAST_SCRAPE_SWEPT = True
+                print("AIEXE_MODELS reused swept catalog (%d total) — cache fresh" % len(names), flush=True)
+            else:
+                swept = _aiexe_sweep_models_by_search(driver, names)
+                for n in swept:
+                    if n not in names:
+                        names.append(n)
+                AIEXE_LAST_SCRAPE_SWEPT = bool(swept)
         if names and set(names) == set(cached_models) and cache.get("priced"):
             AIEXE_PRICED_MODELS = set(cache["priced"])
             AIEXE_PRICED_CHECKED_MODELS = set(names)
             print("AIEXE_PRICED reused cached set (%d) — catalog unchanged" % len(AIEXE_PRICED_MODELS), flush=True)
         else:
+            # Catalog changed: trust cached verdicts for models still present so only
+            # the NEW names get searched (a one-model release must not cost a full
+            # per-model priced crawl).
+            if cached_models and cache.get("priced") is not None:
+                AIEXE_PRICED_MODELS = set(cache.get("priced") or []) & set(names)
+                AIEXE_PRICED_CHECKED_MODELS = set(cached_models) & set(names)
             _aiexe_collect_priced_models_by_search(driver, names)
         _aiexe_close_modal(driver)
         return names
@@ -2722,6 +2890,7 @@ def _aiexe_restore_unobtrusive(driver):
 
 
 AIEXE_MODEL_CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "aiexe_model_cache.json")
+AIEXE_MODEL_CACHE_VERSION = 2
 
 
 def _aiexe_load_model_cache():
@@ -2737,6 +2906,7 @@ def _aiexe_save_model_cache(models):
     try:
         with open(AIEXE_MODEL_CACHE_FILE, "w") as f:
             json.dump({
+                "version": AIEXE_MODEL_CACHE_VERSION,
                 "models": list(models),
                 "priced": sorted(AIEXE_PRICED_MODELS),
                 "ts": time.time(),
@@ -3093,6 +3263,7 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
         _dom_probe_prev = ""
         _dom_probe_stable = 0
         _dom_probe_ts = 0.0
+        _alert_probe_ts = 0.0
         try:
             _structured_limit = int(data.get('aiexe_max_output_chars') or 0) if data.get('aiexe_structured_output') else 0
         except (TypeError, ValueError):
@@ -3233,6 +3404,18 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
             if AIEXE_LAST_TURN_HAD_UPLOAD and eval_count == 0 and time.time() - last_data_time > 12:
                 print("AIEXE_ATTACH no interceptor chunks after upload — DOM fallback", flush=True)
                 break
+            # Venice can refuse to generate at all — daily request limit, plan expired —
+            # and only shows a warning alert: no chunks, no assistant bubble. Detect it
+            # and fail fast with the alert's own text instead of burning the idle timeout
+            # into a generic "ended without a complete JSON object".
+            if eval_count == 0 and time.time() - last_data_time > 4 and time.time() - _alert_probe_ts >= 3:
+                _alert_probe_ts = time.time()
+                _alert = _aiexe_visible_alert_text(driver)
+                if _alert and not _aiexe_generation_running(driver):
+                    print("AIEXE_ALERT Venice refused to generate: %s" % _alert[:200], flush=True)
+                    if response_format != ResponseFormat.COMPLETION_AS_STRING:
+                        yield json.dumps({"error": "Venice: %s" % _alert[:400]}) + "\r\n"
+                    return
             # Worker-transport turns (ConversationsWorker) render the reply in the DOM
             # while the interceptor stays silent. Once 10s pass with zero chunks, probe
             # every 3s: a NEW reply (differs from pre-send), stable across two probes,
@@ -3278,6 +3461,14 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
                     _aiexe_stop_generation(driver, "cancel during DOM fallback")
                     _aiexe_clear_cancel_key(_chat_key)
                     return
+                # Refusal alert (daily limit etc.) → no reply will ever render; bail now.
+                if _i % 4 == 3 and eval_count == 0 and not _prev:
+                    _alert = _aiexe_visible_alert_text(driver)
+                    if _alert and not _aiexe_generation_running(driver):
+                        print("AIEXE_ALERT Venice refused to generate: %s" % _alert[:200], flush=True)
+                        if response_format != ResponseFormat.COMPLETION_AS_STRING:
+                            yield json.dumps({"error": "Venice: %s" % _alert[:400]}) + "\r\n"
+                        return
                 _txt = _aiexe_read_last_assistant_text(
                     driver, include_reasoning=(response_format != ResponseFormat.COMPLETION_AS_STRING))
                 if _structured_limit and _txt:
@@ -3387,6 +3578,8 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
         # If AI.EXE already has a real title on a later turn, mirror it here too. The first
         # turn usually arrives as "New Chat", so the UI still calls /api/aiexe/rename_chat
         # when smart naming completes; this backend path catches missed/raced attempts.
+        # Spawned, NOT inline: the greenlet blocks on selenium_lock until this request
+        # closes, so the rename never delays the final done message.
         try:
             _slug = _aiexe_slug_from_url(AIEXE_CHAT_URLS.get(_chat_key, "")) if _chat_key else ""
             if (_chat_key and _slug and _wanted_chat_name
@@ -3395,7 +3588,7 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
                 # ONE attempt per wanted name, success or not — a failing rename retried
                 # on every request made Chrome restore/park visibly over and over.
                 AIEXE_THREAD_NAMED[_chat_key] = _wanted_chat_name
-                _aiexe_sidebar_op_with_restore(driver, lambda: _aiexe_rename_chat(driver, _slug, _wanted_chat_name), "RENAME")
+                gevent.spawn(_aiexe_rename_after_stream, _slug, _wanted_chat_name)
         except Exception as _e:
             print("AIEXE_RENAME deferred path failed: %s" % _e, flush=True)
 

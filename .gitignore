@@ -62,3 +62,7 @@ docs/PROJECT_MEMORY.md
 backend/app/aiexe_model_cache.json
 backend/app/aiexe_chat_map.json
 backend/app/.chrome-profile/
+
+# Session scratch (personal docs, generated previews)
+/output/
+/tmp/

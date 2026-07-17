@@ -625,7 +625,7 @@
           </button>
           <span class="ws-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7.5a2 2 0 0 1 2-2h3.6a1 1 0 0 1 .7.3l1.4 1.4a1 1 0 0 0 .7.3H18a2 2 0 0 1 2 2v6.5a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"></path></svg></span>
           <span class="ws-label">${rootLabel}</span>
-          <button type="button" class="ws-root-run" title="Run the project">
+          <button type="button" class="ws-root-run ui-tooltip-anchor${window.aiexeRunAppBusy ? ' running' : ''}" data-tooltip="${window.aiexeRunAppBusy ? 'Starting the project...' : 'Run the project'}" aria-label="Run the project"${window.aiexeRunAppBusy ? ' aria-busy="true"' : ''}>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="6 3 20 12 6 21 6 3"></polygon></svg>
           </button>
         `;
@@ -633,6 +633,7 @@
       if (rootRun) {
         rootRun.addEventListener('click', (evt) => {
           evt.stopPropagation();
+          if (window.aiexeRunAppBusy) return; // launch already in flight
           if (typeof window.runWorkspaceApp === 'function') window.runWorkspaceApp();
         });
       }

@@ -677,8 +677,22 @@
       }
     }
 
+    // Busy state for the Run button: launching can take seconds (server boot,
+    // browser open) — without it users click repeatedly and fire extra runs.
+    // window flag so the renderer keeps the state across tree re-renders.
+    function setRunAppBusy(busy) {
+      window.aiexeRunAppBusy = Boolean(busy);
+      document.querySelectorAll('.ws-root-run').forEach((btn) => {
+        btn.classList.toggle('running', Boolean(busy));
+        btn.setAttribute('data-tooltip', busy ? 'Starting the project...' : 'Run the project');
+        if (busy) btn.setAttribute('aria-busy', 'true');
+        else btn.removeAttribute('aria-busy');
+      });
+    }
+
     async function runWorkspaceApp() {
       deps.closeExplorerMenus();
+      if (window.aiexeRunAppBusy) return; // a launch is already in flight
       if (!deps.ensureSignedIn()) return;
       if (!deps.nativeBridge.available()) {
         window.alert('Native runtime bridge unavailable.');
@@ -688,20 +702,25 @@
         window.alert('Open a project first, then click Run to launch it.');
         return;
       }
-      // Serves the open project over http://127.0.0.1 and opens it in the browser.
-      // file:// breaks ES modules, fetch(), and many APIs ("only the UI shows");
-      // a real http origin makes the generated app actually work.
-      const response = await deps.invokeWorkspaceAction('runWorkspaceApp', {});
-      if (!response || !response.ok) {
-        window.alert((response && response.message) || 'Failed to run the project.');
-        return;
+      setRunAppBusy(true);
+      try {
+        // Serves the open project over http://127.0.0.1 and opens it in the browser.
+        // file:// breaks ES modules, fetch(), and many APIs ("only the UI shows");
+        // a real http origin makes the generated app actually work.
+        const response = await deps.invokeWorkspaceAction('runWorkspaceApp', {});
+        if (!response || !response.ok) {
+          window.alert((response && response.message) || 'Failed to run the project.');
+          return;
+        }
+        // Native run opens the app externally (Chrome/default browser for web
+        // projects, terminal/cmd for servers). Keep the embedded artifact browser
+        // out of the way so it remains reserved for adapter/account flows.
+        if (typeof deps.setMiddleViewMode === 'function') deps.setMiddleViewMode('chat');
+        if (typeof deps.renderMiddleView === 'function') deps.renderMiddleView();
+        if (typeof deps.renderSidebarCounts === 'function') deps.renderSidebarCounts();
+      } finally {
+        setRunAppBusy(false);
       }
-      // Native run opens the app externally (Chrome/default browser for web
-      // projects, terminal/cmd for servers). Keep the embedded artifact browser
-      // out of the way so it remains reserved for adapter/account flows.
-      if (typeof deps.setMiddleViewMode === 'function') deps.setMiddleViewMode('chat');
-      if (typeof deps.renderMiddleView === 'function') deps.renderMiddleView();
-      if (typeof deps.renderSidebarCounts === 'function') deps.renderSidebarCounts();
     }
 
     return {

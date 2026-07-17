@@ -548,6 +548,34 @@
       // 4) A single leading prose lead-in ("Here's the file:", "Below is the file:").
       text = text.replace(/^(?:Sure[,!.]?\s*)?(?:Here(?:'|’)?s|Here is|Below is)\b[^\n]{0,40}?\bfile(?:\s+content)?\b[^\n]{0,20}?[:\-]\s*\n?/i, '').trim();
 
+      // 5) JSX-text `\${expr}` quirk (models escape $ Markdown-style): renders a
+      //    literal stray backslash in the browser. Fix ONLY outside strings/
+      //    templates/comments — `\${` inside a template literal is a real escape.
+      if (/^(?:jsx|tsx)$/i.test(String(extension || ''))) {
+        let out = '';
+        let mode = '';                // '' code/JSX-text, else the open quote or comment kind
+        for (let i = 0; i < text.length; i += 1) {
+          const ch = text[i];
+          const two = text.slice(i, i + 2);
+          if (mode === '') {
+            if (text.slice(i, i + 3) === '\\${') { out += '${'; i += 2; continue; }
+            if (two === '//' || two === '/*') { mode = two; out += two; i += 1; continue; }
+            // Apostrophe after a letter/digit = contraction (Here's), not a string.
+            if (ch === '"' || ch === '`' || (ch === "'" && !/[A-Za-z0-9]/.test(text[i - 1] || ''))) mode = ch;
+          } else if (mode === '//') {
+            if (ch === '\n') mode = '';
+          } else if (mode === '/*') {
+            if (two === '*/') { mode = ''; out += two; i += 1; continue; }
+          } else if (ch === '\\') {
+            out += two; i += 1; continue;   // escaped char inside a string
+          } else if (ch === mode || (mode !== '`' && ch === '\n')) {
+            mode = '';                      // close quote (raw newline ends '/" strings)
+          }
+          out += ch;
+        }
+        text = out;
+      }
+
       // That's it. No tag-based/HTML-document stripping and no "find where the code
       // starts" slicing — those second-guessed good output and cut real code. If a
       // model genuinely returns the wrong shape, the build surfaces it loudly.
@@ -1399,6 +1427,7 @@
             ? 'Do NOT write README.md or other documentation in this phase — docs come in the FINAL phase only. Build the actual app/page files for this phase first.'
             : '',
           'When this phase\'s sub-tasks are built and it runs, validate_files (and run_app if runnable) then return {"action":"final"} — do NOT continue into the next phase. The user presses Continue to advance; the next run picks up the next phase.',
+          'In the final message, state only what was actually done and verified this phase (files built, checks passed). Do NOT claim the app "renders", "works", or "displays" anything unless a run actually happened this phase and succeeded.',
           '===',
         ].filter(Boolean).join('\n')
         : '';

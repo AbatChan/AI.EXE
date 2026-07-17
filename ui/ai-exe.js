@@ -743,6 +743,16 @@ function openCodeArtifactsView(btn) {
   syncFloatingViewToggle();
 }
 
+function openFinanceView(btn) {
+  if (btn) setActive(btn);
+  middleViewMode = 'finance';
+  artifactDetailKey = '';
+  artifactDetailOrigin = 'artifacts';
+  renderHistory();
+  renderMiddleView();
+  syncFloatingViewToggle();
+}
+
 function openArtifactDetail(artifactKey, origin = 'artifacts') {
   artifactDetailKey = String(artifactKey || '');
   artifactDetailOrigin = String(origin || 'artifacts') === 'chat' ? 'chat' : 'artifacts';
@@ -770,6 +780,306 @@ function enterChatView() {
   renderHistory();
   renderMiddleView();
   syncFloatingViewToggle();
+}
+
+function formatFinanceMoney(cents, currency = 'USD') {
+  const amount = Number(cents || 0) / 100;
+  try {
+    return new Intl.NumberFormat(undefined, { style: 'currency', currency: String(currency || 'USD') }).format(amount);
+  } catch (_) {
+    return `${String(currency || 'USD')} ${amount.toFixed(2)}`;
+  }
+}
+
+function formatFinanceDate(value) {
+  if (!value) return 'No due date';
+  const date = new Date(String(value).length === 10 ? `${value}T12:00:00` : value);
+  return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+}
+
+function financePeriodParts(value) {
+  const match = /^(\d{4})-(\d{2})$/.exec(String(value || ''));
+  if (match) return { year: Number(match[1]), month: Number(match[2]) };
+  const now = new Date();
+  return { year: now.getFullYear(), month: now.getMonth() + 1 };
+}
+
+function financeDashboardError(message) {
+  if (!financeDashboardContent) return;
+  financeDashboardContent.innerHTML = `
+    <div class="finance-empty-state">
+      <strong>Finance foundation unavailable</strong>
+      <span>${escapeHtml(message || 'The local AI.EXE backend is not running.')}</span>
+    </div>`;
+}
+
+function financeAuditPlaceholder(isEmpty = false) {
+  return `<div class="finance-audit-empty-state">
+    <div class="finance-audit-empty-mark" aria-hidden="true">A</div>
+    <div><strong>${isEmpty ? 'No audit entries yet' : 'Audit trail standing by'}</strong><span>${isEmpty ? 'Your next settings change, local entry, or invoice update will appear here.' : 'Review the local timeline whenever you want to see every saved finance change.'}</span></div>
+  </div>`;
+}
+
+async function renderFinanceDashboard() {
+  if (!financeDashboardContent) return;
+  financeDashboardContent.innerHTML = '<div class="finance-loading">Loading local finance data...</div>';
+  try {
+    const base = getAIExeBackendUrl();
+    const [overviewResponse, transactionsResponse, invoicesResponse] = await Promise.all([
+      fetch(base + '/api/finance/overview'),
+      fetch(base + '/api/finance/transactions?limit=8'),
+      fetch(base + '/api/finance/invoices?limit=8'),
+    ]);
+    if (!overviewResponse.ok || !transactionsResponse.ok || !invoicesResponse.ok) throw new Error('The local finance service did not respond.');
+    const overview = await overviewResponse.json();
+    const transactions = (await transactionsResponse.json()).transactions || [];
+    const invoices = (await invoicesResponse.json()).invoices || [];
+    const currency = overview.currency || 'USD';
+    const settings = overview.settings || {};
+    const target = Math.max(0, Number(overview.income_target_cents || 0));
+    const progress = target ? Math.min(100, Math.round((Number(overview.income_cents || 0) / target) * 100)) : 0;
+    const transactionRows = transactions.length
+      ? transactions.map((tx) => `
+          <div class="finance-row">
+            <div><strong>${escapeHtml(tx.source || 'Untitled entry')}</strong><span>${escapeHtml(tx.memo || (tx.is_mock ? 'Mock data' : 'Local entry'))}</span></div>
+            <div class="finance-row-amount ${tx.kind === 'expense' ? 'expense' : ''}">${tx.kind === 'expense' ? '−' : '+'}${formatFinanceMoney(tx.amount_cents, tx.currency)}</div>
+          </div>`).join('')
+      : '<div class="finance-empty-state"><strong>No records yet</strong><span>Load mock data to test the local income pool, tax reserve, and split calculations.</span><button type="button" id="financeSeedMockBtn">Load mock data</button></div>';
+    const invoiceRows = invoices.length
+      ? invoices.map((invoice) => `
+          <div class="finance-row finance-invoice-row">
+            <div><strong>${escapeHtml(invoice.invoice_number || 'Draft invoice')} · ${escapeHtml(invoice.client_name || 'Client')}</strong><span>${escapeHtml(invoice.description || 'No description')} · Due ${escapeHtml(formatFinanceDate(invoice.due_date))}</span></div>
+            <div class="finance-row-actions"><strong class="finance-row-amount">${formatFinanceMoney(invoice.amount_cents, invoice.currency)}</strong><label class="finance-status-label">Status<select class="finance-invoice-status" data-invoice-id="${escapeHtml(invoice.id)}"><option value="draft" ${invoice.status === 'draft' ? 'selected' : ''}>Draft</option><option value="sent" ${invoice.status === 'sent' ? 'selected' : ''}>Sent</option><option value="paid" ${invoice.status === 'paid' ? 'selected' : ''}>Paid</option><option value="void" ${invoice.status === 'void' ? 'selected' : ''}>Void</option></select></label></div>
+          </div>`).join('')
+      : `<div class="finance-empty-state finance-invoice-empty-state">
+          <div class="finance-invoice-empty-mark" aria-hidden="true"><span>0</span></div>
+          <div class="finance-invoice-empty-copy"><strong>Your invoice history starts here</strong><span>Create the first local draft above, then use this space to track whether it is drafted, sent, paid, or void. Nothing is emailed or charged from AI.EXE.</span><button type="button" id="financeInvoiceJumpBtn">Create first draft</button></div>
+        </div>`;
+    const currentPeriod = new Date().toISOString().slice(0, 7);
+    financeDashboardContent.innerHTML = `
+      <div class="finance-card-grid">
+        <article class="finance-card"><span>Income pool</span><strong>${formatFinanceMoney(overview.income_cents, currency)}</strong><small>${overview.mock_transaction_count || 0} mock entries</small></article>
+        <article class="finance-card"><span>Tax reserve</span><strong>${formatFinanceMoney(overview.tax_reserve_cents, currency)}</strong><small>${Number((overview.settings || {}).tax_reserve_bps || 0) / 100}% held locally</small></article>
+        <article class="finance-card"><span>Distributable</span><strong>${formatFinanceMoney(overview.distributable_cents, currency)}</strong><small>After recorded expenses and reserve</small></article>
+        <article class="finance-card"><span>Income target</span><strong>${progress}%</strong><small>${formatFinanceMoney(overview.income_cents, currency)} of ${formatFinanceMoney(target, currency)}</small><div class="finance-progress"><i style="width:${progress}%"></i></div></article>
+        <article class="finance-card"><span>Open invoices</span><strong>${formatFinanceMoney(overview.open_invoice_cents, currency)}</strong><small>${overview.open_invoice_count || 0} draft or sent</small></article>
+      </div>
+      <div class="finance-control-grid">
+        <section class="finance-panel finance-form-panel">
+          <div class="finance-panel-title"><div><span>Local settings</span><small>Applied only to this device</small></div></div>
+          <form class="finance-form" id="financeSettingsForm">
+            <label>Currency<input name="base_currency" maxlength="3" value="${escapeHtml(currency)}"></label>
+            <label>Tax reserve %<input name="tax_reserve_percent" type="number" min="0" max="100" step="0.01" value="${Number(settings.tax_reserve_bps || 0) / 100}"></label>
+            <label>Developer split %<input name="developer_split_percent" type="number" min="0" max="100" step="0.01" value="${Number(settings.developer_split_bps || 0) / 100}"></label>
+            <label>Income target<input name="income_target" type="number" min="0" step="0.01" value="${(Number(overview.income_target_cents || 0) / 100).toFixed(2)}"></label>
+            <button type="submit">Save settings</button>
+          </form>
+        </section>
+        <section class="finance-panel finance-form-panel">
+          <div class="finance-panel-title"><div><span>Record local entry</span><small>No bank or payment connection</small></div></div>
+          <form class="finance-form" id="financeEntryForm">
+            <label>Type<select name="kind"><option value="income">Income</option><option value="expense">Expense</option></select></label>
+            <label>Amount<input name="amount" type="number" min="0.01" step="0.01" required placeholder="0.00"></label>
+            <label>Source<input name="source" required maxlength="120" placeholder="Client payment, hosting, etc."></label>
+            <label>Memo<input name="memo" maxlength="500" placeholder="Optional note"></label>
+            <button type="submit">Record entry</button>
+          </form>
+        </section>
+        <section class="finance-panel finance-form-panel finance-invoice-form-panel">
+          <div class="finance-panel-title"><div><span>Local draft invoice</span><small>Record only. No sending or payment connection.</small></div></div>
+          <form class="finance-form" id="financeInvoiceForm">
+            <label>Client name<input name="client_name" required maxlength="160" placeholder="Client or company"></label>
+            <label>Amount<input name="amount" type="number" min="0.01" step="0.01" required placeholder="0.00"></label>
+            <label>Due date<input name="due_date" type="date" required value="${currentPeriod}-28"></label>
+            <label>Description<input name="description" required maxlength="500" placeholder="What the invoice is for"></label>
+            <label>Note<input name="note" maxlength="500" placeholder="Optional internal note"></label>
+            <button type="submit">Create draft</button>
+          </form>
+        </section>
+      </div>
+      <section class="finance-panel"><div class="finance-panel-title"><div><span>Recent local records</span><small>Mock-data testing only</small></div></div>${transactionRows}</section>
+      <section class="finance-panel finance-invoices-panel"><div class="finance-panel-title"><div><span>Local invoice records</span><small>Update status manually after you act outside AI.EXE.</small></div></div>${invoiceRows}</section>
+      <section class="finance-panel finance-report-panel"><div class="finance-panel-title"><div><span>Monthly report</span><small>Local summary and CSV export. Not tax advice.</small></div></div><div class="finance-report-controls"><label>Report month<input id="financeReportMonth" type="month" value="${currentPeriod}"></label><button type="button" class="finance-inline-btn" id="financeReportBtn">Build report</button><button type="button" class="finance-inline-btn" id="financeExportBtn">Export CSV</button></div><div class="finance-report-summary" id="financeReportSummary">Choose a month to build a local summary.</div></section>
+      <section class="finance-panel finance-audit-panel"><div class="finance-panel-title"><div><span>Audit history</span><small>Every local finance change is recorded</small></div><button type="button" class="finance-inline-btn" id="financeAuditBtn">View history</button></div><div class="finance-audit-list" id="financeAuditList">${financeAuditPlaceholder()}</div></section>
+      <div class="finance-split-note">Current split: ${Number(settings.developer_split_bps || 0) / 100}% developer / ${100 - Number(settings.developer_split_bps || 0) / 100}% client. Settings are stored only on this device.</div>`;
+    const seedButton = document.getElementById('financeSeedMockBtn');
+    if (seedButton) {
+      seedButton.addEventListener('click', async () => {
+        seedButton.disabled = true;
+        seedButton.textContent = 'Loading...';
+        try {
+          const response = await fetch(getAIExeBackendUrl() + '/api/finance/mock-income', { method: 'POST' });
+          if (!response.ok) throw new Error('Could not load mock data.');
+          await renderFinanceDashboard();
+        } catch (error) {
+          financeDashboardError(error && error.message ? error.message : 'Could not load mock data.');
+        }
+      });
+    }
+    const settingsForm = document.getElementById('financeSettingsForm');
+    if (settingsForm) {
+      settingsForm.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        const form = new FormData(settingsForm);
+        const tax = Number(form.get('tax_reserve_percent'));
+        const split = Number(form.get('developer_split_percent'));
+        const targetAmount = Number(form.get('income_target'));
+        if (![tax, split, targetAmount].every(Number.isFinite) || tax < 0 || tax > 100 || split < 0 || split > 100 || targetAmount < 0) {
+          financeDashboardError('Use percentages between 0 and 100 and a non-negative income target.');
+          return;
+        }
+        try {
+          const response = await fetch(getAIExeBackendUrl() + '/api/finance/settings', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+              base_currency: String(form.get('base_currency') || '').trim().toUpperCase(),
+              tax_reserve_bps: Math.round(tax * 100), developer_split_bps: Math.round(split * 100),
+              income_target_cents: Math.round(targetAmount * 100),
+            }),
+          });
+          if (!response.ok) throw new Error('Could not save finance settings.');
+          await renderFinanceDashboard();
+        } catch (error) {
+          financeDashboardError(error && error.message ? error.message : 'Could not save finance settings.');
+        }
+      });
+    }
+    const entryForm = document.getElementById('financeEntryForm');
+    if (entryForm) {
+      entryForm.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        const form = new FormData(entryForm);
+        const amount = Number(form.get('amount'));
+        if (!Number.isFinite(amount) || amount <= 0) return;
+        try {
+          const response = await fetch(getAIExeBackendUrl() + '/api/finance/transactions', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+              kind: form.get('kind'), amount_cents: Math.round(amount * 100), currency,
+              source: String(form.get('source') || '').trim(), memo: String(form.get('memo') || '').trim(),
+            }),
+          });
+          if (!response.ok) throw new Error('Could not record this entry.');
+          await renderFinanceDashboard();
+        } catch (error) {
+          financeDashboardError(error && error.message ? error.message : 'Could not record this entry.');
+        }
+      });
+    }
+    const invoiceForm = document.getElementById('financeInvoiceForm');
+    const invoiceJumpButton = document.getElementById('financeInvoiceJumpBtn');
+    if (invoiceJumpButton && invoiceForm) {
+      invoiceJumpButton.addEventListener('click', () => {
+        invoiceForm.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        const clientName = invoiceForm.elements.namedItem('client_name');
+        if (clientName && typeof clientName.focus === 'function') clientName.focus({ preventScroll: true });
+      });
+    }
+    if (invoiceForm) {
+      invoiceForm.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        const form = new FormData(invoiceForm);
+        const amount = Number(form.get('amount'));
+        if (!Number.isFinite(amount) || amount <= 0) return;
+        try {
+          const response = await fetch(getAIExeBackendUrl() + '/api/finance/invoices', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+              client_name: String(form.get('client_name') || '').trim(), description: String(form.get('description') || '').trim(),
+              amount_cents: Math.round(amount * 100), currency, due_date: String(form.get('due_date') || '').trim(), note: String(form.get('note') || '').trim(),
+            }),
+          });
+          if (!response.ok) throw new Error('Could not create the local invoice draft.');
+          await renderFinanceDashboard();
+        } catch (error) {
+          financeDashboardError(error && error.message ? error.message : 'Could not create the local invoice draft.');
+        }
+      });
+    }
+    document.querySelectorAll('.finance-invoice-status').forEach((select) => {
+      select.addEventListener('change', async () => {
+        const invoiceId = select.dataset.invoiceId;
+        if (!invoiceId) return;
+        select.disabled = true;
+        try {
+          const response = await fetch(`${getAIExeBackendUrl()}/api/finance/invoices/${encodeURIComponent(invoiceId)}/status`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: select.value }),
+          });
+          if (!response.ok) throw new Error('Could not update the invoice status.');
+          await renderFinanceDashboard();
+        } catch (error) {
+          financeDashboardError(error && error.message ? error.message : 'Could not update the invoice status.');
+        } finally {
+          select.disabled = false;
+        }
+      });
+    });
+    const reportMonth = document.getElementById('financeReportMonth');
+    const reportSummary = document.getElementById('financeReportSummary');
+    const reportButton = document.getElementById('financeReportBtn');
+    if (reportButton && reportMonth && reportSummary) {
+      reportButton.addEventListener('click', async () => {
+        const period = financePeriodParts(reportMonth.value);
+        reportButton.disabled = true;
+        reportButton.textContent = 'Building...';
+        try {
+          const response = await fetch(`${getAIExeBackendUrl()}/api/finance/reports/monthly?year=${period.year}&month=${period.month}`);
+          if (!response.ok) throw new Error('Could not build the local report.');
+          const report = await response.json();
+          const sources = (report.source_totals || []).slice(0, 4).map((item) => `${escapeHtml(item.source)}: ${formatFinanceMoney(item.amount_cents, report.currency)}`).join(' · ');
+          reportSummary.innerHTML = `<strong>${escapeHtml(report.period)} summary</strong><span>Income ${formatFinanceMoney(report.income_cents, report.currency)} · Expenses ${formatFinanceMoney(report.expense_cents, report.currency)} · Reserve ${formatFinanceMoney(report.tax_reserve_cents, report.currency)} · Distributable ${formatFinanceMoney(report.distributable_cents, report.currency)}</span><small>${sources || 'No local entries for this month.'}</small>`;
+        } catch (error) {
+          reportSummary.textContent = error && error.message ? error.message : 'Could not build the local report.';
+        } finally {
+          reportButton.disabled = false;
+          reportButton.textContent = 'Build report';
+        }
+      });
+    }
+    const exportButton = document.getElementById('financeExportBtn');
+    if (exportButton && reportMonth) {
+      exportButton.addEventListener('click', async () => {
+        const period = financePeriodParts(reportMonth.value);
+        exportButton.disabled = true;
+        exportButton.textContent = 'Preparing...';
+        try {
+          const response = await fetch(`${getAIExeBackendUrl()}/api/finance/reports/monthly.csv?year=${period.year}&month=${period.month}`);
+          if (!response.ok) throw new Error('Could not export the local report.');
+          const blob = await response.blob();
+          const url = URL.createObjectURL(blob);
+          const anchor = document.createElement('a');
+          anchor.href = url;
+          anchor.download = `ai-exe-finance-report-${reportMonth.value || `${period.year}-${String(period.month).padStart(2, '0')}`}.csv`;
+          anchor.click();
+          URL.revokeObjectURL(url);
+        } catch (error) {
+          financeDashboardError(error && error.message ? error.message : 'Could not export the local report.');
+        } finally {
+          exportButton.disabled = false;
+          exportButton.textContent = 'Export CSV';
+        }
+      });
+    }
+    const auditButton = document.getElementById('financeAuditBtn');
+    if (auditButton) {
+      auditButton.addEventListener('click', async () => {
+        const list = document.getElementById('financeAuditList');
+        if (!list) return;
+        auditButton.disabled = true;
+        auditButton.textContent = 'Loading...';
+        try {
+          const response = await fetch(getAIExeBackendUrl() + '/api/finance/audit?limit=20');
+          if (!response.ok) throw new Error('Could not load audit history.');
+          const events = (await response.json()).events || [];
+          list.innerHTML = events.length ? events.map((item) => `<div class="finance-audit-row"><strong>${escapeHtml(item.action || 'change')}</strong><span>${escapeHtml(item.occurred_at || '')} · ${escapeHtml(JSON.stringify(item.detail || {}))}</span></div>`).join('') : financeAuditPlaceholder(true);
+        } catch (error) {
+          list.textContent = error && error.message ? error.message : 'Could not load audit history.';
+        } finally {
+          auditButton.disabled = false;
+          auditButton.textContent = 'View history';
+        }
+      });
+    }
+  } catch (error) {
+    financeDashboardError(error && error.message ? error.message : 'The local AI.EXE backend is not running.');
+  }
 }
 
 function openWorkView() {
@@ -800,14 +1110,20 @@ const accountLogoutText = document.getElementById('accountLogoutText');
 const newChatBtn = document.getElementById('newChatBtn');
 const artifactsBtn = document.getElementById('artifactsBtn');
 const codeBtn = document.getElementById('codeBtn');
+const financeBtn = document.getElementById('financeBtn');
 const artifactCountEl = document.getElementById('artifactCount');
 const codeCountEl = document.getElementById('codeCount');
 const chatArea = document.getElementById('chatArea');
+const bottomBar = document.querySelector('.bottom-bar');
 const artifactBrowser = document.getElementById('artifactBrowser');
 const artifactBrowserTitle = document.getElementById('artifactBrowserTitle');
 const artifactBackBtn = document.getElementById('artifactBackBtn');
 const artifactListView = document.getElementById('artifactListView');
 const artifactDetailView = document.getElementById('artifactDetailView');
+const financeDashboard = document.getElementById('financeDashboard');
+const financeDashboardContent = document.getElementById('financeDashboardContent');
+const financeRefreshBtn = document.getElementById('financeRefreshBtn');
+if (financeRefreshBtn) financeRefreshBtn.addEventListener('click', () => { void renderFinanceDashboard(); });
 const artifactDetailMeta = document.getElementById('artifactDetailMeta');
 const artifactEditor = document.getElementById('artifactEditor');
 const artifactOpenChatBtn = document.getElementById('artifactOpenChatBtn');
@@ -868,6 +1184,7 @@ const fileViewerHighlight = document.getElementById('fileViewerHighlight');
 const fileViewerHighlightCode = document.getElementById('fileViewerHighlightCode');
 const fileViewerEditor = document.getElementById('fileViewerEditor');
 const fvFilename = document.getElementById('fvFilename');
+const fileViewerClose = document.getElementById('fileViewerClose');
 const fileViewerSearch = document.getElementById('fileViewerSearch');
 const fileViewerSearchInput = document.getElementById('fileViewerSearchInput');
 const fileViewerSearchCount = document.getElementById('fileViewerSearchCount');
@@ -955,6 +1272,7 @@ let settingsAutosaveTimer = 0;
 const searchInput = document.getElementById('searchInput');
 const searchDropdown = document.getElementById('searchDropdown');
 const searchPaletteBackdrop = document.getElementById('searchPaletteBackdrop');
+const searchPaletteIdle = document.getElementById('searchPaletteIdle');
 const sidebarSearchBtn = document.getElementById('sidebarSearchBtn');
 const floatingChatBtn = document.getElementById('floatingChatBtn');
 const plusBtn = document.getElementById('plusBtn');
@@ -2279,6 +2597,51 @@ if (chatArea) {
   }, { passive: true });
 }
 
+// Message rows can keep changing height after their initial render. Agent phase
+// checklists, activity drawers, diff previews, images, syntax highlighting and
+// responsive text reflow all do this. Keep a pinned conversation attached to
+// the real bottom as those surfaces settle, while respecting a user who has
+// deliberately scrolled up.
+let chatLayoutScrollRaf = 0;
+const chatLayoutResizeTargets = new Set();
+
+function scheduleChatLayoutScrollSync() {
+  if (!chatArea || chatLayoutScrollRaf) return;
+  chatLayoutScrollRaf = requestAnimationFrame(() => {
+    chatLayoutScrollRaf = 0;
+    if (chatAutoScrollPinned) scrollChatToBottom();
+    else updateChatScrollDownButtonVisibility();
+  });
+}
+
+const chatLayoutResizeObserver = (chatArea && typeof ResizeObserver === 'function')
+  ? new ResizeObserver(() => scheduleChatLayoutScrollSync())
+  : null;
+
+function syncChatLayoutResizeTargets() {
+  if (!chatArea || !chatLayoutResizeObserver) return;
+  const current = new Set(Array.from(chatArea.children));
+  chatLayoutResizeTargets.forEach((node) => {
+    if (current.has(node)) return;
+    chatLayoutResizeObserver.unobserve(node);
+    chatLayoutResizeTargets.delete(node);
+  });
+  current.forEach((node) => {
+    if (chatLayoutResizeTargets.has(node)) return;
+    chatLayoutResizeTargets.add(node);
+    chatLayoutResizeObserver.observe(node);
+  });
+}
+
+if (chatArea && typeof MutationObserver === 'function') {
+  const chatLayoutMutationObserver = new MutationObserver(() => {
+    syncChatLayoutResizeTargets();
+    scheduleChatLayoutScrollSync();
+  });
+  chatLayoutMutationObserver.observe(chatArea, { childList: true, subtree: true });
+  syncChatLayoutResizeTargets();
+}
+
 if (chatScrollDownBtn) {
   chatScrollDownBtn.addEventListener('click', () => {
     if (!chatArea) return;
@@ -2321,8 +2684,8 @@ function makeMessageActionIcon(kind) {
 function applyCustomTooltip(target, fallback = '') {
   if (!target) return;
   if (
-    target.classList.contains('panel-resizer')
-    || target.classList.contains('sidebar-toggle')
+    target.dataset.noTooltip === 'true'
+    || target.classList.contains('panel-resizer')
     || target.classList.contains('explorer-help-btn')
     || target.classList.contains('iact-btn')
     || target.classList.contains('send-btn')
@@ -3357,6 +3720,43 @@ function handleAddUrlContext() {
 // ── Search
 let searchQuery = '';
 let searchBlurTimer = null;
+let searchResultIndex = -1;
+let workspaceContentSearchTimer = 0;
+let workspaceContentSearchRequest = 0;
+const workspaceContentSearchCache = new Map();
+const workspaceSearchableExtensions = new Set([
+  'c', 'cc', 'cpp', 'cs', 'css', 'go', 'h', 'hpp', 'html', 'java', 'js', 'json',
+  'jsx', 'kt', 'md', 'mjs', 'php', 'py', 'rb', 'rs', 'scss', 'sh', 'sql', 'swift',
+  'toml', 'ts', 'tsx', 'txt', 'vue', 'xml', 'yaml', 'yml', 'zsh',
+]);
+const workspaceSearchSkippedFolders = new Set([
+  '.git', '.next', '.venv', '__pycache__', 'build', 'coverage', 'dist', 'node_modules', 'vendor', 'venv',
+]);
+
+function setSearchPaletteIdle(visible) {
+  if (!searchPaletteIdle) return;
+  searchPaletteIdle.classList.toggle('hidden', !visible);
+  searchPaletteIdle.setAttribute('aria-hidden', visible ? 'false' : 'true');
+}
+
+function setSearchResultActive(index) {
+  if (!searchDropdown) return;
+  const results = Array.from(searchDropdown.querySelectorAll('.search-result-item'));
+  if (results.length === 0) {
+    searchResultIndex = -1;
+    if (searchInput) searchInput.removeAttribute('aria-activedescendant');
+    return;
+  }
+  searchResultIndex = Math.max(0, Math.min(results.length - 1, index));
+  results.forEach((result, resultIndex) => {
+    const active = resultIndex === searchResultIndex;
+    result.classList.toggle('active', active);
+    result.setAttribute('aria-selected', active ? 'true' : 'false');
+  });
+  const activeResult = results[searchResultIndex];
+  if (searchInput && activeResult) searchInput.setAttribute('aria-activedescendant', activeResult.id);
+  if (activeResult) activeResult.scrollIntoView({ block: 'nearest' });
+}
 
 function getWorkspaceSearchEntries() {
   const entries = [];
@@ -3391,14 +3791,103 @@ function getWorkspaceSearchEntries() {
   return entries;
 }
 
-function renderSearchDropdown(query) {
+function isWorkspaceContentSearchable(entry) {
+  if (!entry || entry.kind !== 'file') return false;
+  if (Number(entry.sizeBytes) > 512 * 1024) return false;
+  const name = String(entry.name || '').toLowerCase();
+  const extension = name.includes('.') ? name.split('.').pop() : '';
+  return workspaceSearchableExtensions.has(extension) || ['dockerfile', 'makefile', 'readme'].includes(name);
+}
+
+async function collectWorkspaceContentSearchFiles(limit = 72) {
+  if (typeof loadWorkspaceChildren !== 'function' || typeof getWorkspaceNodeState !== 'function') return [];
+  const files = [];
+  const folders = ['/'];
+  const visited = new Set();
+  while (folders.length > 0 && files.length < limit) {
+    const folder = normalizeWorkspacePath(folders.shift() || '/');
+    if (visited.has(folder)) continue;
+    visited.add(folder);
+    const node = await loadWorkspaceChildren(folder);
+    const entries = Array.isArray(node && node.children) ? node.children : [];
+    entries.forEach((entry) => {
+      if (!entry || files.length >= limit) return;
+      if (entry.kind === 'folder') {
+        if (!workspaceSearchSkippedFolders.has(String(entry.name || '').toLowerCase())) folders.push(entry.path);
+      } else if (isWorkspaceContentSearchable(entry)) {
+        files.push(entry);
+      }
+    });
+  }
+  return files;
+}
+
+function workspaceContentSearchPreview(content, offset) {
+  const value = String(content || '');
+  const lineStart = value.lastIndexOf('\n', Math.max(0, offset - 1)) + 1;
+  const lineEnd = value.indexOf('\n', offset);
+  const line = value.slice(lineStart, lineEnd === -1 ? value.length : lineEnd).trim().replace(/\s+/g, ' ');
+  const lineNumber = value.slice(0, offset).split('\n').length;
+  const clipped = line.length > 74 ? `${line.slice(0, 71)}…` : line;
+  return { lineNumber, snippet: clipped || 'Match in file content' };
+}
+
+async function findWorkspaceContentMatches(query, requestId) {
+  const needle = String(query || '').trim().toLowerCase();
+  if (needle.length < 2) return [];
+  const files = await collectWorkspaceContentSearchFiles();
+  const matches = [];
+  for (const entry of files) {
+    if (requestId !== workspaceContentSearchRequest) return [];
+    const path = normalizeWorkspacePath(entry.path);
+    let content = openFileTabs.find((tab) => tab.path === path)?.content;
+    if (content == null) content = workspaceContentSearchCache.get(path);
+    if (content == null) {
+      const response = await invokeWorkspaceAction('workspaceReadFile', { path });
+      if (!response || !response.ok) continue;
+      content = String(response.output || '');
+      workspaceContentSearchCache.set(path, content);
+    }
+    const offset = String(content).toLowerCase().indexOf(needle);
+    if (offset === -1) continue;
+    const preview = workspaceContentSearchPreview(content, offset);
+    matches.push({
+      type: 'file-content',
+      name: String(entry.name || workspaceBaseName(path) || 'File'),
+      path,
+      sub: `Line ${preview.lineNumber} · ${preview.snippet}`,
+      offset,
+    });
+    if (matches.length >= 5) break;
+  }
+  return matches;
+}
+
+function scheduleWorkspaceContentSearch(query) {
+  if (workspaceContentSearchTimer) window.clearTimeout(workspaceContentSearchTimer);
+  const requestedQuery = String(query || '').trim();
+  const requestId = ++workspaceContentSearchRequest;
+  if (requestedQuery.length < 2) return;
+  workspaceContentSearchTimer = window.setTimeout(async () => {
+    const contentMatches = await findWorkspaceContentMatches(requestedQuery, requestId);
+    if (requestId !== workspaceContentSearchRequest || String(searchQuery || '').trim() !== requestedQuery) return;
+    renderSearchDropdown(requestedQuery, contentMatches);
+  }, 180);
+}
+
+function renderSearchDropdown(query, contentMatches = []) {
   if (!searchDropdown) return;
   const q = String(query || '').toLowerCase().trim();
   if (!q) {
     searchDropdown.innerHTML = '';
     searchDropdown.classList.remove('open');
+    searchDropdown.setAttribute('aria-hidden', 'true');
+    if (searchInput) searchInput.setAttribute('aria-expanded', 'false');
+    setSearchPaletteIdle(true);
+    searchResultIndex = -1;
     return;
   }
+  setSearchPaletteIdle(false);
   const matchedChats = chats.filter((c) => c && (
     String(c.name || '').toLowerCase().includes(q) ||
     (c.messages || []).some((m) => String(m.text || '').toLowerCase().includes(q))
@@ -3415,9 +3904,13 @@ function renderSearchDropdown(query) {
   const matchedProjects = workspaceMatches.filter((entry) => entry.type === 'project').slice(0, 2);
   const matchedFiles = workspaceMatches.filter((entry) => entry.type === 'file').slice(0, 5);
   const matchedFolders = workspaceMatches.filter((entry) => entry.type === 'folder').slice(0, 4);
-  if (matchedChats.length === 0 && matchedArtifacts.length === 0 && matchedProjects.length === 0 && matchedFiles.length === 0 && matchedFolders.length === 0) {
-    searchDropdown.innerHTML = '<div class="search-no-results">No results</div>';
+  const matchedFileContent = Array.isArray(contentMatches) ? contentMatches.slice(0, 5) : [];
+  if (matchedChats.length === 0 && matchedArtifacts.length === 0 && matchedProjects.length === 0 && matchedFiles.length === 0 && matchedFolders.length === 0 && matchedFileContent.length === 0) {
+    searchDropdown.innerHTML = '<div class="search-no-results"><strong>No matches yet</strong><span>Try a chat title, file name, or a shorter phrase.</span></div>';
     searchDropdown.classList.add('open');
+    searchDropdown.setAttribute('aria-hidden', 'false');
+    if (searchInput) searchInput.setAttribute('aria-expanded', 'true');
+    searchResultIndex = -1;
     return;
   }
   let html = '';
@@ -3445,6 +3938,12 @@ function renderSearchDropdown(query) {
       html += `<button class="search-result-item" data-type="project" data-path="${escapeHtml(entry.path)}" type="button"><svg class="search-result-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7h6l2 2h10v10a2 2 0 0 1-2 2H3z"></path><path d="M3 7V5a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v2"></path></svg><div class="search-result-text"><div class="search-result-title">${escapeHtml(entry.name || 'Project')}</div><div class="search-result-sub">${escapeHtml(entry.sub || 'Current project')}</div></div></button>`;
     });
   }
+  if (matchedFileContent.length > 0) {
+    html += '<div class="search-section-label">CONTENT IN FILES</div>';
+    matchedFileContent.forEach((entry) => {
+      html += `<button class="search-result-item" data-type="file-content" data-path="${escapeHtml(entry.path)}" data-name="${escapeHtml(entry.name)}" data-search-offset="${Number(entry.offset) || 0}" type="button"><svg class="search-result-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><path d="M8 13h8"></path><path d="M8 17h5"></path></svg><div class="search-result-text"><div class="search-result-title">${escapeHtml(entry.name || 'File')}</div><div class="search-result-sub">${escapeHtml(entry.sub || entry.path || '')}</div></div></button>`;
+    });
+  }
   if (matchedFiles.length > 0) {
     html += '<div class="search-section-label">FILES</div>';
     matchedFiles.forEach((entry) => {
@@ -3459,7 +3958,28 @@ function renderSearchDropdown(query) {
   }
   searchDropdown.innerHTML = html;
   searchDropdown.classList.add('open');
-  searchDropdown.querySelectorAll('.search-result-item').forEach((btn) => {
+  searchDropdown.setAttribute('aria-hidden', 'false');
+  if (searchInput) searchInput.setAttribute('aria-expanded', 'true');
+  const searchResults = Array.from(searchDropdown.querySelectorAll('.search-result-item'));
+  searchResults.forEach((btn, index) => {
+    btn.id = `searchResult-${index}`;
+    btn.setAttribute('role', 'option');
+    btn.setAttribute('aria-selected', 'false');
+    const sub = btn.querySelector('.search-result-sub');
+    const origin = {
+      chat: 'Chat',
+      artifact: 'Artifact',
+      project: 'Project',
+      file: 'File',
+      'file-content': 'Content match',
+      folder: 'Folder',
+    }[btn.dataset.type] || 'Result';
+    if (sub) {
+      const reason = document.createElement('span');
+      reason.className = 'search-match-reason';
+      reason.textContent = origin;
+      sub.prepend(reason);
+    }
     btn.addEventListener('click', async () => {
       if (btn.dataset.type === 'chat') {
         const targetTs = Number(btn.dataset.ts) || 0;
@@ -3472,12 +3992,14 @@ function renderSearchDropdown(query) {
       } else if (btn.dataset.type === 'project') {
         setWorkspaceSelection('/', 'folder');
         await renderArtifacts();
-      } else if (btn.dataset.type === 'file') {
+      } else if (btn.dataset.type === 'file' || btn.dataset.type === 'file-content') {
         const path = normalizeWorkspacePath(btn.dataset.path || '/');
         const name = String(btn.dataset.name || '').trim();
+        const searchOffset = Number(btn.dataset.searchOffset) || 0;
         setWorkspaceSelection(path, 'file');
         await renderArtifacts();
         await openFileTab(path, name);
+        if (btn.dataset.type === 'file-content') revealWorkspaceContentSearchMatch(q, searchOffset);
       } else if (btn.dataset.type === 'folder') {
         const path = normalizeWorkspacePath(btn.dataset.path || '/');
         setWorkspaceSelection(path, 'folder');
@@ -3490,19 +4012,42 @@ function renderSearchDropdown(query) {
       closeSearchPalette();
     });
   });
+  setSearchResultActive(0);
+}
+
+function revealWorkspaceContentSearchMatch(query, preferredOffset) {
+  const delays = [0, 80, 180, 360, 700];
+  let attempt = 0;
+  const reveal = () => {
+    let shown = false;
+    try {
+      shown = Boolean(fileViewerApi && fileViewerApi.revealFileViewerSearchResult
+        && fileViewerApi.revealFileViewerSearchResult(String(query || ''), preferredOffset));
+    } catch (_) { }
+    if (!shown && attempt < delays.length - 1) {
+      attempt += 1;
+      window.setTimeout(reveal, delays[attempt]);
+    }
+  };
+  window.setTimeout(reveal, delays[0]);
 }
 
 function openSearchPalette() {
   if (!searchPaletteBackdrop || !searchInput) return;
   searchPaletteBackdrop.classList.add('open');
   searchPaletteBackdrop.setAttribute('aria-hidden', 'false');
+  renderSearchDropdown(searchQuery);
   setTimeout(() => searchInput.focus(), 0);
 }
 function closeSearchPalette() {
   if (!searchPaletteBackdrop) return;
   searchPaletteBackdrop.classList.remove('open');
   searchPaletteBackdrop.setAttribute('aria-hidden', 'true');
-  if (searchDropdown) searchDropdown.classList.remove('open');
+  if (searchDropdown) {
+    searchDropdown.classList.remove('open');
+    searchDropdown.setAttribute('aria-hidden', 'true');
+  }
+  if (searchInput) searchInput.setAttribute('aria-expanded', 'false');
 }
 function syncFloatingViewToggle() {
   const work = middleViewMode !== 'chat' || activeTabId !== 'chat';
@@ -3510,19 +4055,16 @@ function syncFloatingViewToggle() {
   syncWorkspaceTabStrip();
 }
 
-// Pill strip: "Chat" only on a fresh/new chat, the single open file otherwise,
-// nothing once a conversation has content.
+// The top pill belongs only to the explicit New Chat screen. File views carry
+// their own filename and close control in the file header, so they never need
+// a duplicate centered tab above the editor.
 function syncWorkspaceTabStrip() {
   const strip = document.querySelector('.workspace-tab-strip');
   if (!strip) return;
   const hasFileTabs = Array.isArray(openFileTabs) && openFileTabs.length > 0;
-  let freshChat = inNewChatMode || !activeChatId;
-  if (!freshChat) {
-    const chat = findChatById(activeChatId);
-    freshChat = !chat || !Array.isArray(chat.messages) || chat.messages.length === 0;
-  }
-  strip.style.display = (hasFileTabs || freshChat) ? 'flex' : 'none';
-  if (floatingChatBtn) floatingChatBtn.style.display = hasFileTabs ? 'none' : '';
+  const showNewChatPill = !hasFileTabs && inNewChatMode && middleViewMode === 'chat' && activeTabId === 'chat';
+  strip.style.display = showNewChatPill ? 'flex' : 'none';
+  if (floatingChatBtn) floatingChatBtn.style.display = showNewChatPill ? '' : 'none';
   const bar = document.getElementById('middleTabBar');
   if (bar) bar.classList.toggle('no-files', !hasFileTabs);
 }
@@ -3704,6 +4246,7 @@ if (searchInput) {
   searchInput.addEventListener('input', () => {
     searchQuery = searchInput.value;
     renderSearchDropdown(searchQuery);
+    scheduleWorkspaceContentSearch(searchQuery);
   });
   searchInput.addEventListener('focus', () => { if (searchQuery) renderSearchDropdown(searchQuery); });
   searchInput.addEventListener('blur', () => {
@@ -3712,6 +4255,26 @@ if (searchInput) {
     }, 180);
   });
   searchInput.addEventListener('keydown', (e) => {
+    const resultCount = searchDropdown ? searchDropdown.querySelectorAll('.search-result-item').length : 0;
+    if (e.key === 'ArrowDown' && resultCount > 0) {
+      e.preventDefault();
+      setSearchResultActive(searchResultIndex + 1);
+      return;
+    }
+    if (e.key === 'ArrowUp' && resultCount > 0) {
+      e.preventDefault();
+      setSearchResultActive(searchResultIndex - 1);
+      return;
+    }
+    if (e.key === 'Enter' && resultCount > 0 && searchResultIndex >= 0) {
+      const results = Array.from(searchDropdown.querySelectorAll('.search-result-item'));
+      const activeResult = results[searchResultIndex];
+      if (activeResult) {
+        e.preventDefault();
+        activeResult.click();
+        return;
+      }
+    }
     if (e.key === 'Escape') {
       searchInput.value = '';
       searchQuery = '';
@@ -6009,6 +6572,15 @@ function scheduleSmartChatRename(chatId) {
     if (!remoteProvidersEnabled || !firstAssistant) {
       settleSmartChatTitleFallback(key, !remoteProvidersEnabled ? 'remote_disabled' : 'missing_assistant');
     }
+    return;
+  }
+  // The only reply is a provider-failure notice: naming remotely would burn an
+  // inference on the SAME broken provider (and open a Venice scratch thread) just
+  // to title an error. Derive the title from the user's message instead.
+  if (firstAssistant.inferenceFailure) {
+    chat.smartTitleAttempted = true;
+    pushDebugTrace('smart_chat_title_skipped', { chatId: key, reason: 'inference_failure_reply' });
+    settleSmartChatTitleFallback(key, 'inference_failure_reply');
     return;
   }
 
@@ -8945,7 +9517,9 @@ async function streamOllamaChatCompletion(provider, prompt, handlers = {}, optio
         status: { lastInferenceRoute: `${provider}:${model}`, lastPersistentError: '', lastCompletionStatus: 'ok', lastCompletionLikelyTruncated: false },
       };
     }
-    if (structuredStreamError) return { ok: false, output: '', error: structuredStreamError, message: structuredStreamError, provider, model };
+    // An explicit adapter-reported error (Venice refusal alert: daily limit, plan
+    // expired) is not a transient hiccup — retrying replays the same refusal.
+    if (structuredStreamError) return { ok: false, output: '', error: structuredStreamError, message: structuredStreamError, nonRetriable: true, provider, model };
     // Empty stream with no explicit error — try the one-shot path before giving up.
   } catch (err) {
     if (err && err.name === 'AbortError') return { ok: false, cancelled: true, message: 'Cancelled by user.' };
@@ -8994,9 +9568,9 @@ const agentStepFunctionSchema = {
         thought: { type: 'string', description: 'Optional: one short sentence for the user. Omit if nothing new to say.' },
         action: { type: 'string', enum: ['tool', 'final'] },
         message: { type: 'string', description: 'User-facing message or final answer.' },
-        tool: { type: 'string', enum: ['none', 'new_project', 'list_dir', 'search_files', 'read_file', 'read_files', 'write_file', 'edit_file', 'validate_files', 'check_code', 'run_app', 'run_command', 'mkdir', 'move', 'delete'] },
+        tool: { type: 'string', enum: ['none', 'new_project', 'list_dir', 'search_files', 'read_file', 'read_files', 'write_file', 'write_files', 'edit_file', 'validate_files', 'check_code', 'run_app', 'run_command', 'mkdir', 'move', 'delete'] },
         path: { type: 'string' },
-        paths: { type: 'array', items: { type: 'string' }, description: 'For read_files: the list of file paths to read together in one step.' },
+        paths: { type: 'array', items: { type: 'string' }, description: 'For read_files: the file paths to read together in one step. For write_files: the SMALL brand-new files to create together in one generation pass.' },
         content: { type: 'string' },
         command: { type: 'string', description: 'For run_command: the command to run. Commands are policy-gated direct argv commands; installs/removes require approval. Examples: "python main.py", "node --check script.js", "php -l index.php", "go test -mod=readonly ./...". No shell operators or chaining (&&, ;, |). To clear a stale Vite/bundler cache, run the dev script with a force flag ("npm run dev -- --force") or delete the cache dir (e.g. /node_modules/.vite) with the delete tool — never rm.' },
         src_path: { type: 'string' },
@@ -10471,6 +11045,9 @@ function updateLastAssistantMessage(chatId, text, options = {}) {
   if (options.agentMeta) {
     lastAssistant.agentMeta = cloneAgentMeta(options.agentMeta);
   }
+  if (options.inferenceFailure) {
+    lastAssistant.inferenceFailure = true;
+  }
   chat.updatedAt = nowTs();
   if (typeof options.forceNeedsContinue === 'boolean') {
     chat.needsContinue = options.forceNeedsContinue;
@@ -11523,6 +12100,7 @@ function commitAssistantMessage(chatId, text, rawTextForArtifacts = '', options 
     appendedMessage = options.appendToLastAssistant && !hasCanvasPayload
       ? updateLastAssistantMessage(chatId, display, {
         forceNeedsContinue,
+        inferenceFailure: Boolean(options.inferenceFailure),
         thinking: thinkingState.text,
         thinkingMeta: options.thinkingMeta,
         agentActivities: options.agentActivities,
@@ -11530,6 +12108,7 @@ function commitAssistantMessage(chatId, text, rawTextForArtifacts = '', options 
       })
       : appendMessageToChat(chatId, 'ai', display, 0, {
         forceNeedsContinue,
+        inferenceFailure: Boolean(options.inferenceFailure),
         thinking: thinkingState.text,
         thinkingMeta: options.thinkingMeta,
         agentActivities: options.agentActivities,
@@ -11762,10 +12341,13 @@ const chatShell = window.AIExeChatShell && typeof window.AIExeChatShell.createCh
     newChatBtn,
     artifactsBtn,
     codeBtn,
+    financeBtn,
     canvasEditor,
     chatArea,
+    bottomBar,
     fileViewer,
     artifactBrowser,
+    financeDashboard,
     canvasDock,
     histList,
     mainInput,
@@ -11795,6 +12377,7 @@ const chatShell = window.AIExeChatShell && typeof window.AIExeChatShell.createCh
     renderActiveChat,
     syncInputAugmentState,
     renderArtifactBrowser,
+    renderFinanceDashboard,
     renderTabBar,
     updateChatScrollDownButtonVisibility,
     ensureSignedIn,
@@ -12601,18 +13184,18 @@ async function requestNativeAgentPlannerInference(prompt, maxTokens, grammar = '
     : { ok: false, message: 'No planner response from native runtime.', model: plannerModel };
 }
 
-async function requestAgentPlannerInference(prompt, maxTokens, grammar = '', systemPrompt = '') {
+async function requestAgentPlannerInference(prompt, maxTokens, grammar = '', systemPrompt = '', callOptions = {}) {
   noteAgentInferenceStart(String(prompt || '').length + String(systemPrompt || '').length);
   let result = null;
   try {
-    result = await requestAgentPlannerInferenceInner(prompt, maxTokens, grammar, systemPrompt);
+    result = await requestAgentPlannerInferenceInner(prompt, maxTokens, grammar, systemPrompt, callOptions);
   } finally {
     noteAgentInferenceEnd(result && result.ok ? String(result.output || '').length : 0);
   }
   return result;
 }
 
-async function requestAgentPlannerInferenceInner(prompt, maxTokens, grammar = '', systemPrompt = '') {
+async function requestAgentPlannerInferenceInner(prompt, maxTokens, grammar = '', systemPrompt = '', callOptions = {}) {
   if (agentRuntime && typeof agentRuntime.requestExternalAgentPlanner === 'function') {
     const external = await agentRuntime.requestExternalAgentPlanner(prompt, maxTokens);
     if (external && external.ok) {
@@ -12630,7 +13213,10 @@ async function requestAgentPlannerInferenceInner(prompt, maxTokens, grammar = ''
     // five-minute decision timeout. Larger plan calls receive a proportionally
     // larger bound than short per-step decisions.
     const requestedPlannerTokens = Number(maxTokens) || agentDecisionMaxTokens;
-    const adapterStructuredOptions = isVeniceAdapterSelected()
+    // Prose calls (phase-kickoff narration) must NOT use stopOnCompleteJson: a prose
+    // stream never yields a JSON object, so it was misread as a cut stream, retried
+    // once, and dropped — the narration sentence was generated twice and never shown.
+    const adapterStructuredOptions = isVeniceAdapterSelected() && !(callOptions && callOptions.prose)
       ? {
           preferStreaming: true,
           stopOnCompleteJson: true,
@@ -12777,6 +13363,7 @@ const agentRuntime = window.AIExeAgentRuntime && typeof window.AIExeAgentRuntime
 const {
   generateAgentWriteFileContent,
   generateAgentProjectFiles,
+  generateAgentBatchFileContents,
   generateAgentEditFileProgram,
   generateAgentRewriteExistingFileContent,
   buildAgentCompletionFallbackText,
@@ -12814,6 +13401,7 @@ const agentExecutor = window.AIExeAgentExecutor && typeof window.AIExeAgentExecu
     isAgentGeneratedContentTarget,
     generateAgentWriteFileContent,
     generateAgentProjectFiles,
+    generateAgentBatchFileContents,
     isAgentTaskSoftwareProject,
     isAgentTaskGameLike,
     isExplicitReadmeOrDocsTask,
@@ -15892,6 +16480,12 @@ if (fileViewerSearchClose) {
     if (fileViewerEditor) fileViewerEditor.focus();
   });
 }
+if (fileViewerClose) {
+  fileViewerClose.addEventListener('click', () => {
+    const activeFile = openFileTabs.find((tab) => tab && tab.path === activeTabId);
+    if (activeFile) closeFileTab(activeFile.path);
+  });
+}
 document.addEventListener('keydown', (e) => {
   // Inline explorer drafts (new file/folder, rename): the embedded webview does
   // not always focus the draft input, so its own Enter/Escape handlers can't
@@ -16562,6 +17156,11 @@ function appendMessageToChat(chatId, role, text, forcedTs = 0, options = {}) {
   }
   if (role === 'ai' && options.agentMeta) {
     message.agentMeta = cloneAgentMeta(options.agentMeta);
+  }
+  // Attach before pushing/saving: appendMessageToChat schedules smart naming
+  // synchronously, so a later mutation would race and still open a Venice title chat.
+  if (role === 'ai' && options.inferenceFailure) {
+    message.inferenceFailure = true;
   }
   activeThread.messages.push(message);
   chat.updatedAt = ts;

@@ -261,7 +261,8 @@
 
     function collectFileViewerSearchMatches(query) {
       const editor = d.getFileViewerEditor ? d.getFileViewerEditor() : null;
-      const content = String(editor && editor.value || '');
+      const tab = getActiveFileTab();
+      const content = String(tab ? tab.content : (editor && editor.value) || '');
       const needle = String(query || '');
       if (!needle) return [];
       const lowerHaystack = content.toLowerCase();
@@ -291,7 +292,9 @@
       state.index = nextIndex;
       setFileViewerSearchState(state);
       const match = state.matches[nextIndex];
-      selectFileViewerLine(String(editor.value || '').slice(0, match.start).split('\n').length, { focusEditor: !keepSearchFocus, reveal: true });
+      const tab = getActiveFileTab();
+      const activeContent = String(tab ? tab.content : editor.value || '');
+      selectFileViewerLine(activeContent.slice(0, match.start).split('\n').length, { focusEditor: !keepSearchFocus, reveal: true });
       editor.selectionStart = match.start;
       editor.selectionEnd = match.end;
       if (typeof editor.setSelectionRange === 'function') editor.setSelectionRange(match.start, match.end);
@@ -333,6 +336,20 @@
         input.focus();
         input.select();
       }
+    }
+
+    function revealFileViewerSearchResult(query, preferredOffset) {
+      const input = d.getFileViewerSearchInput ? d.getFileViewerSearchInput() : null;
+      if (!input) return false;
+      setFileViewerSearchOpen(true);
+      input.value = String(query || '');
+      updateFileViewerSearch();
+      const state = getFileViewerSearchState();
+      if (!state.matches.length) return false;
+      const requestedOffset = Math.max(0, Number(preferredOffset) || 0);
+      const matchIndex = state.matches.findIndex((match) => match.start >= requestedOffset);
+      applyFileViewerSearchSelection(matchIndex === -1 ? 0 : matchIndex, { keepSearchFocus: true });
+      return true;
     }
 
     function syncFileViewerScroll() {
@@ -780,6 +797,7 @@
       applyFileViewerSearchSelection,
       updateFileViewerSearch,
       setFileViewerSearchOpen,
+      revealFileViewerSearchResult,
       syncFileViewerScroll,
       refreshActiveFileTabView,
       setActiveFileTabContent,

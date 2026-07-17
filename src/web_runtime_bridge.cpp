@@ -211,6 +211,15 @@ bool WebRuntimeBridge::AppendDebugLog(const std::string& channel,
   }
 
   const auto file_path = log_dir / (trimmed_channel + ".jsonl");
+  // Rotate at 64MB (debug_trace grew unbounded to 800MB+); keep one .1 backup.
+  constexpr uintmax_t kMaxDebugLogBytes = 64ull * 1024 * 1024;
+  const auto current_size = std::filesystem::file_size(file_path, ec);
+  if (!ec && current_size >= kMaxDebugLogBytes) {
+    const auto rotated_path = log_dir / (trimmed_channel + ".jsonl.1");
+    std::filesystem::remove(rotated_path, ec);
+    std::filesystem::rename(file_path, rotated_path, ec);
+  }
+  ec.clear();
   std::ofstream out(file_path, std::ios::app);
   if (!out.good()) {
     if (err) {

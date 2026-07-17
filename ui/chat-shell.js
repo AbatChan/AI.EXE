@@ -6,7 +6,8 @@
     }
 
     function syncSidebarNavState() {
-      const artifactMode = deps.getMiddleViewMode() !== 'chat';
+      const financeMode = deps.getMiddleViewMode() === 'finance';
+      const artifactMode = deps.getMiddleViewMode() !== 'chat' && !financeMode;
       const codeMode = artifactMode && deps.getArtifactListFilter && deps.getArtifactListFilter() === 'code';
       if (deps.newChatBtn) {
         deps.newChatBtn.classList.toggle('active', deps.isInNewChatMode());
@@ -17,25 +18,36 @@
       if (deps.codeBtn) {
         deps.codeBtn.classList.toggle('active', !deps.isInNewChatMode() && codeMode);
       }
+      if (deps.financeBtn) {
+        deps.financeBtn.classList.toggle('active', !deps.isInNewChatMode() && financeMode);
+      }
       if (deps.isInNewChatMode()) {
         if (deps.artifactsBtn) deps.artifactsBtn.classList.remove('active');
         if (deps.codeBtn) deps.codeBtn.classList.remove('active');
+        if (deps.financeBtn) deps.financeBtn.classList.remove('active');
       }
     }
 
     function renderMiddleView() {
-      const showArtifacts = deps.getMiddleViewMode() !== 'chat';
+      const financeMode = deps.getMiddleViewMode() === 'finance';
+      const showArtifacts = deps.getMiddleViewMode() !== 'chat' && !financeMode;
       const hasCanvasContent = Boolean(deps.canvasEditor && String(deps.canvasEditor.value || '').trim());
-      const showCanvasDock = !showArtifacts && deps.isCanvasDockOpen() && (deps.isCanvasModeEnabled() || hasCanvasContent);
+      const showCanvasDock = !showArtifacts && !financeMode && deps.isCanvasDockOpen() && (deps.isCanvasModeEnabled() || hasCanvasContent);
       const showingFile = deps.getActiveTabId() !== 'chat';
       if (deps.chatArea) {
-        deps.chatArea.style.display = (showArtifacts || showingFile) ? 'none' : 'flex';
+        deps.chatArea.style.display = (showArtifacts || financeMode || showingFile) ? 'none' : 'flex';
       }
       if (deps.fileViewer) {
-        deps.fileViewer.classList.toggle('hidden', !showingFile || showArtifacts);
+        deps.fileViewer.classList.toggle('hidden', !showingFile || showArtifacts || financeMode);
       }
       if (deps.artifactBrowser) {
         deps.artifactBrowser.classList.toggle('hidden', !showArtifacts);
+      }
+      if (deps.financeDashboard) {
+        deps.financeDashboard.classList.toggle('hidden', !financeMode);
+      }
+      if (deps.bottomBar) {
+        deps.bottomBar.classList.toggle('hidden', financeMode);
       }
       if (deps.canvasDock) {
         deps.canvasDock.classList.toggle('hidden', !showCanvasDock);
@@ -43,6 +55,10 @@
       if (showArtifacts) {
         deps.setActiveTabId('chat');
         deps.renderArtifactBrowser();
+      }
+      if (financeMode && typeof deps.renderFinanceDashboard === 'function') {
+        deps.setActiveTabId('chat');
+        deps.renderFinanceDashboard();
       }
       deps.renderTabBar();
       syncSidebarNavState();

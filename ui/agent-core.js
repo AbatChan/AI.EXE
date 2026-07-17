@@ -532,7 +532,7 @@
         return null;
       }
       const normalizedAction = String(action || '').trim().toLowerCase();
-      const validTools = ['none', 'new_project', 'generate_project', 'list_dir', 'search_files', 'read_file', 'read_files', 'write_file', 'edit_file', 'validate_files', 'check_code', 'run_app', 'run_command', 'mkdir', 'move', 'delete'];
+      const validTools = ['none', 'new_project', 'generate_project', 'list_dir', 'search_files', 'read_file', 'read_files', 'write_file', 'write_files', 'edit_file', 'validate_files', 'check_code', 'run_app', 'run_command', 'mkdir', 'move', 'delete'];
       let resolvedAction = normalizedAction;
       let resolvedTool = String(tool || '').toLowerCase();
       // Auto-repair: model put tool name in action field (e.g. "action": "read_file")
@@ -595,7 +595,9 @@
           return {
             action: 'tool',
             tool: 'new_project',
-            message: `Create the ${String(planSpec && planSpec.projectName ? planSpec.projectName : deriveProjectNameFromTask(taskText) || 'project')} workspace`,
+            // No message: the loop's deterministic startup narration (or the phase
+            // kickoff sentence) covers the intro; a terse label here shadowed both.
+            message: '',
             path: `/${String(planSpec && planSpec.projectName ? planSpec.projectName : deriveProjectNameFromTask(taskText) || 'project')}`,
             content: '',
             srcPath: '',

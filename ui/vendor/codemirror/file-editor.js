@@ -109,20 +109,17 @@ function createTheme() {
       color: "#fff"
     },
     ".cm-searchMatch": {
-      backgroundColor: "rgba(255, 214, 10, 0.28)",
-      outline: "1px solid rgba(255, 214, 10, 0.35)"
+      backgroundColor: "rgba(255, 214, 10, 0.22)"
     },
     ".cm-searchMatch.cm-searchMatch-selected": {
       backgroundColor: "rgba(255, 214, 10, 0.45)"
     },
     // Range highlight for "go to the read/edited region" from the agent work panel.
     ".cm-range-hl-read": {
-      backgroundColor: "rgba(82, 174, 255, 0.16)",
-      boxShadow: "inset 3px 0 0 rgba(82, 174, 255, 0.85)"
+      backgroundColor: "rgba(82, 174, 255, 0.14)"
     },
     ".cm-range-hl-edit": {
-      backgroundColor: "rgba(52, 211, 153, 0.16)",
-      boxShadow: "inset 3px 0 0 rgba(52, 211, 153, 0.9)"
+      backgroundColor: "rgba(52, 211, 153, 0.14)"
     }
   }, {dark: true});
 }

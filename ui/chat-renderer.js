@@ -60,6 +60,11 @@
     // Live agent messages are rebuilt as each activity arrives. Keep subgroup
     // disclosure outside the DOM so those rebuilds cannot undo a user's click.
     const activitySubgroupDisclosure = new Map();
+    let activeEditDiffPreview = null;
+    let editDiffPreviewHideTimer = 0;
+    let editDiffPreviewShowTimer = 0;
+    let pendingEditDiffPreview = null;
+    const editDiffPreviewHoverDelayMs = 700;
 
     function resolveActivitySubgroupDisclosure(key, options = {}) {
       const disclosureKey = String(key || '');
@@ -320,6 +325,8 @@
             // Structured outcome flag (validate/run cards) — group headers key off it;
             // dropping it here made "Checked files — no issues found" wrap failed checks.
             hasIssues: item.hasIssues === true,
+            // Batch write rows create several files — group headers sum this.
+            fileCount: Math.max(0, Number(item.fileCount) || 0) || null,
             items: checklistItems && checklistItems.length ? checklistItems : null,
             terminal,
             devServer: item.devServer && typeof item.devServer === 'object' ? {
@@ -629,6 +636,173 @@
       return rows.slice(0, maxRows);
     }
 
+    function getEditCardDiffPreview(path, activities) {
+      const targetPath = normalizeWorkspacePath(path || '');
+      const list = normalizeAgentActivities(activities);
+      for (let index = list.length - 1; index >= 0; index -= 1) {
+        const activity = list[index];
+        if (!activity || !Array.isArray(activity.diffPreview) || !activity.diffPreview.length) continue;
+        if (!['edit', 'write'].includes(String(activity.kind || '').toLowerCase())) continue;
+        if (normalizeWorkspacePath(activity.openPath || '') === targetPath) return activity.diffPreview;
+      }
+      return [];
+    }
+
+    function clearEditDiffPreviewHideTimer() {
+      if (!editDiffPreviewHideTimer) return;
+      window.clearTimeout(editDiffPreviewHideTimer);
+      editDiffPreviewHideTimer = 0;
+    }
+
+    function clearEditDiffPreviewShowTimer() {
+      if (editDiffPreviewShowTimer) window.clearTimeout(editDiffPreviewShowTimer);
+      editDiffPreviewShowTimer = 0;
+      pendingEditDiffPreview = null;
+    }
+
+    function closeEditDiffPreview() {
+      clearEditDiffPreviewHideTimer();
+      if (!activeEditDiffPreview) return;
+      const { popover, onViewportChange } = activeEditDiffPreview;
+      if (onViewportChange) {
+        window.removeEventListener('resize', onViewportChange);
+        document.removeEventListener('scroll', onViewportChange, true);
+      }
+      if (popover && popover.parentNode) popover.remove();
+      activeEditDiffPreview = null;
+    }
+
+    function positionEditDiffPreview(anchor, popover) {
+      if (!anchor || !popover) return;
+      const inset = 12;
+      const rect = anchor.getBoundingClientRect();
+      const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
+      const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
+      const popoverWidth = popover.offsetWidth;
+      const naturalHeight = Math.min(425, popover.offsetHeight);
+      const spaceBelow = Math.max(0, viewportHeight - rect.bottom - inset);
+      const spaceAbove = Math.max(0, rect.top - inset);
+      // Keep the preview completely on one side of its file row. If neither
+      // side has the room for the full diff, cap the preview to the larger
+      // available space rather than letting it cover nearby rows.
+      const placeBelow = spaceBelow >= naturalHeight || spaceBelow >= spaceAbove;
+      const availableHeight = placeBelow ? spaceBelow : spaceAbove;
+      const maxHeight = Math.min(425, availableHeight);
+      popover.style.setProperty('--edit-preview-max-height', `${Math.max(0, Math.floor(maxHeight))}px`);
+      const popoverHeight = Math.min(maxHeight, popover.offsetHeight);
+      const rowCenter = rect.left + (rect.width / 2);
+      const left = Math.max(inset, Math.min(
+        rowCenter - (popoverWidth / 2),
+        viewportWidth - popoverWidth - inset,
+      ));
+      const top = placeBelow
+        ? rect.bottom
+        : rect.top - popoverHeight;
+      popover.dataset.placement = placeBelow ? 'below' : 'above';
+      popover.style.left = `${Math.round(left)}px`;
+      popover.style.top = `${Math.round(Math.max(inset, top))}px`;
+    }
+
+    function openEditDiffPreview(anchor, file, activities) {
+      const rows = getEditCardDiffPreview(file && file.path, activities);
+      if (!rows.length || !anchor) return;
+      clearEditDiffPreviewShowTimer();
+      if (activeEditDiffPreview && activeEditDiffPreview.anchor === anchor) {
+        clearEditDiffPreviewHideTimer();
+        return;
+      }
+      closeEditDiffPreview();
+      const popover = document.createElement('section');
+      popover.className = 'msg-agent-editpreview';
+      popover.setAttribute('role', 'tooltip');
+      popover.setAttribute('aria-label', `Changes in ${String(file.path || 'file').replace(/^\//, '')}`);
+
+      const header = document.createElement('div');
+      header.className = 'msg-agent-editpreview-header';
+      const name = document.createElement('span');
+      name.className = 'msg-agent-editpreview-name';
+      name.textContent = String(file.path || 'file').replace(/^\//, '');
+      header.appendChild(name);
+      const stats = document.createElement('span');
+      stats.className = 'msg-agent-editpreview-stats';
+      stats.innerHTML = `<span class="plus">+${Number(file.added) || 0}</span><span class="minus">-${Number(file.removed) || 0}</span>`;
+      header.appendChild(stats);
+      popover.appendChild(header);
+
+      const body = document.createElement('div');
+      body.className = 'msg-agent-editpreview-body';
+      rows.forEach((diffRow) => {
+        if (!diffRow || typeof diffRow !== 'object') return;
+        if (diffRow.type === 'spacer') {
+          const spacer = document.createElement('div');
+          spacer.className = 'msg-agent-editpreview-spacer';
+          spacer.textContent = '…';
+          body.appendChild(spacer);
+          return;
+        }
+        const row = document.createElement('div');
+        row.className = `msg-agent-editpreview-row ${String(diffRow.type || 'context')}`;
+        const line = document.createElement('span');
+        line.className = 'msg-agent-editpreview-line';
+        const lineNumber = Number(diffRow.newLine) || Number(diffRow.oldLine) || 0;
+        line.textContent = lineNumber ? String(lineNumber) : '';
+        row.appendChild(line);
+        const code = document.createElement('code');
+        code.className = 'msg-agent-editpreview-code';
+        code.textContent = String(diffRow.text || '');
+        row.appendChild(code);
+        body.appendChild(row);
+      });
+      popover.appendChild(body);
+      // Keep this in the document layer. Agent messages animate with a CSS
+      // transform, which would otherwise turn the row into the fixed preview's
+      // containing block and let it escape off the right edge.
+      document.body.appendChild(popover);
+
+      const onViewportChange = () => positionEditDiffPreview(anchor, popover);
+      activeEditDiffPreview = { anchor, popover, onViewportChange };
+      // The preview touches its source row, so this short handoff preserves one
+      // continuous hover area while still letting the viewport own positioning.
+      popover.addEventListener('mouseenter', clearEditDiffPreviewHideTimer);
+      popover.addEventListener('mouseleave', deferCloseEditDiffPreview);
+      popover.addEventListener('pointerdown', (event) => event.stopPropagation());
+      popover.addEventListener('click', (event) => event.stopPropagation());
+      window.addEventListener('resize', onViewportChange);
+      document.addEventListener('scroll', onViewportChange, true);
+      requestAnimationFrame(() => positionEditDiffPreview(anchor, popover));
+    }
+
+    function scheduleEditDiffPreview(anchor, file, activities) {
+      const rows = getEditCardDiffPreview(file && file.path, activities);
+      if (!rows.length || !anchor) return;
+      if (activeEditDiffPreview && activeEditDiffPreview.anchor === anchor) {
+        clearEditDiffPreviewHideTimer();
+        return;
+      }
+      // Once a preview is open, moving straight to another file is an explicit
+      // comparison action, so switch immediately. The intent delay returns only
+      // after the pointer leaves the edit-card preview interaction entirely.
+      if (activeEditDiffPreview) {
+        openEditDiffPreview(anchor, file, activities);
+        return;
+      }
+      if (pendingEditDiffPreview && pendingEditDiffPreview.anchor === anchor) return;
+      clearEditDiffPreviewShowTimer();
+      pendingEditDiffPreview = { anchor, file, activities };
+      editDiffPreviewShowTimer = window.setTimeout(() => {
+        const pending = pendingEditDiffPreview;
+        editDiffPreviewShowTimer = 0;
+        pendingEditDiffPreview = null;
+        if (pending) openEditDiffPreview(pending.anchor, pending.file, pending.activities);
+      }, editDiffPreviewHoverDelayMs);
+    }
+
+    function deferCloseEditDiffPreview() {
+      clearEditDiffPreviewShowTimer();
+      clearEditDiffPreviewHideTimer();
+      editDiffPreviewHideTimer = window.setTimeout(closeEditDiffPreview, 110);
+    }
+
     function buildAgentActivityFromToolResult(decision, toolResult, toolEvents = []) {
       const tool = String(decision && decision.tool ? decision.tool : '').toLowerCase();
       const ok = Boolean(toolResult && toolResult.ok);
@@ -709,6 +883,27 @@
           detail: formatAgentActivityPathLabel(targetInfo || 'workspace'),
           meta: matchCount ? `${matchCount} match${matchCount === 1 ? '' : 'es'}` : 'no matches',
           diffPreview: buildObservationPreviewRows(observation),
+          status: 'done',
+        });
+      }
+      if (tool === 'write_files') {
+        const createdPaths = (observation.match(/^-\s+(\/\S+)\s+\(\d+\s*chars\)/gm) || [])
+          .map((line) => normalizeWorkspacePath((line.match(/^-\s+(\/\S+)/) || [])[1] || ''))
+          .filter(Boolean);
+        // Basenames keep the row on one line; full paths wrapped across three.
+        const baseName = (p) => String(p || '').split('/').filter(Boolean).pop() || p;
+        return buildInlineAgentActivityBase({
+          kind: 'write',
+          title: 'Wrote',
+          detail: createdPaths.length === 1
+            ? formatAgentActivityPathLabel(createdPaths[0])
+            : (createdPaths.length
+              ? createdPaths.map(baseName).join(', ').slice(0, 140)
+              : `${(Array.isArray(decision && decision.paths) ? decision.paths.length : 0) || 'several'} files`),
+          openPath: createdPaths[0] || '',
+          openKind: 'file',
+          meta: `${createdPaths.length || 'batch'} files`,
+          fileCount: createdPaths.length || undefined,
           status: 'done',
         });
       }
@@ -990,6 +1185,20 @@
           detail: formatAgentActivityPathLabel(targetInfo || 'workspace file'),
           openPath: targetInfo,
           openKind: 'file',
+          status: 'pending',
+        });
+      }
+      if (tool === 'write_files') {
+        const pendingPaths = (Array.isArray(decision && decision.paths) ? decision.paths : [])
+          .map((p) => normalizeWorkspacePath(String(p || '').trim()))
+          .filter((p) => p && p !== '/');
+        const baseName = (p) => String(p || '').split('/').filter(Boolean).pop() || p;
+        return buildInlineAgentActivityBase({
+          kind: 'write',
+          title: 'Writing',
+          detail: pendingPaths.length === 1
+            ? formatAgentActivityPathLabel(pendingPaths[0])
+            : (pendingPaths.length ? pendingPaths.map(baseName).join(', ').slice(0, 140) : 'several files'),
           status: 'pending',
         });
       }
@@ -1782,7 +1991,7 @@
       if (kind === 'move' || kind === 'delete') return 'cleanup';
       if (tool === 'new_project' || tool === 'mkdir') return 'setup';
       if (tool === 'read_file' || tool === 'search_files' || tool === 'list_dir') return 'explore';
-      if (tool === 'write_file') return 'create';
+      if (tool === 'write_file' || tool === 'write_files') return 'create';
       if (tool === 'edit_file') return 'edit';
       if (tool === 'validate_files') return 'validate';
       if (tool === 'move' || tool === 'delete') return 'cleanup';
@@ -1822,7 +2031,15 @@
       })();
       const labelsByPhase = {
         setup: { running: 'Preparing workspace', done: setupLabel },
-        create: { running: 'Generating files', done: `Generated ${count} file${count !== 1 ? 's' : ''}` },
+        create: {
+          running: 'Generating files',
+          // Batch rows carry fileCount (write_files creates several per row) —
+          // counting rows undercounted ("Generated 2 files" for 4 real files).
+          done: (() => {
+            const files = items.reduce((sum, a) => sum + (Number(a && a.fileCount) || 1), 0);
+            return `Generated ${files} file${files !== 1 ? 's' : ''}`;
+          })(),
+        },
         explore: {
           running: 'Inspecting files',
           done: (() => {
@@ -2100,7 +2317,7 @@
     // (after the final message, before the action icons). The aggregate +A/-R
     // swaps to "Review changes ↗" on hover; rows reveal that file's edit inside
     // the work panel.
-    function buildAgentEditCard(chatId, messageTs, meta, editedFiles, bubble) {
+    function buildAgentEditCard(chatId, messageTs, meta, editedFiles, bubble, activities = []) {
       const reverted = meta.reverted === true;
       const totalAdded = editedFiles.reduce((sum, file) => sum + file.added, 0);
       const totalRemoved = editedFiles.reduce((sum, file) => sum + file.removed, 0);
@@ -2202,9 +2419,18 @@
         rowStats.innerHTML = `<span class="plus">+${file.added}</span> <span class="minus">-${file.removed}</span>`;
         row.appendChild(rowStats);
         row.addEventListener('click', () => {
+          clearEditDiffPreviewShowTimer();
+          closeEditDiffPreview();
           revealAgentWorkPanel(bubble, file.path);
           rememberPanelExpanded();
         });
+        if (getEditCardDiffPreview(file.path, activities).length) {
+          row.classList.add('has-preview');
+          row.addEventListener('mouseenter', () => scheduleEditDiffPreview(row, file, activities));
+          row.addEventListener('mouseleave', deferCloseEditDiffPreview);
+          row.addEventListener('focus', () => scheduleEditDiffPreview(row, file, activities));
+          row.addEventListener('blur', deferCloseEditDiffPreview);
+        }
         fileList.appendChild(row);
       });
       card.appendChild(fileList);
@@ -2346,6 +2572,7 @@
             normalizedAgentMeta,
             editedSnapshotFiles,
             bubble,
+            options.agentActivities || [],
           ));
         }
       }

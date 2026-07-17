@@ -12,7 +12,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .config import settings
-from .routers import (adapter, generate, health, modules, package, pdf, projects, run,
+from .routers import (adapter, finance, generate, health, modules, package, pdf, projects, run,
                       status, usage, workshop)
 from .services import adapter_manager
 
@@ -103,6 +103,7 @@ app.include_router(generate.router, prefix="/api")
 app.include_router(projects.router, prefix="/api")
 app.include_router(package.router, prefix="/api")
 app.include_router(modules.router, prefix="/api")
+app.include_router(finance.router, prefix="/api")
 app.include_router(pdf.router, prefix="/api")
 app.include_router(adapter.router, prefix="/api")
 

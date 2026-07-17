@@ -159,6 +159,20 @@
     return out;
   }
 
+  // Directory-glob sub-tasks ("Src/components/ui/*.") name a folder of files, not
+  // one path — extract the folder prefix so writes under it can tick the task.
+  function extractDirGlobTaskPrefixes(text, normalizeWorkspacePath) {
+    const norm = typeof normalizeWorkspacePath === 'function' ? normalizeWorkspacePath : (p) => String(p || '');
+    const out = [];
+    const rx = /(^|[\s"'`(])((?:\/|\.\/)?[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*)\/\*/g;
+    let m;
+    while ((m = rx.exec(String(text || '')))) {
+      const p = norm(String(m[2] || '').replace(/^\.\//, '/'));
+      if (p && p !== '/' && !out.includes(p)) out.push(p);
+    }
+    return out;
+  }
+
   function markPhaseTaskLiveProgressForPath(phaseState, rawPath, normalizeWorkspacePath) {
     if (!phaseState || !Array.isArray(phaseState.phases)) return 0;
     const norm = typeof normalizeWorkspacePath === 'function' ? normalizeWorkspacePath : (p) => String(p || '');
@@ -172,7 +186,9 @@
     tasks.forEach((task) => {
       if (!task || task.done || task.liveDone) return;
       const matches = extractFileLikeTaskPaths(task.text || task, norm);
-      if (matches.some((candidate) => String(candidate || '').toLowerCase() === comparablePath)) {
+      const globPrefixes = extractDirGlobTaskPrefixes(task.text || task, norm);
+      if (matches.some((candidate) => String(candidate || '').toLowerCase() === comparablePath)
+        || globPrefixes.some((prefix) => comparablePath.startsWith(`${String(prefix).toLowerCase()}/`))) {
         task.liveDone = true;
         changed += 1;
       }
@@ -1113,7 +1129,7 @@
         };
       };
 
-      setAgentProgress('Thinking...');
+      setAgentProgress('Planning the approach...');
       if (typeof deps.syncWorkspaceStateFromNative === 'function') {
         await deps.syncWorkspaceStateFromNative('agent_start', { render: false });
       }
@@ -1139,6 +1155,7 @@
           agentActivities,
           agentMeta: agentMetaWithRevert({ startedAt, completedAt: Date.now(), collapsed: false }),
           forceNeedsContinue: true,
+          inferenceFailure: true,
         });
         recordDebugTrace('agent_plan_hard_error', {
           chatId: String(chatId || ''),
@@ -1251,6 +1268,7 @@
           agentActivities,
           agentMeta: agentMetaWithRevert({ startedAt, completedAt: Date.now(), collapsed: false }),
           forceNeedsContinue: true,
+          inferenceFailure: true,
         });
         recordDebugTrace('agent_plan_infer_failed_stop', {
           chatId: String(chatId || ''),
@@ -1299,19 +1317,30 @@
             }, { chatId: String(chatId || ''), missing });
           }
         }
-        // Resuming over a fallback plan: its heuristic file list/name would poison
-        // pending-requirements and get force-rewritten into plan.md's title. Restore
-        // both from plan.md, the source of truth.
-        if (preferPlanFile && /^fallback/.test(String(planSpec._planSource || ''))) {
+        // Resuming over plan.md: the Continue re-planner routinely produces a
+        // degenerate file list (one random root file like /next-env.d.ts), which
+        // starves prompts of the planned-file context (frameworkWeb detection,
+        // sibling hints, planned-import advisories). plan.md is the source of
+        // truth on resume — always restore the union of its phase files.
+        if (preferPlanFile) {
           const phaseFiles = allPhaseFilePaths({ phases }, deps.normalizeWorkspacePath);
           if (phaseFiles.length) {
-            planSpec.expectedFiles = phaseFiles.slice();
-            planSpec.affectedFiles = phaseFiles.slice();
+            const merged = Array.from(new Set([
+              ...phaseFiles,
+              ...(Array.isArray(planSpec.expectedFiles) ? planSpec.expectedFiles : [])
+                .map((p) => deps.normalizeWorkspacePath(p || '')).filter((p) => p && p !== '/'),
+            ]));
+            planSpec.expectedFiles = merged;
+            planSpec.affectedFiles = merged.slice();
           }
-          const fileProjectName = String((planFileParsed && planFileParsed.projectName) || '').trim();
-          if (fileProjectName) {
-            planSpec.projectName = fileProjectName;
-            projectDisplayName = fileProjectName;
+          // A fallback plan's heuristic name would also get force-rewritten into
+          // plan.md's title — restore the persisted name for that case only.
+          if (/^fallback/.test(String(planSpec._planSource || ''))) {
+            const fileProjectName = String((planFileParsed && planFileParsed.projectName) || '').trim();
+            if (fileProjectName) {
+              planSpec.projectName = fileProjectName;
+              projectDisplayName = fileProjectName;
+            }
           }
         }
         // Repair legacy/model-authored phase casing against the authoritative
@@ -1339,15 +1368,49 @@
         let activeIndex = typeof deps.firstUnfinishedPhaseIndex === 'function'
           ? deps.firstUnfinishedPhaseIndex(phases) : 0;
         if (activeIndex < 0) activeIndex = phases.length - 1;
-        phaseState = { phases, activeIndex };
+        phaseState = { phases, activeIndex, diskPresent: new Set() };
         keepPhaseTrackerPinned = true;
         planSpec.taskKind = 'project'; // re-planner reclassifies Continue as 'edit'; force back
         const active = phases[activeIndex] || {};
+        // Seed the checklist from DISK: on a Continue, files built by earlier runs
+        // already exist, but liveDone only tracked THIS run's tool events — the
+        // tracker rendered 0/N until the model happened to touch each file again.
+        try {
+          const seedTasks = (Array.isArray(active.tasks) ? active.tasks : [])
+            .filter((t) => t && !t.done)
+            .map((t) => ({
+              task: t,
+              paths: extractFileLikeTaskPaths(t.text || t, deps.normalizeWorkspacePath),
+              globs: extractDirGlobTaskPrefixes(t.text || t, deps.normalizeWorkspacePath),
+            }));
+          const seedPaths = Array.from(new Set(seedTasks.flatMap((entry) => entry.paths))).slice(0, 24);
+          for (const seedPath of seedPaths) {
+            const res = await deps.invokeWorkspaceAction('workspaceReadFile', { path: seedPath });
+            if (res && res.ok && String(res.output || '').trim()) phaseState.diskPresent.add(seedPath.toLowerCase());
+          }
+          // Glob tasks ("ui/*") tick when their folder already holds files on disk.
+          const globDirsWithFiles = new Set();
+          for (const globDir of Array.from(new Set(seedTasks.flatMap((entry) => entry.globs))).slice(0, 8)) {
+            const res = await deps.invokeWorkspaceAction('workspaceList', { path: globDir });
+            if (res && res.ok && /\[file\]/.test(String(res.output || ''))) globDirsWithFiles.add(globDir.toLowerCase());
+          }
+          seedTasks.forEach(({ task, paths, globs }) => {
+            const filesPresent = paths.length && paths.every((p) => phaseState.diskPresent.has(p.toLowerCase()));
+            const globsPresent = globs.length && globs.every((g) => globDirsWithFiles.has(g.toLowerCase()));
+            if ((paths.length || globs.length) && (paths.length ? filesPresent : true) && (globs.length ? globsPresent : true)) {
+              task.liveDone = true;
+            }
+          });
+        } catch (_) { /* seeding is best-effort; live events still tick tasks */ }
         planSpec._activePhase = {
           number: activeIndex + 1,
           total: phases.length,
           title: String(active.title || ''),
-          tasks: (Array.isArray(active.tasks) ? active.tasks : []).filter((t) => t && !t.done).map((t) => t.text),
+          tasks: (Array.isArray(active.tasks) ? active.tasks : []).filter((t) => t && !t.done).map((t) => (
+            t.liveDone
+              ? `${t.text} — ALREADY BUILT by an earlier run (file exists). Do not recreate it; edit only if something in it needs fixing.`
+              : t.text
+          )),
         };
         // Harvest foundation vocab from earlier phases so this phase's pages reuse real
         // tokens/classes/components. Empty on phase 1 (nothing built yet). Best-effort.
@@ -1383,6 +1446,7 @@
         try {
           const pendingTasks = (Array.isArray(active.tasks) ? active.tasks : [])
             .filter((t) => t && !t.done).map((t) => t.text);
+          setAgentProgress(`Starting Phase ${activeIndex + 1}${active.title ? `: ${String(active.title).trim()}` : ''}...`);
           const ackPrompt = [
             'Write ONE short, natural, first-person sentence telling the user what you will do in this build phase.',
             'Output ONLY the sentence — no preamble, no quotes, no markdown, no labels.',
@@ -1397,12 +1461,17 @@
             pendingTasks.length ? `This phase covers: ${pendingTasks.join('; ')}` : '',
             'Sentence:',
           ].filter(Boolean).join('\n');
-          const ackRes = await deps.requestAgentPlannerInference(ackPrompt, 160, '');
+          const ackRes = await deps.requestAgentPlannerInference(ackPrompt, 160, '', '', { prose: true });
           if (ackRes && ackRes.ok) {
             let ack = String(deps.sanitizeAssistantText(String(ackRes.output || '')) || '')
               .split('\n').map((s) => s.trim()).filter(Boolean)[0] || '';
             ack = ack.replace(/^["'`]+|["'`]+$/g, '').trim();
-            if (ack && !/^[{<[]/.test(ack)) appendAgentNarration(ack);
+            if (ack && !/^[{<[]/.test(ack)) {
+              appendAgentNarration(ack);
+              // The kickoff sentence IS the intro — don't let the deterministic
+              // startup batch (new_project) add a second, blander one.
+              deterministicBatchNarrated = true;
+            }
           }
         } catch (_) { /* best-effort; the tracker still shows the phases */ }
       }
@@ -1558,6 +1627,10 @@
         const target = deps.normalizeWorkspacePath(rawPath || '');
         if (!target) return false;
         const comparableTarget = target.toLowerCase();
+        // Files proven on disk at phase start count as present — without this, a
+        // Continue run forced pointless re-reads (or rebuilds) of finished files
+        // just to satisfy the phase gap check.
+        if (phaseState && phaseState.diskPresent && phaseState.diskPresent.has(comparableTarget)) return true;
         return toolEvents.some((event) => {
           if (!event || event.ok === false) return false;
           const tool = String(event.tool || '').toLowerCase();
@@ -1696,17 +1769,17 @@
             toolEvents,
           });
         } else {
-          setAgentProgress('Thinking...');
+          // Contextual decide label: the user should see WHERE the run is, not a
+          // generic "Thinking..." between every tool.
+          setAgentProgress('Working...');
           let plannerHeartbeatTimer = 0;
           const startPlannerHeartbeat = () => {
             if (plannerHeartbeatTimer) return;
             const started = Date.now();
             plannerHeartbeatTimer = setInterval(() => {
               const elapsed = Math.max(1, Math.round((Date.now() - started) / 1000));
-              if (elapsed >= 60) {
+              if (elapsed >= 20) {
                 setAgentProgress('Still working...');
-              } else if (elapsed >= 20) {
-                setAgentProgress('Still thinking...');
               }
             }, 5000);
           };
@@ -1781,6 +1854,29 @@
           if (!deps.isInferenceActive(requestToken)) return true;
           if (!res || !res.ok) {
             if (runLog) runLog.emitDecisionFailure(step, (res && res.message) || 'agent infer failed', Boolean(res && res.timedOut));
+            // Salvage a cut-off inline-file decision: the truncated head already
+            // names the tool + path, and the dedicated content step regenerates the
+            // file with its big budget — discarding the round (twice in one run)
+            // burned full generations and left the user staring at "Still working".
+            if (res && res.outputLimitExceeded) {
+              const head = String(res.output || '').slice(0, 3000);
+              const toolMatch = head.match(/"tool"\s*:\s*"(write_file|edit_file)"/);
+              const pathMatch = head.match(/"path"\s*:\s*"(\/[^"\\]+)"/);
+              if (toolMatch && pathMatch) {
+                const msgMatch = head.match(/"message"\s*:\s*"([^"\\]{1,180})/);
+                recordDebugTrace('agent_decision_output_limit_salvaged', {
+                  chatId: String(chatId || ''), step: String(step), tool: toolMatch[1], path: pathMatch[1],
+                }, { chatId: String(chatId || ''), step, tool: toolMatch[1], path: pathMatch[1], rawPreview: deps.debugPreview(head, 300) });
+                res = {
+                  ok: true,
+                  output: JSON.stringify({ action: 'tool', tool: toolMatch[1], path: pathMatch[1], message: (msgMatch && msgMatch[1]) || '' }),
+                  provider: res.provider,
+                  model: res.model,
+                };
+              }
+            }
+          }
+          if (!res || !res.ok) {
             // The model inlined a whole file into the decision JSON and blew the
             // structured-output cap. Retrying the same prompt would overflow again —
             // steer it to the correct shape instead of killing the run.
@@ -1857,6 +1953,11 @@
             return true;
           }
 
+          // Consecutive-failure caps, not lifetime caps: a long repair run on a
+          // flaky adapter exhausted 2 nudges early, then a later hiccup killed the
+          // whole run ("Adapter structured stream ended without a complete JSON").
+          outputLimitNudges = 0;
+          incompleteJsonNudges = 0;
           rawPlannerOutput = String(res.output || '');
           decision = deps.parseAgentDecision(rawPlannerOutput);
           if (runLog && decision) runLog.emitDecision(step, 'model', decision);
@@ -3201,9 +3302,10 @@
               createdNewFile: Boolean(autoFile.createdNewFile), mutated: true,
               validationPassed: false, validationIssues: [], runErrorCount: 0,
               startLine: 0, endLine: 0, offset: 0, searchQuery: '', pathsSig: '',
-              observation: `write_file ok: ${autoPath} (synchronized automatically from project imports).`,
+              observation: `write_file ok: ${autoPath} ${String(autoFile.note || '(synchronized automatically from project imports).')}`,
               _automaticSupportFile: true,
             });
+            refreshPhaseLiveProgress(autoPath);
           }
         }
         // Track the run's dev server + staleness (source mutated after start).
