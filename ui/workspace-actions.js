@@ -690,6 +690,48 @@
       });
     }
 
+    async function listDevServerRows() {
+      let res = null;
+      try { res = await deps.invokeWorkspaceAction('devServerList', {}); } catch (_) { return null; }
+      return String(res && res.ok ? res.output : '')
+        .split('\n')
+        .filter(Boolean)
+        .map((line) => {
+          const parts = line.split('\t');
+          return { id: Number(parts[0]) || 0, running: parts[1] === 'running' };
+        })
+        .filter((row) => row.id > 0);
+    }
+
+    // A dev server should never exit on its own right after Run — if the new
+    // entry dies during startup (broken install, port clash, crash), surface
+    // its log instead of leaving the user waiting on a tab that never opens.
+    async function watchNewDevServerForEarlyExit(knownIds) {
+      const seen = new Set(knownIds);
+      const deadline = Date.now() + 180000;
+      let targetId = 0;
+      while (Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 5000));
+        const rows = await listDevServerRows();
+        if (!rows) return;
+        if (!targetId) {
+          const fresh = rows.find((row) => !seen.has(row.id));
+          if (!fresh) return; // run target didn't spawn a tracked server
+          targetId = fresh.id;
+        }
+        const row = rows.find((entry) => entry.id === targetId);
+        if (!row) return;
+        if (row.running) continue;
+        let tail = '';
+        try {
+          const status = await deps.invokeWorkspaceAction('devServerStatus', { serverId: targetId });
+          tail = String((status && status.output) || '').trim().slice(-700);
+        } catch (_) { }
+        window.alert('The dev server stopped before it finished starting.' + (tail ? '\n\n' + tail : ''));
+        return;
+      }
+    }
+
     async function runWorkspaceApp() {
       deps.closeExplorerMenus();
       if (window.aiexeRunAppBusy) return; // a launch is already in flight
@@ -703,6 +745,7 @@
         return;
       }
       setRunAppBusy(true);
+      const preRunIds = (await listDevServerRows() || []).map((row) => row.id);
       try {
         // Serves the open project over http://127.0.0.1 and opens it in the browser.
         // file:// breaks ES modules, fetch(), and many APIs ("only the UI shows");
@@ -718,6 +761,7 @@
         if (typeof deps.setMiddleViewMode === 'function') deps.setMiddleViewMode('chat');
         if (typeof deps.renderMiddleView === 'function') deps.renderMiddleView();
         if (typeof deps.renderSidebarCounts === 'function') deps.renderSidebarCounts();
+        void watchNewDevServerForEarlyExit(preRunIds);
       } finally {
         setRunAppBusy(false);
       }

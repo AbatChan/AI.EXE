@@ -292,10 +292,16 @@ class DevServerManager {
       // No kill-on-close job on POSIX: run the command under a supervisor
       // that group-kills everything if the app process disappears (a hard
       // kill skips StopAll and would otherwise orphan the server).
+      // The watcher must drop the inherited log pipe (exec >/dev/null) —
+      // holding it open starves the reader thread of EOF after the server
+      // dies, so the entry would stay "running" forever. It also watches
+      // the server child so it never outlives a crashed server.
+      const std::string app = std::to_string(app_pid);
       std::string script =
           std::string("\"$@\" & CHILD=$!; ")
-          + "( while kill -0 " + std::to_string(app_pid)
-          + " 2>/dev/null; do sleep 2; done; kill -- -$$ 2>/dev/null ) & WATCH=$!; "
+          + "( exec >/dev/null 2>&1; while kill -0 " + app
+          + " 2>/dev/null && kill -0 $CHILD 2>/dev/null; do sleep 2; done; "
+          + "kill -0 " + app + " 2>/dev/null || kill -- -$$ 2>/dev/null ) & WATCH=$!; "
           + "wait $CHILD; CODE=$?; kill $WATCH 2>/dev/null; exit $CODE";
       std::string sh = "/bin/sh";
       std::string dash_c = "-c";

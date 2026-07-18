@@ -1489,12 +1489,22 @@ bool LaunchNodeDevServerMac(const std::filesystem::path &root, int port,
          << "  read -n 1 -s -r -p 'Press any key to close this window...'\n"
          << "  exit 1\n"
          << "fi\n"
-         << "if [ ! -d node_modules ]; then\n"
+         << "RUNNER=" << (nextProject ? "node_modules/.bin/next" : "node_modules/.bin/vite") << "\n"
+         << "if [ ! -x \"$RUNNER\" ]; then\n"
          << "  echo 'Installing npm dependencies...'\n"
          << "  npm install || {\n"
          << "    echo 'Dependency conflict detected - retrying with --legacy-peer-deps...'\n"
          << "    npm install --legacy-peer-deps || { read -n 1 -s -r -p 'Install failed. Press any key to close...'; exit 1; }\n"
          << "  }\n"
+         << "  if [ ! -x \"$RUNNER\" ]; then\n"
+         << "    echo 'Install incomplete - cleaning node_modules and reinstalling...'\n"
+         << "    rm -rf node_modules\n"
+         << "    npm install || npm install --legacy-peer-deps || { read -n 1 -s -r -p 'Install failed. Press any key to close...'; exit 1; }\n"
+         << "  fi\n"
+         << "fi\n"
+         << "if [ ! -x \"$RUNNER\" ]; then\n"
+         << "  read -n 1 -s -r -p \"$RUNNER is still missing after install. Press any key to close...\"\n"
+         << "  exit 1\n"
          << "fi\n"
          << "echo 'Starting dev server at " << url << "'\n"
          // The app opens the URL when the port is up (smart browser routing);
@@ -1533,13 +1543,23 @@ bool LaunchNodeDevServerMac(const std::filesystem::path &root, int port,
 // dies with the app (StopAll + kill-on-close) so nothing lingers.
 bool LaunchNodeDevServerInApp(const std::filesystem::path &root, int port,
                               bool nextProject, std::string *err) {
+  // A node_modules dir-only check misses interrupted installs (folder exists,
+  // runner binary missing) — probe the actual dev-server binary.
+  const char *runner = nextProject ? "node_modules/.bin/next" : "node_modules/.bin/vite";
   std::ostringstream script;
   script << "if ! command -v npm >/dev/null 2>&1; then"
-         << " echo 'Node.js/npm is required to run this Vite project.'; exit 1; fi\n"
-         << "if [ ! -d node_modules ]; then\n"
+         << " echo 'Node.js/npm is required to run this web project.'; exit 1; fi\n"
+         << "RUNNER=" << runner << "\n"
+         << "if [ ! -x \"$RUNNER\" ]; then\n"
          << "  echo 'Installing npm dependencies...'\n"
-         << "  npm install || npm install --legacy-peer-deps || exit 1\n"
+         << "  npm install || npm install --legacy-peer-deps || { echo 'npm install failed.'; exit 1; }\n"
+         << "  if [ ! -x \"$RUNNER\" ]; then\n"
+         << "    echo 'Install incomplete - cleaning node_modules and reinstalling...'\n"
+         << "    rm -rf node_modules\n"
+         << "    npm install || npm install --legacy-peer-deps || { echo 'npm install failed.'; exit 1; }\n"
+         << "  fi\n"
          << "fi\n"
+         << "if [ ! -x \"$RUNNER\" ]; then echo \"$RUNNER is still missing after install.\"; exit 1; fi\n"
          << "exec npm run dev -- "
          << (nextProject ? "--hostname 127.0.0.1 --port " : "--host 127.0.0.1 --port ")
          << port << (nextProject ? "" : " --strictPort") << "\n";
