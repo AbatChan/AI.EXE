@@ -978,6 +978,9 @@
             const lastContent = String(lastEvent.content || '').trim();
             if (newContent && newContent !== lastContent) return '';
           }
+          if (signature.tool === 'read_file' && /file not found/i.test(String(lastEvent.observation || ''))) {
+            return `read_file blocked for ${signature.path || 'this file'}: it does not exist — re-reading cannot help. If it is a planned file, CREATE it now with write_file; otherwise take the next planned step.`;
+          }
           return `${signature.tool} blocked for ${signature.path || signature.dstPath || signature.srcPath || 'this target'}: the same tool/target already failed and nothing changed since then. Follow the latest observation and choose a different corrective step.`;
         }
         return '';
@@ -2636,7 +2639,7 @@
             recordDebugTrace('agent_read_after_own_write_blocked', {
               chatId: String(chatId || ''), step: String(step), path: readPath, served: String(Boolean(writtenEvent)),
             }, { chatId: String(chatId || ''), step, path: readPath });
-            toolEvents.push(writtenEvent ? {
+            const guardEvent = writtenEvent ? {
               tool: 'read_file',
               ok: true,
               _guardBlock: true,
@@ -2648,7 +2651,10 @@
               _guardBlock: true,
               path: readPath,
               observation: `read_file blocked for ${readPath}: you just wrote this file's complete content yourself — the saved file IS that content, nothing changed it since. Do not read it back. If something specific is wrong, change it with ONE targeted edit_file; otherwise run validate_files once and finalize.`,
-            });
+            };
+            toolEvents.push(guardEvent);
+            // Show a card: the narration promised a read, so a silent skip reads as a stall.
+            appendAgentActivity(deps.buildAgentActivityFromToolResult(decision, guardEvent, toolEvents));
             continue;
           }
         }
@@ -2784,7 +2790,7 @@
               ok: false,
               _guardBlock: true,
               path: deps.normalizeWorkspacePath(decision.path || ''),
-              observation: `You have inspected the workspace ${inspections} times without making a single change — you already have enough context. STOP inspecting: no more read_file or search_files. Make the change now with edit_file using the lines you have already located, or finalize if the task is done. Anchors do NOT need to be byte-exact — close matches (whitespace/indent differences) are accepted, so edit from what you have.${checklistSteer}`,
+              observation: `You have inspected the workspace ${inspections} times without making a single change — you already have enough context. STOP inspecting: no more read_file or search_files. Make the change now with edit_file using the lines you have already located, CREATE any missing planned file with write_file (creation is not inspection), or finalize if the task is done. Anchors do NOT need to be byte-exact — close matches (whitespace/indent differences) are accepted, so edit from what you have.${checklistSteer}`,
             });
             continue;
           }

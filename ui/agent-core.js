@@ -1601,7 +1601,9 @@
       const libraryNames = new Set(['node.js', 'three.js', 'vue.js', 'next.js', 'express.js', 'd3.js', 'chart.js', 'p5.js', 'react.js', 'jquery.js']);
       const out = [];
       const seen = new Set();
-      const re = /(?:^|[\s"'`(,:+])((?:\/?[a-z0-9_-]+\/)*[a-z0-9._-]+\.(?:html?|css|scss|sass|less|js|mjs|cjs|ts|jsx|tsx|json|md|txt|py|php|java|go|rs|c|cpp|cs))\b/gi;
+      // Leading slash sits OUTSIDE the dir group: "/contact.html" (root file,
+      // slash-prefixed) used to never match — only nested "/css/style.css" did.
+      const re = /(?:^|[\s"'`(,:+])(\/?(?:[a-z0-9_-]+\/)*[a-z0-9._-]+\.(?:html?|css|scss|sass|less|js|mjs|cjs|ts|jsx|tsx|json|md|txt|py|php|java|go|rs|c|cpp|cs))\b/gi;
       let match;
       while ((match = re.exec(String(taskText || ''))) && out.length < maxFiles) {
         const raw = String(match[1] || '');
@@ -2041,6 +2043,14 @@
         expectedFiles = ['/index.html'];
         affectedFiles = [];
         filesToInspect = [];
+      }
+      // User-typed deliverables outrank a lossy plan: a dropped /contact.html made
+      // PENDING_REQUIREMENTS say "none" and force-finalized with a page missing.
+      if (taskKind === 'project' && !singleHtmlFileProject && explicitTaskFiles.size) {
+        const planned = new Set(expectedFiles.map((path) => normalizeWorkspacePath(path)));
+        explicitTaskFiles.forEach((path) => {
+          if (!planned.has(path)) { planned.add(path); expectedFiles.push(path); }
+        });
       }
       const rootEntries = Array.isArray(workspaceContext.rootEntries) ? workspaceContext.rootEntries : [];
       const rootFilePaths = rootEntries

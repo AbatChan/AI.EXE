@@ -2281,7 +2281,12 @@ export default config;
         }
         const response = await deps.invokeWorkspaceAction('workspaceReadFile', { path });
         if (!response || !response.ok) {
-          return { ok: false, mutated, observation: `read_file failed for ${path}: ${(response && response.message) || 'unknown error'}` };
+          const notFound = /not found/i.test(String((response && response.message) || ''));
+          // Not-found on a planned file: the corrective step is CREATION, say so.
+          const createSteer = notFound && planExpectedFiles.includes(path)
+            ? ` This is a PLANNED file that does not exist yet — create it now with write_file (batch other missing small modules with write_files). Do not try to read it again.`
+            : '';
+          return { ok: false, mutated, observation: `read_file failed for ${path}: ${(response && response.message) || 'unknown error'}${createSteer}` };
         }
         const body = String(response.output || '');
         const requestedLimit = Number(decision.limit || 0);

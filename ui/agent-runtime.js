@@ -173,7 +173,11 @@
       if (typeof deps.markAgentToolProgress === 'function') deps.markAgentToolProgress();
     };
 
+    // True once the user stopped the run: no further inference calls or disk writes.
+    const genCancelled = () => (typeof deps.isAgentGenerationCancelled === 'function' && deps.isAgentGenerationCancelled());
+
     async function runRawAgentFileInference(prompt, onPartial = null, label = '') {
+      if (genCancelled()) return { output: '', truncated: false };
       const budget = Math.max(1, Number(getAgentFileOutputBudget()) || agentFileContentMaxTokens);
       const startedAt = Date.now();
       let streamed = '';
@@ -210,14 +214,29 @@
         return { output: String(remote.output || ''), truncated: Boolean(remote.truncated) };
       }
       logFileInfer('remote_empty', '', remote && remote.truncated);
+      // A user stop aborts the remote fetch — don't re-run the request on fallbacks.
+      if (genCancelled()) return { output: '', truncated: false };
       const external = await requestExternalAgentPlanner(prompt, budget, agentFileGenerationRequestTimeoutMs);
       if (external && external.ok && String(external.output || '').trim()) {
         return { output: String(external.output || ''), truncated: Boolean(external.truncated) };
       }
+      if (genCancelled()) return { output: '', truncated: false };
       if (!deps.nativeBridge.available()) return { output: '', truncated: false };
       const res = await deps.nativeBridge.invoke('infer', { prompt, maxTokens: budget, max_tokens: budget });
       if (!res || !res.ok) return { output: '', truncated: false };
       return { output: String(res.output || ''), truncated: Boolean(res.truncated) };
+    }
+
+    // Peel a whole-reply wrapper fence (Venice mangles UNfenced code: markdown
+    // rendering strips template-literal backticks and decodes HTML entities, so
+    // prompts now REQUIRE the fence; raw must be unfenced before the scan loop).
+    function unwrapWholeFence(text) {
+      let out = String(text || '');
+      if (/^\s*```/.test(out)) {
+        out = out.replace(/^\s*```[a-z0-9_+\-]*[^\S\n]*\n?/i, '');
+        out = out.replace(/\n?```\s*$/, '');
+      }
+      return out;
     }
 
     // Continuations don't need the bulky prompt sections; the tail is the anchor.
@@ -260,7 +279,7 @@
       beat();
       const first = await runRawAgentFileInference(prompt, emitPartial, `${path} (initial)`);
       beat();
-      let raw = first.output;
+      let raw = unwrapWholeFence(first.output);
       if (!raw) {
         if (typeof deps.clearAgentStreamingFile === 'function') deps.clearAgentStreamingFile(path);
         recordAgentFileGenTrace(path, promptChars, 0, 0, first.truncated, 'empty_output');
@@ -278,7 +297,7 @@
       // Persist after the first pass so the file is created + visible in the
       // workspace and the partial isn't lost if generation stops.
       const persistPartial = (text) => {
-        if (!persistPartials) return;
+        if (!persistPartials || genCancelled()) return;
         if (typeof deps.persistAgentFile === 'function') deps.persistAgentFile(path, deps.sanitizeAgentGeneratedFileContent(text, path));
       };
       persistPartial(raw);
@@ -286,14 +305,15 @@
       // file's own tail, which is the only grounding a continuation actually uses.
       const slimBase = slimContinuationBasePrompt(prompt);
       // Append until whole instead of regenerating from scratch on truncation.
-      while (guard < 6 && (wasTruncated || looksTruncatedFileContent(raw, path))) {
+      while (guard < 6 && !genCancelled() && (wasTruncated || looksTruncatedFileContent(raw, path))) {
         guard += 1;
         const reason = wasTruncated ? 'provider_truncated' : 'looks_truncated';
-        const continuationPrompt = `${slimBase}\n\nPARTIAL_OUTPUT_ALREADY_SAVED (do NOT repeat any of this):\n${raw.slice(-4000)}\n\nContinue the file from exactly where it stopped. Output ONLY the remaining content — no repetition, no commentary, no code fences.`;
+        const continuationPrompt = `${slimBase}\n\nPARTIAL_OUTPUT_ALREADY_SAVED (do NOT repeat any of this):\n${raw.slice(-4000)}\n\nContinue the file from exactly where it stopped. Reply with ONE fenced code block containing ONLY the remaining content — no repetition, no commentary outside the fence.`;
         const carried = raw;
         const next = await runRawAgentFileInference(continuationPrompt, (partial) => emitPartial(stitchFileContinuation(carried, partial)), `${path} (continue ${guard})`);
         beat();
-        if (!next.output || !next.output.trim()) { passTrace(guard, { reason, added: 0, note: 'empty_continuation' }); break; }
+        const chunk = unwrapWholeFence(next.output);
+        if (!chunk || !chunk.trim()) { passTrace(guard, { reason, added: 0, note: 'empty_continuation' }); break; }
         const before = raw.length;
         // Some models (deepseek) ignore "continue from where it stopped" and
         // REGENERATE from the top. Appending that duplicates the file ("starts
@@ -305,24 +325,28 @@
         // an exact prefix match misses) → keep the better copy, don't append a dupe.
         const stripLead = (s) => String(s || '').replace(/^```[a-z0-9]*\s*/i, '')
           .replace(/^(?:\s*\/\/[^\n]*\n|\s*\/\*[\s\S]*?\*\/\s*|\s*<!--[\s\S]*?-->\s*)+/, '').trimStart();
-        const isFreshFile = /^(?:['"]use strict['"]|;?\(function\b|<!doctype|<html[\s>]|:root\b|import\s|@import\s)/i.test(stripLead(next.output));
-        const isRestart = isFreshFile || norm(next.output).slice(0, 120) === norm(raw).slice(0, 120);
+        const isFreshFile = /^(?:['"]use strict['"]|;?\(function\b|<!doctype|<html[\s>]|:root\b|import\s|@import\s)/i.test(stripLead(chunk));
+        const isRestart = isFreshFile || norm(chunk).slice(0, 120) === norm(raw).slice(0, 120);
         if (isRestart) {
-          const regenLonger = next.output.length >= raw.length;
-          passTrace(guard, { reason, beforeLen: before, restart: true, nextChunkLen: next.output.length, kept: regenLonger ? 'regenerated' : 'original', nextTruncated: Boolean(next.truncated) });
+          const regenLonger = chunk.length >= raw.length;
+          passTrace(guard, { reason, beforeLen: before, restart: true, nextChunkLen: chunk.length, kept: regenLonger ? 'regenerated' : 'original', nextTruncated: Boolean(next.truncated) });
           if (!regenLonger) break;            // restart wasn't better — stop, don't append a duplicate
-          raw = next.output;                  // keep the (longer) regeneration; while-cond re-checks completeness
+          raw = chunk;                        // keep the (longer) regeneration; while-cond re-checks completeness
           wasTruncated = next.truncated;
           persistPartial(raw);
           continue;
         }
-        raw = stitchFileContinuation(raw, next.output);
+        raw = stitchFileContinuation(raw, chunk);
         wasTruncated = next.truncated;
         persistPartial(raw);
-        passTrace(guard, { reason, beforeLen: before, addedLen: raw.length - before, nextChunkLen: next.output.length, nextTruncated: Boolean(next.truncated), promptChars: continuationPrompt.length, tail: raw.slice(-120) });
+        passTrace(guard, { reason, beforeLen: before, addedLen: raw.length - before, nextChunkLen: chunk.length, nextTruncated: Boolean(next.truncated), promptChars: continuationPrompt.length, tail: raw.slice(-120) });
         if (raw.length <= before) break;
       }
       if (typeof deps.clearAgentStreamingFile === 'function') deps.clearAgentStreamingFile(path);
+      if (genCancelled()) {
+        recordAgentFileGenTrace(path, promptChars, raw.length, guard, wasTruncated, 'cancelled');
+        return '';
+      }
       const finalContent = deps.sanitizeAgentGeneratedFileContent(raw, path);
       // Sanitize should tidy, not amputate. If it drops a big chunk, surface it —
       // a silent post-generation cut (e.g. an over-eager scaffolding strip) reads

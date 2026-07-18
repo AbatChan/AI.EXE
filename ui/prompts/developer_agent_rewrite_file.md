@@ -1,6 +1,6 @@
 Rewrite the complete final contents for one existing file after applying the requested edits.
-Output contract: your ENTIRE response is the raw file content for the path below and nothing else — no ``` fences, no preamble/explanation, and NEVER any of this prompt's own text inside the file (no "PROJECT_CONTRACT", "PROJECT_STATE", "TASK", rule bullets, etc.).
-Example — for a /script.js the response begins straight with code, e.g.: document.addEventListener('DOMContentLoaded', () => {
+Output contract: your ENTIRE response is ONE fenced code block containing the complete file — the FIRST line is ``` plus the file's language, the LAST line is ```, and NOTHING appears outside the fence. The fence protects the code from display mangling; never omit it. No preamble/explanation, and NEVER any of this prompt's own text inside the file (no "PROJECT_CONTRACT", "PROJECT_STATE", "TASK", rule bullets, etc.).
+Example — for a /script.js the response is exactly: ```javascript then the whole file then ``` .
 
 File path: {{FILE_PATH}}
 

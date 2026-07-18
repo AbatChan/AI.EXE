@@ -785,7 +785,7 @@
       }
       return [
         'Write the complete final contents for one project file.',
-        'Return only the file contents. No markdown fences. No explanation.',
+        'Return the complete file inside ONE fenced code block (```<language> first line, ``` last line, nothing outside it). No explanation.',
         `File path: ${normalizedPath}`,
         `FILE BUDGET: ${fileBudget}`,
         'Rules:',
@@ -923,7 +923,7 @@
       }
       return [
         'Rewrite the complete final contents for one existing file after applying the requested edits.',
-        'Return only the file contents. No markdown fences. No explanation.',
+        'Return the complete file inside ONE fenced code block (```<language> first line, ``` last line, nothing outside it). No explanation.',
         `File path: ${normalizedPath}`,
         planSpec && planSpec.projectContract ? `PROJECT_CONTRACT:\n${String(planSpec.projectContract)}` : '',
         projectState ? `PROJECT_STATE:\n${projectState}` : '',

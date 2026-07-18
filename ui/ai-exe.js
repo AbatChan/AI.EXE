@@ -13365,6 +13365,9 @@ const agentRuntime = window.AIExeAgentRuntime && typeof window.AIExeAgentRuntime
     sanitizeAgentGeneratedFileContent,
     sanitizeAgentGeneratedEditProgram,
     requestSelectedRemoteTextCompletion,
+    // Stop must kill hidden work too: file-gen retries/continuations check this
+    // before issuing another inference or persisting bytes after cancel.
+    isAgentGenerationCancelled: () => !activeInferenceRequest || activeInferenceRequest.cancelled === true,
     markAgentToolProgress,
     updateAgentStreamingFile,
     clearAgentStreamingFile,
