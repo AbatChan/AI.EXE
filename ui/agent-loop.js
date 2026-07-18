@@ -1467,11 +1467,11 @@
         try {
           const pendingTasks = (Array.isArray(active.tasks) ? active.tasks : [])
             .filter((t) => t && !t.done).map((t) => t.text);
-          setAgentProgress(`Starting Phase ${activeIndex + 1}${active.title ? `: ${String(active.title).trim()}` : ''}...`);
+          setAgentProgress(`${isResume ? 'Continuing' : 'Starting'} Phase ${activeIndex + 1}${active.title ? `: ${String(active.title).trim()}` : ''}...`);
           const ackPrompt = [
             'Write ONE short, natural, first-person sentence telling the user what you will do in this build phase.',
             'Output ONLY the sentence — no preamble, no quotes, no markdown, no labels.',
-            activeIndex === 0
+            activeIndex === 0 && !isResume
               ? 'This is the FIRST of several phases — say you are starting with this phase and will build the rest in later phases the user continues.'
               : `This is phase ${activeIndex + 1} of ${phases.length} — say you are continuing the build and what this phase adds.`,
             activeIndex > 0
@@ -1573,7 +1573,10 @@
         }, { chatId: String(chatId || ''), step, items });
         return true;
       };
-      setAgentProgress('Starting...');
+      // This is the agent run's activity label, not the adapter lifecycle.
+      // Do not reset a useful phase label, and do not imply that an already
+      // serving adapter is being started again for every user message.
+      if (!phaseState) setAgentProgress(isResume ? 'Continuing...' : 'Working...');
 
       // .aiexe/plan.md = the phased build's source of truth (checkboxes are state).
       // Write it once the project workspace exists; opportunistic because the
