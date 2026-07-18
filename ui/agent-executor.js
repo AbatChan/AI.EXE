@@ -798,10 +798,33 @@ export default config;
     }
 
     function splitAgentCommand(rawCommand) {
-      return String(rawCommand || '')
-        .trim()
-        .split(/\s+/)
-        .filter(Boolean);
+      // Quote-aware tokenizer: keeps a quoted argument (e.g. node -e "() => 1")
+      // as ONE token with the quotes stripped, so inline scripts survive. For
+      // unquoted commands this yields exactly what a /\s+/ split would. The
+      // backend execs program+args directly (no shell), so quoted content is a
+      // literal arg — never re-interpreted.
+      const text = String(rawCommand || '').trim();
+      const tokens = [];
+      let cur = '';
+      let quote = '';
+      let hasToken = false;
+      for (let i = 0; i < text.length; i += 1) {
+        const ch = text[i];
+        if (quote) {
+          if (ch === quote) quote = '';
+          else cur += ch;
+          continue;
+        }
+        if (ch === '"' || ch === "'") { quote = ch; hasToken = true; continue; }
+        if (/\s/.test(ch)) {
+          if (hasToken) { tokens.push(cur); cur = ''; hasToken = false; }
+          continue;
+        }
+        cur += ch;
+        hasToken = true;
+      }
+      if (hasToken) tokens.push(cur);
+      return tokens;
     }
 
     // Long-running dev servers must not go through the blocking 60s runner —
@@ -827,8 +850,18 @@ export default config;
     function hasBlockedShellSyntax(command) {
       const text = String(command || '');
       const blockedChars = new Set([';', '&', '|', '`', '<', '>']);
+      // Only metacharacters OUTSIDE quotes are shell operators. A quoted arg
+      // (node -e "a => b", python -c "print(1<2)") passes its `<`/`>`/etc. as a
+      // literal to the program — the runner never invokes a shell — so flagging
+      // them false-blocked every inline script.
+      let quote = '';
       for (let i = 0; i < text.length; i += 1) {
         const ch = text[i];
+        if (quote) {
+          if (ch === quote) quote = '';
+          continue;
+        }
+        if (ch === '"' || ch === "'") { quote = ch; continue; }
         if (blockedChars.has(ch)) return true;
         if (ch === '$' && text[i + 1] === '(') return true;
       }

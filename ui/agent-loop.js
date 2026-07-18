@@ -895,6 +895,11 @@
         startLine: Number(decision && decision.start_line || 0),
         endLine: Number(decision && decision.end_line || 0),
         pathsSig: decisionPathsSignature(decision),
+        // run_command's identity is its command, not a path — every run_command
+        // shares path '/'. Without this, a second, DIFFERENT command (e.g. `npx
+        // prisma generate` after a blocked `node -e ...`) was flagged a duplicate
+        // and the run dead-ended.
+        command: String(decision && decision.command ? decision.command : '').trim(),
       });
       const hasWorkspaceMutationSince = (index) => {
         const start = Math.max(-1, Number(index));
@@ -927,7 +932,8 @@
             && Number(event.offset || 0) === signature.offset
             && Number(event.startLine || 0) === signature.startLine
             && Number(event.endLine || 0) === signature.endLine
-            && String(event.pathsSig || '') === signature.pathsSig;
+            && String(event.pathsSig || '') === signature.pathsSig
+            && String(event.command || '').trim() === signature.command;
         });
         if (lastIndex < 0) return '';
         const lastEvent = toolEvents[lastIndex];
@@ -3342,6 +3348,9 @@
           // Approval/blocked policy — drives awaiting_approval/blocked run-log states.
           commandPolicy: String((toolResult && toolResult.commandPolicy) || ''),
           terminalCommand: String((toolResult && toolResult.terminalCommand) || ''),
+          // The decision's command — the duplicate-guard signature for run_command
+          // (a blocked command must not shadow a DIFFERENT next command).
+          command: String((decision && decision.command) || ''),
           // run_app reports startup crashes as ok:true + runErrorCount>0 (not !ok).
           runErrorCount: Number(toolResult && toolResult.runErrorCount) || 0,
           // Read range — for the range-aware read-loop guard.
