@@ -1477,6 +1477,12 @@
     // Phases carry sub-tasks: "Title :: task ; task ; task | Title2 :: ...".
     // Also tolerate the model emitting a JSON array of {title, tasks}. Returns
     // [{ title, tasks:[{ text, done:false }] }].
+    // Model titles often already carry "Phase N —"; composers add their own
+    // "Phase ${i+1} —", producing "Phase 3 — Phase 3 — Click Tracking".
+    function stripPhaseTitlePrefix(title) {
+      return String(title || '').replace(/^(?:\s*phase\s*\d+\s*[—–·:.\-]*\s*)+/i, '').trim();
+    }
+
     function parseAgentPlanPhases(raw, maxPhases = 4, maxTasks = 6) {
       const mkTasks = (list) => (Array.isArray(list) ? list : [])
         .map((t) => String(t || '').trim())
@@ -1486,11 +1492,11 @@
       if (Array.isArray(raw)) {
         return raw.map((p) => {
           if (p && typeof p === 'object') {
-            const title = String(p.title || p.name || '').trim();
+            const title = stripPhaseTitlePrefix(p.title || p.name || '');
             const tasks = Array.isArray(p.tasks) ? p.tasks : (Array.isArray(p.sub_tasks) ? p.sub_tasks : []);
             return { title, tasks: mkTasks(tasks) };
           }
-          return { title: String(p || '').trim(), tasks: [] };
+          return { title: stripPhaseTitlePrefix(p), tasks: [] };
         }).filter((p) => p.title).slice(0, maxPhases);
       }
       const text = String(raw || '').trim();
@@ -1499,8 +1505,8 @@
         const part = String(chunk || '').trim();
         if (!part) return null;
         const idx = part.indexOf('::');
-        if (idx < 0) return { title: part, tasks: [] };
-        const title = part.slice(0, idx).trim();
+        if (idx < 0) return { title: stripPhaseTitlePrefix(part), tasks: [] };
+        const title = stripPhaseTitlePrefix(part.slice(0, idx));
         const tasks = part.slice(idx + 2).split(/\s*;\s*|\s*•\s*/);
         return title ? { title, tasks: mkTasks(tasks) } : null;
       }).filter(Boolean).slice(0, maxPhases);
@@ -1550,7 +1556,7 @@
         if (!summary && /^>\s+/.test(line)) { summary = line.replace(/^>\s+/, '').trim(); return; }
         const head = line.match(/^##\s+Phase\s+\d+\s*[·:.\-]?\s*(.*)$/i);
         if (head) {
-          current = { title: head[1].trim(), tasks: [] };
+          current = { title: stripPhaseTitlePrefix(head[1]), tasks: [] };
           phases.push(current);
           return;
         }
@@ -1598,7 +1604,7 @@
     // app.js") — used only when the model plan is missing/empty, so a lost planner
     // response degrades to the user's own file list instead of one index.html.
     function extractExplicitTaskFilePaths(taskText = '', maxFiles = 12) {
-      const libraryNames = new Set(['node.js', 'three.js', 'vue.js', 'next.js', 'express.js', 'd3.js', 'chart.js', 'p5.js', 'react.js', 'jquery.js']);
+      const libraryNames = new Set(['node.js', 'three.js', 'vue.js', 'next.js', 'express.js', 'd3.js', 'chart.js', 'p5.js', 'react.js', 'jquery.js', 'auth.js', 'nextauth/auth.js', 'alpine.js']);
       const out = [];
       const seen = new Set();
       // Leading slash sits OUTSIDE the dir group: "/contact.html" (root file,
@@ -1991,6 +1997,10 @@
         : deriveProjectNameFromTask(taskText);
       let expectedFiles = parseAgentExpectedFiles(parsed && parsed.expected_files ? parsed.expected_files : '');
       expectedFiles = expectedFiles.filter((path) => !/\.(?:png|jpe?g|gif|webp|bmp|ico|tiff?)$/i.test(String(path || '')));
+      // "Auth: NextAuth/Auth.js" in a task's stack list is a LIBRARY reference the
+      // planner parrots as a deliverable (it created a real /NextAuth folder).
+      const libraryEchoPath = /^\/nextauth\/auth\.js$/i;
+      expectedFiles = expectedFiles.filter((path) => !libraryEchoPath.test(String(path || '')));
       // Binary document/sheet formats can't be authored as text — plan the text-native
       // equivalent so the plan, write target, and validation all agree (.pdf/.docx/.pptx
       // → .html; .xlsx/.ods → .csv). Mirrors the executor's write-time redirect.
@@ -2018,7 +2028,8 @@
           || explicitlyNamed.has(path)
         ));
       }
-      let affectedFiles = parseAgentPlanPathList(parsed && parsed.affected_files ? parsed.affected_files : '').map(mapBinaryDocPath);
+      let affectedFiles = parseAgentPlanPathList(parsed && parsed.affected_files ? parsed.affected_files : '').map(mapBinaryDocPath)
+        .filter((path) => !libraryEchoPath.test(String(path || '')));
       let filesToInspect = parseAgentPlanPathList(parsed && parsed.files_to_inspect ? parsed.files_to_inspect : '');
       let doneCriteria = parseAgentPlanTextList(parsed && parsed.done_criteria ? parsed.done_criteria : '', 5); // cap 5
       let phases = parseAgentPlanPhases(parsed && parsed.phases ? parsed.phases : ''); // [{title,tasks}]
@@ -2047,9 +2058,10 @@
       // User-typed deliverables outrank a lossy plan: a dropped /contact.html made
       // PENDING_REQUIREMENTS say "none" and force-finalized with a page missing.
       if (taskKind === 'project' && !singleHtmlFileProject && explicitTaskFiles.size) {
-        const planned = new Set(expectedFiles.map((path) => normalizeWorkspacePath(path)));
+        const planned = new Set(expectedFiles.map((path) => normalizeWorkspacePath(path).toLowerCase()));
         explicitTaskFiles.forEach((path) => {
-          if (!planned.has(path)) { planned.add(path); expectedFiles.push(path); }
+          const key = String(path || '').toLowerCase();
+          if (!planned.has(key)) { planned.add(key); expectedFiles.push(path); }
         });
       }
       const rootEntries = Array.isArray(workspaceContext.rootEntries) ? workspaceContext.rootEntries : [];

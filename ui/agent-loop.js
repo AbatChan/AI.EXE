@@ -251,16 +251,29 @@
   // Natural phase-handoff line: rotate phrasings by phase index so back-to-back
   // handoffs don't read like the same canned template, while keeping the phase
   // names and the literal "Continue" cue.
-  function buildPhaseHandoffMessage(doneIdx, doneTitle, nextIdx, nextTitle) {
-    const doneName = `Phase ${doneIdx + 1}${doneTitle ? ` (${doneTitle})` : ''}`;
-    const nextName = `Phase ${nextIdx + 1}${nextTitle ? ` — ${nextTitle}` : ''}`;
-    const variants = [
-      `That's ${doneName} finished. Whenever you're ready, press Continue and I'll get started on ${nextName}.`,
-      `${doneName} is all built. Continue takes us into ${nextName} next.`,
-      `Just wrapped up ${doneName} — hit Continue and I'll dig into ${nextName}.`,
-      `${doneName} is done and in place. Next comes ${nextName}; just press Continue.`,
-      `Finished with ${doneName}. Press Continue when you want me to move on to ${nextName}.`,
-    ];
+  function buildPhaseHandoffMessage(doneIdx, doneTitle, nextIdx, nextTitle, options = {}) {
+    // Belt-and-braces: titles are stripped at parse time, but legacy plan.md
+    // entries may still carry the "Phase N —" prefix.
+    const clean = (t) => String(t || '').replace(/^(?:\s*phase\s*\d+\s*[—–·:.\-]*\s*)+/i, '').trim();
+    const doneName = `Phase ${doneIdx + 1}`;
+    const nextName = `Phase ${nextIdx + 1}${clean(nextTitle) ? ` — ${clean(nextTitle)}` : ''}`;
+    // When appended under the model's own "Phase N complete — ..." line, don't
+    // restate completion; just give the forward cue.
+    const variants = options && options.forwardOnly
+      ? [
+        `Whenever you're ready, press Continue and I'll get started on ${nextName}.`,
+        `Continue takes us into ${nextName} next.`,
+        `Hit Continue and I'll dig into ${nextName}.`,
+        `Next up: ${nextName} — just press Continue.`,
+        `Press Continue when you want me to move on to ${nextName}.`,
+      ]
+      : [
+        `That's ${doneName} finished. Whenever you're ready, press Continue and I'll get started on ${nextName}.`,
+        `${doneName} is all built. Continue takes us into ${nextName} next.`,
+        `Just wrapped up ${doneName} — hit Continue and I'll dig into ${nextName}.`,
+        `${doneName} is done and in place. Next comes ${nextName}; just press Continue.`,
+        `Finished with ${doneName}. Press Continue when you want me to move on to ${nextName}.`,
+      ];
     return variants[Math.abs(Number(doneIdx) || 0) % variants.length];
   }
 
@@ -1302,10 +1315,10 @@
         // to the first phase, everything else to the last. Fresh plans only —
         // plan.md resumes keep their persisted contract.
         if (!preferPlanFile) {
-          const covered = new Set(allPhaseFilePaths({ phases }, deps.normalizeWorkspacePath));
+          const covered = new Set(allPhaseFilePaths({ phases }, deps.normalizeWorkspacePath).map((p) => p.toLowerCase()));
           const missing = (Array.isArray(planSpec.expectedFiles) ? planSpec.expectedFiles : [])
             .map((p) => deps.normalizeWorkspacePath(p || ''))
-            .filter((p) => p && p !== '/' && /\.[A-Za-z0-9]+$/.test(p) && !covered.has(p));
+            .filter((p) => p && p !== '/' && /\.[A-Za-z0-9]+$/.test(p) && !covered.has(p.toLowerCase()));
           if (missing.length) {
             const foundationRe = /(?:^\/index\.html$|^\/src\/(?:main|app|index)\.[a-z]+$|^\/package\.json$|config\.[a-z]+$)/i;
             missing.forEach((p) => {
@@ -1328,11 +1341,18 @@
         if (preferPlanFile) {
           const phaseFiles = allPhaseFilePaths({ phases }, deps.normalizeWorkspacePath);
           if (phaseFiles.length) {
-            const merged = Array.from(new Set([
+            // Case-insensitive union, plan.md casing first: a re-plan that
+            // Sentence-cases paths (/Src/app/...) used to duplicate the whole list.
+            const seenLower = new Set();
+            const merged = [];
+            [
               ...phaseFiles,
               ...(Array.isArray(planSpec.expectedFiles) ? planSpec.expectedFiles : [])
                 .map((p) => deps.normalizeWorkspacePath(p || '')).filter((p) => p && p !== '/'),
-            ]));
+            ].forEach((p) => {
+              const key = p.toLowerCase();
+              if (!seenLower.has(key)) { seenLower.add(key); merged.push(p); }
+            });
             planSpec.expectedFiles = merged;
             planSpec.affectedFiles = merged.slice();
           }
@@ -2524,7 +2544,7 @@
               const nextPhase = phaseState.phases[res.nextIdx] || {};
               setAgentProgress('Phase complete.');
               let phaseMsg = deps.sanitizeAssistantText(decision.message || '') || '';
-              const handoff = buildPhaseHandoffMessage(res.idx, res.donePhase.title, res.nextIdx, nextPhase.title);
+              const handoff = buildPhaseHandoffMessage(res.idx, res.donePhase.title, res.nextIdx, nextPhase.title, { forwardOnly: Boolean(phaseMsg) });
               phaseMsg = phaseMsg ? `${phaseMsg}\n\n${handoff}` : handoff;
               if (agentHasWorkspaceMutations()) {
                 await deps.refreshWorkspaceTree(true);
