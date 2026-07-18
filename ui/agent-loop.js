@@ -2726,10 +2726,16 @@
         if (decision.action === 'tool' && String(decision.tool || '').toLowerCase() === 'write_file') {
           const writePath = deps.normalizeWorkspacePath(decision.path || '');
           // Allow rewriting a tiny STUB with substantially more content — that's a
-          // legitimate expansion (e.g. a 1-line README), not a polish loop.
+          // legitimate expansion (e.g. a 1-line README), not a polish loop. In the
+          // two-phase write flow the decision carries NO content (newLen 0) — the
+          // harness collects it in a separate step — so a stub must be expandable on
+          // newLen 0 too, else the model deadlocks: inlining content to prove the
+          // expansion trips the output-limit guard, and omitting it (the CORRECT
+          // shape) trips this one.
           const savedLen = lastWriteCharsFor(writePath);
           const newLen = String(decision.content || '').length;
-          const expandingStub = savedLen >= 0 && savedLen < 200 && newLen > Math.max(200, savedLen * 2);
+          const expandingStub = savedLen >= 0 && savedLen < 200
+            && (newLen === 0 || newLen > Math.max(200, savedLen * 2));
           if (writePath && !expandingStub && lastWriteWithoutFailureSince(writePath)) {
             recordDebugTrace('agent_repeat_rewrite_blocked', {
               chatId: String(chatId || ''), step: String(step), path: writePath,
