@@ -3442,7 +3442,7 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
                         _dom_probe_stable = 0
                     _dom_probe_prev = _probe
             if time.time() - last_data_time > timeout:
-                print(f"Timeout: No data received for {timeout} seconds. Exiting loop.")
+                print(f"Timeout: No data received for {timeout} seconds. Exiting loop.", flush=True)
                 try:
                     _posts = driver.execute_script("return window.__aiexe_urls || []")
                     print("AIEXE_DIAG_FETCH posts=" + str(_posts)[:900], flush=True)
@@ -3514,6 +3514,19 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
                 if driver.execute_script("return window.streamComplete;"):
                     _stable += 1
                 time.sleep(0.8)
+            if _structured_limit and not _structured_dom_result and eval_count == 0:
+                # Final-chance read after the window: the reply may have rendered but
+                # never parsed mid-loop. Also the ONLY diagnostic for an empty structured
+                # capture — says whether the DOM reader was blind or the text had no JSON.
+                try:
+                    _txt = _aiexe_read_last_assistant_text(
+                        driver, include_reasoning=(response_format != ResponseFormat.COMPLETION_AS_STRING)) or ""
+                except Exception:
+                    _txt = ""
+                _structured_dom_result = _complete_json_prefix(_txt)
+                print("AIEXE_STRUCTURED empty capture: dom_len=%d json_found=%s gen_running=%s preview=%r" % (
+                    len(_txt), bool(_structured_dom_result),
+                    _aiexe_generation_running(driver), _txt[:200]), flush=True)
             if _structured_dom_result:
                 eval_count += 1
                 if response_format == ResponseFormat.CHAT_NON_STREAMED:

@@ -9619,8 +9619,15 @@ async function streamOllamaChatCompletion(provider, prompt, handlers = {}, optio
   // unbounded one-shot path would recreate the exact runaway-output timeout this
   // stream guard is meant to prevent.
   if (stopOnCompleteJson) {
-    const message = structuredStreamError || 'Adapter structured stream ended without a complete JSON object.';
-    return { ok: false, output: '', error: message, message, nonRetriable: true, provider, model };
+    if (structuredStreamError) {
+      // Adapter-reported refusal (daily limit, plan expired) — retrying replays it.
+      return { ok: false, output: '', error: structuredStreamError, message: structuredStreamError, nonRetriable: true, provider, model };
+    }
+    // Empty stream with no explicit error = the adapter lost a reply it may well
+    // have received (capture miss). Retriable: the agent loop's short-backoff
+    // retry re-asks and recovers instead of killing the whole run.
+    const message = 'Adapter structured stream ended without a complete JSON object.';
+    return { ok: false, output: '', error: message, message, provider, model };
   }
   const result = await requestOllamaChatCompletion(provider, prompt, options.maxTokens, options.systemPrompt || '', Boolean(options.thinkActive), {
     attachments: options.attachments,
