@@ -304,6 +304,12 @@ class AdapterManager:
                 with open(archive_path, "wb") as out:
                     for chunk in response.iter_bytes(1024 * 256):
                         out.write(chunk)
+            # Sweep leftovers from a prior locked swap so they don't accumulate.
+            for leftover in glob.glob(driver + ".old-*"):
+                try:
+                    os.remove(leftover)
+                except OSError:
+                    pass
             with zipfile.ZipFile(archive_path) as archive:
                 member = next((n for n in archive.namelist()
                                if n.lower().endswith("/chromedriver.exe")), "")
@@ -315,7 +321,7 @@ class AdapterManager:
                         if not chunk:
                             break
                         out.write(chunk)
-            os.replace(driver + ".tmp", driver)
+            self._swap_into_place(driver + ".tmp", driver)
             with open(marker, "w", encoding="utf-8") as fh:
                 fh.write(version)
             try:
@@ -324,7 +330,42 @@ class AdapterManager:
                 pass
             return True, ""
         except (OSError, httpx.HTTPError, zipfile.BadZipFile) as exc:
-            return False, "Could not prepare ChromeDriver automatically: " + str(exc)
+            hint = ""
+            if isinstance(exc, PermissionError) or "Access is denied" in str(exc):
+                hint = (" — chromedriver.exe may be running (close AI.EXE fully, "
+                        "or end lingering chromedriver.exe tasks) or blocked by antivirus.")
+            return False, "Could not prepare ChromeDriver automatically: " + str(exc) + hint
+
+    @staticmethod
+    def _swap_into_place(src: str, dst: str) -> None:
+        """Move `src` onto `dst`. POSIX os.replace swaps even a running binary
+        (the old inode survives for any process still using it). Windows locks a
+        running / AV-scanned .exe against replacement (WinError 5), so retry the
+        transient AV lock, then rename the locked original aside — Windows permits
+        renaming a running image even when it forbids replacing or deleting it —
+        and drop the new driver into place (the self-updater trick)."""
+        if os.name != "nt":
+            os.replace(src, dst)
+            return
+        for attempt in range(5):
+            try:
+                os.replace(src, dst)
+                return
+            except PermissionError:
+                try:
+                    os.chmod(dst, 0o666)  # clear a read-only bit set by AV / prior run
+                except OSError:
+                    pass
+                time.sleep(0.4 * (attempt + 1))
+        # Still locked: a chromedriver.exe from a prior session is running. Rename
+        # it out of the way (allowed while running), then place the new file.
+        stale = "%s.old-%d-%d" % (dst, os.getpid(), int(time.time()))
+        os.rename(dst, stale)
+        os.replace(src, dst)
+        try:
+            os.remove(stale)
+        except OSError:
+            pass  # still held by the running process — swept on a later run
 
     @property
     def install_dir(self) -> str:
