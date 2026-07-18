@@ -16828,6 +16828,15 @@ function renderPhaseTracker() {
   phaseTracker.classList.toggle('collapsed', phaseTrackerCollapsed);
   phaseTracker.classList.add('visible');
   phaseTracker.setAttribute('aria-hidden', 'false');
+  // Card is capped at 400px; each expanded task list scrolls itself. Keep the
+  // item being worked on in view (innerHTML rebuilds reset scrollTop every tick).
+  phaseTracker.querySelectorAll('.phase-row-tasks').forEach((list) => {
+    if (list.scrollHeight <= list.clientHeight) return;
+    const target = list.querySelector('.phase-task:not(.done)') || list.lastElementChild;
+    if (!target) return;
+    const top = target.getBoundingClientRect().top - list.getBoundingClientRect().top + list.scrollTop;
+    list.scrollTop = Math.max(0, top - list.clientHeight / 2);
+  });
   const viewBtn = document.getElementById('phaseTrackerViewPlan');
   if (viewBtn) viewBtn.addEventListener('click', openAgentPlanFile);
   const collapseBtn = document.getElementById('phaseTrackerCollapse');
