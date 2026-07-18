@@ -1005,7 +1005,15 @@
 
           <div class="settings-pane" data-settings-pane="personalization">
             <div class="settings-section">
-              <div class="settings-section-title">Personalization</div>
+              <div class="settings-section-title">About you</div>
+              <label class="chat-modal-label" for="settingsUserProfile">Tell AI.EXE about yourself (optional)</label>
+              <textarea class="chat-modal-input settings-profile-input" id="settingsUserProfile" rows="4" maxlength="2000" placeholder="e.g. I'm Alex from Toronto, Canada. I run a small design business, prefer plain-English explanations, and I'm building income tools."></textarea>
+              <div class="settings-note-block">
+                Used to personalize replies — your name, where you're based, what you work on, how you like answers. Stored only on this device and shared only with the model you chat with. Date, time, and timezone are read from your computer automatically.
+              </div>
+            </div>
+            <div class="settings-section">
+              <div class="settings-section-title">Style & UI preferences</div>
               <div class="settings-placeholder-card">
                 <strong>Reserved for response style and UI preferences</strong>
                 <span>Theme, density, reply tone, editor behavior, and similar preferences can land here later without forcing another settings redesign.</span>

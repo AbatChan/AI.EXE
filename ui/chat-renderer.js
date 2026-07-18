@@ -171,6 +171,9 @@
     function formatPlanItemText(value) {
       const text = String(value || '').trim().replace(/\s+/g, ' ');
       if (!text) return '';
+      const first = (text.match(/^\S+/) || [''])[0].replace(/[),;]+$/, '');
+      const technical = /^(?:[a-z][a-z0-9+.-]*:\/\/|www\.|(?:[a-z]:[\\/]|\.{0,2}[\\/]|[\\/])?[^\s\\/]+[\\/][^\s]+|[\w@+.-]+\.[a-z0-9]{1,12})/i.test(first);
+      if (technical) return text.replace(/\.$/, '');
       const capitalized = text.charAt(0).toUpperCase() + text.slice(1);
       return /[.!?]$/.test(capitalized) ? capitalized : `${capitalized}.`;
     }

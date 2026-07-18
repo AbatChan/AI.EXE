@@ -12,7 +12,7 @@ global.window = global;
 require(path.join(__dirname, '..', 'ui', 'agent-core.js'));
 
 const core = global.AIExeAgentCore.createAgentCore({});
-const { computeAgentChecklistProgress, renderAgentChecklist } = core;
+const { computeAgentChecklistProgress, renderAgentChecklist, parseAgentPlanPhases, buildAgentPlanMarkdown } = core;
 
 let passed = 0;
 function ok(name, cond) {
@@ -75,6 +75,19 @@ const items = ['resize search close icon', 'redesign movie cards', 'no class/id 
     /- \[x\]\s+resize search close icon\.?/i.test(md)
     && /- \[ \]\s+no class\/id mismatches\.?/i.test(md));
   ok('empty checklist renders empty string', renderAgentChecklist([]) === '');
+}
+
+// Technical task labels keep exact casing and do not receive sentence punctuation.
+{
+  const phases = parseAgentPlanPhases('Foundation :: /src/App.tsx ; README.md ; https://example.com/setup');
+  const labels = phases[0].tasks.map((task) => task.text);
+  ok('phase file paths preserve casing and punctuation', labels[0] === '/src/App.tsx');
+  ok('phase filenames preserve casing and punctuation', labels[1] === 'README.md');
+  ok('phase URLs preserve casing and punctuation', labels[2] === 'https://example.com/setup');
+  const markdown = buildAgentPlanMarkdown({ projectName: 'demo', phases });
+  ok('plan persistence does not reformat technical labels', markdown.includes('- [ ] /src/App.tsx\n')
+    && markdown.includes('- [ ] README.md\n')
+    && markdown.includes('- [ ] https://example.com/setup\n'));
 }
 
 console.log(`\n${passed} passed`);

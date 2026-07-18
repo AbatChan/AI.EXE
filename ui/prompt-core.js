@@ -5,7 +5,7 @@
       chat_main: [
         '<|im_start|>system',
         'You are AI.EXE, {{ASSISTANT_DESCRIPTOR}}.',
-        'Current date and time: {{CURRENT_DATETIME}} (from the device clock). This is known information — answer date/time questions directly and use the current year;',
+        'Current date and time: {{CURRENT_DATETIME}} (from the device clock). This is known information — answer date/time questions directly and use the current year; you may infer the user\'s likely country/region from the timezone and locale for suggestions, units, and spelling (phrase it as a friendly inference, never as certainty or tracking).',
         '',
         'Rules:',
         '- You are AI.EXE. Do not present yourself as Qwen, Alibaba, Claude, GPT, Gemini, Llama, Venice, or any hosted service.',
@@ -18,6 +18,8 @@
         '- Agent mode is the only mode that can create, read, edit, test, or verify workspace files. If Agent mode is off and the user asks you to create/write/save a file, either provide the code inline in chat or tell them to enable Agent mode; do not say you will create/write/place the file now.',
         '- Do not say the message is cut off or ask for more context unless the user message is actually empty.',
         '{{USER_CUSTOM_CONTEXT}}',
+        '{{USER_PROFILE_CONTEXT}}',
+        '{{RECENT_WORK_CONTEXT}}',
         '{{MODE_INSTRUCTIONS}}',
         '{{THINK_INSTRUCTION}}',
         '{{CHAT_NAME_INSTRUCTION}}',
@@ -401,6 +403,16 @@
       const customContextReminder = manualContextRaw
         ? `[Active user preference for THIS reply — obey it exactly: ${manualContextRaw}]`
         : '';
+      // Global "About you" profile + cross-chat recall for personal continuity
+      // ("yesterday we built X"); both optional and filled from local data only.
+      const userProfileRaw = deps.getUserProfileContext ? String(deps.getUserProfileContext() || '').trim() : '';
+      const userProfileBlock = userProfileRaw
+        ? `ABOUT_THE_USER (from their settings profile — weave in naturally when relevant; never recite it back or claim to track them): ${userProfileRaw.slice(0, 800)}`
+        : '';
+      const recentWorkRaw = deps.getRecentWorkContext ? String(deps.getRecentWorkContext(chatId) || '').trim() : '';
+      const recentWorkBlock = recentWorkRaw
+        ? `RECENT_WORK (this user's other recent chats in this app — you may reference them conversationally, e.g. "yesterday we worked on...", but their files/messages are NOT open here):\n${recentWorkRaw}`
+        : '';
       const canvasModeUiEnabled = Boolean((chat && chat.canvasMode) || canvasModeEnabled || (options && options.canvasForced));
       const hasCanvasModeOverride = options && typeof options.canvasModeOverride === 'boolean';
       const canvasModeActive = hasCanvasModeOverride
@@ -541,10 +553,18 @@
         ASSISTANT_DESCRIPTOR: assistantDescriptor,
         CURRENT_USER: currentUserTag,
         CURRENT_DATETIME: (() => {
-          try { return new Date().toLocaleString(); } catch (_) { return new Date().toString(); }
+          try {
+            if (typeof deps.getAssistantDateTimeContext === 'function') {
+              const rich = String(deps.getAssistantDateTimeContext() || '').trim();
+              if (rich) return rich;
+            }
+            return new Date().toLocaleString();
+          } catch (_) { return new Date().toString(); }
         })(),
         ANTI_LOOP_INSTRUCTION: antiLoopInstruction,
         USER_CUSTOM_CONTEXT: customContextInstruction,
+        USER_PROFILE_CONTEXT: userProfileBlock,
+        RECENT_WORK_CONTEXT: recentWorkBlock,
         USER_CUSTOM_REMINDER: customContextReminder,
         MODE_INSTRUCTIONS: modeInstructions,
         CANVAS_INSTRUCTIONS: canvasInstructions,

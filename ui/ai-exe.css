@@ -2291,6 +2291,16 @@ html.platform-mac .settings-sidebar {
   color: var(--text);
 }
 
+.settings-main textarea.settings-profile-input {
+  height: auto;
+  min-height: 96px;
+  padding: 10px 14px;
+  line-height: 1.5;
+  resize: vertical;
+  font-family: var(--font-sans);
+  margin-bottom: 10px;
+}
+
 .settings-main .chat-modal-input:focus {
   border-color: rgba(0, 229, 255, 0.72);
   box-shadow: 0 0 0 2px rgba(0, 229, 255, 0.1);
@@ -6249,6 +6259,7 @@ html.platform-mac .settings-sidebar {
   margin-bottom: 8px;
   /* Whole card caps at 400px; the phases body scrolls, head stays pinned. */
   max-height: 400px;
+  overflow: hidden;
   border-radius: 14px;
   background: linear-gradient(180deg, rgba(28, 34, 46, 0.92), rgba(22, 26, 36, 0.92));
   box-shadow: inset 0 0 0 1px rgba(138, 193, 255, 0.16), 0 10px 26px rgba(0, 0, 0, 0.28);
@@ -6269,6 +6280,7 @@ html.platform-mac .settings-sidebar {
   display: flex;
   align-items: center;
   gap: 8px;
+  flex: 0 0 auto;
 }
 
 .phase-tracker-collapse {
@@ -6340,9 +6352,9 @@ html.platform-mac .settings-sidebar {
   display: flex;
   flex-direction: column;
   gap: 3px;
-  /* No scrollbar here: the card's 400px cap squeezes the EXPANDED task list,
-     which scrolls itself (min-height:0 chain lets it shrink). */
+  flex: 1 1 auto;
   min-height: 0;
+  overflow: hidden;
 }
 
 .phase-tracker-progress {
@@ -6364,6 +6376,11 @@ html.platform-mac .settings-sidebar {
   flex: 0 0 auto;
 }
 
+.phase-row.expanded {
+  flex: 1 1 auto;
+  overflow: hidden;
+}
+
 .phase-row-main {
   display: grid;
   grid-template-columns: 16px minmax(0, 1fr) auto auto;
@@ -6373,6 +6390,8 @@ html.platform-mac .settings-sidebar {
   border: 0;
   background: transparent;
   padding: 4px 6px;
+  min-height: 30px;
+  flex: 0 0 auto;
   border-radius: 8px;
   cursor: pointer;
   font-family: var(--font-sans);
@@ -6455,7 +6474,7 @@ html.platform-mac .settings-sidebar {
   flex-direction: column;
   gap: 2px;
   padding-left: 24px;
-  /* Per-phase scrollbar: shrinks within the card's 400px cap and scrolls. */
+  flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
   overscroll-behavior: contain;

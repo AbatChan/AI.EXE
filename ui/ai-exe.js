@@ -1552,6 +1552,7 @@ let appSettings = {
   modelUrl: '',
   keepModelOnUpdate: true,
   debugTraceEnabled: false,
+  userProfile: '',
 };
 const inferenceProviderDefs = {
   local: {
@@ -7077,6 +7078,7 @@ function loadAppSettings() {
     modelUrl: '',
     keepModelOnUpdate: true,
     debugTraceEnabled: false,
+    userProfile: '',
   };
   try {
     const raw = localStorage.getItem(settingsStorageKey);
@@ -7136,6 +7138,7 @@ function loadAppSettings() {
     if (typeof parsed.modelUrl === 'string') appSettings.modelUrl = parsed.modelUrl.trim();
     if (typeof parsed.keepModelOnUpdate === 'boolean') appSettings.keepModelOnUpdate = parsed.keepModelOnUpdate;
     if (typeof parsed.debugTraceEnabled === 'boolean') appSettings.debugTraceEnabled = parsed.debugTraceEnabled;
+    if (typeof parsed.userProfile === 'string') appSettings.userProfile = parsed.userProfile.slice(0, 2000);
   } catch (_) { }
 }
 
@@ -7249,15 +7252,71 @@ function isRemoteInferenceProviderEnabled() {
   return remoteProvidersEnabled && getSelectedInferenceProvider() !== 'local';
 }
 
+// Locale/timezone from the OS only — no network lookup, no telemetry.
+function getUserLocaleInfo() {
+  let timeZone = '';
+  let locale = '';
+  try {
+    const opts = Intl.DateTimeFormat().resolvedOptions();
+    timeZone = String(opts.timeZone || '');
+    locale = String(opts.locale || '');
+  } catch (_) { }
+  if (!locale) { try { locale = String(navigator.language || ''); } catch (_) { } }
+  return { timeZone, locale };
+}
+
+// Rich "now" string for prompts: weekday + date + time + timezone + locale so the
+// model can reference today/yesterday and infer region itself.
+function buildAssistantDateTimeContext() {
+  const { timeZone, locale } = getUserLocaleInfo();
+  let stamp = '';
+  try {
+    stamp = new Date().toLocaleString(undefined, {
+      weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', hour: 'numeric', minute: '2-digit',
+    });
+  } catch (_) { stamp = new Date().toLocaleString(); }
+  const extras = [timeZone ? `timezone ${timeZone}` : '', locale ? `locale ${locale}` : ''].filter(Boolean).join(', ');
+  return extras ? `${stamp} (${extras})` : stamp;
+}
+
+function getUserProfileContext() {
+  return String((appSettings && appSettings.userProfile) || '').trim();
+}
+
+// Recent OTHER chats so replies can say "yesterday we built X" across sessions.
+function buildRecentWorkContext(currentChatId = '') {
+  try {
+    const now = nowTs();
+    const dayKey = (ts) => new Date(ts).toDateString();
+    const relLabel = (ts) => {
+      if (!ts) return '';
+      if (dayKey(ts) === dayKey(now)) return 'earlier today';
+      if (dayKey(ts) === dayKey(now - 86400000)) return 'yesterday';
+      const days = Math.round((now - ts) / 86400000);
+      if (days < 7) return `${days} days ago`;
+      return `on ${new Date(ts).toLocaleDateString()}`;
+    };
+    return (Array.isArray(chats) ? chats : [])
+      .filter((c) => c && String(c.id || '') !== String(currentChatId || '')
+        && String(c.name || '').trim() && String(c.name).trim().toLowerCase() !== 'new chat')
+      .sort((a, b) => (Number(b.updatedAt) || 0) - (Number(a.updatedAt) || 0))
+      .slice(0, 3)
+      .map((c) => `- "${String(c.name).trim().slice(0, 60)}" (${relLabel(Number(c.updatedAt) || 0)})`)
+      .join('\n');
+  } catch (_) { return ''; }
+}
+
 function getAgentEnvironmentContext() {
   const provider = getSelectedInferenceProvider();
   const def = getInferenceProviderDef(provider);
   const label = String((def && def.label) || provider || 'Local Model');
   const model = String(getProviderModel(provider) || '').trim();
   const isLocal = provider === 'local';
+  const nowLine = `- Current date/time: ${buildAssistantDateTimeContext()}. Use it for today/yesterday references and any generated dates.`;
   if (isLocal) {
     return [
       'AGENT_ENVIRONMENT:',
+      nowLine,
       '- Selected inference provider: local model (offline/local runtime).',
       '- Prefer self-contained local projects that run without hosted services, cloud databases, external APIs, or internet-only assets.',
       '- If the user asks for React/Tailwind/TypeScript/Next/Vue and the local environment cannot reliably run a build step, downgrade to a rich static/local implementation and explain the limitation in the final response.',
@@ -7266,6 +7325,7 @@ function getAgentEnvironmentContext() {
   }
   return [
     'AGENT_ENVIRONMENT:',
+    nowLine,
     `- Selected inference provider: ${label}${model ? ` (${model})` : ''}; this is not the local/offline model.`,
     '- Do NOT downgrade framework requests just because a local/offline fallback exists. If the user asks for React, Tailwind CSS, TypeScript, Next, Vue, or a component architecture, plan and build the corresponding local project files.',
     '- You may plan normal local development files such as package.json, src/App.tsx, src/main.tsx, tsconfig.json, vite.config.ts, and local mock data/state when they fit the request.',
@@ -7605,7 +7665,7 @@ function getSettingsSectionMeta(section) {
   if (key === 'personalization') {
     return {
       title: 'Personalization',
-      subtitle: 'Reserved for reply style, themes, layout density, and UI preferences.',
+      subtitle: 'Tell AI.EXE about yourself so replies feel personal; stays on this device.',
     };
   }
   if (key === 'advanced') {
@@ -8428,6 +8488,8 @@ function saveSettingsFromUi(options = {}) {
   appSettings.modelUrl = settingsModelUrlInput ? settingsModelUrlInput.value.trim() : '';
   appSettings.keepModelOnUpdate = Boolean(settingsKeepModelChk && settingsKeepModelChk.checked);
   appSettings.debugTraceEnabled = Boolean(settingsDebugTraceChk && settingsDebugTraceChk.checked);
+  const profileInput = document.getElementById('settingsUserProfile');
+  if (profileInput) appSettings.userProfile = String(profileInput.value || '').trim().slice(0, 2000);
   const saved = saveAppSettings();
   updateModelSetupBanner(); // a freshly-added API key should hide the setup banner
   if (options.toast) {
@@ -11464,6 +11526,8 @@ async function openSettingsModal() {
     if (settingsModelUrlInput) settingsModelUrlInput.value = appSettings.modelUrl;
     if (settingsKeepModelChk) settingsKeepModelChk.checked = appSettings.keepModelOnUpdate;
     if (settingsDebugTraceChk) settingsDebugTraceChk.checked = appSettings.debugTraceEnabled;
+    const profileInput = document.getElementById('settingsUserProfile');
+    if (profileInput) profileInput.value = String(appSettings.userProfile || '');
     syncSettingsWorkModeUi();
     syncSettingsProviderUi();
     renderSettingsWorkerList();
@@ -12755,6 +12819,9 @@ const promptCore = window.AIExePromptCore && typeof window.AIExePromptCore.creat
       : 'a software-engineering assistant'),
     getUncensoredEscalationInstruction,
     shouldInlineNameChatResponse,
+    getAssistantDateTimeContext: buildAssistantDateTimeContext,
+    getUserProfileContext,
+    getRecentWorkContext: buildRecentWorkContext,
   })
   : null;
 const promptCoreApi = promptCore || {};
@@ -15589,6 +15656,13 @@ if (settingsApiEndpointInput) {
 if (settingsModelUrlInput) {
   settingsModelUrlInput.addEventListener('input', () => scheduleSettingsAutosave(420, 'Model download URL'));
 }
+{
+  const settingsUserProfileInput = document.getElementById('settingsUserProfile');
+  if (settingsUserProfileInput) {
+    // Longer debounce: it's free-form prose, don't toast on every keystroke pause.
+    settingsUserProfileInput.addEventListener('input', () => scheduleSettingsAutosave(900, 'About you'));
+  }
+}
 if (settingsKeepModelChk) {
   settingsKeepModelChk.addEventListener('change', () => saveSettingsFromUi({ toastChange: settingsKeepModelChk.checked ? 'Keep model on update: on' : 'Keep model on update: off' }));
 }
@@ -16702,6 +16776,17 @@ function phaseIsDone(phase) {
   return tasks.length ? tasks.every((t) => t && t.done) : Boolean(phase.done);
 }
 
+function formatPhaseTaskLabel(value) {
+  const text = String(value || '').trim().replace(/\s+/g, ' ');
+  if (!text) return '';
+  const first = (text.match(/^\S+/) || [''])[0].replace(/[),;]+$/, '');
+  const technical = /^(?:[a-z][a-z0-9+.-]*:\/\/|www\.|(?:[a-z]:[\\/]|\.{0,2}[\\/]|[\\/])?[^\s\\/]+[\\/][^\s]+|[\w@+.-]+\.[a-z0-9]{1,12})/i.test(first);
+  if (!technical) return text;
+  return text
+    .replace(/^([A-Z][A-Za-z0-9+.-]*):\/\//, (match, scheme) => `${scheme.toLowerCase()}://`)
+    .replace(/\.$/, '');
+}
+
 // Snapshot the tracker on the owning chat so it survives reload (cleared when done).
 function persistPhaseTrackerToChat(state) {
   try {
@@ -16806,7 +16891,7 @@ function renderPhaseTracker() {
         } else {
           liveNew = phaseTrackerLiveHighlight.has(key);
         }
-        return `<div class="phase-task${tdone ? ' done' : ''}${liveNew ? ' live-new' : ''}"><span class="phase-task-box">${tdone ? '✓' : ''}</span><span class="phase-task-label">${escapeHtml(String((t && t.text) || ''))}</span></div>`;
+        return `<div class="phase-task${tdone ? ' done' : ''}${liveNew ? ' live-new' : ''}"><span class="phase-task-box">${tdone ? '✓' : ''}</span><span class="phase-task-label">${escapeHtml(formatPhaseTaskLabel((t && t.text) || ''))}</span></div>`;
       }).join('')}</div>`;
     }
     return `<div class="phase-row ${status}${expanded ? ' expanded' : ''}">`
@@ -16850,7 +16935,10 @@ function renderPhaseTracker() {
     btn.addEventListener('click', () => {
       const idx = Number(btn.getAttribute('data-phase-toggle'));
       if (phaseTrackerExpanded.has(idx)) phaseTrackerExpanded.delete(idx);
-      else phaseTrackerExpanded.add(idx);
+      else {
+        phaseTrackerExpanded.clear();
+        phaseTrackerExpanded.add(idx);
+      }
       renderPhaseTracker();
     });
   });
