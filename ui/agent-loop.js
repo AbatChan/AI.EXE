@@ -1899,6 +1899,34 @@
                 };
               }
             }
+            // A cut-off FINAL decision needs no retry: its only payload is the prose
+            // summary, and a summary missing its last few words is still a fine
+            // summary. Salvage it instead of re-asking — a re-ask just rewords the
+            // final and burns 2-3 more Venice requests (the DOM scrape snapshots
+            // before Venice renders the closing brace). Tool decisions still retry:
+            // a truncated path/content is genuinely unusable.
+            if (res && !res.ok && !res.timedOut && !res.hardFail
+                && /structured stream ended (?:with incomplete JSON|without a complete JSON object)/i.test(String(res.message || ''))) {
+              const raw = String(res.output || '');
+              const actionMatch = raw.match(/"action"\s*:\s*"(\w+)"/);
+              if (actionMatch && actionMatch[1] === 'final') {
+                const msgMatch = raw.match(/"message"\s*:\s*"((?:[^"\\]|\\.)*)/);
+                let salvaged = msgMatch ? msgMatch[1].replace(/\\+$/, '') : '';
+                try { salvaged = JSON.parse('"' + salvaged + '"'); } catch (_) { /* keep the literal partial */ }
+                salvaged = String(salvaged || '').trim();
+                if (salvaged) {
+                  recordDebugTrace('agent_incomplete_final_salvaged', {
+                    chatId: String(chatId || ''), step: String(step),
+                  }, { chatId: String(chatId || ''), step, rawPreview: deps.debugPreview(raw, 300) });
+                  res = {
+                    ok: true,
+                    output: JSON.stringify({ action: 'final', message: salvaged }),
+                    provider: res.provider,
+                    model: res.model,
+                  };
+                }
+              }
+            }
           }
           if (!res || !res.ok) {
             // The model inlined a whole file into the decision JSON and blew the
