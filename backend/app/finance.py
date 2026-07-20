@@ -17,6 +17,7 @@ DEFAULT_SETTINGS = {
     "tax_reserve_bps": 2000,
     "developer_split_bps": 5000,
     "income_target_cents": 100000,
+    "mining_hardware_cost_cents": 0,
 }
 
 
@@ -76,6 +77,19 @@ class FinanceStore:
                     status TEXT NOT NULL CHECK(status IN ('draft', 'sent', 'paid', 'void')),
                     note TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS mining_pilot_entries (
+                    id TEXT PRIMARY KEY,
+                    occurred_date TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    hashrate_th REAL NOT NULL DEFAULT 0,
+                    downtime_hours REAL NOT NULL DEFAULT 0,
+                    power_cost_cents INTEGER NOT NULL DEFAULT 0,
+                    provider_fee_cents INTEGER NOT NULL DEFAULT 0,
+                    payout_cents INTEGER NOT NULL DEFAULT 0,
+                    expected_cents INTEGER NOT NULL DEFAULT 0,
+                    provider TEXT NOT NULL DEFAULT '',
+                    memo TEXT NOT NULL DEFAULT ''
+                );
                 """
             )
             for key, value in DEFAULT_SETTINGS.items():
@@ -102,7 +116,8 @@ class FinanceStore:
         return values
 
     def update_settings(self, updates: Dict) -> Dict:
-        allowed = {"base_currency", "tax_reserve_bps", "developer_split_bps", "income_target_cents"}
+        allowed = {"base_currency", "tax_reserve_bps", "developer_split_bps", "income_target_cents",
+                   "mining_hardware_cost_cents"}
         clean = {key: value for key, value in updates.items() if key in allowed and value is not None}
         if not clean:
             return self.settings()
@@ -115,6 +130,8 @@ class FinanceStore:
                 raise ValueError(f"{key} must be between 0 and 10000")
         if "income_target_cents" in clean and int(clean["income_target_cents"]) < 0:
             raise ValueError("income_target_cents cannot be negative")
+        if "mining_hardware_cost_cents" in clean and int(clean["mining_hardware_cost_cents"]) < 0:
+            raise ValueError("mining_hardware_cost_cents cannot be negative")
 
         with self._lock, self._connect() as conn:
             for key, value in clean.items():
@@ -329,6 +346,172 @@ class FinanceStore:
             "invoices": invoice_rows,
             "settings": settings,
             "disclaimer": "Local recordkeeping only. Confirm tax, invoice, and compliance requirements with a qualified professional.",
+        }
+
+    # ---- Mining pilot ----------------------------------------------------
+    def add_mining_entry(self, occurred_date: str, hashrate_th: float = 0, downtime_hours: float = 0,
+                         power_cost_cents: int = 0, provider_fee_cents: int = 0, payout_cents: int = 0,
+                         expected_cents: int = 0, provider: str = "", memo: str = "") -> Dict:
+        occurred_date = str(occurred_date).strip()
+        try:
+            datetime.strptime(occurred_date, "%Y-%m-%d")
+        except ValueError as exc:
+            raise ValueError("occurred_date must use YYYY-MM-DD") from exc
+        hashrate_th = max(0.0, float(hashrate_th))
+        downtime_hours = min(24.0, max(0.0, float(downtime_hours)))
+        for name, val in (("power_cost_cents", power_cost_cents), ("provider_fee_cents", provider_fee_cents),
+                          ("payout_cents", payout_cents), ("expected_cents", expected_cents)):
+            if int(val) < 0:
+                raise ValueError(f"{name} cannot be negative")
+        entry = {
+            "id": uuid.uuid4().hex,
+            "occurred_date": occurred_date,
+            "created_at": _now(),
+            "hashrate_th": hashrate_th,
+            "downtime_hours": downtime_hours,
+            "power_cost_cents": int(power_cost_cents),
+            "provider_fee_cents": int(provider_fee_cents),
+            "payout_cents": int(payout_cents),
+            "expected_cents": int(expected_cents),
+            "provider": str(provider or "")[:80],
+            "memo": str(memo or "")[:500],
+        }
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                """INSERT INTO mining_pilot_entries
+                   (id, occurred_date, created_at, hashrate_th, downtime_hours, power_cost_cents,
+                    provider_fee_cents, payout_cents, expected_cents, provider, memo)
+                   VALUES (:id, :occurred_date, :created_at, :hashrate_th, :downtime_hours, :power_cost_cents,
+                           :provider_fee_cents, :payout_cents, :expected_cents, :provider, :memo)""",
+                entry,
+            )
+            self._audit(conn, "mining_entry_recorded", {
+                key: entry[key] for key in ("id", "occurred_date", "payout_cents", "power_cost_cents", "provider")
+            })
+        return entry
+
+    def mining_entries(self, limit: int = 90) -> List[Dict]:
+        limit = max(1, min(int(limit), 366))
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM mining_pilot_entries ORDER BY occurred_date DESC, rowid DESC LIMIT ?", (limit,)
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def delete_mining_entry(self, entry_id: str) -> bool:
+        with self._lock, self._connect() as conn:
+            cursor = conn.execute("DELETE FROM mining_pilot_entries WHERE id = ?", (str(entry_id),))
+            if cursor.rowcount:
+                self._audit(conn, "mining_entry_deleted", {"id": entry_id})
+        return bool(cursor.rowcount)
+
+    def mining_summary(self) -> Dict:
+        settings = self.settings()
+        currency = settings["base_currency"]
+        rows = self.mining_entries(limit=366)
+        days = len(rows)
+        payout = sum(r["payout_cents"] for r in rows)
+        power = sum(r["power_cost_cents"] for r in rows)
+        fees = sum(r["provider_fee_cents"] for r in rows)
+        expected = sum(r["expected_cents"] for r in rows)
+        hardware = int(settings.get("mining_hardware_cost_cents", 0))
+        net_cents = payout - power - fees                    # operating profit before hardware
+        net_after_hardware_cents = net_cents - hardware
+        variance_cents = payout - expected                   # actual vs expected
+        downtime_hours = sum(r["downtime_hours"] for r in rows)
+        uptime_pct = round(100.0 * (days * 24 - downtime_hours) / (days * 24), 1) if days else 0.0
+        avg_hashrate = round(sum(r["hashrate_th"] for r in rows) / days, 2) if days else 0.0
+        tax_reserve_cents = max(0, net_cents * int(settings["tax_reserve_bps"]) // 10000)
+        distributable_cents = max(0, net_cents - tax_reserve_cents)
+        developer_share_cents = distributable_cents * int(settings["developer_split_bps"]) // 10000
+        avg_daily_net = round(net_cents / days) if days else 0
+        return {
+            "currency": currency,
+            "days": days,
+            "payout_cents": payout,
+            "power_cost_cents": power,
+            "provider_fee_cents": fees,
+            "expected_cents": expected,
+            "variance_cents": variance_cents,
+            "net_cents": net_cents,
+            "hardware_cost_cents": hardware,
+            "net_after_hardware_cents": net_after_hardware_cents,
+            "avg_daily_net_cents": avg_daily_net,
+            "uptime_pct": uptime_pct,
+            "downtime_hours": round(downtime_hours, 1),
+            "avg_hashrate_th": avg_hashrate,
+            "tax_reserve_cents": tax_reserve_cents,
+            "distributable_cents": distributable_cents,
+            "developer_share_cents": developer_share_cents,
+            "client_share_cents": distributable_cents - developer_share_cents,
+            "entries": rows,
+            "settings": settings,
+            "disclaimer": "Local pilot recordkeeping only. AI.EXE never controls wallets, exchanges, or payouts.",
+        }
+
+    @staticmethod
+    def mining_buy_calculator(hashrate_th: float, hashprice_cents_per_ph_day: float, power_watts: float,
+                              power_rate_cents_per_kwh: float, hosting_cents_per_day: int = 0,
+                              equipment_cost_cents: int = 0, pool_fee_bps: int = 200,
+                              target_payback_days: int = 365) -> Dict:
+        # Pure projection — advises only, moves no money.
+        hashrate_th = max(0.0, float(hashrate_th))
+        hashprice = max(0.0, float(hashprice_cents_per_ph_day))
+        power_watts = max(0.0, float(power_watts))
+        power_rate = max(0.0, float(power_rate_cents_per_kwh))
+        hosting = max(0, int(hosting_cents_per_day))
+        equipment = max(0, int(equipment_cost_cents))
+        pool_fee_bps = min(10000, max(0, int(pool_fee_bps)))
+        target_payback_days = max(1, int(target_payback_days))
+
+        gross_day = (hashrate_th / 1000.0) * hashprice                 # PH/day × hashprice
+        gross_after_fee = gross_day * (1 - pool_fee_bps / 10000.0)
+        power_day = (power_watts * 24 / 1000.0) * power_rate           # kWh/day × rate
+        net_day = gross_after_fee - power_day - hosting
+        net_month = net_day * 30
+        net_year = net_day * 365
+        payback_days = (equipment / net_day) if (net_day > 0 and equipment > 0) else None
+        roi_year_bps = round((net_year / equipment) * 10000) if (equipment > 0) else None
+        breakeven_hashprice = None
+        if hashrate_th > 0:
+            fee_factor = (1 - pool_fee_bps / 10000.0) or 1e-9
+            breakeven_hashprice = round((power_day + hosting) / ((hashrate_th / 1000.0) * fee_factor))
+
+        if net_day <= 0:
+            verdict, reason = "no-buy", "Loses money every day at these rates — power and fees exceed mined value."
+        elif payback_days is None:
+            verdict, reason = "buy", "Profitable per day. Enter an equipment cost to see the payback period."
+        elif payback_days <= target_payback_days:
+            verdict, reason = "buy", f"Pays for itself in ~{round(payback_days)} days, under your {target_payback_days}-day target."
+        elif payback_days <= target_payback_days * 2:
+            verdict, reason = "marginal", f"Payback ~{round(payback_days)} days is past target — thin margin, sensitive to BTC price and difficulty."
+        else:
+            verdict, reason = "no-buy", f"Payback ~{round(payback_days)} days is too long — the numbers do not justify buying now."
+
+        return {
+            "gross_day_cents": round(gross_day),
+            "gross_after_fee_cents": round(gross_after_fee),
+            "power_day_cents": round(power_day),
+            "hosting_day_cents": hosting,
+            "net_day_cents": round(net_day),
+            "net_month_cents": round(net_month),
+            "net_year_cents": round(net_year),
+            "payback_days": round(payback_days) if payback_days is not None else None,
+            "roi_year_bps": roi_year_bps,
+            "breakeven_hashprice_cents_per_ph_day": breakeven_hashprice,
+            "verdict": verdict,
+            "reason": reason,
+            "inputs": {
+                "hashrate_th": hashrate_th,
+                "hashprice_cents_per_ph_day": round(hashprice),
+                "power_watts": power_watts,
+                "power_rate_cents_per_kwh": power_rate,
+                "hosting_cents_per_day": hosting,
+                "equipment_cost_cents": equipment,
+                "pool_fee_bps": pool_fee_bps,
+                "target_payback_days": target_payback_days,
+            },
+            "disclaimer": "Projection only, not financial advice. Assumes flat hashprice/difficulty; real payouts vary daily.",
         }
 
     def overview(self) -> Dict:

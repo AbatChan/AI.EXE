@@ -8,6 +8,7 @@ import glob
 import os
 import re
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -618,9 +619,20 @@ class AdapterManager:
             self._append_log("AIEXE_INSTALL timeout")
             return {"ok": False, "detail": "install timed out"}
 
-    def _port_alive(self, port: int = 0) -> bool:
+    def _port_bound(self, port: int) -> bool:
+        # TCP connect succeeds even while the greenlet is busy = bound.
         try:
-            return httpx.get(f"http://127.0.0.1:{port or self._port}/api/tags", timeout=2).status_code == 200
+            with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+                return True
+        except OSError:
+            return False
+
+    def _port_alive(self, port: int = 0) -> bool:
+        p = port or self._port
+        try:
+            return httpx.get(f"http://127.0.0.1:{p}/api/tags", timeout=2).status_code == 200
+        except httpx.TimeoutException:
+            return self._port_bound(p)  # bound but slow = busy mid-inference, still serving
         except httpx.HTTPError:
             return False
 

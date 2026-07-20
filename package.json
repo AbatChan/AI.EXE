@@ -23,6 +23,7 @@
     "test:agent-write-repair": "node scripts/agent_write_file_repair_test.js",
     "test:agent-planner-diagnostics": "node scripts/agent_planner_diagnostics_test.js",
     "test:agent-grounding": "node scripts/agent_change_grounding_test.js",
+    "test:agent-edit-preview": "node scripts/agent_edit_preview_aggregate_test.js",
     "test:agent-terminal-command-state": "node scripts/agent_terminal_command_state_test.js",
     "test:agent-foundation-vocab": "node scripts/agent_foundation_vocab_test.js",
     "test:preflight-semantic-router": "node scripts/preflight_semantic_router_test.js",

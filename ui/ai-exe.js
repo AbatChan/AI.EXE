@@ -899,6 +899,7 @@ async function renderFinanceDashboard() {
       </div>
       <section class="finance-panel"><div class="finance-panel-title"><div><span>Recent local records</span><small>Mock-data testing only</small></div></div>${transactionRows}</section>
       <section class="finance-panel finance-invoices-panel"><div class="finance-panel-title"><div><span>Local invoice records</span><small>Update status manually after you act outside AI.EXE.</small></div></div>${invoiceRows}</section>
+      <section class="finance-panel mining-pilot-panel" id="miningPilotSection"><div class="finance-loading">Loading mining pilot...</div></section>
       <section class="finance-panel finance-report-panel"><div class="finance-panel-title"><div><span>Monthly report</span><small>Local summary and CSV export. Not tax advice.</small></div></div><div class="finance-report-controls"><label>Report month<input id="financeReportMonth" type="month" value="${currentPeriod}"></label><button type="button" class="finance-inline-btn" id="financeReportBtn">Build report</button><button type="button" class="finance-inline-btn" id="financeExportBtn">Export CSV</button></div><div class="finance-report-summary" id="financeReportSummary">Choose a month to build a local summary.</div></section>
       <section class="finance-panel finance-audit-panel"><div class="finance-panel-title"><div><span>Audit history</span><small>Every local finance change is recorded</small></div><button type="button" class="finance-inline-btn" id="financeAuditBtn">View history</button></div><div class="finance-audit-list" id="financeAuditList">${financeAuditPlaceholder()}</div></section>
       <div class="finance-split-note">Current split: ${Number(settings.developer_split_bps || 0) / 100}% developer / ${100 - Number(settings.developer_split_bps || 0) / 100}% client. Settings are stored only on this device.</div>`;
@@ -1077,8 +1078,155 @@ async function renderFinanceDashboard() {
         }
       });
     }
+    renderMiningPilot(currency);
   } catch (error) {
     financeDashboardError(error && error.message ? error.message : 'The local AI.EXE backend is not running.');
+  }
+}
+
+// Mining Pilot dashboard: records daily payouts/power/fees/downtime and runs a
+// buy/no-buy ASIC calculator. Advises only — never moves money.
+async function renderMiningPilot(currency = 'USD') {
+  const host = document.getElementById('miningPilotSection');
+  if (!host) return;
+  let summary;
+  try {
+    const res = await fetch(getAIExeBackendUrl() + '/api/finance/mining/summary');
+    if (!res.ok) throw new Error('bad status');
+    summary = await res.json();
+  } catch (_) {
+    host.innerHTML = '<div class="finance-empty-state"><strong>Mining pilot unavailable</strong><span>Restart the local backend to load it.</span></div>';
+    return;
+  }
+  const cur = summary.currency || currency;
+  const money = (c) => formatFinanceMoney(c || 0, cur);
+  const signed = (c) => (c < 0 ? '−' : '+') + money(Math.abs(c || 0));
+  const s = summary.settings || {};
+  const today = new Date().toISOString().slice(0, 10);
+  const entries = Array.isArray(summary.entries) ? summary.entries : [];
+  const entryRows = entries.length
+    ? entries.slice(0, 12).map((e) => `
+        <div class="finance-row mining-entry-row">
+          <div><strong>${escapeHtml(e.occurred_date)} · net ${signed(e.payout_cents - e.power_cost_cents - e.provider_fee_cents)}</strong><span>${(e.hashrate_th || 0)} TH/s · ${(e.downtime_hours || 0)}h down · payout ${money(e.payout_cents)} · power ${money(e.power_cost_cents)} · fee ${money(e.provider_fee_cents)}${e.provider ? ' · ' + escapeHtml(e.provider) : ''}</span></div>
+          <button type="button" class="finance-inline-btn mining-del-btn" data-entry-id="${escapeHtml(e.id)}">Remove</button>
+        </div>`).join('')
+    : '<div class="finance-empty-state"><strong>No pilot days recorded yet</strong><span>Log your first mining day below. Import real NiceHash payout data as you go.</span></div>';
+
+  host.innerHTML = `
+    <div class="finance-panel-title"><div><span>Mining pilot</span><small>Real 30-day pilot · AI.EXE tracks &amp; advises, never controls money</small></div></div>
+    <div class="finance-card-grid">
+      <article class="finance-card"><span>Net profit / loss</span><strong class="${summary.net_cents < 0 ? 'expense' : ''}">${signed(summary.net_cents)}</strong><small>${summary.days} day(s) · payout ${money(summary.payout_cents)}</small></article>
+      <article class="finance-card"><span>Costs (power + fees)</span><strong>${money(summary.power_cost_cents + summary.provider_fee_cents)}</strong><small>Power ${money(summary.power_cost_cents)} · fees ${money(summary.provider_fee_cents)}</small></article>
+      <article class="finance-card"><span>Expected vs actual</span><strong class="${summary.variance_cents < 0 ? 'expense' : ''}">${signed(summary.variance_cents)}</strong><small>Actual ${money(summary.payout_cents)} vs expected ${money(summary.expected_cents)}</small></article>
+      <article class="finance-card"><span>Uptime</span><strong>${summary.uptime_pct}%</strong><small>${summary.downtime_hours}h down · avg ${summary.avg_hashrate_th} TH/s</small></article>
+      <article class="finance-card"><span>Tax reserve &amp; split</span><strong>${money(summary.tax_reserve_cents)}</strong><small>You ${money(summary.developer_share_cents)} · Alex ${money(summary.client_share_cents)}</small></article>
+      <article class="finance-card"><span>Net after hardware</span><strong class="${summary.net_after_hardware_cents < 0 ? 'expense' : ''}">${signed(summary.net_after_hardware_cents)}</strong><small>Hardware ${money(summary.hardware_cost_cents)}</small></article>
+    </div>
+    <div class="finance-control-grid">
+      <section class="finance-panel finance-form-panel">
+        <div class="finance-panel-title"><div><span>Log a pilot day</span><small>One row per day of mining</small></div></div>
+        <form class="finance-form" id="miningEntryForm">
+          <label>Date<input name="occurred_date" type="date" required value="${today}"></label>
+          <label>Hashrate (TH/s)<input name="hashrate_th" type="number" min="0" step="0.01" placeholder="e.g. 0.05"></label>
+          <label>Downtime (hours)<input name="downtime_hours" type="number" min="0" max="24" step="0.1" placeholder="0"></label>
+          <label>BTC payout (${cur})<input name="payout" type="number" min="0" step="0.01" placeholder="0.00"></label>
+          <label>Electricity cost (${cur})<input name="power" type="number" min="0" step="0.01" placeholder="0.00"></label>
+          <label>Provider fee (${cur})<input name="fee" type="number" min="0" step="0.01" placeholder="0.00"></label>
+          <label>Expected (${cur})<input name="expected" type="number" min="0" step="0.01" placeholder="0.00"></label>
+          <label>Provider<input name="provider" maxlength="80" placeholder="NiceHash, pool, etc."></label>
+          <button type="submit">Record day</button>
+        </form>
+      </section>
+      <section class="finance-panel finance-form-panel mining-calc-panel">
+        <div class="finance-panel-title"><div><span>Buy / no-buy calculator</span><small>ASIC (e.g. S21 XP) — projection only</small></div></div>
+        <form class="finance-form" id="miningCalcForm">
+          <label>Hashrate (TH/s)<input name="hashrate_th" type="number" min="0" step="0.1" required value="270"></label>
+          <label>Hashprice (${cur}/PH/day)<input name="hashprice" type="number" min="0" step="0.01" required value="29"></label>
+          <label>Power draw (W)<input name="power_watts" type="number" min="0" step="1" required value="3645"></label>
+          <label>Power rate (¢/kWh)<input name="power_rate" type="number" min="0" step="0.1" required value="7.5"></label>
+          <label>Hosting (${cur}/day)<input name="hosting" type="number" min="0" step="0.01" value="0"></label>
+          <label>Equipment cost (${cur})<input name="equipment" type="number" min="0" step="1" value="5500"></label>
+          <label>Pool fee (%)<input name="pool_fee" type="number" min="0" max="100" step="0.1" value="2"></label>
+          <label>Target payback (days)<input name="target_days" type="number" min="1" step="1" value="365"></label>
+          <button type="submit">Run calculator</button>
+        </form>
+        <div class="mining-calc-result" id="miningCalcResult">Enter miner specs and current hashprice, then run.</div>
+      </section>
+    </div>
+    <section class="finance-panel"><div class="finance-panel-title"><div><span>Pilot log</span><small>Verified real-world results — decide on scaling only after 30 days</small></div></div>${entryRows}</section>`;
+
+  const entryForm = document.getElementById('miningEntryForm');
+  if (entryForm) {
+    entryForm.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const f = new FormData(entryForm);
+      const cents = (name) => Math.max(0, Math.round((Number(f.get(name)) || 0) * 100));
+      try {
+        const res = await fetch(getAIExeBackendUrl() + '/api/finance/mining/entries', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+            occurred_date: String(f.get('occurred_date') || '').trim(),
+            hashrate_th: Number(f.get('hashrate_th')) || 0,
+            downtime_hours: Number(f.get('downtime_hours')) || 0,
+            payout_cents: cents('payout'), power_cost_cents: cents('power'),
+            provider_fee_cents: cents('fee'), expected_cents: cents('expected'),
+            provider: String(f.get('provider') || '').trim(),
+          }),
+        });
+        if (!res.ok) throw new Error('Could not record the pilot day.');
+        renderMiningPilot(cur);
+      } catch (error) {
+        financeDashboardError(error && error.message ? error.message : 'Could not record the pilot day.');
+      }
+    });
+  }
+  host.querySelectorAll('.mining-del-btn').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      btn.disabled = true;
+      try {
+        await fetch(`${getAIExeBackendUrl()}/api/finance/mining/entries/${encodeURIComponent(btn.dataset.entryId)}/delete`, { method: 'POST' });
+        renderMiningPilot(cur);
+      } catch (_) { btn.disabled = false; }
+    });
+  });
+  const calcForm = document.getElementById('miningCalcForm');
+  const calcResult = document.getElementById('miningCalcResult');
+  if (calcForm && calcResult) {
+    calcForm.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const f = new FormData(calcForm);
+      try {
+        const res = await fetch(getAIExeBackendUrl() + '/api/finance/mining/calculator', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+            hashrate_th: Number(f.get('hashrate_th')) || 0,
+            hashprice_cents_per_ph_day: Math.round((Number(f.get('hashprice')) || 0) * 100),
+            power_watts: Number(f.get('power_watts')) || 0,
+            power_rate_cents_per_kwh: Number(f.get('power_rate')) || 0,
+            hosting_cents_per_day: Math.round((Number(f.get('hosting')) || 0) * 100),
+            equipment_cost_cents: Math.round((Number(f.get('equipment')) || 0) * 100),
+            pool_fee_bps: Math.round((Number(f.get('pool_fee')) || 0) * 100),
+            target_payback_days: Math.max(1, Math.round(Number(f.get('target_days')) || 365)),
+          }),
+        });
+        if (!res.ok) throw new Error('Calculator failed.');
+        const r = await res.json();
+        const payback = r.payback_days == null ? 'n/a' : `${r.payback_days} days`;
+        const roi = r.roi_year_bps == null ? 'n/a' : `${(r.roi_year_bps / 100).toFixed(0)}%/yr`;
+        calcResult.innerHTML = `
+          <div class="mining-verdict mining-verdict-${escapeHtml(r.verdict)}">${r.verdict === 'buy' ? 'BUY' : r.verdict === 'marginal' ? 'MARGINAL' : 'NO-BUY'} — ${escapeHtml(r.reason)}</div>
+          <div class="mining-calc-grid">
+            <span>Net / day</span><strong>${signed(r.net_day_cents)}</strong>
+            <span>Net / month</span><strong>${signed(r.net_month_cents)}</strong>
+            <span>Payback</span><strong>${payback}</strong>
+            <span>ROI</span><strong>${roi}</strong>
+            <span>Gross / day (after fee)</span><strong>${money(r.gross_after_fee_cents)}</strong>
+            <span>Power / day</span><strong>${money(r.power_day_cents)}</strong>
+            <span>Break-even hashprice</span><strong>${r.breakeven_hashprice_cents_per_ph_day == null ? 'n/a' : money(r.breakeven_hashprice_cents_per_ph_day) + '/PH/day'}</strong>
+          </div>
+          <small>${escapeHtml(r.disclaimer)}</small>`;
+      } catch (error) {
+        calcResult.textContent = error && error.message ? error.message : 'Calculator failed.';
+      }
+    });
   }
 }
 
@@ -14666,7 +14814,9 @@ function saveChats() {
       }
       if (next.agentMeta && next.agentMeta.revert && Array.isArray(next.agentMeta.revert.files)) {
         const dropContent = (files) => (Array.isArray(files)
-          ? files.map((file) => (file && typeof file === 'object' ? { ...file, content: '' } : file))
+          ? files.map((file) => (file && typeof file === 'object'
+            ? { ...file, content: '', diffPreview: null }
+            : file))
           : files);
         const revert = { ...next.agentMeta.revert, files: dropContent(next.agentMeta.revert.files) };
         if (Array.isArray(next.agentMeta.revert.restored)) revert.restored = dropContent(next.agentMeta.revert.restored);

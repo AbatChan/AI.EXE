@@ -18,6 +18,30 @@ class FinanceSettingsUpdate(BaseModel):
     tax_reserve_bps: Optional[int] = Field(default=None, ge=0, le=10000)
     developer_split_bps: Optional[int] = Field(default=None, ge=0, le=10000)
     income_target_cents: Optional[int] = Field(default=None, ge=0)
+    mining_hardware_cost_cents: Optional[int] = Field(default=None, ge=0)
+
+
+class MiningEntryCreate(BaseModel):
+    occurred_date: str = Field(min_length=10, max_length=10)
+    hashrate_th: float = Field(default=0, ge=0)
+    downtime_hours: float = Field(default=0, ge=0, le=24)
+    power_cost_cents: int = Field(default=0, ge=0)
+    provider_fee_cents: int = Field(default=0, ge=0)
+    payout_cents: int = Field(default=0, ge=0)
+    expected_cents: int = Field(default=0, ge=0)
+    provider: str = Field(default="", max_length=80)
+    memo: str = Field(default="", max_length=500)
+
+
+class MiningCalcInput(BaseModel):
+    hashrate_th: float = Field(ge=0)
+    hashprice_cents_per_ph_day: float = Field(ge=0)
+    power_watts: float = Field(ge=0)
+    power_rate_cents_per_kwh: float = Field(ge=0)
+    hosting_cents_per_day: int = Field(default=0, ge=0)
+    equipment_cost_cents: int = Field(default=0, ge=0)
+    pool_fee_bps: int = Field(default=200, ge=0, le=10000)
+    target_payback_days: int = Field(default=365, ge=1)
 
 
 class FinanceTransactionCreate(BaseModel):
@@ -153,3 +177,30 @@ def update_finance_invoice_status(invoice_id: str, payload: FinanceInvoiceStatus
 @router.post("/finance/mock-income")
 def seed_finance_mock_income():
     return {"transactions": finance_store.seed_mock_income(), "overview": finance_store.overview()}
+
+
+@router.get("/finance/mining/summary")
+def mining_summary():
+    return finance_store.mining_summary()
+
+
+@router.post("/finance/mining/entries")
+def create_mining_entry(payload: MiningEntryCreate):
+    data = payload.model_dump() if hasattr(payload, "model_dump") else payload.dict()
+    try:
+        entry = finance_store.add_mining_entry(**data)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"entry": entry, "summary": finance_store.mining_summary()}
+
+
+@router.post("/finance/mining/entries/{entry_id}/delete")
+def delete_mining_entry(entry_id: str):
+    finance_store.delete_mining_entry(entry_id)
+    return {"summary": finance_store.mining_summary()}
+
+
+@router.post("/finance/mining/calculator")
+def mining_calculator(payload: MiningCalcInput):
+    data = payload.model_dump() if hasattr(payload, "model_dump") else payload.dict()
+    return finance_store.mining_buy_calculator(**data)

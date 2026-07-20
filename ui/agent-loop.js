@@ -1,4 +1,61 @@
 (function initAIExeAgentLoop(global) {
+  // Build the same bounded, line-oriented preview used by the finished edit card.
+  // Keeping it with the run snapshot is important: a file can be edited several
+  // times, while the card totals describe the complete pre-run -> post-run change.
+  function buildAgentLineDiffPreview(beforeText, afterText, contextLines = 2, maxRows = 240) {
+    const before = String(beforeText || '');
+    const after = String(afterText || '');
+    const beforeLines = before ? before.split('\n') : [];
+    const afterLines = after ? after.split('\n') : [];
+    const rows = [];
+    if (!beforeLines.length && !afterLines.length) return rows;
+    const width = afterLines.length + 1;
+    const dp = Array.from({ length: beforeLines.length + 1 }, () => new Uint16Array(width));
+    for (let i = 1; i <= beforeLines.length; i += 1) {
+      for (let j = 1; j <= afterLines.length; j += 1) {
+        dp[i][j] = beforeLines[i - 1] === afterLines[j - 1]
+          ? dp[i - 1][j - 1] + 1
+          : Math.max(dp[i - 1][j], dp[i][j - 1]);
+      }
+    }
+    const reversed = [];
+    let i = beforeLines.length;
+    let j = afterLines.length;
+    while (i > 0 || j > 0) {
+      if (i > 0 && j > 0 && beforeLines[i - 1] === afterLines[j - 1]) {
+        reversed.push({ type: 'context', oldLine: i, newLine: j, text: beforeLines[i - 1] });
+        i -= 1;
+        j -= 1;
+      } else if (j > 0 && (i === 0 || dp[i][j - 1] >= dp[i - 1][j])) {
+        reversed.push({ type: 'add', oldLine: 0, newLine: j, text: afterLines[j - 1] });
+        j -= 1;
+      } else if (i > 0) {
+        reversed.push({ type: 'remove', oldLine: i, newLine: 0, text: beforeLines[i - 1] });
+        i -= 1;
+      }
+    }
+    const full = reversed.reverse();
+    const changedIndexes = [];
+    full.forEach((row, index) => {
+      if (row.type !== 'context') changedIndexes.push(index);
+    });
+    if (!changedIndexes.length) return rows;
+    const include = new Set();
+    changedIndexes.forEach((index) => {
+      const start = Math.max(0, index - contextLines);
+      const end = Math.min(full.length - 1, index + contextLines);
+      for (let cursor = start; cursor <= end; cursor += 1) include.add(cursor);
+    });
+    const selected = Array.from(include).sort((a, b) => a - b);
+    let previousIndex = -1;
+    selected.forEach((index) => {
+      if (previousIndex >= 0 && index > previousIndex + 1) rows.push({ type: 'spacer' });
+      rows.push(full[index]);
+      previousIndex = index;
+    });
+    return rows.slice(0, maxRows);
+  }
+
   // Pure derivation for the bounded self-correction circuit breaker: given a tool
   // decision + its result, return a stable failure signature ({ streakPath,
   // shortReason, normIssue, streakKey }) when this step is a "file is bad" failure
@@ -593,7 +650,9 @@
           if (!path) continue;
           const existing = seen.get(path);
           if (existing) {
-            if (typeof event.content === 'string' && event.content) existing.post = event.content;
+            // An empty file is still a valid final state and must not leave the
+            // snapshot pointing at an earlier, non-empty intermediate edit.
+            if (typeof event.content === 'string') existing.post = event.content;
             continue;
           }
           if (typeof event.originalContent !== 'string') continue;
@@ -626,6 +685,7 @@
             content: file.content,
             added: stats.added,
             removed: stats.removed,
+            diffPreview: buildAgentLineDiffPreview(file.content, file.post),
           });
         }
         return files.length ? { files } : null;
@@ -4070,5 +4130,6 @@
     getActivePhaseFileTaskGaps,
     activePhaseFilePaths,
     shouldForcePhaseValidation,
+    buildAgentLineDiffPreview,
   };
 })(window);

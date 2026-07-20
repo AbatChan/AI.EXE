@@ -363,6 +363,20 @@
           content: String(file.content || ''),
           added: Math.max(0, Number(file.added) || 0),
           removed: Math.max(0, Number(file.removed) || 0),
+          diffPreview: Array.isArray(file.diffPreview)
+            ? file.diffPreview.slice(0, 240).map((row) => {
+                if (!row || typeof row !== 'object') return null;
+                const type = String(row.type || '').toLowerCase();
+                if (type === 'spacer') return { type: 'spacer' };
+                if (!['context', 'add', 'remove'].includes(type)) return null;
+                return {
+                  type,
+                  oldLine: Number(row.oldLine) > 0 ? Number(row.oldLine) : 0,
+                  newLine: Number(row.newLine) > 0 ? Number(row.newLine) : 0,
+                  text: String(row.text || '').slice(0, 400),
+                };
+              }).filter(Boolean)
+            : null,
         } : null))
         .filter(Boolean);
       if (meta.revert && typeof meta.revert === 'object') {
@@ -639,8 +653,11 @@
       return rows.slice(0, maxRows);
     }
 
-    function getEditCardDiffPreview(path, activities) {
-      const targetPath = normalizeWorkspacePath(path || '');
+    function getEditCardDiffPreview(file, activities) {
+      // New messages carry the aggregate preview beside the aggregate stats.
+      // Fall back to the newest per-step activity only for legacy messages.
+      if (file && Array.isArray(file.diffPreview) && file.diffPreview.length) return file.diffPreview;
+      const targetPath = normalizeWorkspacePath(file && file.path ? file.path : '');
       const list = normalizeAgentActivities(activities);
       for (let index = list.length - 1; index >= 0; index -= 1) {
         const activity = list[index];
@@ -707,7 +724,7 @@
     }
 
     function openEditDiffPreview(anchor, file, activities) {
-      const rows = getEditCardDiffPreview(file && file.path, activities);
+      const rows = getEditCardDiffPreview(file, activities);
       if (!rows.length || !anchor) return;
       clearEditDiffPreviewShowTimer();
       if (activeEditDiffPreview && activeEditDiffPreview.anchor === anchor) {
@@ -776,7 +793,7 @@
     }
 
     function scheduleEditDiffPreview(anchor, file, activities) {
-      const rows = getEditCardDiffPreview(file && file.path, activities);
+      const rows = getEditCardDiffPreview(file, activities);
       if (!rows.length || !anchor) return;
       if (activeEditDiffPreview && activeEditDiffPreview.anchor === anchor) {
         clearEditDiffPreviewHideTimer();
@@ -2442,7 +2459,7 @@
           revealAgentWorkPanel(bubble, file.path);
           rememberPanelExpanded();
         });
-        if (getEditCardDiffPreview(file.path, activities).length) {
+        if (getEditCardDiffPreview(file, activities).length) {
           row.classList.add('has-preview');
           row.addEventListener('mouseenter', () => scheduleEditDiffPreview(row, file, activities));
           row.addEventListener('mouseleave', deferCloseEditDiffPreview);
@@ -3156,6 +3173,7 @@
       formatAgentWorkedDuration,
       normalizeAgentActivities,
       normalizeAgentMeta,
+      getEditCardDiffPreview,
       cloneAgentActivities,
       cloneAgentMeta,
       mergeAgentActivityIntoList,
