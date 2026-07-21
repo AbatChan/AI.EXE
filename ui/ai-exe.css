@@ -4425,6 +4425,14 @@ html.platform-mac .settings-sidebar {
   background: transparent;
 }
 
+/* WKWebView can let the authored flex display win over the browser's default
+   [hidden] rule. A collapsed drawer would then retain its top margin below the
+   summary, stacking with the activity-list gap and looking like a blank row. */
+.msg-agent-subgroup-drawer[hidden] {
+  display: none !important;
+  margin-top: 0;
+}
+
 .msg-agent-activity-row.compact-grouped .msg-agent-activity-inline {
   gap: 7px;
 }
