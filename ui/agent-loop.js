@@ -418,6 +418,12 @@
       const fileStateHistory = new Map(); // path -> Set(contentHash)
       const oscillatingEditPaths = new Set();
       let oscillationBlocks = 0;   // repeated re-edits of an already-correct file → force finalize
+      // Finalize-block escape: if the SAME validation issue blocks the phase finish more
+      // than once (the model tried, edited, and it still won't clear — often an
+      // unfixable/false-positive check), stop churning and let the FINAL through with a note.
+      let lastBlockedValidationIssue = '';
+      let validationFinalizeBlockStreak = 0;
+      const VALIDATION_FINALIZE_BLOCK_LIMIT = 2;
       const hashFileState = (text) => {
         const s = String(text || '');
         let h = 5381;
@@ -2571,25 +2577,46 @@
               setAgentProgress('Building this phase...');
               continue;
             }
+            let releaseFinalizeDespiteValidation = false;
             const validationFailure = latestValidationFailureSinceLatestMutation();
             if (validationFailure) {
               const issue = Array.isArray(validationFailure.validationIssues) && validationFailure.validationIssues.length
                 ? String(validationFailure.validationIssues[0] || '')
                 : String(validationFailure.observation || '').slice(0, 240);
-              toolEvents.push({
-                tool: 'final_check',
-                ok: false,
-                observation: `Do not finish Phase ${phaseState.activeIndex + 1} yet. The latest validate_files check still failed${issue ? `: ${issue}` : ''}. Fix the specific issue with edit_file, then validate again.`,
-              });
-              recordDebugTrace('agent_phase_final_failed_validation_blocked', {
-                chatId: String(chatId || ''), step: String(step),
-                phase: String(phaseState.activeIndex + 1),
-                issue: deps.debugPreview(issue, 260),
-              }, { chatId: String(chatId || ''), step, validationFailure, phaseState });
-              setAgentProgress('Repairing...');
-              continue;
+              // Same issue as last finalize-block? The model already tried to fix it and it
+              // still won't clear — stop re-blocking (that's what looped a run to timeout).
+              if (issue && issue === lastBlockedValidationIssue) {
+                validationFinalizeBlockStreak += 1;
+              } else {
+                lastBlockedValidationIssue = issue;
+                validationFinalizeBlockStreak = 1;
+              }
+              if (validationFinalizeBlockStreak > VALIDATION_FINALIZE_BLOCK_LIMIT) {
+                recordDebugTrace('agent_phase_final_validation_block_released', {
+                  chatId: String(chatId || ''), step: String(step),
+                  phase: String(phaseState.activeIndex + 1),
+                  streak: String(validationFinalizeBlockStreak),
+                  issue: deps.debugPreview(issue, 260),
+                }, { chatId: String(chatId || ''), step, validationFailure, phaseState });
+                // Let the FINAL complete the phase and bypass the "must validate clean"
+                // gate below. The unresolved issue rides into the finish note, not a loop.
+                releaseFinalizeDespiteValidation = true;
+              } else {
+                toolEvents.push({
+                  tool: 'final_check',
+                  ok: false,
+                  observation: `Do not finish Phase ${phaseState.activeIndex + 1} yet. The latest validate_files check still failed${issue ? `: ${issue}` : ''}. Fix the specific issue with edit_file, then validate again. If you have already tried and believe this check is a false positive, finalize and say so plainly instead of editing again.`,
+                });
+                recordDebugTrace('agent_phase_final_failed_validation_blocked', {
+                  chatId: String(chatId || ''), step: String(step),
+                  phase: String(phaseState.activeIndex + 1),
+                  issue: deps.debugPreview(issue, 260),
+                }, { chatId: String(chatId || ''), step, validationFailure, phaseState });
+                setAgentProgress('Repairing...');
+                continue;
+              }
             }
-            if (!hasValidationPassedSinceLatestMutation()) {
+            if (!releaseFinalizeDespiteValidation && !hasValidationPassedSinceLatestMutation()) {
               toolEvents.push({
                 tool: 'final_check',
                 ok: false,

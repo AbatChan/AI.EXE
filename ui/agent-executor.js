@@ -1776,13 +1776,70 @@ export default config;
       return imports;
     }
 
-    function resolveAliasImportCandidates(specifier) {
+    // Tolerant parse for config files (tsconfig/jsconfig are JSONC — comments +
+    // trailing commas). Strict JSON.parse is the primary path; the comment/comma
+    // strip is a last-resort fallback only when strict parsing fails.
+    function parseJsonc(text) {
+      const raw = String(text || '');
+      if (!raw.trim()) return null;
+      try { return JSON.parse(raw); } catch (_) { }
+      try {
+        const stripped = raw
+          .replace(/\/\*[\s\S]*?\*\//g, '')
+          .replace(/(^|[^:"'`])\/\/[^\n]*/g, '$1')
+          .replace(/,(\s*[}\]])/g, '$1');
+        return JSON.parse(stripped);
+      } catch (_) { return null; }
+    }
+
+    // Read the project's REAL path aliases from tsconfig/jsconfig (compilerOptions
+    // baseUrl + paths) instead of assuming '@/' -> '/src/'. Returns [{prefix, bases[]}]
+    // where each base is an absolute workspace dir the alias tail resolves against.
+    function deriveAliasRules(fileContents) {
+      const cfg = parseJsonc(fileContents['/tsconfig.json'] || fileContents['/jsconfig.json'] || '');
+      const co = cfg && typeof cfg === 'object' ? cfg.compilerOptions : null;
+      const paths = co && co.paths && typeof co.paths === 'object' ? co.paths : null;
+      if (!paths) return [];
+      const baseUrl = String(co.baseUrl || '.').replace(/^\.\/?/, '').replace(/\/+$/, '');
+      const rules = [];
+      for (const key of Object.keys(paths)) {
+        const prefix = String(key).replace(/\*$/, '');
+        const targets = Array.isArray(paths[key]) ? paths[key] : [paths[key]];
+        const bases = targets
+          .map((t) => String(t || '').replace(/\*$/, '').replace(/^\.\/?/, '').replace(/\/+$/, ''))
+          .map((tgt) => deps.normalizeWorkspacePath(`/${[baseUrl, tgt].filter(Boolean).join('/')}`));
+        if (prefix) rules.push({ prefix, bases });
+      }
+      return rules;
+    }
+
+    function resolveAliasImportCandidates(specifier, aliasRules) {
       const spec = String(specifier || '').split('?')[0].split('#')[0];
-      if (!spec.startsWith('@/')) return [];
-      const base = deps.normalizeWorkspacePath(`/src/${spec.slice(2)}`);
-      if (/\.[a-z0-9]+$/i.test(base)) return [base];
-      return ['.ts', '.tsx', '.js', '.jsx', '.json'].map((ext) => `${base}${ext}`)
-        .concat(['.ts', '.tsx', '.js', '.jsx'].map((ext) => `${base}/index${ext}`));
+      const bases = new Set();
+      let tail = '';
+      (Array.isArray(aliasRules) ? aliasRules : []).forEach((rule) => {
+        if (rule && rule.prefix && spec.startsWith(rule.prefix)) {
+          tail = spec.slice(rule.prefix.length);
+          (rule.bases || []).forEach((base) => bases.add(base));
+        }
+      });
+      if (!bases.size) {
+        // No configured alias matched — handle the conventional '@/' and try BOTH the
+        // project root and /src so a root-mapped project ('@/* -> ./*') is not a false
+        // positive when tsconfig is absent or unparseable.
+        if (!spec.startsWith('@/')) return [];
+        tail = spec.slice(2);
+        bases.add('/');
+        bases.add('/src');
+      }
+      const out = [];
+      bases.forEach((base) => {
+        const full = deps.normalizeWorkspacePath(`${base}/${tail}`);
+        if (/\.[a-z0-9]+$/i.test(full)) { out.push(full); return; }
+        ['.ts', '.tsx', '.js', '.jsx', '.json'].forEach((ext) => out.push(`${full}${ext}`));
+        ['.ts', '.tsx', '.js', '.jsx'].forEach((ext) => out.push(`${full}/index${ext}`));
+      });
+      return Array.from(new Set(out));
     }
 
     function resolveRelativeImportCandidates(fromPath, specifier) {
@@ -3654,6 +3711,15 @@ export default config;
           }
         }
         const codePaths = Object.keys(fileContents).filter((path) => /\.(js|mjs|cjs|ts|jsx|tsx)$/i.test(path));
+        // Load the real path-alias config so aliases resolve to their actual targets
+        // (never a hardcoded '/src' guess) before scanning imports.
+        if (!fileContents['/tsconfig.json'] && !fileContents['/jsconfig.json']) {
+          for (const cfgPath of ['/tsconfig.json', '/jsconfig.json']) {
+            const cfgRes = await deps.invokeWorkspaceAction('workspaceReadFile', { path: cfgPath });
+            if (cfgRes && cfgRes.ok) { fileContents[cfgPath] = String(cfgRes.output || ''); break; }
+          }
+        }
+        const aliasRules = deriveAliasRules(fileContents);
         for (const path of codePaths) {
           const source = String(fileContents[path] || '');
           const specs = extractRelativeCodeImports(source);
@@ -3677,7 +3743,7 @@ export default config;
           }
           const aliasSpecs = extractAliasCodeImports(source);
           for (const spec of aliasSpecs) {
-            const candidates = resolveAliasImportCandidates(spec);
+            const candidates = resolveAliasImportCandidates(spec, aliasRules);
             let found = candidates.some((candidate) => Object.prototype.hasOwnProperty.call(fileContents, candidate));
             if (!found) {
               for (const candidate of candidates) {

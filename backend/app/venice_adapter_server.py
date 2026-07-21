@@ -1114,6 +1114,17 @@ AIEXE_THREAD_NAMED = {}
 # lock, so HTTP cancel routes set this flag and the loop clicks Venice's Stop button itself.
 AIEXE_CANCEL_KEYS = set()
 
+# Rotate to a FRESH Venice conversation once a chat's thread grows large. Venice keeps every
+# prior turn server-side, but AI.EXE re-sends the full context in every prompt (see chat-map
+# note above), so a fresh thread loses NOTHING and sheds the accumulated weight that slows
+# replies on long runs. Count turns per thread; when it crosses the cap, forget the mapping so
+# the next send opens a New chat, and delete the stale thread in the background.
+AIEXE_THREAD_TURNS = {}          # chat_key -> turns sent on the CURRENT Venice thread
+try:
+    AIEXE_THREAD_MAX_TURNS = max(0, int(os.getenv('AIEXE_THREAD_MAX_TURNS', '12')))
+except Exception:
+    AIEXE_THREAD_MAX_TURNS = 12  # 0 disables rotation
+
 
 def _aiexe_stable_chat_url(url):
     """True for a materialized conversation URL like /chat/classic/<slug> (not ?refreshId=…)."""
@@ -2721,6 +2732,20 @@ def _aiexe_rename_after_stream(slug, name):
         print("AIEXE_RENAME background failed: %s" % _e, flush=True)
 
 
+def _aiexe_delete_after_stream(slug):
+    """Deferred best-effort cleanup of a thread we rotated away from. Fire-and-forget:
+    ONE attempt, never retried (Venice delete is flaky, and a stray stale thread is
+    harmless sidebar clutter, not a correctness issue)."""
+    global driver
+    try:
+        with selenium_lock:
+            if not _aiexe_driver_alive(driver):
+                return
+            _aiexe_delete_chat(driver, slug, nav_fallback=False)
+    except Exception as _e:
+        print("AIEXE_ROTATE_DELETE background failed: %s" % _e, flush=True)
+
+
 def _aiexe_sidebar_op_with_restore(driver, op, label):
     """Run a sidebar operation; if it fails, restore the window and retry once, then
     re-minimize. A minimized Chrome often leaves the virtualized sidebar rowless
@@ -3085,6 +3110,19 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
         #   same chat + already on its conversation → no navigation at all (the common case);
         #   different chat with a known conversation  → navigate to it (deleted → new + remap);
         #   unknown chat                              → New chat (SPA), remembered after send.
+        # Rotate off a thread that has accumulated too many turns: drop its mapping so the
+        # nav policy below opens a fresh New chat, and delete the stale thread in the
+        # background. Correctness is unaffected — the full context rides in every prompt.
+        if (_chat_key and AIEXE_THREAD_MAX_TURNS
+                and AIEXE_THREAD_TURNS.get(_chat_key, 0) >= AIEXE_THREAD_MAX_TURNS):
+            _old = AIEXE_CHAT_URLS.pop(_chat_key, "")
+            AIEXE_THREAD_TURNS[_chat_key] = 0
+            _aiexe_save_chat_map()
+            _old_slug = _aiexe_slug_from_url(_old)
+            print("AIEXE_ROTATE %s after %d turns (old=%s)"
+                  % (_chat_key[:32], AIEXE_THREAD_MAX_TURNS, _old_slug or "?"), flush=True)
+            if _old_slug and not _chat_key.startswith("id:internal:"):
+                gevent.spawn(_aiexe_delete_after_stream, _old_slug)
         _cur_url = str(driver.current_url or "")
         _mapped = AIEXE_CHAT_URLS.get(_chat_key, "") if _chat_key else ""
         if 'venice.ai/chat' not in _cur_url:
@@ -3099,6 +3137,7 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
             if landed.split('?')[0] != _mapped.split('?')[0]:
                 # Venice deleted/lost that conversation → forget it; a new one gets mapped below.
                 AIEXE_CHAT_URLS.pop(_chat_key, None)
+                AIEXE_THREAD_TURNS[_chat_key] = 0
                 _aiexe_save_chat_map()
                 print("AIEXE_NAV mapped chat GONE (%s) — will remap" % _mapped, flush=True)
             else:
@@ -3587,6 +3626,8 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
                     time.sleep(0.5)
             except Exception:
                 pass
+            # Count this turn on the current thread (drives rotation on the next send).
+            AIEXE_THREAD_TURNS[_chat_key] = AIEXE_THREAD_TURNS.get(_chat_key, 0) + 1
 
         # If AI.EXE already has a real title on a later turn, mirror it here too. The first
         # turn usually arrives as "New Chat", so the UI still calls /api/aiexe/rename_chat
@@ -3724,6 +3765,7 @@ def aiexe_delete_chat():
             AIEXE_CHAT_URLS.pop(key, None)
             AIEXE_THREAD_ATTACHMENTS.pop(key, None)
             AIEXE_THREAD_NAMED.pop(key, None)
+            AIEXE_THREAD_TURNS.pop(key, None)
             _aiexe_save_chat_map()
     return Response(json.dumps({"ok": bool(ok), "slug": slug, "reason": reason,
                                 "mapping_cleared": bool(key)}),
@@ -4114,6 +4156,7 @@ def _aiexe_cleanup_internal_batch(min_count=1, respect_user_window=True, cap=20)
                     except Exception as exc:
                         print("AIEXE_CLEANUP delete failed for %s: %s" % (slug, exc), flush=True)
                 AIEXE_CHAT_URLS.pop(key, None)
+                AIEXE_THREAD_TURNS.pop(key, None)
                 done += 1
                 print("AIEXE_CLEANUP %s -> %s" % (slug or key[:36], "deleted" if deleted else "dropped from map"), flush=True)
             _aiexe_save_chat_map()

@@ -5238,6 +5238,7 @@ function normalizeMessageAttachmentList(list) {
       const normalized = normalizePendingAttachmentMeta(item);
       if (!normalized) return null;
       return {
+        id: normalized.id,
         name: normalized.name,
         kind: normalized.kind,
         mime: normalized.mime,
@@ -5258,10 +5259,25 @@ function rememberAttachmentFullText(id, text) {
   if (id && text) attachmentFullText.set(id, String(text));
 }
 
-// Full-quality image data (in-memory, id -> data URL) for the adapter upload so
-// the MODEL sees the real image, not the small chat preview. Transient like
-// attachmentFullText; after an app reload the preview is the fallback.
+// Model-upload image data (in-memory, id -> data URL): an optimized-but-detailed copy
+// sent to Venice. Transient like attachmentFullText; cleared on send.
 const attachmentFullImage = new Map();
+// Original-quality image for the CHAT DISPLAY (id -> data URL). Unlike the upload map this
+// is NOT cleared on send, so the chat keeps showing the crisp original for the rest of the
+// session (after a full app reload the small preview is the fallback). Bounded so it can't
+// grow without limit.
+const attachmentDisplayImage = new Map();
+function rememberAttachmentDisplayImage(id, dataUrl) {
+  if (!id || !dataUrl) return;
+  attachmentDisplayImage.set(id, dataUrl);
+  while (attachmentDisplayImage.size > 40) {
+    const oldest = attachmentDisplayImage.keys().next().value;
+    if (oldest === undefined) break;
+    attachmentDisplayImage.delete(oldest);
+  }
+}
+// Read accessor for the chat renderer (separate module) to fetch the crisp image by id.
+window.aiexeGetAttachmentDisplayImage = (id) => (id && attachmentDisplayImage.get(id)) || '';
 async function createImageAttachmentFullData(file) {
   const size = Number((file && file.size) || 0);
   if (size > 0 && size <= 3.5 * 1024 * 1024) {
@@ -5297,6 +5313,37 @@ async function createImageAttachmentFullData(file) {
     if (!ctx) return '';
     ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
     return canvas.toDataURL('image/jpeg', 0.92);
+  } catch (_) {
+    return '';
+  } finally {
+    if (objectUrl) { try { URL.revokeObjectURL(objectUrl); } catch (_) { } }
+  }
+}
+
+// Optimized-but-detailed copy for the MODEL upload: downscale to <=1568px on the long edge
+// (the size vision models actually ingest) at JPEG 0.85 — smaller/faster to upload than the
+// original while keeping enough detail to read. Smaller originals just recompress in place.
+async function createImageAttachmentModelData(file) {
+  let objectUrl = '';
+  try {
+    objectUrl = URL.createObjectURL(file);
+    const img = await new Promise((resolve, reject) => {
+      const image = new Image();
+      image.onload = () => resolve(image);
+      image.onerror = reject;
+      image.src = objectUrl;
+    });
+    const maxSide = 1568;
+    const width = Math.max(1, Number(img.naturalWidth || img.width) || 1);
+    const height = Math.max(1, Number(img.naturalHeight || img.height) || 1);
+    const scale = Math.min(1, maxSide / Math.max(width, height));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(width * scale));
+    canvas.height = Math.max(1, Math.round(height * scale));
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return '';
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    return canvas.toDataURL('image/jpeg', 0.85);
   } catch (_) {
     return '';
   } finally {
@@ -5798,8 +5845,12 @@ async function parseAttachmentFile(file) {
   if (isLikelyImageAttachment(file)) {
     const previewDataUrl = await createImageAttachmentPreview(file);
     const thumbDataUrl = await createImageAttachmentThumbnail(file);
+    // Chat shows the crisp original; the model gets an optimized-but-detailed copy
+    // (falls back to the original if the downscale encode fails).
     const fullDataUrl = await createImageAttachmentFullData(file);
-    if (fullDataUrl) attachmentFullImage.set(base.id, fullDataUrl);
+    if (fullDataUrl) rememberAttachmentDisplayImage(base.id, fullDataUrl);
+    const modelDataUrl = (await createImageAttachmentModelData(file)) || fullDataUrl;
+    if (modelDataUrl) attachmentFullImage.set(base.id, modelDataUrl);
     return {
       ...base,
       kind: 'image',
