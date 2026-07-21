@@ -1124,6 +1124,18 @@ try:
     AIEXE_THREAD_MAX_TURNS = max(0, int(os.getenv('AIEXE_THREAD_MAX_TURNS', '12')))
 except Exception:
     AIEXE_THREAD_MAX_TURNS = 12  # 0 disables rotation
+# Latency-based rotation: chat_keys whose LAST turn was slow (cold empty-capture or a full
+# idle timeout) get a fresh thread on the next send — a fresh, small conversation loads and
+# first-tokens far faster than a huge saved one, which is exactly the cold-start pathology.
+AIEXE_THREAD_SLOW = set()
+# Cold first-token budget: if NOTHING has streamed AND the DOM is still empty this long after
+# send, give up and retry instead of burning the full idle --timeout (which cost ~120s x2 =
+# an 8-minute stall on cold starts). Only shortens the "no data at all" case; a reply that
+# has already begun streaming still gets the full inter-chunk idle timeout.
+try:
+    AIEXE_FIRST_CHUNK_TIMEOUT = max(10, int(os.getenv('AIEXE_FIRST_CHUNK_TIMEOUT', '45')))
+except Exception:
+    AIEXE_FIRST_CHUNK_TIMEOUT = 45
 
 
 def _aiexe_stable_chat_url(url):
@@ -3113,14 +3125,18 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
         # Rotate off a thread that has accumulated too many turns: drop its mapping so the
         # nav policy below opens a fresh New chat, and delete the stale thread in the
         # background. Correctness is unaffected — the full context rides in every prompt.
-        if (_chat_key and AIEXE_THREAD_MAX_TURNS
-                and AIEXE_THREAD_TURNS.get(_chat_key, 0) >= AIEXE_THREAD_MAX_TURNS):
+        _rotate_turns = bool(_chat_key and AIEXE_THREAD_MAX_TURNS
+                             and AIEXE_THREAD_TURNS.get(_chat_key, 0) >= AIEXE_THREAD_MAX_TURNS)
+        _rotate_slow = bool(_chat_key and _chat_key in AIEXE_THREAD_SLOW)
+        if _rotate_turns or _rotate_slow:
+            AIEXE_THREAD_SLOW.discard(_chat_key)
             _old = AIEXE_CHAT_URLS.pop(_chat_key, "")
             AIEXE_THREAD_TURNS[_chat_key] = 0
             _aiexe_save_chat_map()
             _old_slug = _aiexe_slug_from_url(_old)
-            print("AIEXE_ROTATE %s after %d turns (old=%s)"
-                  % (_chat_key[:32], AIEXE_THREAD_MAX_TURNS, _old_slug or "?"), flush=True)
+            _why = 'slow last turn' if _rotate_slow else ('%d turns' % AIEXE_THREAD_MAX_TURNS)
+            print("AIEXE_ROTATE %s (%s, old=%s)"
+                  % (_chat_key[:32], _why, _old_slug or "?"), flush=True)
             if _old_slug and not _chat_key.startswith("id:internal:"):
                 gevent.spawn(_aiexe_delete_after_stream, _old_slug)
         _cur_url = str(driver.current_url or "")
@@ -3480,8 +3496,21 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
                     else:
                         _dom_probe_stable = 0
                     _dom_probe_prev = _probe
+            # Cold first-token miss: nothing streamed and nothing rendered in the DOM yet.
+            # Give up at the short first-chunk budget (not the full idle timeout) and flag the
+            # thread slow so the next send rotates to a fresh one — this is what turned a pair
+            # of dead captures into an 8-minute stall.
+            if (eval_count == 0 and not streamed_content
+                    and time.time() - last_data_time > AIEXE_FIRST_CHUNK_TIMEOUT):
+                print("Timeout: no first token in %ds (empty capture). Exiting loop."
+                      % AIEXE_FIRST_CHUNK_TIMEOUT, flush=True)
+                if _chat_key:
+                    AIEXE_THREAD_SLOW.add(_chat_key)
+                break
             if time.time() - last_data_time > timeout:
                 print(f"Timeout: No data received for {timeout} seconds. Exiting loop.", flush=True)
+                if _chat_key:
+                    AIEXE_THREAD_SLOW.add(_chat_key)
                 try:
                     _posts = driver.execute_script("return window.__aiexe_urls || []")
                     print("AIEXE_DIAG_FETCH posts=" + str(_posts)[:900], flush=True)
@@ -3508,6 +3537,14 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
                         if response_format != ResponseFormat.COMPLETION_AS_STRING:
                             yield json.dumps({"error": "Venice: %s" % _alert[:400]}) + "\r\n"
                         return
+                # Nothing has rendered yet AND generation isn't running: no reply is coming
+                # (cold empty capture). Bail after a short probe instead of polling the full
+                # idle window into an empty result, and flag the thread slow so it rotates.
+                if not _prev and eval_count == 0 and _i >= 12 and not _aiexe_generation_running(driver):
+                    print("AIEXE_STREAM empty DOM, generation idle — bailing early", flush=True)
+                    if _chat_key:
+                        AIEXE_THREAD_SLOW.add(_chat_key)
+                    break
                 _txt = _aiexe_read_last_assistant_text(
                     driver, include_reasoning=(response_format != ResponseFormat.COMPLETION_AS_STRING))
                 if _structured_limit and _txt:
@@ -3766,6 +3803,7 @@ def aiexe_delete_chat():
             AIEXE_THREAD_ATTACHMENTS.pop(key, None)
             AIEXE_THREAD_NAMED.pop(key, None)
             AIEXE_THREAD_TURNS.pop(key, None)
+            AIEXE_THREAD_SLOW.discard(key)
             _aiexe_save_chat_map()
     return Response(json.dumps({"ok": bool(ok), "slug": slug, "reason": reason,
                                 "mapping_cleared": bool(key)}),
@@ -4157,6 +4195,7 @@ def _aiexe_cleanup_internal_batch(min_count=1, respect_user_window=True, cap=20)
                         print("AIEXE_CLEANUP delete failed for %s: %s" % (slug, exc), flush=True)
                 AIEXE_CHAT_URLS.pop(key, None)
                 AIEXE_THREAD_TURNS.pop(key, None)
+                AIEXE_THREAD_SLOW.discard(key)
                 done += 1
                 print("AIEXE_CLEANUP %s -> %s" % (slug or key[:36], "deleted" if deleted else "dropped from map"), flush=True)
             _aiexe_save_chat_map()
