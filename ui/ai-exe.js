@@ -14799,31 +14799,78 @@ function saveChats() {
     return copy;
   });
 
-  // Fallback 2: shed the heaviest per-message weight — agent transcript stream bodies,
-  // diff previews, and (biggest) agentMeta.revert.files[].content, which hold FULL file
-  // snapshots for the revert feature. One agent run over large files can otherwise blow
-  // quota and, with the error swallowed, silently drop the newest reply on reload.
-  const shedAgentWeight = (payload) => payload.map((chat) => {
-    const lighten = (messages) => (Array.isArray(messages) ? messages.map((msg) => {
-      if (!msg || typeof msg !== 'object' || msg.role !== 'ai') return msg;
-      const next = { ...msg };
-      if (Array.isArray(next.agentActivities) && next.agentActivities.length) {
-        next.agentActivities = next.agentActivities.map((activity) => (activity && typeof activity === 'object'
-          ? { ...activity, streamContent: '', diffPreview: null }
-          : activity));
-      }
-      if (next.agentMeta && next.agentMeta.revert && Array.isArray(next.agentMeta.revert.files)) {
-        const dropContent = (files) => (Array.isArray(files)
-          ? files.map((file) => (file && typeof file === 'object'
-            ? { ...file, content: '', diffPreview: null }
-            : file))
-          : files);
-        const revert = { ...next.agentMeta.revert, files: dropContent(next.agentMeta.revert.files) };
-        if (Array.isArray(next.agentMeta.revert.restored)) revert.restored = dropContent(next.agentMeta.revert.restored);
-        next.agentMeta = { ...next.agentMeta, revert };
-      }
-      return next;
-    }) : messages);
+  // Keep a bounded preview when storage is tight. The inline Edited drawer and the
+  // finished edit-card hover preview both depend on these rows after a reload; dropping
+  // them made those affordances silently disappear even though the edit stats survived.
+  const compactStoredDiffPreview = (rows, maxRows = 72) => (Array.isArray(rows)
+    ? rows.slice(0, maxRows).map((row) => {
+      if (!row || typeof row !== 'object') return null;
+      const type = String(row.type || '').toLowerCase();
+      if (type === 'spacer') return { type: 'spacer' };
+      if (!['context', 'add', 'remove'].includes(type)) return null;
+      return {
+        type,
+        oldLine: Math.max(0, Number(row.oldLine) || 0),
+        newLine: Math.max(0, Number(row.newLine) || 0),
+        text: String(row.text || '').slice(0, 240),
+      };
+    }).filter(Boolean)
+    : null);
+
+  // Threads are the canonical persisted conversation. `chat.messages` mirrors the active
+  // thread at runtime, so serializing both copies can double a long agent run and push an
+  // otherwise valid final reply over WebKit's localStorage quota.
+  const removeMirroredActiveMessages = (payload) => payload.map((chat) => {
+    const copy = { ...chat };
+    if (Array.isArray(copy.threads) && copy.threads.length) {
+      copy.messages = [];
+      copy.branchLinks = [];
+      delete copy.pendingBranchLink;
+    }
+    return copy;
+  });
+
+  // Fallback 2: shed the heaviest per-message weight — agent transcript stream bodies
+  // and (biggest) agentMeta.revert.files[].content, which hold FULL file snapshots for
+  // the revert feature. Recent compact previews remain so edit drawers and hover previews
+  // still work after storage-pressure saves and app relaunches. Older previews are the
+  // first expendable UI detail when preserving a newly completed response.
+  const shedAgentWeight = (payload, preserveRecentPreviewAiCount = Number.POSITIVE_INFINITY) => payload.map((chat) => {
+    const lighten = (messages) => {
+      const source = Array.isArray(messages) ? messages : [];
+      const aiTotal = source.reduce((count, msg) => count + (msg && msg.role === 'ai' ? 1 : 0), 0);
+      let aiIndex = 0;
+      return source.map((msg) => {
+        if (!msg || typeof msg !== 'object' || msg.role !== 'ai') return msg;
+        aiIndex += 1;
+        const keepPreview = aiIndex > aiTotal - Math.max(0, Number(preserveRecentPreviewAiCount) || 0);
+        const next = { ...msg };
+        if (Array.isArray(next.agentActivities) && next.agentActivities.length) {
+          next.agentActivities = next.agentActivities.map((activity) => (activity && typeof activity === 'object'
+            ? {
+              ...activity,
+              streamContent: '',
+              diffPreview: keepPreview ? compactStoredDiffPreview(activity.diffPreview) : null,
+            }
+            : activity));
+        }
+        if (next.agentMeta && next.agentMeta.revert && Array.isArray(next.agentMeta.revert.files)) {
+          const dropContent = (files) => (Array.isArray(files)
+            ? files.map((file) => (file && typeof file === 'object'
+              ? {
+                ...file,
+                content: '',
+                diffPreview: keepPreview ? compactStoredDiffPreview(file.diffPreview, 120) : null,
+              }
+              : file))
+            : files);
+          const revert = { ...next.agentMeta.revert, files: dropContent(next.agentMeta.revert.files) };
+          if (Array.isArray(next.agentMeta.revert.restored)) revert.restored = dropContent(next.agentMeta.revert.restored);
+          next.agentMeta = { ...next.agentMeta, revert };
+        }
+        return next;
+      });
+    };
     const copy = { ...chat };
     copy.messages = lighten(copy.messages);
     if (Array.isArray(copy.threads)) {
@@ -14834,14 +14881,38 @@ function saveChats() {
     return copy;
   });
 
+  // Emergency history reduction is deliberately chronological and per thread: it keeps
+  // the newest user/assistant exchange (including the final narration and tool summary)
+  // instead of merely dropping whole chats while one oversized active chat remains.
+  const keepRecentThreadMessages = (payload, messageLimit) => payload.map((chat) => {
+    const copy = { ...chat };
+    const keep = (messages) => (Array.isArray(messages) ? messages.slice(-messageLimit) : []);
+    copy.messages = keep(copy.messages);
+    if (Array.isArray(copy.threads)) {
+      copy.threads = copy.threads.map((thread) => (thread && typeof thread === 'object'
+        ? { ...thread, messages: keep(thread.messages) }
+        : thread));
+    }
+    return copy;
+  });
+
   // Escalating attempts, lightest last. Never swallow into a total no-op: keeping the
   // newest conversation matters more than keeping the full agent transcript/revert data.
   const attempts = [
     () => basePayload,
     () => stripAttachmentPreviews(basePayload),
-    () => shedAgentWeight(stripAttachmentPreviews(basePayload)),
-    () => shedAgentWeight(stripAttachmentPreviews(basePayload)).slice(0, 30),
-    () => shedAgentWeight(stripAttachmentPreviews(basePayload)).slice(0, 12),
+    () => shedAgentWeight(removeMirroredActiveMessages(stripAttachmentPreviews(basePayload))),
+    () => shedAgentWeight(removeMirroredActiveMessages(stripAttachmentPreviews(basePayload)), 4),
+    () => shedAgentWeight(removeMirroredActiveMessages(stripAttachmentPreviews(basePayload)), 1).slice(0, 30),
+    () => shedAgentWeight(removeMirroredActiveMessages(stripAttachmentPreviews(basePayload)), 1).slice(0, 12),
+    () => keepRecentThreadMessages(
+      shedAgentWeight(removeMirroredActiveMessages(stripAttachmentPreviews(basePayload)), 1).slice(0, 12),
+      24,
+    ),
+    () => keepRecentThreadMessages(
+      shedAgentWeight(removeMirroredActiveMessages(stripAttachmentPreviews(basePayload)), 0).slice(0, 4),
+      8,
+    ),
   ];
   let saved = false;
   for (const build of attempts) {

@@ -330,6 +330,10 @@
             hasIssues: item.hasIssues === true,
             // Batch write rows create several files — group headers sum this.
             fileCount: Math.max(0, Number(item.fileCount) || 0) || null,
+            // Full path list for batch writes, so each file opens individually.
+            files: Array.isArray(item.files)
+              ? item.files.map((p) => normalizeWorkspacePath(String(p || '').trim())).filter((p) => p && p !== '/').slice(0, 60)
+              : null,
             items: checklistItems && checklistItems.length ? checklistItems : null,
             terminal,
             devServer: item.devServer && typeof item.devServer === 'object' ? {
@@ -835,10 +839,16 @@
         const guardSkip = /\bblocked\b/i.test(observation) && !notFound;
         const failKind = (tool === 'read_file' || tool === 'read_files' || tool === 'search_files') ? 'read'
           : ((tool === 'write_file' || tool === 'write_files' || tool === 'edit_file') ? 'edit' : 'scan');
+        const failedPath = normalizeWorkspacePath(targetInfo || (decision && decision.path) || '');
         return buildInlineAgentActivityBase({
-          kind: failKind,
+          // A guard skip is a neutral outcome, not another read/edit step. Keeping it
+          // out of those phases prevents summaries such as "Read 3 files" counting a
+          // file that was deliberately not read again.
+          kind: guardSkip ? 'skip' : failKind,
           title: notFound ? 'Not found' : (guardSkip ? 'Skipped' : 'Failed'),
-          detail: formatAgentActivityPathLabel(targetInfo || (decision && decision.path) || '') || 'this step',
+          detail: formatAgentActivityPathLabel(failedPath) || 'this step',
+          openPath: guardSkip ? failedPath : '',
+          openKind: 'file',
           meta: guardSkip ? 'already covered' : '',
           status: guardSkip ? 'done' : 'error',
         });
@@ -854,10 +864,13 @@
         });
       }
       if (tool === 'list_dir') {
+        const inspectedPath = normalizeWorkspacePath(targetInfo || '');
         return buildInlineAgentActivityBase({
           kind: 'scan',
-          title: targetInfo && targetInfo !== '/' ? `Inspected ${formatAgentActivityPathLabel(targetInfo)}` : 'Inspected workspace',
-          detail: '',
+          title: 'Inspected',
+          detail: inspectedPath && inspectedPath !== '/' ? formatAgentActivityPathLabel(inspectedPath) : 'workspace',
+          openPath: inspectedPath && inspectedPath !== '/' ? inspectedPath : '',
+          openKind: 'folder',
           status: 'done',
         });
       }
@@ -906,6 +919,7 @@
             ? paths.map((p) => formatAgentActivityPathLabel(p)).join(', ').slice(0, 120)
             : `${count || 'several'} files`,
           meta: paths.length ? `${count} files` : '',
+          files: paths.length > 1 ? paths : null,
           diffPreview: buildObservationPreviewRows(observation),
           status: 'done',
         });
@@ -939,6 +953,7 @@
           openKind: 'file',
           meta: `${createdPaths.length || 'batch'} files`,
           fileCount: createdPaths.length || undefined,
+          files: createdPaths.length > 1 ? createdPaths : null,
           status: 'done',
         });
       }
@@ -1363,7 +1378,7 @@
       }
     }
 
-    function buildAgentActivityRow(chatId, activity) {
+    function buildAgentActivityRow(chatId, activity, rowOptions = {}) {
       if (activity && activity.kind === 'stream_file' && String(activity.streamContent || '').trim()) {
         return buildAgentStreamingFileView({
           path: activity.openPath || activity.detail || 'partial file',
@@ -1408,10 +1423,16 @@
         });
         return wrap;
       }
-      const hasDiffDrawer = Boolean(activity && activity.diffPreview && activity.diffPreview.length);
-      const clickable = Boolean(activity && activity.status === 'done' && activity.openPath && !hasDiffDrawer);
+      // Batch reads/writes collapse to "N files" + a click-to-open file list (below).
+      // No nested buttons: the row is a toggle, each file is its own button inside.
+      const multiFile = Boolean(activity && Array.isArray(activity.files) && activity.files.length > 1);
+      const hasFileList = multiFile;
+      const hasDiffDrawer = Boolean(activity && activity.diffPreview && activity.diffPreview.length) && !hasFileList;
+      const clickable = Boolean(activity && activity.status === 'done' && activity.openPath && !hasDiffDrawer && !hasFileList);
+      const compactGrouped = rowOptions.compactGrouped === true;
       const item = document.createElement(clickable ? 'button' : 'div');
-      item.className = `msg-agent-activity-row${activity && activity.status === 'error' ? ' error' : ''}${clickable ? ' clickable' : ''}`;
+      const activityKind = String(activity && activity.kind || '').toLowerCase().replace(/[^a-z0-9_-]/g, '');
+      item.className = `msg-agent-activity-row${activity && activity.status === 'error' ? ' error' : ''}${activity && activity.hasIssues === true ? ' has-issues' : ''}${clickable ? ' clickable' : ''}${compactGrouped ? ' compact-grouped' : ''}${activityKind ? ` kind-${activityKind}` : ''}`;
       if (item instanceof HTMLButtonElement) item.type = 'button';
       const activityRowPath = normalizeWorkspacePath(activity && activity.openPath ? activity.openPath : '');
       if (activityRowPath && activityRowPath !== '/') item.dataset.activityPath = activityRowPath;
@@ -1425,13 +1446,15 @@
         inlineRow = document.createElement('div');
         inlineRow.className = 'msg-agent-activity-inline';
 
-        titleEl = document.createElement('span');
-        titleEl.className = 'msg-agent-activity-inline-title';
-        titleEl.textContent = String(activity && activity.title ? activity.title : '').trim() || 'Step';
-        inlineRow.appendChild(titleEl);
+        if (!compactGrouped) {
+          titleEl = document.createElement('span');
+          titleEl.className = 'msg-agent-activity-inline-title';
+          titleEl.textContent = String(activity && activity.title ? activity.title : '').trim() || 'Step';
+          inlineRow.appendChild(titleEl);
+        }
 
         const detail = String(activity && activity.detail ? activity.detail : '').trim();
-        if (detail) {
+        if (detail && !multiFile) {
           pathEl = document.createElement('span');
           const fileLikeTarget = Boolean(
             activity
@@ -1440,13 +1463,17 @@
             && normalizeWorkspacePath(activity.openPath) !== '/'
           );
           const commandLikeTarget = String(activity && activity.kind || '').toLowerCase() === 'command';
-          pathEl.className = `msg-agent-activity-inline-path${fileLikeTarget ? ' file-target' : ''}${commandLikeTarget ? ' command-target' : ''}`;
+          const targetLikeDetail = fileLikeTarget || commandLikeTarget || [
+            'project', 'mkdir', 'move', 'delete', 'read', 'write', 'edit', 'search', 'scan', 'skip',
+          ].includes(String(activity && activity.kind || '').toLowerCase());
+          pathEl.className = `msg-agent-activity-inline-path${fileLikeTarget ? ' file-target' : ''}${commandLikeTarget ? ' command-target' : ''}${targetLikeDetail ? ' activity-target' : ' supporting-detail'}`;
           pathEl.textContent = detail;
           inlineRow.appendChild(pathEl);
         }
 
         const meta = String(activity && activity.meta ? activity.meta : '').trim();
-        if (meta) {
+        const redundantOpenMeta = /^(Open file|Open folder|Open target)$/i.test(meta);
+        if (meta && (!compactGrouped || !redundantOpenMeta)) {
           metaEl = document.createElement('span');
           metaEl.className = 'msg-agent-activity-inline-meta';
           metaEl.textContent = meta;
@@ -1540,7 +1567,7 @@
         inlineRow.appendChild(actions);
       }
 
-      if (hasDiffDrawer) {
+      if (hasDiffDrawer || hasFileList) {
           chevron = document.createElement('span');
           chevron.className = 'msg-agent-summary-chevron';
           chevron.innerHTML = `
@@ -1575,7 +1602,34 @@
         item.appendChild(metaEl);
       }
       }
-      if (hasDiffDrawer) {
+      if (hasFileList) {
+        // Collapsed by default: "Read/Wrote N files" + chevron; expand to the list,
+        // each file a button that opens it. Consistent for reads and writes.
+        item.classList.add('files-toggle');
+        item.setAttribute('aria-expanded', 'false');
+        const drawer = document.createElement('div');
+        drawer.className = 'msg-agent-files-drawer';
+        const drawerInner = document.createElement('div');
+        drawerInner.className = 'msg-agent-files-drawer-inner';
+        activity.files.forEach((filePath) => {
+          const line = document.createElement('button');
+          line.type = 'button';
+          line.className = 'msg-agent-file-line';
+          line.textContent = String(filePath || '').replace(/^\//, '');
+          line.title = filePath;
+          line.addEventListener('click', (evt) => {
+            evt.stopPropagation();
+            void openAgentActivityTarget({ openPath: filePath, openKind: 'file', kind: activity.kind });
+          });
+          drawerInner.appendChild(line);
+        });
+        drawer.appendChild(drawerInner);
+        item.appendChild(drawer);
+        item.addEventListener('click', () => {
+          const expanded = item.getAttribute('aria-expanded') === 'true';
+          item.setAttribute('aria-expanded', expanded ? 'false' : 'true');
+        });
+      } else if (hasDiffDrawer) {
         item.classList.add('diff-toggle');
         item.setAttribute('aria-expanded', 'false');
         const drawer = document.createElement('div');
@@ -2053,6 +2107,16 @@
       const errorItem = items.find((a) => a && a.status === 'error');
       const groupStatus = runningItem ? 'running' : (errorItem ? 'error' : 'done');
       const count = items.length;
+      const activityPaths = (activity) => {
+        const paths = Array.isArray(activity && activity.files) && activity.files.length
+          ? activity.files
+          : [activity && activity.openPath];
+        return paths
+          .map((value) => normalizeWorkspacePath(String(value || '').trim()))
+          .filter((value) => value && value !== '/');
+      };
+      const groupFilePaths = Array.from(new Set(items.flatMap(activityPaths)));
+      const groupFileCount = groupFilePaths.length || count;
       // Structured flag set by the validate activity builder — the old detail-text
       // regex matched the word "issues" inside "no obvious issues found".
       const validateHasIssues = phase === 'validate' && items.some((a) => a && (a.hasIssues === true || a.status === 'error'));
@@ -2071,7 +2135,7 @@
           // Batch rows carry fileCount (write_files creates several per row) —
           // counting rows undercounted ("Generated 2 files" for 4 real files).
           done: (() => {
-            const files = items.reduce((sum, a) => sum + (Number(a && a.fileCount) || 1), 0);
+            const files = groupFileCount;
             return `Generated ${files} file${files !== 1 ? 's' : ''}`;
           })(),
         },
@@ -2082,19 +2146,18 @@
             const reads = readItems.length;
             const searches = items.filter((a) => a && (a.kind === 'search' || a.kind === 'search_files')).length;
             if (reads && !searches && reads === count) {
-              const uniquePaths = new Set(readItems.map((a) => String(a && a.openPath ? a.openPath : '')));
-              if (uniquePaths.size === 1) {
-                const name = (readItems[0].openPath || '').split('/').filter(Boolean).pop() || 'file';
+              if (groupFilePaths.length === 1) {
+                const name = groupFilePaths[0].split('/').filter(Boolean).pop() || 'file';
                 // Same file read in chunks — name it, don't claim multiple files.
                 return reads === 1 ? `Read ${name}` : `Read ${name} · ${reads} sections`;
               }
-              return `Read ${reads} files`;
+              return `Read ${groupFileCount} files`;
             }
-            if (searches && !reads) return `Searched ${searches} pattern${searches !== 1 ? 's' : ''}`;
+            if (searches && !reads && searches === count) return `Searched ${searches} pattern${searches !== 1 ? 's' : ''}`;
             return `Inspected ${count} item${count !== 1 ? 's' : ''}`;
           })()
         },
-        edit: { running: 'Applying changes', done: `Updated ${count} file${count !== 1 ? 's' : ''}` },
+        edit: { running: 'Applying changes', done: `Updated ${groupFileCount} file${groupFileCount !== 1 ? 's' : ''}` },
         validate: { running: 'Checking files', done: (() => {
           // Name every kind of verification the group actually contains \u2014 a bare
           // "Checked files" hid the syntax check and app run inside the drawer.
@@ -2126,6 +2189,9 @@
 
       const subgroup = document.createElement('div');
       subgroup.className = `msg-agent-subgroup${groupStatus === 'error' ? ' error' : ''}`;
+      const compactFileGroup = groupFilePaths.length > 1 && ['explore', 'create', 'edit'].includes(phase);
+      if (compactFileGroup) subgroup.classList.add('compact-files');
+      subgroup.classList.add('compact-summary');
       subgroup.dataset.expanded = expanded ? 'true' : 'false';
 
       const toggle = document.createElement('button');
@@ -2135,7 +2201,28 @@
 
       const labelEl = document.createElement('span');
       labelEl.className = 'msg-agent-subgroup-label';
-      labelEl.textContent = label;
+      const [summaryLabel, outcomeLabel = ''] = label.split(/\s+—\s+/, 2);
+      const summaryMatch = summaryLabel.match(/^(\S+)(?:\s+(.+))?$/);
+      const verbEl = document.createElement('span');
+      verbEl.className = 'msg-agent-subgroup-verb';
+      verbEl.textContent = summaryMatch ? summaryMatch[1] : summaryLabel;
+      labelEl.appendChild(verbEl);
+      if (summaryMatch && summaryMatch[2]) {
+        const metaEl = document.createElement('span');
+        const isCountMeta = /^\d+\s+(?:files?|folders?|projects?|items?|patterns?|steps?)$/i.test(summaryMatch[2]);
+        metaEl.className = `msg-agent-subgroup-meta${isCountMeta ? ' count-meta' : ''}`;
+        metaEl.textContent = summaryMatch[2];
+        labelEl.appendChild(metaEl);
+      }
+      if (outcomeLabel) {
+        const outcomeEl = document.createElement('span');
+        const outcomeKind = /no issues|passed|clean/i.test(outcomeLabel)
+          ? 'success'
+          : (/issues|failed|error|missing|blocked/i.test(outcomeLabel) ? 'error' : 'neutral');
+        outcomeEl.className = `msg-agent-subgroup-status ${outcomeKind}`;
+        outcomeEl.textContent = outcomeLabel;
+        labelEl.appendChild(outcomeEl);
+      }
       toggle.appendChild(labelEl);
 
       const chevron = document.createElement('span');
@@ -2146,7 +2233,27 @@
 
       const drawer = document.createElement('div');
       drawer.className = 'msg-agent-subgroup-drawer';
-      items.forEach((activity) => drawer.appendChild(buildAgentActivityRow(chatId, activity)));
+      items.forEach((activity) => {
+        const paths = activityPaths(activity);
+        if (compactFileGroup && paths.length > 1) {
+          paths.forEach((filePath) => {
+            const line = document.createElement('button');
+            line.type = 'button';
+            line.className = 'msg-agent-file-line';
+            line.textContent = filePath.replace(/^\//, '');
+            line.title = filePath;
+            line.addEventListener('click', (event) => {
+              event.stopPropagation();
+              void openAgentActivityTarget({ openPath: filePath, openKind: 'file', kind: activity.kind });
+            });
+            drawer.appendChild(line);
+          });
+          return;
+        }
+        // The subgroup header already states the action. Children retain the useful
+        // target, range, outcome, stats, and diff disclosure without repeating it.
+        drawer.appendChild(buildAgentActivityRow(chatId, activity, { compactGrouped: true }));
+      });
       subgroup.appendChild(drawer);
       if (!expanded) {
         drawer.hidden = true;

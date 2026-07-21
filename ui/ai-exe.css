@@ -4306,11 +4306,65 @@ html.platform-mac .settings-sidebar {
 }
 
 .msg-agent-subgroup-label {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 7px;
   font-size: 13.5px;
   font-weight: 600;
   letter-spacing: -0.01em;
   color: rgba(166, 178, 198, 0.86);
   transition: color 0.16s ease;
+}
+
+.msg-agent-subgroup-verb {
+  color: rgba(220, 228, 242, 0.88);
+  font-weight: 600;
+}
+
+.msg-agent-subgroup-meta {
+  color: rgba(188, 199, 218, 0.88);
+  font-weight: 500;
+  transition: color 0.15s ease;
+}
+
+.msg-agent-subgroup-status {
+  font-size: 12.5px;
+  font-weight: 500;
+  color: rgba(148, 162, 185, 0.78);
+  transition: color 0.15s ease;
+}
+
+.msg-agent-subgroup-status::before {
+  content: "—";
+  margin-right: 7px;
+  color: rgba(130, 144, 166, 0.58);
+}
+
+.msg-agent-subgroup-status.error {
+  color: #fb7185;
+}
+
+.msg-agent-subgroup-status.success {
+  color: rgba(167, 178, 197, 0.82);
+}
+
+.msg-agent-subgroup-toggle:hover .msg-agent-subgroup-meta,
+.msg-agent-subgroup-toggle:focus-visible .msg-agent-subgroup-meta {
+  color: rgba(228, 234, 243, 0.96);
+}
+
+.msg-agent-subgroup.compact-summary[data-expanded="true"] .msg-agent-subgroup-meta.count-meta {
+  display: none;
+}
+
+.msg-agent-subgroup-toggle:hover .msg-agent-subgroup-verb,
+.msg-agent-subgroup-toggle:focus-visible .msg-agent-subgroup-verb {
+  color: rgba(242, 246, 252, 0.98);
+}
+
+.msg-agent-subgroup-toggle:hover .msg-agent-subgroup-status.error,
+.msg-agent-subgroup-toggle:focus-visible .msg-agent-subgroup-status.error {
+  color: #fda4af;
 }
 
 .msg-agent-subgroup-chevron {
@@ -4320,7 +4374,7 @@ html.platform-mac .settings-sidebar {
   align-items: center;
   justify-content: center;
   color: rgba(150, 162, 180, 0.7);
-  opacity: 0.75;
+  opacity: 0;
   transform: rotate(-90deg);
   transition: transform 0.18s ease, color 0.16s ease, opacity 0.16s ease;
   flex-shrink: 0;
@@ -4333,6 +4387,7 @@ html.platform-mac .settings-sidebar {
 
 .msg-agent-subgroup-toggle[aria-expanded="true"] .msg-agent-subgroup-chevron {
   transform: rotate(0deg);
+  opacity: 1;
 }
 
 .msg-agent-subgroup-toggle:hover .msg-agent-subgroup-label,
@@ -4344,10 +4399,6 @@ html.platform-mac .settings-sidebar {
 .msg-agent-subgroup-toggle:focus-visible .msg-agent-subgroup-chevron {
   color: rgba(180, 192, 210, 0.88);
   opacity: 1;
-}
-
-.msg-agent-subgroup.error .msg-agent-subgroup-label {
-  color: #fb7185;
 }
 
 .msg-agent-subgroup-drawer {
@@ -4362,6 +4413,32 @@ html.platform-mac .settings-sidebar {
   max-height: none;
   opacity: 1;
   transition: max-height 0.22s ease, opacity 0.18s ease;
+}
+
+/* Every phase summary uses the same clean hierarchy as a batched Read:
+   one structured header and useful child details without repeated actions. */
+.msg-agent-subgroup.compact-summary .msg-agent-subgroup-drawer {
+  gap: 1px;
+  padding-left: 2px;
+  margin-top: 5px;
+  margin-left: 0;
+  background: transparent;
+}
+
+.msg-agent-activity-row.compact-grouped .msg-agent-activity-inline {
+  gap: 7px;
+}
+
+.msg-agent-activity-row.compact-grouped .msg-agent-activity-inline-path.file-target {
+  text-decoration: underline;
+  text-decoration-color: rgba(130, 144, 166, 0.3);
+  text-underline-offset: 2px;
+}
+
+.msg-agent-activity-row.compact-grouped.clickable .msg-agent-activity-inline-path.activity-target {
+  text-decoration: underline;
+  text-decoration-color: rgba(130, 144, 166, 0.3);
+  text-underline-offset: 2px;
 }
 
 .msg-agent-activity-thought {
@@ -4521,9 +4598,21 @@ html.platform-mac .settings-sidebar {
   word-break: break-word;
 }
 
-.msg-agent-activity-inline-path.file-target {
-  color: var(--accent);
+.msg-agent-activity-inline-path.activity-target {
+  color: rgba(188, 199, 218, 0.88);
   font-weight: 600;
+  transition: color 0.15s ease;
+}
+
+.msg-agent-activity-inline-path.supporting-detail {
+  color: rgba(148, 162, 185, 0.78);
+  font-weight: 500;
+}
+
+.msg-agent-activity-inline-path.file-target {
+  color: rgba(188, 199, 218, 0.88);
+  font-weight: 600;
+  transition: color 0.15s ease;
 }
 
 .msg-agent-activity-inline-path.command-target {
@@ -4543,6 +4632,80 @@ html.platform-mac .settings-sidebar {
   font-size: 13px;
   min-width: 0;
   word-break: break-word;
+}
+
+/* Batch read/write file list — collapsed by default, each file opens on click. */
+.msg-agent-activity-row.files-toggle { cursor: pointer; }
+/* Chevron: hidden until hover or expanded — same as the diff (edit) rows. */
+.msg-agent-activity-row.files-toggle .msg-agent-summary-chevron {
+  opacity: 0;
+  align-self: center;
+  margin-top: 1px;
+  transition: transform 0.18s ease, color 0.16s ease, opacity 0.16s ease;
+}
+.msg-agent-activity-row.files-toggle:hover .msg-agent-summary-chevron,
+.msg-agent-activity-row.files-toggle:focus-visible .msg-agent-summary-chevron,
+.msg-agent-activity-row.files-toggle[aria-expanded="true"] .msg-agent-summary-chevron {
+  opacity: 1;
+}
+.msg-agent-activity-row.files-toggle[aria-expanded="true"] .msg-agent-summary-chevron {
+  transform: rotate(0deg);
+}
+/* The "N files" label is the hover affordance; it brightens on hover and is
+   hidden once expanded (the list itself already shows the count). */
+.msg-agent-activity-row.files-toggle .msg-agent-activity-inline-meta {
+  color: rgba(188, 199, 218, 0.88);
+  transition: color 0.15s ease;
+}
+.msg-agent-activity-row.files-toggle:hover .msg-agent-activity-inline-meta,
+.msg-agent-activity-row.files-toggle:focus-visible .msg-agent-activity-inline-meta {
+  color: rgba(228, 234, 243, 0.96);
+}
+.msg-agent-activity-row.files-toggle[aria-expanded="true"] .msg-agent-activity-inline-meta {
+  display: none;
+}
+/* Smooth collapse: grid-rows 0fr→1fr animates the auto height with an ease. */
+.msg-agent-files-drawer {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  transition: grid-template-rows 0.24s var(--ease-out, ease), opacity 0.2s ease;
+}
+.msg-agent-activity-row.files-toggle[aria-expanded="true"] .msg-agent-files-drawer {
+  grid-template-rows: 1fr;
+  opacity: 1;
+}
+.msg-agent-files-drawer-inner {
+  overflow: hidden;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  padding: 5px 0 2px 2px;
+}
+.msg-agent-file-line {
+  max-width: 100%;
+  padding: 3px 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
+  color: rgba(188, 199, 218, 0.88);
+  font: 500 13px var(--font-sans);
+  text-align: left;
+  text-decoration: underline;
+  text-decoration-color: rgba(130, 144, 166, 0.3);
+  text-underline-offset: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: color 0.15s ease, text-decoration-color 0.14s;
+}
+.msg-agent-file-line:hover,
+.msg-agent-file-line:focus-visible {
+  color: rgba(228, 234, 243, 0.96);
+  text-decoration-color: rgba(228, 234, 243, 0.45);
+  outline: none;
 }
 
 .msg-agent-activity-inline-plus {
@@ -4789,17 +4952,36 @@ html.platform-mac .settings-sidebar {
 }
 
 .msg-agent-activity-row.clickable:hover .msg-agent-activity-detail,
-.msg-agent-activity-row.clickable:focus-visible .msg-agent-activity-detail,
-.msg-agent-activity-row.clickable:hover .msg-agent-activity-inline-path.file-target,
-.msg-agent-activity-row.clickable:focus-visible .msg-agent-activity-inline-path.file-target {
-  color: var(--text2);
+.msg-agent-activity-row.clickable:focus-visible .msg-agent-activity-detail {
+  color: rgba(228, 234, 243, 0.96);
+}
+
+.msg-agent-activity-row.clickable:hover .msg-agent-activity-inline-meta,
+.msg-agent-activity-row.clickable:focus-visible .msg-agent-activity-inline-meta,
+.msg-agent-activity-row.diff-toggle:hover .msg-agent-activity-inline-meta,
+.msg-agent-activity-row.diff-toggle:focus-visible .msg-agent-activity-inline-meta {
+  color: rgba(188, 199, 218, 0.88);
+}
+
+.msg-agent-activity-row.clickable:hover .msg-agent-activity-inline-path.activity-target:not(.file-target),
+.msg-agent-activity-row.clickable:focus-visible .msg-agent-activity-inline-path.activity-target:not(.file-target) {
+  color: rgba(228, 234, 243, 0.96);
+}
+
+/* Filename sits at the neutral file color by default and returns to its blue
+   only when the row is hovered. (+N/-N keep their green/red always.) */
+.msg-agent-activity-row:hover .msg-agent-activity-inline-path.file-target,
+.msg-agent-activity-row:focus-visible .msg-agent-activity-inline-path.file-target {
+  color: var(--accent);
 }
 
 .msg-agent-activity-row.error .msg-agent-activity-title,
-.msg-agent-activity-row.error .msg-agent-activity-detail,
-.msg-agent-activity-row.error .msg-agent-activity-inline-title,
-.msg-agent-activity-row.error .msg-agent-activity-inline-path {
+.msg-agent-activity-row.error .msg-agent-activity-inline-title {
   color: #fda4af;
+}
+
+.msg-agent-activity-row.error .msg-agent-activity-inline-path:not(.command-target) {
+  color: rgba(188, 199, 218, 0.88);
 }
 
 .msg-agent-activity-title {
