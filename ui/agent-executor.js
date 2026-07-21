@@ -3788,6 +3788,20 @@ export default config;
           }
         }
         if (!issues.length) {
+          // Advisories are optional and re-running the review re-surfaces the same
+          // (often false) notes — which loops weak models. Show them once, then steer
+          // to finalize on any later passing validate.
+          const alreadyPassed = Array.isArray(toolEvents)
+            && toolEvents.some((e) => e && String(e.tool || '').toLowerCase() === 'validate_files' && e.validationPassed === true);
+          if (alreadyPassed) {
+            return {
+              ok: true,
+              mutated,
+              observation: `validate_files ok: ${targets.join(', ')} passed again. The earlier advisory notes are OPTIONAL and non-blocking — do NOT keep editing to chase them. Finalize now.`,
+              validationPassed: true,
+              autoWrittenFiles,
+            };
+          }
           // Advisory model-driven cross-file review; never blocks.
           let advisoryNotes = mechanicalAdvisory.slice();
           if (typeof deps.reviewAgentProjectCoherence === 'function') {
