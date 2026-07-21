@@ -13047,11 +13047,15 @@ function workspaceTreeHasFile(path) {
   const comparable = normalized.toLowerCase();
   return Array.from(_workspaceTreeSummaryCache.paths).some((known) => String(known || '').toLowerCase() === comparable);
 }
-async function getWorkspaceFileTreeSummary() {
+async function getWorkspaceFileTreeSummary(markPaths = null) {
   const ctx = typeof getWorkspaceContext === 'function' ? getWorkspaceContext() || {} : {};
   if (!ctx.workspaceRootName && !ctx.rootLoaded) return '';
+  // Files created during the current run get a ● tag so the model sees at a glance what it
+  // just made (vs pre-existing). Only the plain, unmarked build is cached — a marked build
+  // is per-run state and must never poison the shared cache.
+  const marks = markPaths instanceof Set && markPaths.size ? markPaths : null;
   const now = Date.now();
-  if (now - _workspaceTreeSummaryCache.at < 5000) return _workspaceTreeSummaryCache.text;
+  if (!marks && now - _workspaceTreeSummaryCache.at < 5000) return _workspaceTreeSummaryCache.text;
   const HIDDEN = new Set(['.DS_Store', 'Thumbs.db', 'desktop.ini', '.Spotlight-V100', '.Trashes',
     '.fseventsd', '.aiexe', '.git', 'node_modules', 'dist', 'build', '.venv', '__pycache__', '.next', 'coverage']);
   const lines = [];
@@ -13077,13 +13081,13 @@ async function getWorkspaceFileTreeSummary() {
         lines.push(`${indent}${entry.name}/`);
         await walk(entryPath, depth + 1);
       } else {
-        lines.push(`${indent}${entry.name}`);
+        lines.push(`${indent}${entry.name}${marks && marks.has(entryPath) ? ' ●' : ''}`);
       }
     }
   };
   try { await walk('/', 0); } catch (_) { }
   const text = lines.join('\n');
-  _workspaceTreeSummaryCache = { at: now, text, paths };
+  if (!marks) _workspaceTreeSummaryCache = { at: now, text, paths };
   return text;
 }
 

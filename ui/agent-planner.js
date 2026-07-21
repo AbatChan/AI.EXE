@@ -1202,12 +1202,25 @@
       let currentWorkspaceRoot = workspace.workspaceRootName ? `/${workspace.workspaceRootName}` : '(none)';
       // Always give the model the LIVE project structure (system files excluded) —
       // stops each phase burning steps on list_dir re-discovery and grounds paths.
+      // Tag files this run created so the tree shows what was just built vs pre-existing.
+      const createdThisRun = new Set();
+      (Array.isArray(toolEvents) ? toolEvents : []).forEach((e) => {
+        if (!e || !e.ok) return;
+        if (e.createdNewFile && e.path) createdThisRun.add(normalizeWorkspacePath(e.path));
+        if (Array.isArray(e.autoWrittenFiles)) {
+          e.autoWrittenFiles.forEach((f) => {
+            if (f && f.createdNewFile && f.path) createdThisRun.add(normalizeWorkspacePath(f.path));
+          });
+        }
+      });
       let liveTreeText = '';
       try {
-        const tree = typeof getWorkspaceFileTreeSummary === 'function' ? await getWorkspaceFileTreeSummary() : '';
+        const tree = typeof getWorkspaceFileTreeSummary === 'function'
+          ? await getWorkspaceFileTreeSummary(createdThisRun) : '';
         if (tree) {
           liveTreeText = String(tree);
-          currentWorkspaceRoot += `\nCurrent project file structure (live):\n${tree}`;
+          const legend = createdThisRun.size ? ' (● = created this run)' : '';
+          currentWorkspaceRoot += `\nCurrent project file structure (live)${legend}:\n${tree}`;
         }
       } catch (_) { }
       const allEvents = toolEvents || [];
