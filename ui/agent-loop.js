@@ -1467,8 +1467,9 @@
         keepPhaseTrackerPinned = true;
         planSpec.taskKind = 'project'; // re-planner reclassifies Continue as 'edit'; force back
         const active = phases[activeIndex] || {};
-        // Seed checklist from disk: earlier runs' files count without a re-touch.
-        try {
+        // Disk-seed liveDone only on resume; a fresh build must not inherit a stale
+        // same-named folder's files.
+        if (isResume) try {
           const seedTasks = (Array.isArray(active.tasks) ? active.tasks : [])
             .filter((t) => t && !t.done)
             .map((t) => ({
