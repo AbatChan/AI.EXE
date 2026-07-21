@@ -232,9 +232,12 @@
     // prompts now REQUIRE the fence; raw must be unfenced before the scan loop).
     function unwrapWholeFence(text) {
       let out = String(text || '');
-      if (/^\s*```/.test(out)) {
-        out = out.replace(/^\s*```[a-z0-9_+\-]*[^\S\n]*\n?/i, '');
-        out = out.replace(/\n?```\s*$/, '');
+      // Peel a fence of 3+ backticks; markdown files use a 4-tick wrapper so their
+      // inner ``` blocks survive. Close must match the opener's length.
+      const open = out.match(/^\s*(`{3,})[a-z0-9_+\-]*[^\S\n]*\n?/i);
+      if (open) {
+        out = out.slice(open[0].length);
+        out = out.replace(new RegExp(`\\n?${open[1]}\\s*$`), '');
       }
       return out;
     }

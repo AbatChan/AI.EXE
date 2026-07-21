@@ -785,7 +785,9 @@
       }
       return [
         'Write the complete final contents for one project file.',
-        'Return the complete file inside ONE fenced code block (```<language> first line, ``` last line, nothing outside it). No explanation.',
+        /\.mdx?$/i.test(normalizedPath)
+          ? 'Return the complete file inside ONE fenced code block. This file is MARKDOWN and contains its own ``` code fences, so wrap it in FOUR backticks (````markdown on the first line, ```` on the last line). The inner ``` blocks then stay literal and cannot end the wrapper. Nothing outside the fence. No explanation.'
+          : 'Return the complete file inside ONE fenced code block (```<language> first line, ``` last line, nothing outside it). No explanation.',
         `File path: ${normalizedPath}`,
         `FILE BUDGET: ${fileBudget}`,
         'Rules:',
@@ -923,7 +925,9 @@
       }
       return [
         'Rewrite the complete final contents for one existing file after applying the requested edits.',
-        'Return the complete file inside ONE fenced code block (```<language> first line, ``` last line, nothing outside it). No explanation.',
+        /\.mdx?$/i.test(normalizedPath)
+          ? 'Return the complete file inside ONE fenced code block. This file is MARKDOWN and contains its own ``` code fences, so wrap it in FOUR backticks (````markdown on the first line, ```` on the last line). The inner ``` blocks then stay literal and cannot end the wrapper. Nothing outside the fence. No explanation.'
+          : 'Return the complete file inside ONE fenced code block (```<language> first line, ``` last line, nothing outside it). No explanation.',
         `File path: ${normalizedPath}`,
         planSpec && planSpec.projectContract ? `PROJECT_CONTRACT:\n${String(planSpec.projectContract)}` : '',
         projectState ? `PROJECT_STATE:\n${projectState}` : '',
