@@ -691,6 +691,23 @@ export default config;
       const normalized = deps.normalizeWorkspacePath(path || '');
       const text = String(content || '');
       if (/\.(ts|tsx|js|jsx|mjs|cjs)$/i.test(normalized) && text.trim()) {
+        // Plain (non-module) JS: the real JS parser is AUTHORITATIVE. The raw bracket scan
+        // can't tell a regex literal like /[()]/ or /[{}]/ from real brackets and
+        // false-flags valid files as "truncated" — so if it parses, trust the parser and
+        // never let the heuristic override it. (CLAUDE.md: regex/keyword heuristics are a
+        // last-resort fallback, not the primary signal.)
+        const isPlainJs = /\.(js|mjs|cjs)$/i.test(normalized) && !/\b(import|export)\b/.test(text);
+        if (isPlainJs) {
+          try {
+            // eslint-disable-next-line no-new, no-new-func
+            new Function(text);
+            return '';
+          } catch (err) {
+            return getJsSyntaxIssue(text, err) || `has a JavaScript syntax error: ${String((err && err.message) || err || 'unknown')}`;
+          }
+        }
+        // TS/TSX/JSX or ES-module JS: no safe in-page parser, so fall back to the structural
+        // scan as a best-effort truncation hint.
         const structure = scanCodeStructure(text);
         if (structure.unterminatedBlockComment || structure.unterminatedString || structure.invalidCloser || structure.unclosed.length || looksTruncatedCodeTail(text)) {
           return 'looks truncated or structurally incomplete — a comment, parenthesis, bracket, or code block was not closed; regenerate or append the missing tail before saving';
@@ -698,15 +715,6 @@ export default config;
       }
       if (/\.html?$/i.test(normalized)) return getHtmlStructureIssue(text);
       if (/\.css$/i.test(normalized)) return getCssSyntaxIssue(text);
-      if (/\.(js|mjs|cjs)$/i.test(normalized) && !/\b(import|export)\b/.test(text)) {
-        try {
-          // eslint-disable-next-line no-new, no-new-func
-          new Function(text);
-        } catch (err) {
-          return getJsSyntaxIssue(text, err) || `has a JavaScript syntax error: ${String((err && err.message) || err || 'unknown')}`;
-        }
-        return '';
-      }
       if (/\.json$/i.test(normalized)) {
         let parsed = null;
         try {
