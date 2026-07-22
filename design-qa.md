@@ -1,52 +1,48 @@
-# Tool Activity System Design QA
+# Model Picker Design QA
 
-- Source visual truth: `/Users/macbookair2020/Documents/Screenshots/Screenshot 2026-07-21 at 3.20.54 AM.png`
-- Implementation screenshot: `/Users/macbookair2020/.codex/visualizations/2026/07/21/019f826c-f029-7f02-b86f-40c204611b11/tool-group-implementation.png`
-- Combined comparison: `/Users/macbookair2020/.codex/visualizations/2026/07/21/019f826c-f029-7f02-b86f-40c204611b11/tool-group-comparison.png`
-- Full state matrix: `/Users/macbookair2020/.codex/visualizations/2026/07/21/019f826c-f029-7f02-b86f-40c204611b11/tool-state-matrix-v9.0.3.png`
-- Viewport: desktop; implementation captured at 1280 × 768 CSS pixels and normalized to the reference's 2× screenshot density for comparison.
-- State: dark theme; collapsed and expanded multi-file Read/Updated summaries.
-
-## Full-view comparison evidence
-
-The implementation now uses the reference hierarchy consistently across Read, Updated, Skipped, Inspected, Searched, Created, Checked, Ran, Moved, Removed, and failure states: a bright action verb, a secondary target/subject, a subtle disclosure chevron, and semantic outcome color only where it adds meaning. Expanded summaries hide redundant counts and never repeat the parent action in every child row.
-
-## Focused region comparison evidence
-
-The combined comparison focuses on the tool-summary headers and filename lists. The full state matrix adds focused evidence for neutral skips, mixed inspection, validation success/failure, setup, cleanup, commands, and missing-file errors. No image assets or broader page layout were changed.
-
-## Required fidelity surfaces
-
-- Fonts and typography: existing product font, 13.5px activity sizing, 600-weight verb, and 500-weight count/file hierarchy are preserved.
-- Spacing and layout rhythm: compact groups use the same 7px header gap and filename-list indentation as the preferred batch Read component; the heavier nested subgroup inset/background is removed.
-- Colors and visual tokens: Read/Updated verbs share `rgba(220, 228, 242, 0.88)`; counts and filenames share `rgba(188, 199, 218, 0.88)` with the existing near-white hover state.
-- Image quality and asset fidelity: no raster or brand assets are present in this component; the existing product chevron asset/rendering is reused.
-- Copy and content: counts are based on unique file paths, singular/plural remains dynamic, mixed groups describe the whole group, Skipped does not inflate Read/Edit counts, and expanded lists remove duplicate verbs/status text while retaining useful ranges, outcomes, and edit statistics.
+- Source visual truth: `/Users/macbookair2020/Downloads/Projects and Code/AI EXE/design-reference.png`
+- Implementation screenshot: `/Users/macbookair2020/Downloads/Projects and Code/AI EXE/design-implementation-compact.png`
+- Combined comparison: `/Users/macbookair2020/Downloads/Projects and Code/AI EXE/design-comparison-compact.png`
+- Focused search state: `/Users/macbookair2020/Downloads/Projects and Code/AI EXE/design-focused-search.jpeg`
+- Viewport/state: desktop dark-mode Mac preview, 1050 × 760 implementation viewport, model picker open with live Venice catalog.
+- Source pixels: 1104 × 720. Implementation pixels: 1050 × 760. The source was proportionally resized and centered on a 1050 × 760 canvas for the combined comparison; density was treated as 1× for layout comparison.
 
 ## Findings
 
-No actionable P0, P1, or P2 mismatch remains in the changed tool-group surface.
+No actionable P0/P1/P2 differences remain.
 
-## Comparison history
+- Typography: the implementation preserves the source hierarchy, optical weight, compact labels, and truncation behavior using the app's existing sans-serif tokens.
+- Spacing and layout: centered 520px modal, compact header/search/control divisions, 18px frame radius, 58px row rhythm, and responsive height match the requested smaller direction.
+- Colors and tokens: near-black panel, cyan focus/selection, muted blue-gray borders, green Free badges, and amber Pay-per-use badges match the reference.
+- Image and icon quality: no raster artwork is required. Existing app SVG controls are used for search and close; model identity is rendered as a compact text monogram because the live scraper does not provide provider artwork.
+- Copy and content: title, supporting copy, search prompt, and pricing filters match the selected design direction. The confirmation footer, sort control, recommendations, and synthetic capability descriptions were intentionally omitted because the user requested immediate click-to-select and a simpler flow.
 
-- Earlier P2: separate batch and phase-group renderers produced different verb colors, indentation, disclosure treatments, and repeated `Read … Open file` children.
-- Fix: introduced a shared compact group hierarchy, structured action/subject/outcome labels, unique-path counts, filename-only Read/Create children, compact edit children that retain diff statistics and drawers, neutral Skipped states, and targeted error coloring.
-- Post-fix evidence: `tool-group-comparison.png` shows the revised Read and Updated states; `tool-state-matrix-v9.0.3.png` confirms the same grammar across every other tool family.
+## Full-view Comparison Evidence
 
-## Primary interactions checked
+`design-comparison-compact.png` places the supplied reference on the left and the live Mac implementation on the right. Modal composition, color hierarchy, search focus, tabs, selected state, badges, and background treatment visibly align. The intentional compact variant preserves the source hierarchy while fitting seven live catalog rows in the native viewport.
 
-- Collapsed multi-file summary.
-- Expanded multi-file summary.
-- Count hidden while expanded.
-- Filename links retained.
-- Edit statistics and diff disclosure retained in compact Updated groups.
-- Neutral Skipped row and supporting `already covered` text.
-- Validation success and issue outcomes with semantic color limited to the outcome.
-- Setup, cleanup, mixed inspection, command success/failure, and missing-target states.
-- Browser console checked with no warnings or errors.
+## Focused Region Evidence
 
-## Follow-up polish
+`design-focused-search.jpeg` verifies the search region and live result rows at readable scale. Live follow-up checks verified Kimi K3 and all three `GLM 5.2` rows (Private Free, Private Pay-per-use, and TEE Free), including persistence across a complete adapter restart.
 
-No blocking polish items. Final behavior should be confirmed once in the native WKWebView after relaunch because the browser harness does not reproduce native font antialiasing exactly.
+## Comparison History
+
+1. Initial implementation matched the modal structure but exposed raw `:latest` suffixes and used one-letter provider initials.
+2. Fixed display normalization and model-derived two-letter monograms (`NV`, `QW`, `GL`, `CL`, `KI`).
+3. Rebuilt and restarted the Mac preview, then recaptured the same state. The revised implementation has no remaining P0/P1/P2 mismatch.
+4. Tightened the dialog from 680px to 520px, the search field from 50px to 40px, and model rows from 76px to 58px in response to the compact-size request; rebuilt and verified the live catalog again.
+
+## Primary Interactions Tested
+
+- Open and close the modal.
+- Search live models.
+- Clear search state.
+- All / Free / Pay-per-use / Uncensored live counts.
+- Immediate click-to-select and modal close.
+- New-chat `hello` smoke test returned a normal conversational reply; preflight routing JSON did not appear.
+
+## Follow-up Polish
+
+- P3: provider logo artwork could replace monograms later if the live model API supplies trustworthy assets.
 
 final result: passed

@@ -75,6 +75,9 @@ def read_provider_health(base_url: str, kind: str) -> dict:
                 priced = state.get("priced_models") or []
                 if isinstance(priced, list):
                     out["priced_models"] = [str(m) for m in priced if m]
+                uncensored = state.get("uncensored_models") or []
+                if isinstance(uncensored, list):
+                    out["uncensored_models"] = [str(m) for m in uncensored if m]
         except Exception:
             pass
     return out

@@ -10,7 +10,7 @@ const loop = fs.readFileSync(path.join(__dirname, '..', 'ui', 'agent-loop.js'), 
 // executor's revert/structure guards run — a first-pass model refusal once
 // replaced a 43K app.js with its own prose (v7.8.6 chess-app data loss).
 assert.match(runtime, /const persistPartials = Boolean\(options && options\.persistPartials === true\);/, 'generateFullAgentFile requires an explicit partial-persistence opt-in');
-assert.match(runtime, /if \(!persistPartials\) return;/, 'persistPartial honors the switch');
+assert.match(runtime, /if \(!persistPartials \|\| genCancelled\(\)\) return;/, 'persistPartial honors the switch and cancellation');
 assert.match(runtime, /generateFullAgentFile\(prompt, path, \{ persistPartials: false \}\)/, 'rewrite-existing path never persists partial passes');
 assert.doesNotMatch(executor, /\{ persistPartials: creatingNewFile \}/, 'new-file generation does not save incomplete passes to disk');
 assert.match(executor, /generateAgentWriteFileContent\([\s\S]{0,240}\{ persistPartials: false \}\)/, 'write path commits only the completed generated file');

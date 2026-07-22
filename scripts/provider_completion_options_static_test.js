@@ -5,6 +5,7 @@ const path = require('node:path');
 const aiExe = fs.readFileSync(path.join(__dirname, '..', 'ui', 'ai-exe.js'), 'utf8');
 const backendModels = fs.readFileSync(path.join(__dirname, '..', 'backend', 'app', 'models.py'), 'utf8');
 const backendUsage = fs.readFileSync(path.join(__dirname, '..', 'backend', 'app', 'routers', 'usage.py'), 'utf8');
+const providerUsage = fs.readFileSync(path.join(__dirname, '..', 'backend', 'app', 'provider_usage.py'), 'utf8');
 const adapterServer = fs.readFileSync(path.join(__dirname, '..', 'backend', 'app', 'venice_adapter_server.py'), 'utf8');
 const agentLoop = fs.readFileSync(path.join(__dirname, '..', 'ui', 'agent-loop.js'), 'utf8');
 const cmake = fs.readFileSync(path.join(__dirname, '..', 'CMakeLists.txt'), 'utf8');
@@ -49,14 +50,23 @@ assert.match(plannerFn, /Math\.min\(24000/);
 
 const selectedRemoteFn = sliceFrom('async function requestSelectedRemoteTextCompletion');
 assert.match(selectedRemoteFn, /const owningChatId = String\(\(activeInferenceRequest && activeInferenceRequest\.chatId\)/);
+assert.match(selectedRemoteFn, /owningChatId && !requestExtra\.isolatedAdapterChat/);
 assert.match(selectedRemoteFn, /requestExtra\.adapterChatId = owningChatId/);
-assert.match(selectedRemoteFn, /delete requestExtra\.isolatedAdapterChat/);
+assert.doesNotMatch(selectedRemoteFn, /delete requestExtra\.isolatedAdapterChat/);
+
+const preflightRouteFn = sliceFrom('async function requestPreflightRouteModelDecision');
+assert.match(preflightRouteFn, /isolatedAdapterChat:\s*true/);
+assert.match(preflightRouteFn, /adapterChatScope:\s*'preflight-router'/);
 
 assert.match(backendModels, /structured_output: bool = False/);
 assert.match(backendModels, /max_output_chars: int = 0/);
 assert.match(backendUsage, /body\["aiexe_structured_output"\] = True/);
 assert.match(adapterServer, /AIEXE_STRUCTURED output exceeded/);
 assert.match(adapterServer, /structured output limit/);
+assert.match(adapterServer, /"uncensored_models": sorted\(AIEXE_UNCENSORED_MODELS\)/);
+assert.match(providerUsage, /out\["uncensored_models"\]/);
+assert.match(backendModels, /uncensored_models: List\[str\]/);
+assert.match(aiExe, /data-tier="uncensored"|isProviderModelUncensored/);
 assert.match(adapterServer, /if not _aiexe_generation_running\(driver\):\s+_stable \+= 1/);
 assert.match(adapterServer, /_aiexe_stop_generation\(driver, "stream boundary cleanup"\)/);
 assert.match(agentLoop, /incompleteJsonNudges/);

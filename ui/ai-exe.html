@@ -462,18 +462,44 @@
                 </svg>
               </button>
               <div class="composer-model-wrap" id="composerModelWrap" style="display:none;">
-                <button class="composer-model-pill" id="composerModelPill" type="button" title="Model" aria-label="Choose model" aria-haspopup="listbox"></button>
+                <button class="composer-model-pill" id="composerModelPill" type="button" title="Model" aria-label="Choose model" aria-haspopup="dialog" aria-expanded="false"></button>
                 <button class="composer-adapter-start hidden" id="composerAdapterStartBtn" type="button">
                   <span>Start adapter</span>
                 </button>
-                <div class="composer-model-pop hidden" id="composerModelPop">
-                  <input class="composer-model-search" id="composerModelSearch" type="text" placeholder="Search models…" autocomplete="off" spellcheck="false">
-                  <div class="composer-model-tabs" id="composerModelTabs" role="tablist">
-                    <button type="button" class="composer-model-tab active" data-tier="all" role="tab">All</button>
-                    <button type="button" class="composer-model-tab" data-tier="free" role="tab">Free</button>
-                    <button type="button" class="composer-model-tab" data-tier="paid" role="tab">Pay-per-use</button>
-                  </div>
-                  <div class="composer-model-list" id="composerModelList" role="listbox"></div>
+                <div class="composer-model-pop hidden" id="composerModelPop" role="presentation">
+                  <section class="composer-model-dialog" role="dialog" aria-modal="true" aria-labelledby="composerModelTitle">
+                    <header class="composer-model-header">
+                      <div class="composer-model-title-row">
+                        <div>
+                          <h2 id="composerModelTitle">Select a model</h2>
+                          <p>Choose the model AI.EXE will use.</p>
+                        </div>
+                        <button class="composer-model-close" id="composerModelClose" type="button" aria-label="Close model picker">
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                            <line x1="18" y1="6" x2="6" y2="18"></line>
+                            <line x1="6" y1="6" x2="18" y2="18"></line>
+                          </svg>
+                        </button>
+                      </div>
+                      <div class="composer-model-search-wrap">
+                        <svg class="composer-model-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                          <circle cx="11" cy="11" r="7"></circle>
+                          <line x1="20" y1="20" x2="16.4" y2="16.4"></line>
+                        </svg>
+                        <input class="composer-model-search" id="composerModelSearch" type="search" placeholder="Search models…" autocomplete="off" spellcheck="false">
+                        <button class="composer-model-clear hidden" id="composerModelClear" type="button" aria-label="Clear model search">×</button>
+                      </div>
+                    </header>
+                    <div class="composer-model-controls">
+                      <div class="composer-model-tabs" id="composerModelTabs" role="tablist" aria-label="Model filters">
+                        <button type="button" class="composer-model-tab active" data-tier="all" role="tab" aria-selected="true">All</button>
+                        <button type="button" class="composer-model-tab" data-tier="free" role="tab" aria-selected="false">Free</button>
+                        <button type="button" class="composer-model-tab" data-tier="paid" role="tab" aria-selected="false">Pay-per-use</button>
+                        <button type="button" class="composer-model-tab" data-tier="uncensored" role="tab" aria-selected="false">Uncensored</button>
+                      </div>
+                    </div>
+                    <div class="composer-model-list" id="composerModelList" role="listbox" aria-label="Available models"></div>
+                  </section>
                 </div>
               </div>
               <div class="input-actions" id="inputActions">

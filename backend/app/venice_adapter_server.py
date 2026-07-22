@@ -1305,7 +1305,7 @@ def _aiexe_generation_running(driver):
 
 
 AIEXE_TEXT_MODEL_CATALOG = [
-    "Claude Sonnet 5", "GLM 5.2", "Kimi K2.7 Code", "MiniMax M3 Preview", "MiMo-V2.5",
+    "Claude Sonnet 5", "GLM 5.2", "Kimi K3", "Kimi K2.7 Code", "MiniMax M3 Preview", "MiMo-V2.5",
     "Claude Fable 5", "NVIDIA Nemotron 3 Ultra", "Qwen 3.7 Plus", "Claude Opus 4.8",
     "Claude Opus 4.8 Fast", "Gemma 4 26B A4B Uncensored", "Qwen3.6 35B A3B Uncensored",
     "Qwen 3.7 Max", "Gemini 3.5 Flash", "Grok Build 0.1", "Qwen 3.6 35B A3B FP8",
@@ -1329,20 +1329,128 @@ AIEXE_FALLBACK_MODELS = _vcfg('FALLBACK_MODELS', AIEXE_TEXT_MODEL_CATALOG)
 
 
 def _aiexe_model_catalog():
-    names = []
-    for source in (AIEXE_MODELS_CACHE, AIEXE_FALLBACK_MODELS):
-        for name in source or []:
-            if name and name not in names:
-                names.append(name)
-    return names
+    # Once a live/persisted scrape exists it is authoritative. Mixing the curated
+    # fallback back into a complete scrape kept removed/stale Venice models alive and
+    # made the UI count disagree with the real Text section.
+    source = AIEXE_MODELS_CACHE or AIEXE_FALLBACK_MODELS
+    return list(dict.fromkeys(name for name in (source or []) if name))
 
 
 AIEXE_SETTINGS_DONE = set()   # chat keys whose Venice per-chat settings were already normalized
 AIEXE_SEEN_CHUNK_SHAPES = set()   # textless chunk shapes already logged (dedup)
 AIEXE_PRICED_MODELS = set()   # model names whose picker row shows Venice's coin icon (credit-metered)
 AIEXE_PRICED_CHECKED_MODELS = set()   # model rows already inspected for the coin icon
+AIEXE_UNCENSORED_MODELS = set()  # advertised option ids carrying Venice's Uncensored tag
+AIEXE_MODEL_ROW_OPTIONS = {}  # base name -> ordered [(privacy tag, is_priced)] rows seen live
+AIEXE_ROW_METADATA_SWEPT = False  # every catalog name was searched for duplicate rows
 AIEXE_CREDITS = ""            # last credit-balance text read from the sidebar ("10,279 Credits")
 AIEXE_CREDITS_TRUSTED = False  # True = came from the real sidebar/menu <p>, not a page-text regex guess
+
+AIEXE_MODEL_OPTION_RE = re.compile(
+    r"^(.*?)\s+\[(Default|Private|Anon|TEE|Uncensored)\s+·\s+(Free|Pay-per-use)\]$", re.I)
+
+
+def _aiexe_encode_model_option(base, tag, priced):
+    """Stable, human-readable Ollama model id for duplicate Venice picker rows."""
+    clean_base = str(base or "").strip()
+    clean_tag = str(tag or "Private").strip() or "Private"
+    return "%s [%s · %s]" % (clean_base, clean_tag, "Pay-per-use" if priced else "Free")
+
+
+def _aiexe_decode_model_option(value):
+    """Return (Venice title, privacy tag, priced hint) for an advertised model id."""
+    clean = str(value or "").strip().replace(":latest", "")
+    match = AIEXE_MODEL_OPTION_RE.match(clean)
+    if not match:
+        return clean, "", None
+    raw_tag = match.group(2)
+    tag = "TEE" if raw_tag.lower() == "tee" else raw_tag.title()
+    return match.group(1).strip(), tag, match.group(3).lower() == "pay-per-use"
+
+
+def _aiexe_record_model_row(base, tag, priced):
+    base = str(base or "").strip()
+    if not base:
+        return
+    # Venice omits the label on its default privacy row; the supplied/live row DOM
+    # confirms that unlabeled default is the Private variant.
+    option = (str(tag or "Private").strip() or "Private", bool(priced))
+    rows = AIEXE_MODEL_ROW_OPTIONS.setdefault(base, [])
+    if option not in rows:
+        rows.append(option)
+
+
+def _aiexe_cached_model_rows(cache):
+    """Read persisted duplicate-row identities, including older encoded model IDs."""
+    rows = {}
+    raw_rows = cache.get("row_options") if isinstance(cache, dict) else {}
+    if isinstance(raw_rows, dict):
+        for base, options in raw_rows.items():
+            clean_base = str(base or "").strip()
+            if not clean_base or not isinstance(options, list):
+                continue
+            for option in options:
+                if not isinstance(option, (list, tuple)) or len(option) < 2:
+                    continue
+                tag = str(option[0] or "Private").strip() or "Private"
+                pair = (tag, bool(option[1]))
+                if pair not in rows.setdefault(clean_base, []):
+                    rows[clean_base].append(pair)
+    # Version 6 briefly persisted the expanded IDs but not row_options. Recover those
+    # IDs when present so upgrading never requires another browser crawl.
+    for model_id in (cache.get("models") or []) if isinstance(cache, dict) else []:
+        base, tag, priced = _aiexe_decode_model_option(model_id)
+        if base and tag:
+            pair = (tag, bool(priced))
+            if pair not in rows.setdefault(base, []):
+                rows[base].append(pair)
+    return rows
+
+
+def _aiexe_merge_cached_model_rows(cache):
+    for base, options in _aiexe_cached_model_rows(cache).items():
+        for tag, priced in options:
+            _aiexe_record_model_row(base, tag, priced)
+
+
+def _aiexe_expand_model_options(names, cached_priced=None, cached_uncensored=None):
+    """Preserve same-title Venice rows instead of collapsing them into one option.
+
+    A plain title stays plain when Venice exposes one row. Duplicate rows get a stable
+    suffix containing the privacy mode and billing tier so the UI can show and select
+    every GLM 5.2-style variant independently.
+    """
+    global AIEXE_PRICED_MODELS, AIEXE_UNCENSORED_MODELS
+    prior_priced = set(cached_priced or []) | set(AIEXE_PRICED_MODELS)
+    prior_uncensored = set(cached_uncensored or []) | set(AIEXE_UNCENSORED_MODELS)
+    out, priced_out, uncensored_out, seen = [], set(), set(), set()
+    for raw in names or []:
+        base, _, _ = _aiexe_decode_model_option(raw)
+        if not base or base in seen:
+            continue
+        seen.add(base)
+        rows = list(AIEXE_MODEL_ROW_OPTIONS.get(base) or [])
+        if len(rows) > 1:
+            for tag, is_priced in rows:
+                option_id = _aiexe_encode_model_option(base, tag, is_priced)
+                out.append(option_id)
+                if is_priced:
+                    priced_out.add(option_id)
+                if tag.lower() == "uncensored" or "uncensored" in base.lower():
+                    uncensored_out.add(option_id)
+        else:
+            out.append(base)
+            row_priced = bool(rows and rows[0][1])
+            cached_base_priced = any(_aiexe_decode_model_option(p)[0] == base for p in prior_priced)
+            if row_priced or cached_base_priced:
+                priced_out.add(base)
+            row_uncensored = bool(rows and rows[0][0].lower() == "uncensored")
+            cached_base_uncensored = any(_aiexe_decode_model_option(p)[0] == base for p in prior_uncensored)
+            if row_uncensored or cached_base_uncensored or "uncensored" in base.lower():
+                uncensored_out.add(base)
+    AIEXE_PRICED_MODELS = priced_out
+    AIEXE_UNCENSORED_MODELS = uncensored_out
+    return out
 
 
 def _aiexe_set_switch(driver, label, want_on):
@@ -1591,6 +1699,7 @@ def _aiexe_row_variant_tag(driver, title_el):
           const row = title.closest('[role="group"], [role="menuitem"], [role="menuitemradio"]');
           if (!row) return '';
           const txt = String(row.textContent || '');
+          if (/\bUncensored\b/i.test(txt)) return 'Uncensored';
           if (/TEE/i.test(txt)) return 'TEE';
           if (/\\bAnon\\b/i.test(txt)) return 'Anon';
           if (/\\bPrivate\\b/i.test(txt)) return 'Private';
@@ -1603,6 +1712,38 @@ def _aiexe_row_variant_tag(driver, title_el):
 AIEXE_MODEL_VARIANTS = {}   # name -> set of variant tags seen (diagnostic)
 
 
+def _aiexe_text_model_title_elements(driver):
+    """Return only title nodes inside Venice's Text section.
+
+    The modal also contains Image/Video/Audio rows using the same p[title] markup.
+    A global selector therefore polluted the text catalog whenever search was active.
+    Anchor to the nearest collapse paired with the `Text • N` heading instead.
+    """
+    try:
+        rows = driver.execute_script("""
+          const labels = Array.from(document.querySelectorAll('button,p,div,span'))
+            .filter((el) => /^Text\\s*[•·]\\s*\\d+$/i.test(String(el.textContent || '').trim()))
+            .sort((a, b) => String(a.textContent || '').length - String(b.textContent || '').length);
+          const label = labels[0];
+          if (!label) return [];
+          const heading = label.closest('button') || label;
+          let section = heading.parentElement;
+          while (section && section !== document.body) {
+            const directCollapse = Array.from(section.children || []).find((child) =>
+              child.matches && (child.matches('.chakra-collapse') || child.querySelector(':scope > .chakra-collapse')));
+            if (directCollapse) return Array.from(directCollapse.querySelectorAll('p[title]'));
+            section = section.parentElement;
+          }
+          return [];
+        """) or []
+        if rows:
+            return rows
+    except Exception:
+        pass
+    # Compatibility fallback for older Venice markup that only rendered text rows.
+    return driver.find_elements(By.CSS_SELECTOR, VC_MODEL_ROW_TITLE_CSS)
+
+
 def _aiexe_model_titles(driver):
     """Model names from the visible picker rows. Also records which rows carry Venice's
     coin icon (= the model debits credits per use) into AIEXE_PRICED_MODELS.
@@ -1612,18 +1753,24 @@ def _aiexe_model_titles(driver):
     paid variant isn't missed just because the free row came first — and log the
     distinct variant tags so same-name free/paid pairs are visible in the log."""
     names = []
-    for p in driver.find_elements(By.CSS_SELECTOR, VC_MODEL_ROW_TITLE_CSS):
+    for p in _aiexe_text_model_title_elements(driver):
         try:
             t = (p.get_attribute("title") or "").strip()
         except Exception:
             t = ""
         if not t:
             continue
-        if t not in AIEXE_PRICED_MODELS:   # stop once any variant is known priced
-            _aiexe_note_priced_model(driver, p, t)
+        tag = _aiexe_row_variant_tag(driver, p)
+        is_priced = _aiexe_title_has_priced_icon(driver, p)
+        _aiexe_record_model_row(t, tag, is_priced)
+        if tag:
+            AIEXE_MODEL_VARIANTS.setdefault(t, set()).add(tag)
+        AIEXE_PRICED_CHECKED_MODELS.add(t)
+        if is_priced and t not in AIEXE_PRICED_MODELS:
+            AIEXE_PRICED_MODELS.add(t)
+            print("AIEXE_PRICED_MODEL %r" % t, flush=True)
         if t in names:
             # A repeat title = a potential distinct variant; record its tag once.
-            tag = _aiexe_row_variant_tag(driver, p)
             seen = AIEXE_MODEL_VARIANTS.setdefault(t, set())
             if tag and tag not in seen:
                 seen.add(tag)
@@ -1918,10 +2065,12 @@ def _aiexe_sweep_models_by_search(driver, initial=None):
     expected = _aiexe_text_model_count(driver)
     query_order = "aeioulmrgptnsdchkwqvfbxyzj0123456789"
     max_queries = len(query_order) if expected else 12
+    queries_without_growth = 0
     print("AIEXE_MODELS adaptive search target=%s" % (expected or "unknown"), flush=True)
     for ch in query_order[:max_queries]:
         if expected and len(seen) >= expected:
             break
+        query_start_count = len(seen)
         try:
             _aiexe_set_native_value(driver, box, ch, "HTMLInputElement")
         except Exception:
@@ -1953,6 +2102,15 @@ def _aiexe_sweep_models_by_search(driver, initial=None):
             stagnant = stagnant + 1 if new == 0 else 0
             if at_bottom and stagnant >= 2:
                 break
+        if len(seen) == query_start_count:
+            queries_without_growth += 1
+        else:
+            queries_without_growth = 0
+        # Text counts include duplicate privacy/billing rows, while `seen` is unique
+        # titles, so the numeric target may be unreachable. Six high-coverage queries
+        # without a new title is a stronger and much faster completion signal.
+        if queries_without_growth >= 6:
+            break
     try:
         _aiexe_set_native_value(driver, box, "", "HTMLInputElement")
     except Exception:
@@ -2029,12 +2187,32 @@ def _aiexe_catalog_from_page_api(driver, dom_names):
     if score < max(3, len(wanted) // 3):
         print("AIEXE_MODELS page-api rejected (overlap %d of %d)" % (score, len(wanted)), flush=True)
         return []
+    # Venice now splits catalog families/launches across several arrays. Selecting only
+    # the single best-overlap field silently dropped models living in a sibling array
+    # (Kimi K3 was the first visible casualty). Union every display-name-like field that
+    # has meaningful overlap with the live DOM, while rejecting ids/providers/URLs.
+    min_score = max(2, min(5, score // 4 or 2))
+    accepted = []
+    for candidate_score, candidate_vals in candidates:
+        unique_vals = set(v.lower() for v in candidate_vals)
+        overlap_ratio = candidate_score / max(1, min(len(unique_vals), len(wanted)))
+        if candidate_score >= min_score and overlap_ratio >= 0.15:
+            accepted.append((candidate_score, candidate_vals))
+    if not accepted:
+        accepted = [(score, vals)]
+    accepted.sort(key=lambda c: (-c[0], -len(c[1])))
     out, seen = [], set()
-    for v in vals:
-        if v not in seen:
-            seen.add(v)
-            out.append(v)
-    print("AIEXE_MODELS page-api catalog: %d names (overlap %d of %d curated)" % (len(out), score, len(wanted)), flush=True)
+    for _, candidate_vals in accepted:
+        for v in candidate_vals:
+            clean = str(v or "").strip()
+            key = clean.lower()
+            if (not clean or key in seen or len(clean) > 120 or "://" in clean
+                    or not any(ch.isalpha() for ch in clean)):
+                continue
+            seen.add(key)
+            out.append(clean)
+    print("AIEXE_MODELS page-api catalog: %d names from %d fields (best overlap %d of %d curated)" %
+          (len(out), len(accepted), score, len(wanted)), flush=True)
     return out
 
 
@@ -2042,7 +2220,7 @@ def _aiexe_find_visible_model_title(driver, name):
     target = (name or "").strip().lower()
     if not target:
         return None
-    rows = driver.find_elements(By.CSS_SELECTOR, VC_MODEL_ROW_TITLE_CSS)
+    rows = _aiexe_text_model_title_elements(driver)
     for p in rows:
         try:
             if (p.get_attribute("title") or "").strip().lower() == target:
@@ -2155,7 +2333,7 @@ def _aiexe_search_input(driver):
     return None
 
 
-def _aiexe_collect_priced_models_by_search(driver, candidates):
+def _aiexe_collect_priced_models_by_search(driver, candidates, force_rows=False):
     """Search every known model in the already-open picker and record coin icons.
 
     Some Venice rows are not present in the default/recommended list or the virtualized scroll
@@ -2168,10 +2346,12 @@ def _aiexe_collect_priced_models_by_search(driver, candidates):
         print("AIEXE_PRICED search input unavailable", flush=True)
         return
     names = []
-    for source in (candidates or [], AIEXE_FALLBACK_MODELS):
+    sources = (candidates or [],) if force_rows else (candidates or [], AIEXE_FALLBACK_MODELS)
+    for source in sources:
         for name in source or []:
-            clean = (name or "").strip().replace(":latest", "")
-            if clean and clean not in names and clean not in AIEXE_PRICED_CHECKED_MODELS:
+            clean = _aiexe_decode_model_option((name or "").strip().replace(":latest", ""))[0]
+            if (clean and clean not in names
+                    and (force_rows or clean not in AIEXE_PRICED_CHECKED_MODELS)):
                 names.append(clean)
     checked = 0
     before = len(AIEXE_PRICED_MODELS)
@@ -2192,17 +2372,16 @@ def _aiexe_collect_priced_models_by_search(driver, candidates):
                 break
         if found is not None:
             checked += 1
-            try:
-                title = (found.get_attribute("title") or name).strip()
-            except Exception:
-                title = name
-            _aiexe_note_priced_model(driver, found, title)
+            # Search can return several same-title rows. Inspect every exact match so
+            # privacy/billing variants remain independently selectable.
+            _aiexe_model_titles(driver)
     try:
         _aiexe_set_native_value(driver, box, "", "HTMLInputElement")
     except Exception:
         pass
     print("AIEXE_PRICED searched=%d newly_priced=%d total=%d" %
           (checked, max(0, len(AIEXE_PRICED_MODELS) - before), len(AIEXE_PRICED_MODELS)), flush=True)
+    return checked
 
 
 def _aiexe_wait_composer(driver):
@@ -3034,11 +3213,16 @@ def _aiexe_delete_chat(driver, slug, nav_fallback=True, allow_hidden_nav=False):
 def aiexe_scrape_models(driver):
     """Read Venice's real model list from the picker (title attrs). Best-effort; cached once."""
     import time as _t
-    global AIEXE_PRICED_MODELS, AIEXE_PRICED_CHECKED_MODELS, AIEXE_LAST_SCRAPE_SWEPT
+    global AIEXE_PRICED_MODELS, AIEXE_PRICED_CHECKED_MODELS, AIEXE_UNCENSORED_MODELS, AIEXE_LAST_SCRAPE_SWEPT
+    global AIEXE_MODEL_ROW_OPTIONS, AIEXE_MODEL_VARIANTS, AIEXE_ROW_METADATA_SWEPT
     try:
         print("AIEXE_MODELS scraping catalog and credits", flush=True)
         AIEXE_PRICED_MODELS = set()
         AIEXE_PRICED_CHECKED_MODELS = set()
+        AIEXE_UNCENSORED_MODELS = set()
+        AIEXE_MODEL_ROW_OPTIONS = {}
+        AIEXE_MODEL_VARIANTS = {}
+        AIEXE_ROW_METADATA_SWEPT = False
         if 'venice.ai/chat' not in driver.current_url:
             driver.get(VC_CHAT_URL)
         # Wait for the composer + model button to render, else the modal never opens (the
@@ -3052,7 +3236,14 @@ def aiexe_scrape_models(driver):
         _t.sleep(1)
         names = _aiexe_collect_models_from_modal(driver)
         cache = _aiexe_load_model_cache()
+        cached_rows = _aiexe_cached_model_rows(cache)
+        _aiexe_merge_cached_model_rows(cache)
         cached_models = [m for m in (cache.get("models") or []) if m]
+        cached_bases = []
+        for cached_name in cached_models:
+            cached_base = _aiexe_decode_model_option(cached_name)[0]
+            if cached_base and cached_base not in cached_bases:
+                cached_bases.append(cached_base)
         # The curated slice above misses everything Venice doesn't feature. Best path:
         # the webapp's own catalog request (complete, instant, includes same-day
         # releases the 24h cache would hide). Fallbacks: fresh swept cache, then the
@@ -3071,11 +3262,11 @@ def aiexe_scrape_models(driver):
                 bool(cached_models)
                 and cache.get("version") == AIEXE_MODEL_CACHE_VERSION
                 and bool(cache.get("swept"))
-                and (_t.time() - float(cache.get("ts") or 0)) < 24 * 3600
-                and all(n in cached_models for n in names)
+                and (_t.time() - float(cache.get("ts") or 0)) < AIEXE_MODEL_CACHE_TTL
+                and all(n in cached_bases for n in names)
             )
             if swept_cache_fresh:
-                for n in cached_models:
+                for n in cached_bases:
                     if n not in names:
                         names.append(n)
                 AIEXE_LAST_SCRAPE_SWEPT = True
@@ -3086,18 +3277,32 @@ def aiexe_scrape_models(driver):
                     if n not in names:
                         names.append(n)
                 AIEXE_LAST_SCRAPE_SWEPT = bool(swept)
-        if names and set(names) == set(cached_models) and cache.get("priced"):
-            AIEXE_PRICED_MODELS = set(cache["priced"])
-            AIEXE_PRICED_CHECKED_MODELS = set(names)
+        needs_row_rebuild = not bool(cache.get("row_options_complete") and cached_rows)
+        if (names and cache.get("version") == AIEXE_MODEL_CACHE_VERSION
+                and set(names) == set(cached_bases) and cache.get("priced")
+                and not needs_row_rebuild):
+            AIEXE_PRICED_MODELS = set(
+                _aiexe_decode_model_option(p)[0] for p in cache["priced"] if p)
+            AIEXE_PRICED_CHECKED_MODELS = set(cached_bases)
             print("AIEXE_PRICED reused cached set (%d) — catalog unchanged" % len(AIEXE_PRICED_MODELS), flush=True)
         else:
             # Catalog changed: trust cached verdicts for models still present so only
             # the NEW names get searched (a one-model release must not cost a full
             # per-model priced crawl).
-            if cached_models and cache.get("priced") is not None:
-                AIEXE_PRICED_MODELS = set(cache.get("priced") or []) & set(names)
-                AIEXE_PRICED_CHECKED_MODELS = set(cached_models) & set(names)
-            _aiexe_collect_priced_models_by_search(driver, names)
+            if (cached_models and cache.get("version") == AIEXE_MODEL_CACHE_VERSION
+                    and cache.get("priced") is not None):
+                cached_priced_bases = set(
+                    _aiexe_decode_model_option(p)[0] for p in (cache.get("priced") or []) if p)
+                AIEXE_PRICED_MODELS = cached_priced_bases & set(names)
+                AIEXE_PRICED_CHECKED_MODELS = set(cached_bases) & set(names)
+            _aiexe_collect_priced_models_by_search(driver, names, force_rows=needs_row_rebuild)
+            if needs_row_rebuild:
+                AIEXE_ROW_METADATA_SWEPT = True
+                print("AIEXE_MODELS rebuilt duplicate-row metadata for %d names" % len(names), flush=True)
+        if not needs_row_rebuild:
+            AIEXE_ROW_METADATA_SWEPT = bool(cache.get("row_options_complete"))
+        names = _aiexe_expand_model_options(
+            names, cache.get("priced") or [], cache.get("uncensored") or [])
         _aiexe_close_modal(driver)
         return names
     except Exception as exc:
@@ -3143,7 +3348,10 @@ def _aiexe_restore_unobtrusive(driver):
 
 
 AIEXE_MODEL_CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "aiexe_model_cache.json")
-AIEXE_MODEL_CACHE_VERSION = 2
+AIEXE_MODEL_CACHE_VERSION = 7
+# Keep startup/API responses fast, but do not hide same-day Venice releases for 24 hours.
+AIEXE_MODEL_CACHE_TTL = 5 * 60
+AIEXE_MODEL_REFRESHING = False
 
 
 def _aiexe_load_model_cache():
@@ -3156,25 +3364,96 @@ def _aiexe_load_model_cache():
 
 
 def _aiexe_save_model_cache(models):
+    temp_path = AIEXE_MODEL_CACHE_FILE + ".tmp-%d" % os.getpid()
     try:
-        with open(AIEXE_MODEL_CACHE_FILE, "w") as f:
+        existing = _aiexe_load_model_cache()
+        existing_bases = {_aiexe_decode_model_option(m)[0] for m in (existing.get("models") or []) if m}
+        new_bases = {_aiexe_decode_model_option(m)[0] for m in (models or []) if m}
+        # A transient virtual-list/API failure must not replace a materially fuller
+        # catalog. Legitimate small removals still pass this conservative threshold.
+        if (existing.get("version") == AIEXE_MODEL_CACHE_VERSION and existing.get("swept")
+                and len(existing_bases) >= 20 and len(new_bases) < int(len(existing_bases) * 0.85)):
+            print("AIEXE_MODELS rejected partial cache update: %d < 85%% of %d" %
+                  (len(new_bases), len(existing_bases)), flush=True)
+            return False
+        row_options = {
+            base: [[tag, bool(priced)] for tag, priced in options]
+            for base, options in AIEXE_MODEL_ROW_OPTIONS.items() if base and options
+        }
+        with open(temp_path, "w") as f:
             json.dump({
                 "version": AIEXE_MODEL_CACHE_VERSION,
                 "models": list(models),
                 "priced": sorted(AIEXE_PRICED_MODELS),
+                "uncensored": sorted(AIEXE_UNCENSORED_MODELS),
+                "row_options": row_options,
+                "row_options_complete": bool(AIEXE_ROW_METADATA_SWEPT),
                 "ts": time.time(),
                 # full-catalog quality marker: False forces a re-sweep next boot
                 "swept": bool(AIEXE_LAST_SCRAPE_SWEPT),
             }, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_path, AIEXE_MODEL_CACHE_FILE)
+        return True
     except Exception:
-        pass
+        try:
+            os.remove(temp_path)
+        except OSError:
+            pass
+        return False
+
+
+def _aiexe_model_cache_stale():
+    cache = _aiexe_load_model_cache()
+    return (cache.get("version") != AIEXE_MODEL_CACHE_VERSION
+            or not cache.get("models")
+            or time.time() - float(cache.get("ts") or 0) >= AIEXE_MODEL_CACHE_TTL)
+
+
+def _aiexe_schedule_model_refresh(force=False):
+    """Refresh Selenium catalog in the background; /api/tags itself stays instant."""
+    global AIEXE_MODEL_REFRESHING
+    if AIEXE_MODEL_REFRESHING or (not force and not _aiexe_model_cache_stale()):
+        return False
+    AIEXE_MODEL_REFRESHING = True
+
+    def _refresh():
+        global AIEXE_MODEL_REFRESHING, AIEXE_MODELS_CACHE
+        try:
+            with selenium_lock:
+                # Do not steal a Venice window the user is actively inspecting. The next
+                # health poll will retry; minimized/off-screen adapters refresh normally.
+                try:
+                    if driver.execute_script("return document.hidden === false") is True:
+                        print("AIEXE_MODELS background refresh deferred — Venice window visible", flush=True)
+                        return
+                except Exception:
+                    pass
+                _aiexe_park_offscreen(driver)
+                time.sleep(0.35)
+                refreshed = aiexe_scrape_models_with_restore(driver)
+                if refreshed:
+                    AIEXE_MODELS_CACHE = refreshed
+                    print("AIEXE_MODELS background refresh complete: %d options" % len(refreshed), flush=True)
+                try:
+                    driver.minimize_window()
+                except Exception:
+                    pass
+        except Exception as exc:
+            print("AIEXE_MODELS background refresh failed: %s" % exc, flush=True)
+        finally:
+            AIEXE_MODEL_REFRESHING = False
+
+    gevent.spawn(_refresh)
+    return True
 
 
 def aiexe_scrape_models_with_restore(driver):
     """Scrape; if empty (a minimized Chrome can still throttle paint despite the flags,
     leaving Venice's virtualized picker rowless), restore unobtrusively, retry once,
     re-minimize. Still empty after that -> the last GOOD catalog persisted on disk."""
-    global AIEXE_PRICED_MODELS, AIEXE_PRICED_CHECKED_MODELS
+    global AIEXE_PRICED_MODELS, AIEXE_PRICED_CHECKED_MODELS, AIEXE_UNCENSORED_MODELS
     names = aiexe_scrape_models(driver)
     if not names:
         print("AIEXE_MODELS scrape empty while minimized — parking off-screen for one retry", flush=True)
@@ -3193,6 +3472,7 @@ def aiexe_scrape_models_with_restore(driver):
     cache = _aiexe_load_model_cache()
     if cache.get("models"):
         AIEXE_PRICED_MODELS = set(cache.get("priced") or [])
+        AIEXE_UNCENSORED_MODELS = set(cache.get("uncensored") or [])
         AIEXE_PRICED_CHECKED_MODELS = set(cache["models"])
         print("AIEXE_MODELS using cached catalog (%d models, %d priced) — live scrape failed"
               % (len(cache["models"]), len(AIEXE_PRICED_MODELS)), flush=True)
@@ -3205,13 +3485,14 @@ def aiexe_select_model(driver, name):
     leaves the current model selected, never breaks the chat. Returns False only when the
     switch was NEEDED and didn't land (so the caller can retry with the window restored)."""
     import time as _t
-    name = (name or "").strip()
+    requested_option = (name or "").strip().replace(":latest", "")
+    name, requested_tag, requested_priced = _aiexe_decode_model_option(requested_option)
     if not name:
         return True
     # Only drive the picker for a REAL Venice model. Legacy/mock IDs (llama-...-akash, hermes,
     # dolphin, nemotron, etc.) aren't in Venice's list — opening the modal for them finds
     # nothing and can leave a dialog over the composer, which breaks the chat. Skip them.
-    known = [m.lower() for m in _aiexe_model_catalog()]
+    known = [_aiexe_decode_model_option(m)[0].lower() for m in _aiexe_model_catalog()]
     nl = name.lower()
     if not any(nl == k or nl in k or k in nl for k in known):
         print("AIEXE_MODEL skip (not a known model): %r" % name, flush=True)
@@ -3224,20 +3505,35 @@ def aiexe_select_model(driver, name):
             _t.sleep(0.5)
         cur = _aiexe_current_model(driver)
         global AIEXE_CURRENT_MODEL
-        if cur:
+        cached_option = AIEXE_CURRENT_MODEL
+        if cur and not requested_tag:
             AIEXE_CURRENT_MODEL = cur
-        if cur and cur.lower() == nl:
-            print("AIEXE_MODEL already on %r" % name, flush=True)
+        same_explicit_option = (requested_tag and cur and cur.lower() == nl
+                                and cached_option == requested_option)
+        if (cur and cur.lower() == nl and not requested_tag) or same_explicit_option:
+            print("AIEXE_MODEL already on %r" % requested_option, flush=True)
             return True
-        print("AIEXE_MODEL want=%r current=%r — opening picker" % (name, cur), flush=True)
+        print("AIEXE_MODEL want=%r current=%r — opening picker" % (requested_option, cur), flush=True)
         if not _aiexe_open_model_modal(driver):
             return False
         _t.sleep(0.8)
         def _find_target():
-            rows = driver.find_elements(By.CSS_SELECTOR, VC_MODEL_ROW_TITLE_CSS)
+            rows = _aiexe_text_model_title_elements(driver)
             print("AIEXE_MODEL rows=%d titles=%r" % (len(rows), [(r.get_attribute("title") or "")[:24] for r in rows[:10]]), flush=True)
             exact = [p for p in rows if (p.get_attribute("title") or "").strip().lower() == nl]
             if exact:
+                if requested_tag:
+                    matching = []
+                    for p in exact:
+                        row_tag = _aiexe_row_variant_tag(driver, p) or "Private"
+                        row_priced = _aiexe_title_has_priced_icon(driver, p)
+                        if row_tag.lower() == requested_tag.lower() and row_priced == bool(requested_priced):
+                            matching.append(p)
+                    if matching:
+                        print("AIEXE_MODEL picked explicit %s/%s variant of %r" % (
+                            requested_tag, "paid" if requested_priced else "free", name), flush=True)
+                        return matching[0]
+                    return None
                 # Venice lists the SAME name as free + pay-per-use variants (e.g. GLM 5.2
                 # Private free vs paid) and the paid one can come first. Prefer a row with
                 # no coin icon so the user isn't charged unexpectedly; fall back to first.
@@ -3307,8 +3603,8 @@ def aiexe_select_model(driver, name):
             except Exception:
                 driver.execute_script("arguments[0].click();", row)
             _t.sleep(0.5)
-            AIEXE_CURRENT_MODEL = name
-            print("AIEXE_MODEL clicked %r" % name, flush=True)
+            AIEXE_CURRENT_MODEL = requested_option or name
+            print("AIEXE_MODEL clicked %r" % (requested_option or name), flush=True)
             return True
         print("AIEXE_MODEL target row NOT found for %r" % name, flush=True)
         _aiexe_close_modal(driver)
@@ -4205,6 +4501,8 @@ def aiexe_state():
         "current_model": AIEXE_CURRENT_MODEL,
         "credits": AIEXE_CREDITS,
         "priced_models": sorted(AIEXE_PRICED_MODELS),
+        "uncensored_models": sorted(AIEXE_UNCENSORED_MODELS),
+        "models_refreshing": bool(AIEXE_MODEL_REFRESHING),
     }), content_type='application/json')
 
 @app.route('/api/aiexe/sidebar_debug', methods=['GET'])
@@ -4272,7 +4570,9 @@ def get_mock_model(name, parameter_size):
 @app.route('/api/tags', methods=['GET'])
 def tags():
     # Advertise Venice's REAL models (scraped once at startup, else the curated fallback) so
-    # AI.EXE's model dropdown matches what the picker can actually select.
+    # AI.EXE's model dropdown matches what the picker can actually select. Stale catalogs
+    # are returned immediately and refreshed asynchronously, keeping health checks fast.
+    _aiexe_schedule_model_refresh(force=str(request.args.get('refresh') or '').lower() in ('1', 'true', 'yes'))
     names = _aiexe_model_catalog()
     tags_response = {"models": [get_mock_model(n + ":latest", "") for n in names]}
     return Response(json.dumps(tags_response), content_type='application/json')

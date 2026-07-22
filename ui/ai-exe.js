@@ -7973,16 +7973,30 @@ function openSettingsSection(section) {
 // only a fallback. Works for OpenAI-compatible providers (chat/completions -> models).
 const liveProviderModels = {};
 const liveProviderPricedModels = {};
+const liveProviderUncensoredModels = {};
 const liveProviderCredits = {};
 
 function normalizeProviderModelName(model) {
   return String(model || '').trim().replace(/:latest$/i, '');
 }
 
+function parseProviderModelOption(model) {
+  const id = normalizeProviderModelName(model);
+  const match = id.match(/^(.*?)\s+\[(Default|Private|Anon|TEE|Uncensored)\s+·\s+(Free|Pay-per-use)\]$/i);
+  return match
+    ? { id, name: match[1].trim(), privacy: match[2], tier: match[3] }
+    : { id, name: id, privacy: '', tier: '' };
+}
+
 function rememberProviderHealthMeta(provider, health) {
   if (!provider || !health) return;
   if (Array.isArray(health.priced_models)) {
     liveProviderPricedModels[provider] = health.priced_models
+      .map((m) => normalizeProviderModelName(m))
+      .filter(Boolean);
+  }
+  if (Array.isArray(health.uncensored_models)) {
+    liveProviderUncensoredModels[provider] = health.uncensored_models
       .map((m) => normalizeProviderModelName(m))
       .filter(Boolean);
   }
@@ -8041,6 +8055,12 @@ function isProviderModelPriced(provider, model) {
   if (!priced.length) return false;
   const clean = normalizeProviderModelName(model);
   return priced.some((m) => normalizeProviderModelName(m) === clean);
+}
+
+function isProviderModelUncensored(provider, model) {
+  const tagged = Array.isArray(liveProviderUncensoredModels[provider]) ? liveProviderUncensoredModels[provider] : [];
+  const clean = normalizeProviderModelName(model);
+  return tagged.some((m) => normalizeProviderModelName(m) === clean) || /\buncensored\b/i.test(clean);
 }
 
 // Advisory only: models observed to struggle with multi-file agent/tool-calling
@@ -10102,15 +10122,13 @@ async function requestSelectedRemoteTextCompletion(prompt, maxTokens, systemProm
     ? extra.abortController
     : new AbortController();
   const requestExtra = { ...(extra || {}) };
-  // Every inference belonging to an active AI.EXE turn—including planning,
-  // file generation, repair, and validation narration—must reuse that chat's
-  // single Venice conversation. Previously planner calls forced an `internal:`
-  // thread while file generation used the owning thread, producing two Venice
-  // chats for one visible AI.EXE chat.
+  // User-visible work belonging to an active AI.EXE turn reuses that chat's
+  // Venice conversation. Explicitly isolated control calls (especially the
+  // preflight router) must stay in the scratch thread; putting their JSON-only
+  // prompts into the visible conversation makes the next reply repeat that JSON.
   const owningChatId = String((activeInferenceRequest && activeInferenceRequest.chatId) || '').trim();
-  if (isVeniceAdapterSelected() && owningChatId) {
+  if (isVeniceAdapterSelected() && owningChatId && !requestExtra.isolatedAdapterChat) {
     requestExtra.adapterChatId = owningChatId;
-    delete requestExtra.isolatedAdapterChat;
     delete requestExtra.adapterChatScope;
   }
   if (
@@ -10485,7 +10503,13 @@ async function requestPreflightRouteModelDecision(chatId, latestUserMessage, con
   ].join('\n');
 
   try {
-    const remote = await requestSelectedRemoteTextCompletion(prompt, 160);
+    const remote = await requestSelectedRemoteTextCompletion(prompt, 160, '', {
+      // This is hidden control-plane output, never part of the user's chat.
+      // Keep it out of the owning Venice conversation even though the route
+      // decision runs inside an active inference request.
+      isolatedAdapterChat: true,
+      adapterChatScope: 'preflight-router',
+    });
     let parsed = extractFirstJsonObject(remote && remote.ok ? remote.output : '');
     if (!parsed && nativeBridge.available()) {
       const nativeRes = await nativeBridge.invoke('infer', { prompt, maxTokens: 160, max_tokens: 160 });
@@ -16197,6 +16221,8 @@ const composerModelWrap = document.getElementById('composerModelWrap');
 const composerModelPill = document.getElementById('composerModelPill');
 const composerModelPop = document.getElementById('composerModelPop');
 const composerModelSearch = document.getElementById('composerModelSearch');
+const composerModelClear = document.getElementById('composerModelClear');
+const composerModelClose = document.getElementById('composerModelClose');
 const composerModelList = document.getElementById('composerModelList');
 const composerAdapterStartBtn = document.getElementById('composerAdapterStartBtn');
 let veniceAdapterLastKnownStarting = false;
@@ -16255,7 +16281,8 @@ function renderComposerModelPill() {
   }
   const cur = String(getProviderModel(c.provider) || '');
   const priced = isProviderModelPriced(c.provider, cur);
-  setModelButtonContent(composerModelPill, cur || 'Model', priced);
+  const currentOption = parseProviderModelOption(cur);
+  setModelButtonContent(composerModelPill, currentOption.name || 'Model', priced);
   setAppTooltip(composerModelPill, '');   // coin icon carries the only tooltip
   // The pill's width changes the space left for the action chips — re-run the +N overflow.
   if (typeof recalcComposerChipOverflow === 'function') setTimeout(recalcComposerChipOverflow, 0);
@@ -16269,8 +16296,7 @@ if (composerAdapterStartBtn) {
   });
 }
 
-// Model-picker tier filter: 'all' | 'free' | 'paid'. Paid = the credit-metered
-// (coin-icon) Venice models; free = the rest. Only shown when BOTH kinds exist.
+// Model-picker filter: pricing tiers plus Venice's explicit Uncensored tag.
 let composerModelTier = 'all';
 const composerModelTabs = document.getElementById('composerModelTabs');
 function syncComposerModelTabs(c) {
@@ -16278,19 +16304,47 @@ function syncComposerModelTabs(c) {
   const list = (c && Array.isArray(c.list)) ? c.list : [];
   const paidCount = list.filter((m) => isProviderModelPriced(c.provider, m)).length;
   const freeCount = list.length - paidCount;
+  const uncensoredCount = list.filter((m) => isProviderModelUncensored(c.provider, m)).length;
   // No point splitting if every model is one tier.
-  const show = paidCount > 0 && freeCount > 0;
+  const show = (paidCount > 0 && freeCount > 0) || uncensoredCount > 0;
   composerModelTabs.style.display = show ? '' : 'none';
   if (!show) composerModelTier = 'all';
-  const counts = { all: list.length, free: freeCount, paid: paidCount };
+  const counts = { all: list.length, free: freeCount, paid: paidCount, uncensored: uncensoredCount };
   composerModelTabs.querySelectorAll('.composer-model-tab').forEach((tab) => {
     const tier = tab.getAttribute('data-tier');
     const base = tab.getAttribute('data-label') || tab.textContent.replace(/\s*\(\d+\)$/, '');
     tab.setAttribute('data-label', base);
     tab.textContent = `${base} (${counts[tier] || 0})`;
     tab.classList.toggle('active', tier === composerModelTier);
+    tab.setAttribute('aria-selected', tier === composerModelTier ? 'true' : 'false');
   });
 }
+
+function composerModelProviderLabel(name) {
+  const value = String(name || '');
+  if (/nemotron|nvidia/i.test(value)) return 'NVIDIA';
+  if (/claude/i.test(value)) return 'Anthropic';
+  if (/\bglm\b/i.test(value)) return 'Zhipu AI';
+  if (/\bkimi\b/i.test(value)) return 'Moonshot AI';
+  if (/\bqwen\b/i.test(value)) return 'Alibaba';
+  if (/deepseek/i.test(value)) return 'DeepSeek';
+  if (/gemini|gemma/i.test(value)) return 'Google';
+  if (/\bgpt\b|\bo[134]\b/i.test(value)) return 'OpenAI';
+  if (/llama/i.test(value)) return 'Meta';
+  if (/mistral|codestral/i.test(value)) return 'Mistral AI';
+  if (/\bgrok\b/i.test(value)) return 'xAI';
+  return 'Venice';
+}
+
+function composerModelInitials(model) {
+  const first = String(normalizeProviderModelName(model) || model || '')
+    .replace(/[^A-Za-z0-9]/g, '')
+    .toUpperCase();
+  if (!first) return 'AI';
+  if (first.startsWith('GLM')) return 'GL';
+  return first.slice(0, 2);
+}
+
 function buildComposerModelList(filter) {
   if (!composerModelList) return;
   const c = composerModelChoices();
@@ -16299,18 +16353,57 @@ function buildComposerModelList(filter) {
   syncComposerModelTabs(c);
   const cur = String(getProviderModel(c.provider) || '');
   const q = String(filter || '').trim().toLowerCase();
-  c.list
+  const visibleModels = c.list
     .filter((m) => !q || m.toLowerCase().includes(q))
     .filter((m) => composerModelTier === 'all'
-      || (composerModelTier === 'paid') === isProviderModelPriced(c.provider, m))
-    .slice(0, 200)
-    .forEach((m) => {
+      || (composerModelTier === 'uncensored' && isProviderModelUncensored(c.provider, m))
+      || (composerModelTier !== 'uncensored'
+        && (composerModelTier === 'paid') === isProviderModelPriced(c.provider, m)))
+    .slice(0, 200);
+  visibleModels.forEach((m) => {
       const item = document.createElement('button');
       item.type = 'button';
       const priced = isProviderModelPriced(c.provider, m);
+      const option = parseProviderModelOption(m);
+      const uncensored = isProviderModelUncensored(c.provider, m);
+      const providerLabel = composerModelProviderLabel(option.name);
+      const displayName = option.name || normalizeProviderModelName(m) || m;
       item.className = 'composer-model-item' + (m === cur ? ' active' : '') + (priced ? ' priced' : '');
       item.setAttribute('role', 'option');
-      setModelButtonContent(item, m, priced);
+      item.setAttribute('aria-selected', m === cur ? 'true' : 'false');
+
+      const logo = document.createElement('span');
+      logo.className = 'composer-model-logo';
+      logo.textContent = composerModelInitials(displayName);
+
+      const main = document.createElement('span');
+      main.className = 'composer-model-main';
+      const nameEl = document.createElement('span');
+      nameEl.className = 'composer-model-name';
+      nameEl.textContent = displayName;
+      const meta = document.createElement('span');
+      meta.className = 'composer-model-meta';
+      const providerBadge = document.createElement('span');
+      providerBadge.className = 'composer-model-badge';
+      providerBadge.textContent = providerLabel;
+      if (option.privacy || uncensored) {
+        const privacyBadge = document.createElement('span');
+        privacyBadge.className = 'composer-model-badge';
+        privacyBadge.textContent = option.privacy || 'Uncensored';
+        meta.appendChild(privacyBadge);
+      }
+      const priceBadge = document.createElement('span');
+      priceBadge.className = `composer-model-badge ${priced ? 'paid' : 'free'}`;
+      priceBadge.textContent = priced ? 'Pay-per-use' : 'Free';
+      meta.prepend(providerBadge);
+      meta.append(priceBadge);
+      main.append(nameEl, meta);
+
+      const check = document.createElement('span');
+      check.className = 'composer-model-check';
+      check.setAttribute('aria-hidden', 'true');
+      check.textContent = '✓';
+      item.append(logo, main, check);
       item.addEventListener('click', () => {
         appSettings[c.def.modelField] = m;
         saveAppSettings();
@@ -16321,10 +16414,18 @@ function buildComposerModelList(filter) {
       });
       composerModelList.appendChild(item);
     });
+  if (!visibleModels.length) {
+    const empty = document.createElement('div');
+    empty.className = 'composer-model-empty';
+    empty.innerHTML = '<strong>No matching models</strong><span>Try another model name or pricing filter.</span>';
+    composerModelList.appendChild(empty);
+  }
 }
 
 function closeComposerModelPop() {
-  if (composerModelPop) composerModelPop.classList.add('hidden');
+  if (!composerModelPop) return;
+  composerModelPop.classList.add('hidden');
+  if (composerModelPill) composerModelPill.setAttribute('aria-expanded', 'false');
 }
 
 if (composerModelPill) {
@@ -16337,12 +16438,9 @@ if (composerModelPill) {
       composerModelTier = 'all';
       buildComposerModelList('');
       if (composerModelSearch) composerModelSearch.value = '';
-      // position: fixed — anchor above the pill, kept on-screen (escapes overflow clipping)
-      const r = composerModelPill.getBoundingClientRect();
-      composerModelPop.style.left = Math.max(8, Math.min(r.left, window.innerWidth - 272)) + 'px';
-      composerModelPop.style.bottom = (window.innerHeight - r.top + 10) + 'px';
-      composerModelPop.style.top = 'auto';
+      if (composerModelClear) composerModelClear.classList.add('hidden');
       composerModelPop.classList.remove('hidden');
+      composerModelPill.setAttribute('aria-expanded', 'true');
       if (composerModelSearch) composerModelSearch.focus();
     } else {
       closeComposerModelPop();
@@ -16350,9 +16448,22 @@ if (composerModelPill) {
   });
 }
 if (composerModelSearch) {
-  composerModelSearch.addEventListener('input', () => buildComposerModelList(composerModelSearch.value));
+  composerModelSearch.addEventListener('input', () => {
+    if (composerModelClear) composerModelClear.classList.toggle('hidden', !composerModelSearch.value);
+    buildComposerModelList(composerModelSearch.value);
+  });
   composerModelSearch.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeComposerModelPop(); });
 }
+if (composerModelClear) {
+  composerModelClear.addEventListener('click', () => {
+    if (!composerModelSearch) return;
+    composerModelSearch.value = '';
+    composerModelClear.classList.add('hidden');
+    buildComposerModelList('');
+    composerModelSearch.focus();
+  });
+}
+if (composerModelClose) composerModelClose.addEventListener('click', closeComposerModelPop);
 if (composerModelTabs) {
   composerModelTabs.addEventListener('click', (e) => {
     const tab = e.target.closest('.composer-model-tab');
@@ -16361,7 +16472,10 @@ if (composerModelTabs) {
     buildComposerModelList(composerModelSearch ? composerModelSearch.value : '');
   });
 }
-if (composerModelPop) composerModelPop.addEventListener('click', (e) => e.stopPropagation());
+if (composerModelPop) composerModelPop.addEventListener('click', (e) => {
+  e.stopPropagation();
+  if (e.target === composerModelPop) closeComposerModelPop();
+});
 document.addEventListener('click', () => closeComposerModelPop());
 // Populate the pill's model list WITHOUT needing the Settings page: fetch provider health
 // directly (Settings' updateProviderConnectionStatus does this too, but only while open).
@@ -16408,6 +16522,7 @@ async function refreshComposerModelsFromProvider() {
   } catch (_) { renderComposerModelPill(); }
 }
 setTimeout(refreshComposerModelsFromProvider, 800);  // boot: after settings load
+setInterval(refreshComposerModelsFromProvider, 60 * 1000); // pick up background catalog refreshes
 
 // ---- Composer action-chip overflow (+N) ------------------------------------
 // When [+][pill][chips] outgrow the row, trailing chips are hidden and replaced by a "+N"
@@ -18681,22 +18796,15 @@ function requestTypingIndicatorAfterUserAppend(chatId, reason = '') {
 }
 
 
-// Re-entrancy lock: sendMessage is async and awaits (adapter-ready, attachment
-// parsing) BEFORE beginInferenceRequest() bumps pendingInferenceCount. A rapid
-// second click in that window passed the operationRunning guard and sent a
-// duplicate. The flag blocks re-entry until the first click has dispatched (then
-// the pendingInferenceCount guard takes over) or bailed early.
+// Short pre-dispatch lock: sendMessage awaits adapter-ready/attachment parsing
+// before pendingInferenceCount changes. Block a rapid duplicate during that gap;
+// the lock releases immediately after dispatch, so other chats still use the
+// ordinary queued-send path while the provider is answering.
 let sendDispatchInFlight = false;
 async function sendMessage() {
   if (sendDispatchInFlight) return;
   sendDispatchInFlight = true;
   try {
-    await sendMessageInner();
-  } finally {
-    sendDispatchInFlight = false;
-  }
-}
-async function sendMessageInner() {
   recordComposerKeyboardDiagnostic('send_message_start_keyboard_state', null);
   resetStaleInferenceRuntime('sendMessage:start');
   const operationRunning = pendingInferenceCount > 0;
@@ -18781,6 +18889,9 @@ async function sendMessageInner() {
     appendErrorMessageToChat(chat.id, `Message failed before the provider could respond: ${String(err && err.message ? err.message : err)}`);
     endInferenceRequest();
   });
+  } finally {
+    sendDispatchInFlight = false;
+  }
 }
 
 function sendChip(el) {
