@@ -1162,6 +1162,41 @@ def _aiexe_save_chat_map():
         pass
 
 
+# Slugs of OUR threads rotated away from, pending delete. Persisted so orphans
+# survive crashes; capped so the ledger can't grow unbounded.
+AIEXE_STALE_THREADS = set()
+AIEXE_STALE_MAX = 60
+AIEXE_STALE_PATH = AIEXE_CHAT_MAP_PATH + ".stale"
+
+
+def _aiexe_load_stale_threads():
+    global AIEXE_STALE_THREADS
+    try:
+        with open(AIEXE_STALE_PATH, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        if isinstance(data, list):
+            AIEXE_STALE_THREADS = set(str(s) for s in data if s)
+    except Exception:
+        AIEXE_STALE_THREADS = set()
+
+
+def _aiexe_save_stale_threads():
+    try:
+        with open(AIEXE_STALE_PATH, "w", encoding="utf-8") as fh:
+            json.dump(sorted(AIEXE_STALE_THREADS)[:AIEXE_STALE_MAX], fh)
+    except Exception:
+        pass
+
+
+def _aiexe_stale_add(slug):
+    if not slug:
+        return
+    AIEXE_STALE_THREADS.add(str(slug))
+    while len(AIEXE_STALE_THREADS) > AIEXE_STALE_MAX:
+        AIEXE_STALE_THREADS.pop()
+    _aiexe_save_stale_threads()
+
+
 def _aiexe_chat_key(data):
     """Stable per-AI.EXE-chat key: the chat id AI.EXE sends (preferred), else a hash of the
     first user turn embedded in the flattened prompt (legacy clients)."""
@@ -2744,18 +2779,47 @@ def _aiexe_rename_after_stream(slug, name):
         print("AIEXE_RENAME background failed: %s" % _e, flush=True)
 
 
-def _aiexe_delete_after_stream(slug):
-    """Deferred best-effort cleanup of a thread we rotated away from. Fire-and-forget:
-    ONE attempt, never retried (Venice delete is flaky, and a stray stale thread is
-    harmless sidebar clutter, not a correctness issue)."""
+def _aiexe_sweep_stale_threads(limit=4):
+    """Delete a few ledgered rotated-away threads. Idle-time only: non-blocking lock
+    (skip if a stream is running), one attempt per slug, then ONE restore for the
+    failures (minimized Chrome renders a rowless sidebar — the reason the old
+    single-shot delete silently leaked nearly every rotated thread). Failures stay
+    ledgered for the next idle pass; no hot retries."""
     global driver
+    if not AIEXE_STALE_THREADS:
+        return
+    if not selenium_lock.acquire(blocking=False):
+        return
     try:
-        with selenium_lock:
-            if not _aiexe_driver_alive(driver):
-                return
-            _aiexe_delete_chat(driver, slug, nav_fallback=False)
+        if not _aiexe_driver_alive(driver):
+            return
+        live = set(_aiexe_slug_from_url(u) for u in AIEXE_CHAT_URLS.values())
+        done, failed = [], []
+        for slug in list(AIEXE_STALE_THREADS)[:max(1, int(limit))]:
+            if slug in live:
+                done.append(slug)   # re-mapped to an active chat — keep it
+                continue
+            (done if _aiexe_delete_chat(driver, slug, nav_fallback=False) else failed).append(slug)
+        if failed and _aiexe_restore_unobtrusive(driver):
+            time.sleep(0.8)
+            try:
+                for slug in failed:
+                    if _aiexe_delete_chat(driver, slug, nav_fallback=False):
+                        done.append(slug)
+            finally:
+                try:
+                    driver.minimize_window()
+                except Exception:
+                    pass
+        for slug in done:
+            AIEXE_STALE_THREADS.discard(slug)
+        if done:
+            _aiexe_save_stale_threads()
+        print("AIEXE_SWEEP cleaned %d, %d pending" % (len(done), len(AIEXE_STALE_THREADS)), flush=True)
     except Exception as _e:
-        print("AIEXE_ROTATE_DELETE background failed: %s" % _e, flush=True)
+        print("AIEXE_SWEEP failed: %s" % _e, flush=True)
+    finally:
+        selenium_lock.release()
 
 
 def _aiexe_sidebar_op_with_restore(driver, op, label):
@@ -3137,8 +3201,8 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
             _why = 'slow last turn' if _rotate_slow else ('%d turns' % AIEXE_THREAD_MAX_TURNS)
             print("AIEXE_ROTATE %s (%s, old=%s)"
                   % (_chat_key[:32], _why, _old_slug or "?"), flush=True)
-            if _old_slug and not _chat_key.startswith("id:internal:"):
-                gevent.spawn(_aiexe_delete_after_stream, _old_slug)
+            if _old_slug:   # ledger only (internal threads included) — idle loop sweeps
+                _aiexe_stale_add(_old_slug)
         _cur_url = str(driver.current_url or "")
         _mapped = AIEXE_CHAT_URLS.get(_chat_key, "") if _chat_key else ""
         if 'venice.ai/chat' not in _cur_url:
@@ -4128,6 +4192,7 @@ try:
 except Exception:
     pass
 _aiexe_load_chat_map()
+_aiexe_load_stale_threads()
 driver = login_to_venice()
 try:  # scrape Venice's real model list once (best-effort) so /api/tags advertises the truth
     _scraped = aiexe_scrape_models_with_restore(driver)
@@ -4224,6 +4289,7 @@ def _aiexe_internal_cleanup_loop():
             if time.time() - AIEXE_LAST_REQUEST_TS < 120:
                 continue
             result = _aiexe_cleanup_internal_batch(min_count=6)
+            _aiexe_sweep_stale_threads()   # rotated-thread ledger, same idle window
             if result > 0:
                 gevent.sleep(240)  # cooldown between batches — hygiene, not a show
         except Exception as exc:

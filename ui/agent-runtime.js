@@ -242,6 +242,36 @@
       return out;
     }
 
+    // Continuation replies promise ONE fenced block, but weak models close the
+    // block, narrate, then restart the file in a second block — naive unwrap
+    // stitched that prose INTO the file. Keep fenced code only; a second block
+    // sharing the saved file's opening chars = restart.
+    function extractContinuationChunk(output, savedRaw) {
+      const text = String(output || '');
+      const open = text.match(/^\s*(`{3,})[a-z0-9_+\-]*[^\S\n]*\n?/i);
+      if (!open) return { chunk: unwrapWholeFence(text), restarted: false };
+      const fence = open[1];
+      const body = text.slice(open[0].length);
+      const close = body.match(new RegExp(`\\n${fence}(?!\`)[^\\S\\n]*(\\n|$)`));
+      if (!close) return { chunk: body, restarted: false };              // single unterminated block
+      const first = body.slice(0, close.index);
+      const afterClose = body.slice(close.index + close[0].length);
+      if (!afterClose.trim()) return { chunk: first, restarted: false }; // normal one-block reply
+      const reopen = afterClose.match(/(^|\n)\s*(`{3,})[a-z0-9_+\-]*[^\S\n]*\n/i);
+      if (reopen) {
+        const rest = afterClose.slice(reopen.index + reopen[0].length);
+        const rclose = rest.match(new RegExp(`\\n${reopen[2]}(?!\`)[^\\S\\n]*(\\n|$)`));
+        const second = rclose ? rest.slice(0, rclose.index) : rest;
+        const headA = second.trimStart().slice(0, 40);
+        const headB = String(savedRaw || '').trimStart().slice(0, 40);
+        let shared = 0;
+        while (shared < headA.length && shared < headB.length && headA[shared] === headB[shared]) shared += 1;
+        if (second.trim().length > 200 && shared >= 24) return { chunk: second, restarted: true };
+        if (second.trim()) return { chunk: stitchFileContinuation(first, second), restarted: false };
+      }
+      return { chunk: first, restarted: false };                         // trailing narration — drop
+    }
+
     // Continuations don't need the bulky prompt sections; the tail is the anchor.
     function slimContinuationBasePrompt(prompt) {
       let text = String(prompt || '');
@@ -315,7 +345,8 @@
         const carried = raw;
         const next = await runRawAgentFileInference(continuationPrompt, (partial) => emitPartial(stitchFileContinuation(carried, partial)), `${path} (continue ${guard})`);
         beat();
-        const chunk = unwrapWholeFence(next.output);
+        const extracted = extractContinuationChunk(next.output, raw);
+        const chunk = extracted.chunk;
         if (!chunk || !chunk.trim()) { passTrace(guard, { reason, added: 0, note: 'empty_continuation' }); break; }
         const before = raw.length;
         // Some models (deepseek) ignore "continue from where it stopped" and
@@ -329,7 +360,7 @@
         const stripLead = (s) => String(s || '').replace(/^```[a-z0-9]*\s*/i, '')
           .replace(/^(?:\s*\/\/[^\n]*\n|\s*\/\*[\s\S]*?\*\/\s*|\s*<!--[\s\S]*?-->\s*)+/, '').trimStart();
         const isFreshFile = /^(?:['"]use strict['"]|;?\(function\b|<!doctype|<html[\s>]|:root\b|import\s|@import\s)/i.test(stripLead(chunk));
-        const isRestart = isFreshFile || norm(chunk).slice(0, 120) === norm(raw).slice(0, 120);
+        const isRestart = extracted.restarted || isFreshFile || norm(chunk).slice(0, 120) === norm(raw).slice(0, 120);
         if (isRestart) {
           const regenLonger = chunk.length >= raw.length;
           passTrace(guard, { reason, beforeLen: before, restart: true, nextChunkLen: chunk.length, kept: regenLonger ? 'regenerated' : 'original', nextTruncated: Boolean(next.truncated) });

@@ -3571,8 +3571,14 @@ export default config;
       // Parse code files and report exact syntax errors with line/column — the
       // agent's "console". Non-mutating; doesn't count as inspection budget.
       if (tool === 'check_code') {
-        const codeFileRe = /\.(?:js|mjs|cjs|html?|css|json)$/i;
+        // ts/tsx/jsx included — the structural checker parses them too
+        const codeFileRe = /\.(?:js|mjs|cjs|jsx|ts|tsx|html?|css|json)$/i;
+        const pyFileRe = /\.py$/i;
+        const pythonSteer = 'check_code parses js/ts/html/css/json only — this project is Python. Use run_app: it compiles every .py file (py_compile) and reports exact syntax errors with line numbers.';
         const requested = deps.normalizeWorkspacePath(decision.path || '');
+        if (requested && pyFileRe.test(requested)) {
+          return { ok: false, mutated, observation: pythonSteer };
+        }
         let targets = [];
         if (requested && requested !== '/' && codeFileRe.test(requested)) {
           targets = [requested];
@@ -3593,6 +3599,14 @@ export default config;
           targets = Array.from(seen);
         }
         if (!targets.length) {
+          const knownPaths = [
+            ...planExpectedFiles,
+            ...(Array.isArray(toolEvents) ? toolEvents : []).map((e) => (e && e.path) || ''),
+            ...listedExistingFiles,
+          ];
+          if (knownPaths.some((p) => pyFileRe.test(String(p || '')))) {
+            return { ok: false, mutated, observation: pythonSteer };
+          }
           return { ok: false, mutated, observation: 'check_code found no known code files yet — run list_dir first or pass a specific file path.' };
         }
         const lines = [];
