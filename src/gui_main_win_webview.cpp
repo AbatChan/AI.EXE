@@ -545,10 +545,35 @@ HANDLE StartBundledBackend(const std::filesystem::path &runtime_root,
   std::wstring command = L"\"" + backend.wstring() + L"\" --serve";
   STARTUPINFOW startup{};
   startup.cb = sizeof(startup);
+  // Backend stdout/stderr go to %LOCALAPPDATA%\AI_EXE\backend.log (was discarded —
+  // crash tracebacks vanished with it)
+  HANDLE log = INVALID_HANDLE_VALUE;
+  {
+    const auto log_path = WindowStateIniPath().parent_path() / "backend.log";
+    std::error_code ec;
+    if (std::filesystem::exists(log_path, ec) &&
+        std::filesystem::file_size(log_path, ec) > 8u * 1024 * 1024) {
+      const auto old = log_path.wstring() + L".old";
+      MoveFileExW(log_path.wstring().c_str(), old.c_str(), MOVEFILE_REPLACE_EXISTING);
+    }
+    SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
+    log = CreateFileW(log_path.wstring().c_str(), FILE_APPEND_DATA,
+                      FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, OPEN_ALWAYS,
+                      FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (log != INVALID_HANDLE_VALUE) {
+      startup.dwFlags |= STARTF_USESTDHANDLES;
+      startup.hStdOutput = log;
+      startup.hStdError = log;
+    }
+  }
   PROCESS_INFORMATION process{};
-  if (!CreateProcessW(backend.wstring().c_str(), command.data(), nullptr, nullptr,
-                      FALSE, CREATE_NO_WINDOW, nullptr,
-                      backend.parent_path().wstring().c_str(), &startup, &process)) {
+  const BOOL inherit = (log != INVALID_HANDLE_VALUE) ? TRUE : FALSE;
+  const BOOL created =
+      CreateProcessW(backend.wstring().c_str(), command.data(), nullptr, nullptr,
+                     inherit, CREATE_NO_WINDOW, nullptr,
+                     backend.parent_path().wstring().c_str(), &startup, &process);
+  if (log != INVALID_HANDLE_VALUE) CloseHandle(log);
+  if (!created) {
     return nullptr;
   }
   CloseHandle(process.hThread);
@@ -1581,6 +1606,8 @@ void EnsureDesktopShortcut() {
 // Delayed app-close after launching the updater (see applyUpdate). Fires on the
 // UI thread via the message pump, so the window stays responsive until it closes.
 constexpr UINT_PTR kUpdateCloseTimerId = 0xA1;
+// Watchdog: restart the bundled backend if it dies mid-session
+constexpr UINT_PTR kBackendWatchTimerId = 0xA2;
 void CALLBACK UpdateCloseTimerProc(HWND hwnd, UINT, UINT_PTR id, DWORD) {
   KillTimer(hwnd, id);
   PostMessageW(hwnd, WM_CLOSE, 0, 0);
@@ -1662,7 +1689,9 @@ public:
 
     std::string runtime_err;
     const auto runtime_root = ResolveRuntimeRoot(ui_html_);
+    runtime_root_ = runtime_root;
     backend_process_ = StartBundledBackend(runtime_root, &backend_job_);
+    if (backend_process_) SetTimer(hwnd_, kBackendWatchTimerId, 3000, nullptr);
     runtime_.Initialize(runtime_root, false, &runtime_err);
     if (!runtime_err.empty()) {
       runtime_init_error_ = runtime_err;
@@ -1735,7 +1764,14 @@ private:
       }
       return 0;
     }
+    case WM_TIMER:
+      if (wparam == kBackendWatchTimerId) {
+        self->OnBackendWatchTick();
+        return 0;
+      }
+      return DefWindowProcW(hwnd, msg, wparam, lparam);
     case WM_DESTROY:
+      KillTimer(hwnd, kBackendWatchTimerId);
       DevServerManager::Instance().StopAll();
       if (self->backend_job_) {
         TerminateJobObject(self->backend_job_, 0);
@@ -1752,6 +1788,32 @@ private:
     default:
       return DefWindowProcW(hwnd, msg, wparam, lparam);
     }
+  }
+
+  void OnBackendWatchTick() {
+    if (!backend_process_) return;
+    if (WaitForSingleObject(backend_process_, 0) != WAIT_OBJECT_0) return;
+    // Backend died while the app is alive — clean up its tree and respawn
+    CloseHandle(backend_process_);
+    backend_process_ = nullptr;
+    if (backend_job_) {
+      TerminateJobObject(backend_job_, 0);   // sweep orphaned adapter/chrome
+      CloseHandle(backend_job_);
+      backend_job_ = nullptr;
+    }
+    const DWORD now = GetTickCount();
+    if (backend_restart_tick_ && (now - backend_restart_tick_) < 30000) {
+      ++backend_fast_deaths_;
+    } else {
+      backend_fast_deaths_ = 0;
+    }
+    backend_restart_tick_ = now;
+    if (backend_fast_deaths_ >= 3) {           // crash loop — stop respawning
+      KillTimer(hwnd_, kBackendWatchTimerId);
+      return;
+    }
+    backend_process_ = StartBundledBackend(runtime_root_, &backend_job_);
+    if (!backend_process_) KillTimer(hwnd_, kBackendWatchTimerId);
   }
 
   void ShowFallback(const std::wstring &text) {
@@ -2461,6 +2523,9 @@ private:
   std::string runtime_init_error_;
   HANDLE backend_process_ = nullptr;
   HANDLE backend_job_ = nullptr;
+  std::filesystem::path runtime_root_;
+  DWORD backend_restart_tick_ = 0;
+  int backend_fast_deaths_ = 0;
 
 #if AI_EXE_HAVE_WEBVIEW2_HEADER
   Microsoft::WRL::ComPtr<ICoreWebView2Controller> controller_;

@@ -18320,12 +18320,12 @@ function beginAdapterStartupProgress(opts = {}) {
           statusRetryCount = 0;
         } catch (_) {
           statusRetryCount += 1;
-          setMsg(`Connection check is slow — retrying ${Math.min(statusRetryCount, 10)}/10…`);
+          setMsg(`Local backend isn't responding — waiting for it to come back ${Math.min(statusRetryCount, 10)}/10…`);
           if (statusRetryCount >= 10) {
             closeToast();
             showAppNotification({
-              title: 'Network or backend issue',
-              message: "AI.EXE can't check the adapter right now. Check your internet/backend connection, then try again.",
+              title: 'Backend stopped',
+              message: "AI.EXE's local backend stopped responding. It restarts itself automatically — wait a few seconds and press Start again. If it keeps happening, restart the app.",
               kind: 'error',
               durationMs: 10000,
             });
