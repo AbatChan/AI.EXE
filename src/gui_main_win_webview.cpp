@@ -1418,7 +1418,7 @@ bool LaunchUpdater(const std::string &url, const std::string &version,
      << L"$f.Controls.AddRange(@($left,$si,$title,$sub,$bar,$phaseLbl,$pctLbl))\r\n"
      // Heavy work off the UI thread; streamed download reports real percent via $status.
      << L"$script:job=Start-Job -ScriptBlock {\r\n"
-     << L"  param($u,$app,$exe,$oldpid,$status)\r\n"
+     << L"  param($u,$app,$exe,$oldpid,$status,$ver)\r\n"
      << L"  $ErrorActionPreference='SilentlyContinue'\r\n"
      << L"  function St($t){ Set-Content -LiteralPath $status -Value $t -Encoding UTF8 }\r\n"
      << L"  St('prep|-1')\r\n"
@@ -1438,16 +1438,32 @@ bool LaunchUpdater(const std::string &url, const std::string &version,
      << L"  if(-not $ok){ St('download|-1'); curl.exe -L -o $zip $u }\r\n"
      << L"  St('install|-1')\r\n"
      << L"  $x=Join-Path $t 'x'\r\n"
-     << L"  Expand-Archive -Path $zip -DestinationPath $x -Force\r\n"
-     << L"  Copy-Item -Path (Join-Path $x '*') -Destination $app -Recurse -Force\r\n"
-     << L"  St('reopen|100')\r\n"
+     // Guard: a truncated/failed download yields a tiny or missing zip. Bail to a
+     // 'failed' state instead of extracting garbage and reporting a phantom success.
+     << L"  $zok=$false; try { if((Test-Path -LiteralPath $zip) -and ((Get-Item -LiteralPath $zip).Length -gt 102400)){ $zok=$true } } catch {}\r\n"
+     << L"  if($zok){ try { Expand-Archive -Path $zip -DestinationPath $x -Force -ErrorAction Stop } catch { $zok=$false } }\r\n"
+     // Some release zips wrap everything in one top-level folder; copy from inside it.
+     << L"  $src=$x; try { $kids=@(Get-ChildItem -LiteralPath $x -Force); if($kids.Count -eq 1 -and $kids[0].PSIsContainer -and -not (Test-Path -LiteralPath (Join-Path $x 'ui'))){ $src=$kids[0].FullName } } catch {}\r\n"
+     // Root cause of the locks: old backend adapter / stray children still running
+     // FROM INSIDE $app after the main exe exits (Wait-Process only covered the main
+     // pid). Kill anything whose image path lives under $app before swapping.
+     << L"  if($zok){ $pfx=$app.TrimEnd('\\')+'\\'; Get-Process -ErrorAction SilentlyContinue | ForEach-Object { $pp=$null; try { $pp=$_.Path } catch {}; if($pp -and $pp.StartsWith($pfx,[StringComparison]::OrdinalIgnoreCase)){ try { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue } catch {} } }; Start-Sleep -Milliseconds 400 }\r\n"
+     // Retry the swap until PROVABLY complete: zero copy errors (ErrorVariable still
+     // records skips/locks under SilentlyContinue — a lone locked backend exe must
+     // fail the pass, not ship a new-UI/old-backend hybrid) AND ui-config.js reports
+     // the new version on disk. Never silently relaunch a half-applied build.
+     << L"  $swapped=$false\r\n"
+     << L"  if($zok){ $vf=Join-Path $app 'ui\\ui-config.js'; for($i=0;$i -lt 30;$i++){ $cerr=@(); Copy-Item -Path (Join-Path $src '*') -Destination $app -Recurse -Force -ErrorAction SilentlyContinue -ErrorVariable cerr; $cur=''; try { $cur=Get-Content -LiteralPath $vf -Raw -ErrorAction SilentlyContinue } catch {}; $vok= if([string]::IsNullOrEmpty($ver)){ $true } else { [bool]($cur -and $cur.Contains(\"'\"+$ver+\"'\")) }; if($cerr.Count -eq 0 -and $vok){ $swapped=$true; break }; Start-Sleep -Milliseconds 500 } }\r\n"
+     // Only claim success when the version on disk verifiably changed; otherwise show
+     // a failed state (dwell so it's readable) and still relaunch the old build.
+     << L"  if($swapped){ St('reopen|100') } else { St('failed|-1'); Start-Sleep -Milliseconds 2600 }\r\n"
      // Schedule the relaunch in a detached helper so this updater window can close
      // cleanly first; otherwise both windows overlap for a visible beat.
      << L"  $cmd=\"Start-Sleep -Milliseconds 350; Start-Process -FilePath '\"+$exe.Replace(\"'\",\"''\")+\"' -WorkingDirectory '\"+$app.Replace(\"'\",\"''\")+\"'\"\r\n"
      << L"  $enc=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($cmd))\r\n"
      << L"  Start-Process powershell.exe -WindowStyle Hidden -ArgumentList @('-NoProfile','-EncodedCommand',$enc)\r\n"
      << L"  Remove-Item -Recurse -Force $t -ErrorAction SilentlyContinue\r\n"
-     << L"} -ArgumentList $u,$app,$exe," << pid << L",$status\r\n"
+     << L"} -ArgumentList $u,$app,$exe," << pid << L",$status,$ver\r\n"
      << L"$timer=New-Object Windows.Forms.Timer; $timer.Interval=33\r\n"
      << L"$timer.Add_Tick({\r\n"
      << L"  $script:spin=($script:spin+11)%360; if($script:pct -lt 0){ $script:anim+=0.02; if($script:anim -ge 1){ $script:anim-=1 } }\r\n"
@@ -1456,7 +1472,7 @@ bool LaunchUpdater(const std::string &url, const std::string &version,
      << L"  if($script:tc % 5 -eq 0){\r\n"
      << L"    $raw=Get-Content -LiteralPath $status -Raw -ErrorAction SilentlyContinue\r\n"
      << L"    if($raw){ $pp=$raw.Trim().Split('|'); $ph=$pp[0]; $pc= if($pp.Length -gt 1){ [int]$pp[1] } else { -1 }\r\n"
-     << L"      if($ph -ne $script:phase){ $script:phase=$ph; switch($ph){ 'prep' { $title.Text='Preparing update'; $sub.Text='Getting things ready...'; $phaseLbl.Text='Prepare' } 'download' { $title.Text='Downloading update'; $sub.Text='Please keep this window open.'; $phaseLbl.Text='Download' } 'install' { $title.Text='Installing update'; $sub.Text='This may take a moment.'; $phaseLbl.Text='Install' } 'reopen' { $title.Text='Reopening AI.EXE'; $sub.Text='Update complete.'; $phaseLbl.Text='Reopen' } } }\r\n"
+     << L"      if($ph -ne $script:phase){ $script:phase=$ph; switch($ph){ 'prep' { $title.Text='Preparing update'; $sub.Text='Getting things ready...'; $phaseLbl.Text='Prepare' } 'download' { $title.Text='Downloading update'; $sub.Text='Please keep this window open.'; $phaseLbl.Text='Download' } 'install' { $title.Text='Installing update'; $sub.Text='This may take a moment.'; $phaseLbl.Text='Install' } 'reopen' { $title.Text='Reopening AI.EXE'; $sub.Text='Update complete.'; $phaseLbl.Text='Reopen' } 'failed' { $title.Text='Update failed'; $sub.Text='Could not apply the update. Please try again.'; $phaseLbl.Text='Failed' } } }\r\n"
      << L"      if($pc -ne $script:pct){ $script:pct=$pc; if($pc -ge 0){ $pctLbl.Text=(''+$pc+'%') } else { $pctLbl.Text='' } }\r\n"
      << L"    }\r\n"
      << L"    if(-not $script:done -and $script:job){ $stt=(Get-Job -Id $script:job.Id).State; if($stt -eq 'Completed' -or $stt -eq 'Failed' -or $stt -eq 'Stopped'){ $script:done=$true; $timer.Stop(); $f.Close() } }\r\n"
