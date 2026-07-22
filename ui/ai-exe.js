@@ -1889,7 +1889,9 @@ try {
   const applyBuildVer = () => {
     document.querySelectorAll('[data-app-version]').forEach((el) => {
       el.textContent = `v${AI_EXE_VERSION}`;
-      el.title = AI_EXE_BUILD;
+      el.dataset.tooltip = AI_EXE_BUILD;              // branded tooltip, never native title=
+      el.classList.add('ui-tooltip-anchor');
+      if (el.hasAttribute('title')) el.removeAttribute('title');
     });
   };
   applyBuildVer(); // element is above this script, so usually set right away
@@ -1983,7 +1985,7 @@ try {
       if (badge) {
         if (text) text.textContent = `Update to v${latest}`;
         badge.style.display = '';
-        badge.title = `Version ${latest} is available — click to update`;
+        badge.dataset.tooltip = `Version ${latest} is available — click to update`;
         ulog('update_badge_shown', { latest });
       }
       startBackgroundStage();
@@ -2026,15 +2028,19 @@ try {
           clearInterval(stagePoll);
           ulog('update_staged', { version: updateInfo.version, pendingInstall: String(pendingInstall) });
           if (pendingInstall) { doApplyUpdate('Installing…'); return; }
-          setBadgeText(`Restart to update v${updateInfo.version}`);
-          if (badge) badge.title = `v${updateInfo.version} is downloaded — installs in seconds`;
+          setBadgeText('Restart to update');   // short label; detail in tooltip
+          if (badge) badge.dataset.tooltip = `v${updateInfo.version} is downloaded — click to install (a few seconds)`;
           return;
         }
         if (st.bytes > lastStageBytes) { lastStageBytes = st.bytes; lastStageProgressAt = Date.now(); }
         if (st.bytes > 0) {
           const pct = updateInfo.size > 0 ? Math.min(99, Math.round((st.bytes * 100) / updateInfo.size)) : 0;
-          const base = pct ? `Downloading v${updateInfo.version}… ${pct}%` : `Downloading v${updateInfo.version}…`;
-          setBadgeText(pendingInstall ? `${base} — restarting when ready` : base);
+          setBadgeText(pct ? `Downloading… ${pct}%` : 'Downloading…');   // keep it inside the pill
+          if (badge) {
+            badge.dataset.tooltip = pendingInstall
+              ? `v${updateInfo.version} — installs and restarts when the download finishes`
+              : `Downloading v${updateInfo.version} in the background`;
+          }
         }
         // Download stalled after an install click — fall back to the classic flow
         // so the update is never unreachable.
@@ -2056,7 +2062,9 @@ try {
       lastStageProgressAt = Date.now();
       startBackgroundStage();
       if (!stagePoll) { doApplyUpdate('Updating…'); return; }   // staging unavailable — classic flow
-      setBadgeText(`Downloading v${updateInfo.version}… — restarting when ready`);
+      setBadgeText('Downloading…');
+      const badge = document.getElementById('updateBadge');
+      if (badge) badge.dataset.tooltip = `v${updateInfo.version} — installs and restarts when the download finishes`;
     } else if (updateInfo.page) {
       openExternalUrl(updateInfo.page);
     }

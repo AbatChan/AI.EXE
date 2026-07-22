@@ -636,6 +636,7 @@ body.resizing-panels .panel-resizer {
   margin-top: 6px;
   padding: 5px 9px;
   min-height: 28px;
+  max-width: 100%;          /* never grow past the sidebar — long labels ellipsize */
   border: 1px solid transparent;
   border-radius: 999px;
   /* glass fill + cyan→purple gradient ring (border-box layer paints the ring) */
@@ -667,6 +668,8 @@ body.resizing-panels .panel-resizer {
   transform: translateY(-1px);
   box-shadow: 0 6px 18px rgba(0, 229, 255, 0.25), 0 2px 8px rgba(124, 58, 237, 0.2);
 }
+.update-badge > svg { flex: 0 0 auto; }
+#updateBadgeText { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .update-badge:active { transform: translateY(0) scale(0.97); }
 .update-badge:disabled { cursor: default; opacity: 0.7; animation: none; }
 .update-badge:disabled::after { animation: none; }
