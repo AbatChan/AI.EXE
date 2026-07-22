@@ -4,9 +4,17 @@ as HTTP endpoints for the desktop UI / future separate frontend.
 Run:  uvicorn app.main:app --host 127.0.0.1 --port 8765
 Docs: http://127.0.0.1:8765/docs
 """
+import faulthandler
 import os
 import threading
 import time
+
+# Native crashes (access violations in frozen deps) die with no traceback;
+# this dumps thread stacks to stderr -> backend.log
+try:
+    faulthandler.enable()
+except Exception:
+    pass
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -44,9 +52,11 @@ def _watch_parent_posix(parent: int) -> None:
             try:
                 os.kill(parent, 0)            # signal 0 = harmless existence probe (POSIX only)
             except (ProcessLookupError, PermissionError, OSError):
+                print("AIEXE_PARENT_WATCH parent gone (probe) — exiting", flush=True)
                 _stop_children()              # app is gone — take the adapter with us
                 os._exit(0)
             if os.getppid() != parent:        # reparented (parent died)
+                print("AIEXE_PARENT_WATCH reparented — exiting", flush=True)
                 _stop_children()
                 os._exit(0)
 
@@ -73,7 +83,12 @@ def _watch_parent_windows(parent: int) -> None:
         return  # can't observe the parent — keep serving rather than suicide
 
     def loop():
-        kernel32.WaitForSingleObject(handle, INFINITE)  # blocks until parent exits
+        rc = kernel32.WaitForSingleObject(handle, INFINITE)  # blocks until parent exits
+        if rc != 0:
+            # WAIT_FAILED/abandoned — can't trust it; keep serving, never suicide blind
+            print("AIEXE_PARENT_WATCH wait rc=%s err=%s — ignoring" % (rc, ctypes.get_last_error()), flush=True)
+            return
+        print("AIEXE_PARENT_WATCH parent exited — shutting down", flush=True)
         _stop_children()
         os._exit(0)
 

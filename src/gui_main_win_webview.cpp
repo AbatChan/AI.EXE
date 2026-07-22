@@ -1870,7 +1870,17 @@ private:
   }
 
   void OnBackendWatchTick() {
-    if (!backend_process_) return;
+    const DWORD now = GetTickCount();
+    if (!backend_process_) {
+      // Crash-loop pause: retry once after a 10-min cool-off instead of never
+      if (backend_fast_deaths_ >= 3 && backend_restart_tick_ &&
+          (now - backend_restart_tick_) >= 600000) {
+        backend_fast_deaths_ = 0;
+        backend_restart_tick_ = now;
+        backend_process_ = StartBundledBackend(runtime_root_, &backend_job_);
+      }
+      return;
+    }
     if (WaitForSingleObject(backend_process_, 0) != WAIT_OBJECT_0) return;
     // Backend died while the app is alive — clean up its tree and respawn
     CloseHandle(backend_process_);
@@ -1880,19 +1890,15 @@ private:
       CloseHandle(backend_job_);
       backend_job_ = nullptr;
     }
-    const DWORD now = GetTickCount();
     if (backend_restart_tick_ && (now - backend_restart_tick_) < 30000) {
       ++backend_fast_deaths_;
     } else {
       backend_fast_deaths_ = 0;
     }
     backend_restart_tick_ = now;
-    if (backend_fast_deaths_ >= 3) {           // crash loop — stop respawning
-      KillTimer(hwnd_, kBackendWatchTimerId);
-      return;
-    }
+    if (backend_fast_deaths_ >= 3) return;     // pause; cool-off path above retries
     backend_process_ = StartBundledBackend(runtime_root_, &backend_job_);
-    if (!backend_process_) KillTimer(hwnd_, kBackendWatchTimerId);
+    if (!backend_process_) backend_fast_deaths_ = 3;   // spawn failed — treat as loop
   }
 
   void ShowFallback(const std::wstring &text) {
