@@ -45,6 +45,17 @@
 #include <wrl.h>
 #endif
 
+// On-device dictation via WinRT SpeechRecognizer (the Windows counterpart of the
+// mac SFSpeech path). Guarded so an older SDK without cppwinrt still builds.
+#if __has_include(<winrt/Windows.Media.SpeechRecognition.h>)
+#define AI_EXE_HAVE_WINRT_SPEECH 1
+#include <condition_variable>
+#include <winrt/Windows.Foundation.h>
+#include <winrt/Windows.Foundation.Collections.h>
+#include <winrt/Windows.Globalization.h>
+#include <winrt/Windows.Media.SpeechRecognition.h>
+#endif
+
 namespace {
 
 constexpr wchar_t kWindowClassName[] = L"AI_EXE_WEBVIEW_WINDOW";
@@ -1698,6 +1709,157 @@ void EnsureDesktopShortcut() {
   }
 }
 
+// ---- On-device dictation (WinRT SpeechRecognizer) ----
+// The recognizer + continuous session live on ONE persistent MTA worker thread for
+// the whole dictation: that thread owns the WinRT objects (no cross-apartment
+// lifetime issues) and is the only one that blocks on the async .get() calls (the
+// UI thread is STA and would deadlock). ResultGenerated fires on a threadpool
+// thread and appends finalized text under the mutex. The audio LEVEL isn't read
+// natively — the WebView draws the waveform from real mic audio via WebAudio.
+#if AI_EXE_HAVE_WINRT_SPEECH
+struct WinDictationState {
+  std::thread worker;
+  std::mutex mtx;
+  std::condition_variable cv;
+  bool start_done = false;
+  bool start_ok = false;
+  bool stop_requested = false;      // finalize: keep accumulated text
+  bool cancel_requested = false;    // discard
+  bool finished = false;
+  std::string text;
+  std::string start_err;
+  std::string locale;
+};
+WinDictationState &WinDict() { static WinDictationState s; return s; }
+
+void JoinDictationWorker() {
+  auto &d = WinDict();
+  if (d.worker.joinable()) d.worker.join();
+}
+
+std::string FriendlyDictationError(const winrt::hresult_error &e) {
+  if (e.code() == E_ACCESSDENIED) {
+    return "Microphone access is blocked — allow desktop apps to use the mic in "
+           "Windows Settings > Privacy & security > Microphone, then try again.";
+  }
+  return winrt::to_string(e.message());
+}
+
+bool WinDictationStart(const std::string &locale, std::string *err) {
+  auto &d = WinDict();
+  JoinDictationWorker();   // reap any prior session
+  {
+    std::lock_guard<std::mutex> lk(d.mtx);
+    d.start_done = d.start_ok = d.stop_requested = d.cancel_requested = d.finished = false;
+    d.text.clear();
+    d.start_err.clear();
+    d.locale = locale;
+  }
+  d.worker = std::thread([]() {
+    using namespace winrt;
+    using namespace winrt::Windows::Media::SpeechRecognition;
+    using namespace winrt::Windows::Globalization;
+    auto &d = WinDict();
+    SpeechRecognizer recognizer{ nullptr };
+    winrt::event_token token{};
+    try {
+      init_apartment(apartment_type::multi_threaded);
+      std::string loc;
+      { std::lock_guard<std::mutex> lk(d.mtx); loc = d.locale; }
+      try {
+        if (!loc.empty()) recognizer = SpeechRecognizer(Language(winrt::to_hstring(loc)));
+      } catch (...) { recognizer = nullptr; }
+      if (!recognizer) recognizer = SpeechRecognizer();   // system default speech language
+      // No constraints added → the predefined free-form dictation grammar.
+      auto compiled = recognizer.CompileConstraintsAsync().get();
+      if (compiled.Status() != SpeechRecognitionResultStatus::Success) {
+        throw std::runtime_error(
+            "Windows speech recognition isn't ready for this language — install a "
+            "speech language pack in Settings > Time & language > Speech, then retry.");
+      }
+      token = recognizer.ContinuousRecognitionSession().ResultGenerated(
+          [](SpeechContinuousRecognitionSession const &,
+             SpeechContinuousRecognitionResultGeneratedEventArgs const &args) {
+            try {
+              auto res = args.Result();
+              if (res.Confidence() == SpeechRecognitionConfidence::Rejected) return;
+              auto piece = winrt::to_string(res.Text());
+              if (piece.empty()) return;
+              auto &d = WinDict();
+              std::lock_guard<std::mutex> lk(d.mtx);
+              if (!d.text.empty()) d.text += " ";
+              d.text += piece;
+            } catch (...) {}
+          });
+      recognizer.ContinuousRecognitionSession().StartAsync().get();
+      { std::lock_guard<std::mutex> lk(d.mtx); d.start_ok = true; d.start_done = true; }
+      d.cv.notify_all();
+    } catch (const winrt::hresult_error &e) {
+      std::lock_guard<std::mutex> lk(d.mtx);
+      d.start_err = FriendlyDictationError(e); d.start_done = true; d.finished = true;
+      d.cv.notify_all();
+      return;
+    } catch (const std::exception &e) {
+      std::lock_guard<std::mutex> lk(d.mtx);
+      d.start_err = e.what(); d.start_done = true; d.finished = true;
+      d.cv.notify_all();
+      return;
+    } catch (...) {
+      std::lock_guard<std::mutex> lk(d.mtx);
+      d.start_err = "Dictation failed to start."; d.start_done = true; d.finished = true;
+      d.cv.notify_all();
+      return;
+    }
+    // Session live — wait for finalize/cancel, then stop on THIS (owning) thread.
+    {
+      std::unique_lock<std::mutex> lk(d.mtx);
+      d.cv.wait(lk, [&]() { return d.stop_requested || d.cancel_requested; });
+    }
+    try { recognizer.ContinuousRecognitionSession().StopAsync().get(); } catch (...) {}
+    try { recognizer.ContinuousRecognitionSession().ResultGenerated(token); } catch (...) {}
+    { std::lock_guard<std::mutex> lk(d.mtx); d.finished = true; }
+    d.cv.notify_all();
+  });
+  std::unique_lock<std::mutex> lk(d.mtx);
+  d.cv.wait_for(lk, std::chrono::seconds(15), [&]() { return d.start_done; });
+  if (!d.start_ok) {
+    if (err) *err = d.start_err.empty() ? "Dictation failed to start." : d.start_err;
+    lk.unlock();
+    JoinDictationWorker();
+    return false;
+  }
+  return true;
+}
+
+bool WinDictationFinalize(int timeout_ms, std::string *out, std::string *err) {
+  auto &d = WinDict();
+  {
+    std::unique_lock<std::mutex> lk(d.mtx);
+    if (!d.worker.joinable() && d.text.empty() && !d.finished) {
+      if (err) *err = "No dictation session is active.";
+      return false;
+    }
+    d.stop_requested = true;
+    d.cv.notify_all();
+    d.cv.wait_for(lk, std::chrono::milliseconds(timeout_ms > 0 ? timeout_ms : 15000),
+                  [&]() { return d.finished; });
+    if (out) *out = d.text;
+  }
+  JoinDictationWorker();
+  return true;
+}
+
+void WinDictationCancel() {
+  auto &d = WinDict();
+  {
+    std::lock_guard<std::mutex> lk(d.mtx);
+    d.cancel_requested = true;
+  }
+  d.cv.notify_all();
+  JoinDictationWorker();
+}
+#endif  // AI_EXE_HAVE_WINRT_SPEECH
+
 // Delayed app-close after launching the updater (see applyUpdate). Fires on the
 // UI thread via the message pump, so the window stays responsive until it closes.
 constexpr UINT_PTR kUpdateCloseTimerId = 0xA1;
@@ -2051,24 +2213,50 @@ private:
           message = op_err;
         }
       }
-    } else if (action == "dictateOffline") {
+    } else if (action == "dictationStart" || action == "dictateOffline") {
+#if AI_EXE_HAVE_WINRT_SPEECH
+      std::string loc = ExtractJsonStringField(request_json, "locale");
+      if (!WinDictationStart(loc, &op_err)) {
+        ok = false;
+        message = op_err.empty() ? "Could not start dictation." : op_err;
+      } else if (action == "dictateOffline") {
+        // One-shot variant: start, wait for the caller's timeout, return the text.
+        int tmo = ExtractJsonIntField(request_json, "timeoutMs", 15000);
+        std::string text;
+        WinDictationFinalize(tmo, &text, &op_err);
+        output = text;
+        if (text.empty()) message = "No speech was recognized.";
+      } else {
+        message = "Dictation started.";
+      }
+#else
       ok = false;
-      message =
-          "Offline dictation is not implemented on Windows in this build yet.";
-    } else if (action == "dictationStart") {
-      ok = false;
-      message =
-          "Offline dictation is not implemented on Windows in this build yet.";
+      message = "Dictation needs a newer Windows SDK at build time (WinRT speech).";
+#endif
     } else if (action == "dictationFinalize") {
+#if AI_EXE_HAVE_WINRT_SPEECH
+      int tmo = ExtractJsonIntField(request_json, "timeoutMs", 15000);
+      std::string text;
+      if (!WinDictationFinalize(tmo, &text, &op_err)) {
+        ok = false;
+        message = op_err.empty() ? "Could not finalize dictation." : op_err;
+      } else {
+        output = text;
+      }
+#else
       ok = false;
-      message =
-          "Offline dictation is not implemented on Windows in this build yet.";
+      message = "Dictation needs a newer Windows SDK at build time (WinRT speech).";
+#endif
     } else if (action == "dictationCancel") {
+#if AI_EXE_HAVE_WINRT_SPEECH
+      WinDictationCancel();
+      message = "Dictation cancelled.";
+#else
       ok = false;
-      message =
-          "Offline dictation is not implemented on Windows in this build yet.";
+      message = "Dictation needs a newer Windows SDK at build time (WinRT speech).";
+#endif
     } else if (action == "dictationLevel") {
-      output = "0";
+      output = "0";   // level comes from the WebView's WebAudio meter on Windows
     } else if (action == "workspaceList") {
       if (!BuildWorkspaceListOutput(runtime_, workspace_path, &output,
                                     &op_err)) {

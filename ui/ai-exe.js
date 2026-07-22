@@ -18009,8 +18009,12 @@ async function startDictation() {
   dictationApplyPending = false;
   setDictationApplyLoading(false);
   setMicListeningState(true);
-  // Avoid dual microphone capture (WebAudio + native Speech) which can starve native transcript capture.
-  void startDictationWaveVisualizer(false);
+  // Mac SFSpeech wants sole mic access — dual WebAudio capture starves its transcript,
+  // so the waveform there runs off the native level poll. Windows recognition (WinRT)
+  // shares the mic (WASAPI shared mode), so the WebView draws a REAL waveform from the
+  // live mic and the native dictationLevel stays 0.
+  const useMicWave = document.documentElement.classList.contains('platform-windows');
+  void startDictationWaveVisualizer(useMicWave);
   try {
     const res = await nativeBridge.invoke('dictationStart', {
       locale: navigator.language || 'en-US',

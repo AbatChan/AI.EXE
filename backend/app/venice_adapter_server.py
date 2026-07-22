@@ -483,6 +483,13 @@ def login_to_venice_with_username(username, password):
     import time as _t
     driver = get_webdriver(headless=args.headless, debug_browser=args.debug_browser, docker=args.docker)
     print("Logging in to Venice with username and password...", flush=True)
+    # Chrome restores persisted window bounds — a session that ended parked
+    # off-screen would reopen off-screen and hide the SIGN-IN form. Clamp now,
+    # before any manual sign-in wait, not after login.
+    try:
+        _aiexe_restore_unobtrusive(driver)
+    except Exception:
+        pass
     driver.get("https://venice.ai/sign-in")
     _t.sleep(3)
     def _open_classic_chat():
@@ -490,20 +497,7 @@ def login_to_venice_with_username(username, password):
         # and keeping the visible setup window compact makes manual verification unobtrusive.
         driver.get(VC_CHAT_URL)
         try:
-            # ALWAYS place the sign-in window on-screen. Chrome persists window bounds
-            # per profile, so a session that ended with the window parked off-screen
-            # (idle cleanup) would otherwise restore it off-screen and the user could
-            # never see the login form. Clamp x/y into the visible desktop.
-            dims = driver.execute_script(
-                "return [screen.availWidth||screen.width||1440, screen.availHeight||screen.height||900];"
-            ) or [1440, 900]
-            rect = driver.get_window_rect() or {}
-            x, y = int(rect.get("x", 20)), int(rect.get("y", 20))
-            if x < 0 or x > int(dims[0]) - 120:
-                x = 20
-            if y < 0 or y > int(dims[1]) - 80:
-                y = 20
-            driver.set_window_rect(x=x, y=y, width=670, height=570)
+            _aiexe_restore_unobtrusive(driver)   # compact, always fully on-screen
         except Exception:
             try:
                 driver.set_window_size(670, 570)
