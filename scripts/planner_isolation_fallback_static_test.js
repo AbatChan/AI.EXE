@@ -35,15 +35,18 @@ assert.match(cmake, /AI_EXE_APP_VERSION "\d+\.\d+\.\d+"/);
 assert.equal(pkg.version, (cmake.match(/AI_EXE_APP_VERSION "([^"]+)"/) || [])[1]);
 
 // Venice thread hygiene: internal calls REUSE one stable scratch thread per chat
-// (no per-call timestamp/random ids → no sidebar flood, no delete sweeps), the
+// (no per-call timestamp/random ids → no per-call sidebar flood), the
 // adapter never renames internal threads, renames get ONE attempt (no Chrome
-// restore/park retry loop), and cleanup never deletes the stable scratch threads.
+// restore/park retry loop), and session cleanup deletes active + rotated scratch threads.
 const adapter = fs.readFileSync(path.join(__dirname, '..', 'backend', 'app', 'venice_adapter_server.py'), 'utf8');
 assert.match(aiExe, /return `internal:chat:\$\{String\(activeChatId \|\| 'shared'\)\}`/);
 assert.doesNotMatch(aiExe, /internal:\$\{cleanScope\}:\$\{nowTs\(\)/);
 assert.match(adapter, /not _chat_key\.startswith\("id:internal:"\)/);
 assert.match(adapter, /key\.startswith\("id:internal:"\)/);
-assert.match(adapter, /not k\.startswith\("id:internal:chat:"\)/);
+assert.match(adapter, /if k\.startswith\("id:internal:"\)/);
+assert.match(adapter, /stale = list\(AIEXE_STALE_THREADS\)/);
+assert.match(adapter, /AIEXE_STALE_THREADS\.discard\(slug\)/);
+assert.match(aiExe, /agentAdapterUploadedAttachmentIds\.delete\(String\(chatId \|\| ''\)\)/);
 
 // Agent images upload ONCE per persistent scratch thread (dedup by chat +
 // attachment id, released if the carrying call fails) — the old 3x-per-run
@@ -76,4 +79,4 @@ assert.match(adapter, /def _aiexe_sweep_models_by_search/);
 assert.match(adapter, /"swept": bool\(AIEXE_LAST_SCRAPE_SWEPT\)/);
 assert.match(adapter, /swept_cache_fresh/);
 
-console.log('PASS: planner calls are isolated, router-shaped plan JSON is rejected, Vite React fallback is preserved, Venice scratch threads are stable per chat, and version is synced');
+console.log('PASS: planner calls are isolated, router-shaped plan JSON is rejected, Venice scratch threads rotate on stalls and are deleted at session end, and version is synced');

@@ -2721,7 +2721,11 @@ export default config;
         if (shouldAutoGenerate && !modelSuppliedComplete && !(packageJsonTarget && String(content).trim())) {
           const generated = await deps.generateAgentWriteFileContent(taskText, toolEvents, path, content, planSpec, { persistPartials: false });
           if (generated) content = generated;
-          await repairStructuralIssueOnce('initial generated content');
+          // generateFullAgentFile already performs bounded continuation passes.
+          // Starting a second COMPLETE-file generation here made large files visibly
+          // restart from line 1 and doubled the longest/most expensive part of a run.
+          // Save a still-incomplete new file with the structural warning below; the
+          // next agent step can append a focused repair with edit_file.
         } else if (!shouldAutoGenerate && !String(content).trim()) {
           const generated = await deps.generateAgentWriteFileContent(taskText, toolEvents, path, '', planSpec, { persistPartials: false });
           if (generated) content = generated;

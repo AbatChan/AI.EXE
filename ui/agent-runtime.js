@@ -197,6 +197,12 @@
       };
       const remote = await deps.requestSelectedRemoteTextCompletion(prompt, budget, '', {
         preferStreaming: true,
+        // File bodies are implementation traffic, not chat turns. Keeping them in
+        // the user's visible Venice conversation makes its sidebar fill with raw
+        // "Write the complete file" prompts and lets a slow generation rotate into
+        // yet another visible chat. Use the per-run scratch conversation instead.
+        isolatedAdapterChat: true,
+        adapterChatScope: 'agent-file',
         onDelta: (delta) => {
           beatToolProgress();
           if (delta) {
@@ -345,7 +351,11 @@
         const reason = wasTruncated ? 'provider_truncated' : 'looks_truncated';
         const continuationPrompt = `${slimBase}\n\nPARTIAL_OUTPUT_ALREADY_SAVED (do NOT repeat any of this):\n${raw.slice(-4000)}\n\nContinue the file from exactly where it stopped. Reply with ONE fenced code block containing ONLY the remaining content — no repetition, no commentary outside the fence.`;
         const carried = raw;
-        const next = await runRawAgentFileInference(continuationPrompt, (partial) => emitPartial(stitchFileContinuation(carried, partial)), `${path} (continue ${guard})`);
+        // Do not replace the live card with an unclassified continuation candidate.
+        // Weak models often restart at line 1; showing that stream made the counter
+        // jump from thousands of lines down to tens, then back up after stitching.
+        // Keep the accepted prefix visible and publish only after restart detection.
+        const next = await runRawAgentFileInference(continuationPrompt, null, `${path} (continue ${guard})`);
         beat();
         const extracted = extractContinuationChunk(next.output, raw, path);
         const chunk = extracted.chunk;
@@ -370,11 +380,13 @@
           raw = chunk;                        // keep the (longer) regeneration; while-cond re-checks completeness
           wasTruncated = next.truncated;
           persistPartial(raw);
+          emitPartial(raw);
           continue;
         }
         raw = stitchFileContinuation(raw, chunk);
         wasTruncated = next.truncated;
         persistPartial(raw);
+        emitPartial(raw);
         passTrace(guard, { reason, beforeLen: before, addedLen: raw.length - before, nextChunkLen: chunk.length, nextTruncated: Boolean(next.truncated), promptChars: continuationPrompt.length, tail: raw.slice(-120) });
         if (raw.length <= before) break;
       }

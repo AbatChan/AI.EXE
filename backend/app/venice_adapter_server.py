@@ -3647,6 +3647,9 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
         # background. Correctness is unaffected — the full context rides in every prompt.
         _rotate_turns = bool(_chat_key and AIEXE_THREAD_MAX_TURNS
                              and AIEXE_THREAD_TURNS.get(_chat_key, 0) >= AIEXE_THREAD_MAX_TURNS)
+        # A slow/cold thread may be wedged in Venice itself. Rotate every chat type,
+        # including internal file generation; the session-end cleanup owns deleting
+        # both the active scratch thread and every rotated-away slug it produced.
         _rotate_slow = bool(_chat_key and _chat_key in AIEXE_THREAD_SLOW)
         if _rotate_turns or _rotate_slow:
             AIEXE_THREAD_SLOW.discard(_chat_key)
@@ -4703,15 +4706,17 @@ try:  # startup done — ONE minimize, after all window-dependent work finished
     driver.minimize_window()
 except Exception:
     pass
-def _aiexe_cleanup_internal_batch(min_count=1, respect_user_window=True, cap=20):
-    """Delete tracked internal one-shot threads in ONE restore/park pass.
+def _aiexe_cleanup_internal_batch(min_count=1, respect_user_window=True, cap=60):
+    """Delete active internal scratch threads plus rotated-away threads in ONE pass.
     Returns deleted count, or -1 when skipped (busy/user has the window)."""
     global driver
-    # Only legacy one-shot ids (id:internal:<scope>:<ts>:<rand>). The stable per-chat
-    # scratch threads (id:internal:chat:<chatId>) are REUSED across runs — never delete.
+    # The id is stable only DURING an agent session so all file/planner calls reuse a
+    # bounded set of threads. Once that session ends, keeping it buys nothing and
+    # leaves raw implementation prompts in the user's Venice sidebar.
     internal = [k for k in list(AIEXE_CHAT_URLS.keys())
-                if k.startswith("id:internal:") and not k.startswith("id:internal:chat:")]
-    if len(internal) < max(1, int(min_count)):
+                if k.startswith("id:internal:")]
+    stale = list(AIEXE_STALE_THREADS)
+    if len(internal) + len(stale) < max(1, int(min_count)):
         return 0
     if not selenium_lock.acquire(blocking=False):
         return -1
@@ -4723,7 +4728,9 @@ def _aiexe_cleanup_internal_batch(min_count=1, respect_user_window=True, cap=20)
             except Exception:
                 pass
         batch = internal[:cap]
-        print("AIEXE_CLEANUP deleting %d internal one-shot chats (%d tracked)" % (len(batch), len(internal)), flush=True)
+        stale_batch = stale[:max(0, int(cap) - len(batch))]
+        print("AIEXE_CLEANUP deleting %d active internal + %d rotated chats"
+              % (len(batch), len(stale_batch)), flush=True)
         _aiexe_park_offscreen(driver)
         time.sleep(0.8)
         done = 0
@@ -4737,11 +4744,27 @@ def _aiexe_cleanup_internal_batch(min_count=1, respect_user_window=True, cap=20)
                     except Exception as exc:
                         print("AIEXE_CLEANUP delete failed for %s: %s" % (slug, exc), flush=True)
                 AIEXE_CHAT_URLS.pop(key, None)
+                AIEXE_THREAD_ATTACHMENTS.pop(key, None)
+                AIEXE_THREAD_NAMED.pop(key, None)
                 AIEXE_THREAD_TURNS.pop(key, None)
                 AIEXE_THREAD_SLOW.discard(key)
-                done += 1
+                if deleted:
+                    done += 1
+                elif slug:
+                    AIEXE_STALE_THREADS.add(slug)
                 print("AIEXE_CLEANUP %s -> %s" % (slug or key[:36], "deleted" if deleted else "dropped from map"), flush=True)
+            for slug in stale_batch:
+                deleted = False
+                try:
+                    deleted = _aiexe_delete_chat(driver, slug, nav_fallback=False)
+                except Exception as exc:
+                    print("AIEXE_CLEANUP rotated delete failed for %s: %s" % (slug, exc), flush=True)
+                if deleted:
+                    AIEXE_STALE_THREADS.discard(slug)
+                    done += 1
+                print("AIEXE_CLEANUP rotated %s -> %s" % (slug, "deleted" if deleted else "pending retry"), flush=True)
             _aiexe_save_chat_map()
+            _aiexe_save_stale_threads()
         finally:
             try:
                 driver.minimize_window()
@@ -4753,8 +4776,8 @@ def _aiexe_cleanup_internal_batch(min_count=1, respect_user_window=True, cap=20)
 
 
 def _aiexe_internal_cleanup_loop():
-    """Idle-time sidebar hygiene: agent one-shot calls (planner, per-file gen, titles)
-    each open an isolated Venice thread by design — delete them when the adapter has
+    """Idle-time sidebar hygiene: an agent session may open scratch/rotated threads;
+    delete them when the adapter has
     been idle, so the user's Venice sidebar isn't buried in them. Manners matter:
     never touch the window while the user has it restored (document.hidden False),
     do ONE restore per batch, no per-thread navigation, then a cooldown —

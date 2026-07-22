@@ -14201,7 +14201,12 @@ async function requestSelectedDeveloperAgentReply(requestToken, chatId, rawPromp
         fetch(getAIExeBackendUrl() + '/api/provider/cleanup_internal', { method: 'POST' })
           .then((resp) => (resp && resp.ok ? resp.json() : null))
           .then((data) => {
-            if (data) recordDebugTrace('venice_internal_cleanup', { deleted: String((data && data.deleted) || 0), ok: String(Boolean(data && data.ok)) });
+            if (data) {
+              recordDebugTrace('venice_internal_cleanup', { deleted: String((data && data.deleted) || 0), ok: String(Boolean(data && data.ok)) });
+              // The stable scratch conversation was deleted at this session boundary,
+              // so attachments must be eligible for upload again on the next run.
+              if (data.ok) agentAdapterUploadedAttachmentIds.delete(String(chatId || ''));
+            }
           })
           .catch(() => { });
       }, 5000);

@@ -187,14 +187,14 @@ const repairedScript = [
     planSpec
   );
 
-  assert.equal(repaired.ok, true, 'broken generated JS is repaired and saved');
-  assert.equal(calls.length, 2, 'syntax repair uses one targeted follow-up generation');
-  assert.match(calls[1].prior, /failed structural validation/i, 'repair prompt includes validation failure');
-  assert.match(calls[1].prior, /BROKEN_CONTENT/, 'repair prompt includes failed content');
-  assert.equal(writes.length, 1, 'only the repaired file is written');
-  assert.equal(writes[0].content, repairedScript, 'written content is the repaired script');
-  assert.ok(traces.some((entry) => entry.kind === 'agent_write_structural_repair_attempt'), 'repair attempt is traced');
-  console.log('PASS: generated JS syntax failure is repaired before save');
+  assert.equal(repaired.ok, true, 'incomplete generated JS is preserved for a focused follow-up');
+  assert.equal(calls.length, 1, 'initial generation is not restarted as a second full-file rewrite');
+  assert.equal(writes.length, 1, 'the generated prefix is saved once');
+  assert.equal(writes[0].content, brokenScript, 'the exact generated prefix remains available for append repair');
+  assert.match(repaired.observation, /Continue it from where it ends by APPENDING the rest with edit_file/i);
+  assert.equal(repaired.structuralIssue.length > 0, true, 'structural issue is returned to steer the next agent step');
+  assert.ok(!traces.some((entry) => entry.kind === 'agent_write_structural_repair_attempt'), 'no redundant full-file repair is launched');
+  console.log('PASS: generated JS syntax failure is saved once and delegated to append repair');
 
   const validInline = [
     "document.addEventListener('DOMContentLoaded', () => {",
