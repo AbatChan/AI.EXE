@@ -18647,7 +18647,22 @@ function requestTypingIndicatorAfterUserAppend(chatId, reason = '') {
 }
 
 
+// Re-entrancy lock: sendMessage is async and awaits (adapter-ready, attachment
+// parsing) BEFORE beginInferenceRequest() bumps pendingInferenceCount. A rapid
+// second click in that window passed the operationRunning guard and sent a
+// duplicate. The flag blocks re-entry until the first click has dispatched (then
+// the pendingInferenceCount guard takes over) or bailed early.
+let sendDispatchInFlight = false;
 async function sendMessage() {
+  if (sendDispatchInFlight) return;
+  sendDispatchInFlight = true;
+  try {
+    await sendMessageInner();
+  } finally {
+    sendDispatchInFlight = false;
+  }
+}
+async function sendMessageInner() {
   recordComposerKeyboardDiagnostic('send_message_start_keyboard_state', null);
   resetStaleInferenceRuntime('sendMessage:start');
   const operationRunning = pendingInferenceCount > 0;
