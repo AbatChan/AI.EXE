@@ -1947,6 +1947,7 @@ try {
       latest,
       url: asset ? asset.browser_download_url : '',
       page: data.html_url || '',
+      size: asset ? (Number(asset.size) || 0) : 0,
       source: 'api',
     };
   }
@@ -1975,6 +1976,7 @@ try {
         version: latest,
         url: String(release.url || ''),
         page: String(release.page || ''),
+        size: Number(release.size) || 0,
       };
       const badge = document.getElementById('updateBadge');
       const text = document.getElementById('updateBadgeText');
@@ -1984,9 +1986,41 @@ try {
         badge.title = `Version ${latest} is available — click to update`;
         ulog('update_badge_shown', { latest });
       }
+      startBackgroundStage();
     } catch (err) {
       ulog('update_check_error', { error: String(err && err.message ? err.message : err) });
     }
+  }
+  // Background staging: download the new build while the app keeps working, so
+  // clicking the badge is a fast local install instead of download-while-closed.
+  let stagePoll = null;
+  let updateStaged = false;
+  const setBadgeText = (t) => { const el = document.getElementById('updateBadgeText'); if (el) el.textContent = t; };
+  function startBackgroundStage() {
+    const nativeOk = typeof nativeBridge !== 'undefined'
+      && nativeBridge && nativeBridge.available && nativeBridge.available();
+    if (!nativeOk || !updateInfo || !updateInfo.url || stagePoll) return;
+    try { nativeBridge.invoke('stageUpdate', { url: updateInfo.url, version: updateInfo.version }); } catch (_) { return; }
+    ulog('update_stage_started', { version: updateInfo.version });
+    stagePoll = setInterval(async () => {
+      try {
+        const badge = document.getElementById('updateBadge');
+        if (badge && badge.disabled) return;              // install already clicked
+        const res = await nativeBridge.invoke('updateStageStatus', { version: updateInfo.version });
+        const st = res && typeof res.output === 'string' && res.output ? JSON.parse(res.output) : null;
+        if (!st) return;
+        if (st.staged) {
+          updateStaged = true;
+          clearInterval(stagePoll);
+          setBadgeText(`Restart to update v${updateInfo.version}`);
+          if (badge) badge.title = `v${updateInfo.version} is downloaded — installs in seconds`;
+          ulog('update_staged', { version: updateInfo.version });
+        } else if (st.bytes > 0) {
+          const pct = updateInfo.size > 0 ? Math.min(99, Math.round((st.bytes * 100) / updateInfo.size)) : 0;
+          setBadgeText(pct ? `Downloading v${updateInfo.version}… ${pct}%` : `Downloading v${updateInfo.version}…`);
+        }
+      } catch (_) {}
+    }, 2000);
   }
   function onBadgeClick() {
     if (!updateInfo) return;
@@ -1995,9 +2029,9 @@ try {
     const nativeOk = typeof nativeBridge !== 'undefined'
       && nativeBridge && nativeBridge.available && nativeBridge.available();
     if (nativeOk && updateInfo.url) {
-      if (text) text.textContent = 'Updating…';
+      if (text) text.textContent = updateStaged ? 'Installing…' : 'Updating…';
       if (badge) badge.disabled = true;
-      // Native handler downloads the new build, swaps files, and relaunches.
+      // Native handler prefers the staged zip (seconds); else downloads then swaps.
       nativeBridge.invoke('applyUpdate', { url: updateInfo.url, version: updateInfo.version });
     } else if (updateInfo.page) {
       openExternalUrl(updateInfo.page);

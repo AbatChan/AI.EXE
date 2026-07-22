@@ -1365,6 +1365,79 @@ CreateWebView2EnvironmentWithOptionsFn LoadCreateEnvironmentFn() {
 }
 #endif
 
+// Staged updates: pre-downloaded zips live in %LOCALAPPDATA%\AI_EXE\updates so
+// applying is a fast local swap (no download while the app is closed)
+std::filesystem::path UpdateStagingDir() {
+  const auto dir = WindowStateIniPath().parent_path() / "updates";
+  std::error_code ec;
+  std::filesystem::create_directories(dir, ec);
+  return dir;
+}
+
+std::string SanitizeVersionTag(const std::string &version) {
+  std::string out;
+  for (char c : version) if ((c >= '0' && c <= '9') || c == '.') out += c;
+  return out;
+}
+
+std::filesystem::path StagedUpdateZip(const std::string &version) {
+  return UpdateStagingDir() / ("v" + SanitizeVersionTag(version) + ".zip");
+}
+
+// Background downloader: hidden PowerShell fills <ver>.zip.part then renames it
+// to <ver>.zip; the badge polls updateStageStatus for progress
+bool StageUpdateDownload(const std::string &url, const std::string &version) {
+  const auto zip = StagedUpdateZip(version);
+  std::error_code ec;
+  if (std::filesystem::exists(zip, ec)) return true;
+  for (auto it = std::filesystem::directory_iterator(UpdateStagingDir(), ec);
+       it != std::filesystem::directory_iterator(); ++it) {   // drop stale versions
+    if (it->path() != zip) std::filesystem::remove(it->path(), ec);
+  }
+  auto psq = [](const std::wstring &s) {
+    std::wstring out;
+    for (wchar_t c : s) { if (c == L'\'') out += L"''"; else out += c; }
+    return out;
+  };
+  const std::wstring wzip = zip.wstring();
+  std::wstringstream ss;
+  ss << L"$ErrorActionPreference='SilentlyContinue'\r\n"
+     << L"$u='" << psq(Utf8ToWide(url)) << L"'\r\n"
+     << L"$z='" << psq(wzip) << L"'\r\n"
+     << L"$p=$z+'.part'\r\n"
+     << L"if(Test-Path -LiteralPath $z){ exit }\r\n"
+     << L"Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue\r\n"
+     << L"$ok=$false\r\n"
+     << L"try {\r\n"
+     << L"  $req=[System.Net.HttpWebRequest]::Create($u); $req.UserAgent='AIEXE-Updater'; $req.AllowAutoRedirect=$true\r\n"
+     << L"  $resp=$req.GetResponse(); $rs=$resp.GetResponseStream()\r\n"
+     << L"  $fs=[System.IO.File]::Create($p); $buf=New-Object byte[] 1048576\r\n"
+     << L"  while(($n=$rs.Read($buf,0,$buf.Length)) -gt 0){ $fs.Write($buf,0,$n) }\r\n"
+     << L"  $fs.Close(); $rs.Close(); $resp.Close(); $ok=$true\r\n"
+     << L"} catch { $ok=$false }\r\n"
+     << L"if(-not $ok){ curl.exe -L -o $p $u }\r\n"
+     << L"if((Test-Path -LiteralPath $p) -and ((Get-Item -LiteralPath $p).Length -gt 102400)){ Move-Item -LiteralPath $p -Destination $z -Force } else { Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue }\r\n";
+  wchar_t tmp_buf[MAX_PATH] = {};
+  const DWORD tlen = GetTempPathW(MAX_PATH, tmp_buf);
+  const std::filesystem::path tmp_dir =
+      (tlen > 0 && tlen < MAX_PATH) ? std::filesystem::path(tmp_buf) : UpdateStagingDir();
+  const auto script_path = tmp_dir / L"ai_exe_stage.ps1";
+  std::ofstream of(script_path, std::ios::binary);
+  if (!of) return false;
+  const std::string utf8 = WideToUtf8(ss.str());
+  const unsigned char bom[3] = {0xEF, 0xBB, 0xBF};
+  of.write(reinterpret_cast<const char *>(bom), 3);
+  of.write(utf8.data(), static_cast<std::streamsize>(utf8.size()));
+  of.close();
+  std::wstring args =
+      L"-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"";
+  args += script_path.wstring();
+  args += L"\"";
+  const HINSTANCE r = ShellExecuteW(nullptr, L"open", L"powershell.exe",
+                                    args.c_str(), nullptr, SW_HIDE);
+  return reinterpret_cast<INT_PTR>(r) > 32;
+}
+
 // Auto-updater: write a PowerShell script that waits for THIS process to exit, then
 // downloads the new build, extracts it over the app folder, and relaunches. The app
 // quits right after launching it. User data lives in %LOCALAPPDATA% and projects in
@@ -1395,12 +1468,14 @@ bool LaunchUpdater(const std::string &url, const std::string &version,
   // gap while the app is closed (otherwise the user stares at nothing). The phase
   // label updates as it waits → downloads → installs → restarts.
   std::wstring ver_label = psq(Utf8ToWide(version));
+  const std::wstring staged_zip = StagedUpdateZip(version).wstring();
   std::wstringstream ss;
   ss << L"$ErrorActionPreference='SilentlyContinue'\r\n"
      << L"$u='" << psq(Utf8ToWide(url)) << L"'\r\n"
      << L"$app='" << psq(app_dir.wstring()) << L"'\r\n"
      << L"$exe='" << psq(exe_path.wstring()) << L"'\r\n"
      << L"$ver='" << ver_label << L"'\r\n"
+     << L"$staged='" << psq(staged_zip) << L"'\r\n"
      << L"Add-Type -AssemblyName System.Windows.Forms,System.Drawing\r\n"
      << L"[Windows.Forms.Application]::EnableVisualStyles()\r\n"
      << L"$acc=[Drawing.Color]::FromArgb(0,229,255)\r\n"
@@ -1443,7 +1518,7 @@ bool LaunchUpdater(const std::string &url, const std::string &version,
      << L"$f.Controls.AddRange(@($left,$si,$title,$sub,$bar,$phaseLbl,$pctLbl))\r\n"
      // Heavy work off the UI thread; streamed download reports real percent via $status.
      << L"$script:job=Start-Job -ScriptBlock {\r\n"
-     << L"  param($u,$app,$exe,$oldpid,$status,$ver)\r\n"
+     << L"  param($u,$app,$exe,$oldpid,$status,$ver,$staged)\r\n"
      << L"  $ErrorActionPreference='SilentlyContinue'\r\n"
      << L"  function St($t){ Set-Content -LiteralPath $status -Value $t -Encoding UTF8 }\r\n"
      << L"  St('prep|-1')\r\n"
@@ -1452,6 +1527,9 @@ bool LaunchUpdater(const std::string &url, const std::string &version,
      << L"  $t=Join-Path $env:TEMP ('aiexe_up_'+[guid]::NewGuid().ToString('N'))\r\n"
      << L"  New-Item -ItemType Directory -Force $t | Out-Null\r\n"
      << L"  $zip=Join-Path $t 'u.zip'\r\n"
+     // Pre-staged zip = skip the whole download phase (install takes seconds)
+     << L"  if(($staged) -and (Test-Path -LiteralPath $staged) -and ((Get-Item -LiteralPath $staged).Length -gt 102400)){ Copy-Item -LiteralPath $staged -Destination $zip -Force }\r\n"
+     << L"  if(-not (Test-Path -LiteralPath $zip)){\r\n"
      << L"  St('download|0'); $ok=$false\r\n"
      << L"  try {\r\n"
      << L"    $req=[System.Net.HttpWebRequest]::Create($u); $req.UserAgent='AIEXE-Updater'; $req.AllowAutoRedirect=$true\r\n"
@@ -1461,6 +1539,7 @@ bool LaunchUpdater(const std::string &url, const std::string &version,
      << L"    $fs.Close(); $rs.Close(); $resp.Close(); $ok=$true\r\n"
      << L"  } catch { $ok=$false }\r\n"
      << L"  if(-not $ok){ St('download|-1'); curl.exe -L -o $zip $u }\r\n"
+     << L"  }\r\n"
      << L"  St('install|-1')\r\n"
      << L"  $x=Join-Path $t 'x'\r\n"
      // Missing/tiny zip = failed download; bail
@@ -1473,15 +1552,15 @@ bool LaunchUpdater(const std::string &url, const std::string &version,
      // Retry until proven: no copy errors AND new version on disk
      << L"  $swapped=$false\r\n"
      << L"  if($zok){ $vf=Join-Path $app 'ui\\ui-config.js'; for($i=0;$i -lt 30;$i++){ $cerr=@(); Copy-Item -Path (Join-Path $src '*') -Destination $app -Recurse -Force -ErrorAction SilentlyContinue -ErrorVariable cerr; $cur=''; try { $cur=Get-Content -LiteralPath $vf -Raw -ErrorAction SilentlyContinue } catch {}; $vok= if([string]::IsNullOrEmpty($ver)){ $true } else { [bool]($cur -and $cur.Contains(\"'\"+$ver+\"'\")) }; if($cerr.Count -eq 0 -and $vok){ $swapped=$true; break }; Start-Sleep -Milliseconds 500 } }\r\n"
-     // Verified swap → reopen; else show failed briefly, still relaunch
-     << L"  if($swapped){ St('reopen|100') } else { St('failed|-1'); Start-Sleep -Milliseconds 2600 }\r\n"
+     // Verified swap → reopen (+ drop the consumed staged zip); else failed briefly, still relaunch
+     << L"  if($swapped){ St('reopen|100'); if($staged){ Remove-Item -LiteralPath $staged -Force -ErrorAction SilentlyContinue } } else { St('failed|-1'); Start-Sleep -Milliseconds 2600 }\r\n"
      // Schedule the relaunch in a detached helper so this updater window can close
      // cleanly first; otherwise both windows overlap for a visible beat.
      << L"  $cmd=\"Start-Sleep -Milliseconds 350; Start-Process -FilePath '\"+$exe.Replace(\"'\",\"''\")+\"' -WorkingDirectory '\"+$app.Replace(\"'\",\"''\")+\"'\"\r\n"
      << L"  $enc=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($cmd))\r\n"
      << L"  Start-Process powershell.exe -WindowStyle Hidden -ArgumentList @('-NoProfile','-EncodedCommand',$enc)\r\n"
      << L"  Remove-Item -Recurse -Force $t -ErrorAction SilentlyContinue\r\n"
-     << L"} -ArgumentList $u,$app,$exe," << pid << L",$status,$ver\r\n"
+     << L"} -ArgumentList $u,$app,$exe," << pid << L",$status,$ver,$staged\r\n"
      << L"$timer=New-Object Windows.Forms.Timer; $timer.Interval=33\r\n"
      << L"$timer.Add_Tick({\r\n"
      << L"  $script:spin=($script:spin+11)%360; if($script:pct -lt 0){ $script:anim+=0.02; if($script:anim -ge 1){ $script:anim-=1 } }\r\n"
@@ -2311,6 +2390,32 @@ private:
         // files can be swapped. Timer fires on the UI thread without blocking it.
         SetTimer(hwnd_, kUpdateCloseTimerId, 1500, UpdateCloseTimerProc);
       }
+    } else if (action == "stageUpdate") {
+      const std::string url = ExtractJsonStringField(request_json, "url");
+      const std::string version = ExtractJsonStringField(request_json, "version");
+      if (url.empty() || version.empty()) {
+        ok = false;
+        message = "Missing update URL or version.";
+      } else if (StageUpdateDownload(url, version)) {
+        message = "Staging update in the background.";
+      } else {
+        ok = false;
+        message = "Could not start the background download.";
+      }
+    } else if (action == "updateStageStatus") {
+      const std::string version = ExtractJsonStringField(request_json, "version");
+      const auto staged_zip = StagedUpdateZip(version);
+      std::error_code fec;
+      if (std::filesystem::exists(staged_zip, fec)) {
+        output = "{\"staged\":true,\"bytes\":" +
+                 std::to_string(static_cast<long long>(std::filesystem::file_size(staged_zip, fec))) + "}";
+      } else {
+        const std::filesystem::path part(staged_zip.wstring() + L".part");
+        const long long bytes = std::filesystem::exists(part, fec)
+            ? static_cast<long long>(std::filesystem::file_size(part, fec)) : 0;
+        output = "{\"staged\":false,\"bytes\":" + std::to_string(bytes) + "}";
+      }
+      message = "ok";
     } else {
       ok = false;
       message = "Unsupported action.";
