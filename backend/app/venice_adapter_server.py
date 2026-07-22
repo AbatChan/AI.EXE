@@ -490,9 +490,20 @@ def login_to_venice_with_username(username, password):
         # and keeping the visible setup window compact makes manual verification unobtrusive.
         driver.get(VC_CHAT_URL)
         try:
+            # ALWAYS place the sign-in window on-screen. Chrome persists window bounds
+            # per profile, so a session that ended with the window parked off-screen
+            # (idle cleanup) would otherwise restore it off-screen and the user could
+            # never see the login form. Clamp x/y into the visible desktop.
+            dims = driver.execute_script(
+                "return [screen.availWidth||screen.width||1440, screen.availHeight||screen.height||900];"
+            ) or [1440, 900]
             rect = driver.get_window_rect() or {}
-            driver.set_window_rect(x=int(rect.get("x", 20)), y=int(rect.get("y", 20)),
-                                   width=670, height=570)
+            x, y = int(rect.get("x", 20)), int(rect.get("y", 20))
+            if x < 0 or x > int(dims[0]) - 120:
+                x = 20
+            if y < 0 or y > int(dims[1]) - 80:
+                y = 20
+            driver.set_window_rect(x=x, y=y, width=670, height=570)
         except Exception:
             try:
                 driver.set_window_size(670, 570)
