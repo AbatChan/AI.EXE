@@ -61,6 +61,17 @@ const planSpec = {
   finalRequiresRealFiles: true,
 };
 
+assert.equal(planner.looksLikePlaceholderImplementation('// placeholder code\nfunction render() { return true; }'), false,
+  'normal JavaScript comments do not trigger the placeholder watchdog');
+assert.equal(planner.looksLikePlaceholderImplementation('/* implement this carefully in the adapter */\n.app { display: grid; }'), false,
+  'CSS block comments do not trigger the placeholder watchdog');
+assert.equal(planner.looksLikePlaceholderImplementation('<!-- coming soon was the old copy -->\n<main>Ready</main>'), false,
+  'HTML comments do not trigger the placeholder watchdog');
+assert.equal(planner.looksLikePlaceholderImplementation('# placeholder content\ndef run():\n    return True'), false,
+  'full-line Python comments do not trigger the placeholder watchdog');
+assert.equal(planner.looksLikePlaceholderImplementation('const status = "coming soon";'), true,
+  'user-visible placeholder strings are still rejected');
+
 function parentWorkspacePath(candidate) {
   const full = normalizeWorkspacePath(candidate);
   if (full === '/' || !full.includes('/')) return '/';

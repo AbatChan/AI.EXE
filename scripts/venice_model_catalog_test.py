@@ -73,8 +73,11 @@ assert restart_options == [
 assert 'AIEXE_MODEL_CACHE_VERSION = 7' in SOURCE
 assert '"row_options": row_options' in SOURCE
 assert 'os.replace(temp_path, AIEXE_MODEL_CACHE_FILE)' in SOURCE
-assert 'AIEXE_MODEL_CACHE_TTL = 5 * 60' in SOURCE
-assert '_aiexe_schedule_model_refresh' in SOURCE
+assert 'AIEXE_MODEL_CACHE_TTL' not in SOURCE
+assert '_aiexe_schedule_model_refresh' not in SOURCE
+tags_body = SOURCE.split("def tags():", 1)[1].split("def mock_show", 1)[0]
+assert 'aiexe_scrape_models' not in tags_body
+assert '_aiexe_model_catalog()' in tags_body
 assert '"Kimi K3"' in SOURCE
 
-print("PASS: Venice model variants remain distinct and the catalog refresh is short-lived/dynamic")
+print("PASS: Venice model variants remain distinct and catalog refresh is launch-only")

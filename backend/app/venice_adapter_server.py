@@ -3246,8 +3246,9 @@ def aiexe_scrape_models(driver):
                 cached_bases.append(cached_base)
         # The curated slice above misses everything Venice doesn't feature. Best path:
         # the webapp's own catalog request (complete, instant, includes same-day
-        # releases the 24h cache would hide). Fallbacks: fresh swept cache, then the
-        # a-z0-9 search sweep (slow AND lossy for deep search results).
+        # releases a persisted cache could hide). If that request is unavailable,
+        # perform the search sweep NOW because this function runs only at launch;
+        # use disk cache only when both live discovery paths fail.
         api_names = _aiexe_catalog_from_page_api(driver, names)
         if api_names:
             added = 0
@@ -3258,25 +3259,18 @@ def aiexe_scrape_models(driver):
             AIEXE_LAST_SCRAPE_SWEPT = True
             print("AIEXE_MODELS merged page-api catalog: %d total (%d beyond curated)" % (len(names), added), flush=True)
         else:
-            swept_cache_fresh = (
-                bool(cached_models)
-                and cache.get("version") == AIEXE_MODEL_CACHE_VERSION
-                and bool(cache.get("swept"))
-                and (_t.time() - float(cache.get("ts") or 0)) < AIEXE_MODEL_CACHE_TTL
-                and all(n in cached_bases for n in names)
-            )
-            if swept_cache_fresh:
-                for n in cached_bases:
-                    if n not in names:
-                        names.append(n)
-                AIEXE_LAST_SCRAPE_SWEPT = True
-                print("AIEXE_MODELS reused swept catalog (%d total) — cache fresh" % len(names), flush=True)
-            else:
-                swept = _aiexe_sweep_models_by_search(driver, names)
+            swept = _aiexe_sweep_models_by_search(driver, names)
+            if swept:
                 for n in swept:
                     if n not in names:
                         names.append(n)
-                AIEXE_LAST_SCRAPE_SWEPT = bool(swept)
+                AIEXE_LAST_SCRAPE_SWEPT = True
+            elif cached_models and cache.get("version") == AIEXE_MODEL_CACHE_VERSION:
+                for n in cached_bases:
+                    if n not in names:
+                        names.append(n)
+                AIEXE_LAST_SCRAPE_SWEPT = bool(cache.get("swept"))
+                print("AIEXE_MODELS live launch discovery failed; reused cached catalog (%d total)" % len(names), flush=True)
         needs_row_rebuild = not bool(cache.get("row_options_complete") and cached_rows)
         if (names and cache.get("version") == AIEXE_MODEL_CACHE_VERSION
                 and set(names) == set(cached_bases) and cache.get("priced")
@@ -3349,8 +3343,8 @@ def _aiexe_restore_unobtrusive(driver):
 
 AIEXE_MODEL_CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "aiexe_model_cache.json")
 AIEXE_MODEL_CACHE_VERSION = 7
-# Keep startup/API responses fast, but do not hide same-day Venice releases for 24 hours.
-AIEXE_MODEL_CACHE_TTL = 5 * 60
+# The live catalog is scraped once when the adapter launches. Runtime API reads are
+# cache-only so model discovery never takes Selenium's lock away from agent work.
 AIEXE_MODEL_REFRESHING = False
 
 
@@ -3402,51 +3396,6 @@ def _aiexe_save_model_cache(models):
         except OSError:
             pass
         return False
-
-
-def _aiexe_model_cache_stale():
-    cache = _aiexe_load_model_cache()
-    return (cache.get("version") != AIEXE_MODEL_CACHE_VERSION
-            or not cache.get("models")
-            or time.time() - float(cache.get("ts") or 0) >= AIEXE_MODEL_CACHE_TTL)
-
-
-def _aiexe_schedule_model_refresh(force=False):
-    """Refresh Selenium catalog in the background; /api/tags itself stays instant."""
-    global AIEXE_MODEL_REFRESHING
-    if AIEXE_MODEL_REFRESHING or (not force and not _aiexe_model_cache_stale()):
-        return False
-    AIEXE_MODEL_REFRESHING = True
-
-    def _refresh():
-        global AIEXE_MODEL_REFRESHING, AIEXE_MODELS_CACHE
-        try:
-            with selenium_lock:
-                # Do not steal a Venice window the user is actively inspecting. The next
-                # health poll will retry; minimized/off-screen adapters refresh normally.
-                try:
-                    if driver.execute_script("return document.hidden === false") is True:
-                        print("AIEXE_MODELS background refresh deferred — Venice window visible", flush=True)
-                        return
-                except Exception:
-                    pass
-                _aiexe_park_offscreen(driver)
-                time.sleep(0.35)
-                refreshed = aiexe_scrape_models_with_restore(driver)
-                if refreshed:
-                    AIEXE_MODELS_CACHE = refreshed
-                    print("AIEXE_MODELS background refresh complete: %d options" % len(refreshed), flush=True)
-                try:
-                    driver.minimize_window()
-                except Exception:
-                    pass
-        except Exception as exc:
-            print("AIEXE_MODELS background refresh failed: %s" % exc, flush=True)
-        finally:
-            AIEXE_MODEL_REFRESHING = False
-
-    gevent.spawn(_refresh)
-    return True
 
 
 def aiexe_scrape_models_with_restore(driver):
@@ -4573,9 +4522,8 @@ def get_mock_model(name, parameter_size):
 @app.route('/api/tags', methods=['GET'])
 def tags():
     # Advertise Venice's REAL models (scraped once at startup, else the curated fallback) so
-    # AI.EXE's model dropdown matches what the picker can actually select. Stale catalogs
-    # are returned immediately and refreshed asynchronously, keeping health checks fast.
-    _aiexe_schedule_model_refresh(force=str(request.args.get('refresh') or '').lower() in ('1', 'true', 'yes'))
+    # AI.EXE's model dropdown matches what the picker can actually select. This endpoint is
+    # deliberately cache-only: relaunching the adapter is the catalog refresh boundary.
     names = _aiexe_model_catalog()
     tags_response = {"models": [get_mock_model(n + ":latest", "") for n in names]}
     return Response(json.dumps(tags_response), content_type='application/json')

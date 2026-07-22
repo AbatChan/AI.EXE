@@ -16527,7 +16527,6 @@ async function refreshComposerModelsFromProvider() {
   } catch (_) { renderComposerModelPill(); }
 }
 setTimeout(refreshComposerModelsFromProvider, 800);  // boot: after settings load
-setInterval(refreshComposerModelsFromProvider, 60 * 1000); // pick up background catalog refreshes
 
 // ---- Composer action-chip overflow (+N) ------------------------------------
 // When [+][pill][chips] outgrow the row, trailing chips are hidden and replaced by a "+N"

@@ -73,6 +73,8 @@ assert.match(adapterServer, /_aiexe_stop_generation\(driver, "stream boundary cl
 assert.match(adapterServer, /_rotate_slow = bool\(_chat_key and _chat_key in AIEXE_THREAD_SLOW\)/);
 assert.match(agentRuntime, /isolatedAdapterChat:\s*true,\s*adapterChatScope:\s*'agent-file'/);
 assert.match(agentRuntime, /runRawAgentFileInference\(continuationPrompt, null,/);
+assert.doesNotMatch(adapterServer, /AIEXE_MODEL_CACHE_TTL|_aiexe_schedule_model_refresh/);
+assert.doesNotMatch(aiExe, /setInterval\(refreshComposerModelsFromProvider/);
 assert.match(agentLoop, /incompleteJsonNudges/);
 assert.match(agentLoop, /agent_incomplete_json_recovered/);
 assert.match(agentLoop, /Continue from the saved tool results/);

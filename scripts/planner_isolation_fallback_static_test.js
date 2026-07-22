@@ -77,6 +77,7 @@ const decisionRepairMd = fs.readFileSync(path.join(__dirname, '..', 'ui', 'promp
 // sweep the search box (full-catalog discovery) and persist the swept flag.
 assert.match(adapter, /def _aiexe_sweep_models_by_search/);
 assert.match(adapter, /"swept": bool\(AIEXE_LAST_SCRAPE_SWEPT\)/);
-assert.match(adapter, /swept_cache_fresh/);
+assert.doesNotMatch(adapter, /swept_cache_fresh|AIEXE_MODEL_CACHE_TTL|_aiexe_schedule_model_refresh/);
+assert.match(adapter, /live launch discovery failed; reused cached catalog/);
 
 console.log('PASS: planner calls are isolated, router-shaped plan JSON is rejected, Venice scratch threads rotate on stalls and are deleted at session end, and version is synced');

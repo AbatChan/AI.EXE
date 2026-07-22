@@ -41,8 +41,60 @@
     // silently downgrading runs to the fallback plan: wrong name, 2 files, no phases).
     const agentStepTimeoutMs = () => Number(deps.agentStepTimeoutMs) || 20000;
 
+    function stripCommentsForPlaceholderScan(content) {
+      const source = String(content || '');
+      let out = '';
+      let mode = 'code';
+      let escaped = false;
+      let lineOnlyWhitespace = true;
+      for (let i = 0; i < source.length; i += 1) {
+        const ch = source[i];
+        const two = source.slice(i, i + 2);
+        const four = source.slice(i, i + 4);
+        const three = source.slice(i, i + 3);
+        if (mode === 'line') {
+          if (ch === '\n') { mode = 'code'; out += ch; lineOnlyWhitespace = true; }
+          else out += ' ';
+          continue;
+        }
+        if (mode === 'block') {
+          if (two === '*/') { out += '  '; i += 1; mode = 'code'; }
+          else { out += ch === '\n' ? '\n' : ' '; if (ch === '\n') lineOnlyWhitespace = true; }
+          continue;
+        }
+        if (mode === 'html') {
+          if (three === '-->') { out += '   '; i += 2; mode = 'code'; }
+          else { out += ch === '\n' ? '\n' : ' '; if (ch === '\n') lineOnlyWhitespace = true; }
+          continue;
+        }
+        if (mode !== 'code') {
+          out += ch;
+          if (escaped) { escaped = false; continue; }
+          if (ch === '\\') { escaped = true; continue; }
+          if (ch === mode || (mode !== '`' && ch === '\n')) mode = 'code';
+          if (ch === '\n') lineOnlyWhitespace = true;
+          else if (!/\s/.test(ch)) lineOnlyWhitespace = false;
+          continue;
+        }
+        if (four === '<!--') { out += '    '; i += 3; mode = 'html'; continue; }
+        if (two === '//') { out += '  '; i += 1; mode = 'line'; continue; }
+        if (two === '/*') { out += '  '; i += 1; mode = 'block'; continue; }
+        // Covers Python/shell-style full-line comments without mistaking CSS #ids
+        // or hex colors for comments. Inline # comments remain conservatively scanned.
+        if (ch === '#' && lineOnlyWhitespace) { out += ' '; mode = 'line'; continue; }
+        if (ch === '"' || ch === "'" || ch === '`') mode = ch;
+        out += ch;
+        if (ch === '\n') lineOnlyWhitespace = true;
+        else if (!/\s/.test(ch)) lineOnlyWhitespace = false;
+      }
+      return out;
+    }
+
     function looksLikePlaceholderImplementation(content) {
-      const text = String(content || '').toLowerCase();
+      // Comments may describe future work, examples, or the phrase being guarded
+      // against. Only executable code and user-visible strings should trip this
+      // lightweight completeness heuristic.
+      const text = stripCommentsForPlaceholderScan(content).toLowerCase();
       // 'todo:' removed — it collides with real domain code (kanban `todo:` keys).
       return [
         'functionality here',
