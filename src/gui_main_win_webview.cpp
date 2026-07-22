@@ -1544,14 +1544,30 @@ bool LaunchUpdater(const std::string &url, const std::string &version,
      << L"  $x=Join-Path $t 'x'\r\n"
      // Missing/tiny zip = failed download; bail
      << L"  $zok=$false; try { if((Test-Path -LiteralPath $zip) -and ((Get-Item -LiteralPath $zip).Length -gt 102400)){ $zok=$true } } catch {}\r\n"
-     << L"  if($zok){ try { Expand-Archive -Path $zip -DestinationPath $x -Force -ErrorAction Stop } catch { $zok=$false } }\r\n"
+     // .NET ZipFile is several times faster than Expand-Archive on many-file zips
+     << L"  if($zok){ try { Add-Type -AssemblyName System.IO.Compression.FileSystem; [System.IO.Compression.ZipFile]::ExtractToDirectory($zip,$x) } catch { try { Expand-Archive -Path $zip -DestinationPath $x -Force -ErrorAction Stop } catch { $zok=$false } } }\r\n"
      // Unwrap single top-level folder zips
      << L"  $src=$x; try { $kids=@(Get-ChildItem -LiteralPath $x -Force); if($kids.Count -eq 1 -and $kids[0].PSIsContainer -and -not (Test-Path -LiteralPath (Join-Path $x 'ui'))){ $src=$kids[0].FullName } } catch {}\r\n"
      // Kill stragglers running from inside $app — they hold the file locks
      << L"  if($zok){ $pfx=$app.TrimEnd('\\')+'\\'; Get-Process -ErrorAction SilentlyContinue | ForEach-Object { $pp=$null; try { $pp=$_.Path } catch {}; if($pp -and $pp.StartsWith($pfx,[StringComparison]::OrdinalIgnoreCase)){ try { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue } catch {} } }; Start-Sleep -Milliseconds 400 }\r\n"
-     // Retry until proven: no copy errors AND new version on disk
+     // Robocopy swap: fast, long-path capable, per-file retries (rc<8 = success).
+     // The on-disk version is AUTHORITATIVE — a stray uncopyable file must not
+     // report "failed" on a working install (it did; logged instead now).
+     << L"  $ulog=Join-Path $env:LOCALAPPDATA 'AI_EXE\\update.log'\r\n"
+     << L"  function UL($m){ try { Add-Content -LiteralPath $ulog -Value ((Get-Date -Format s)+' '+$m) } catch {} }\r\n"
      << L"  $swapped=$false\r\n"
-     << L"  if($zok){ $vf=Join-Path $app 'ui\\ui-config.js'; for($i=0;$i -lt 30;$i++){ $cerr=@(); Copy-Item -Path (Join-Path $src '*') -Destination $app -Recurse -Force -ErrorAction SilentlyContinue -ErrorVariable cerr; $cur=''; try { $cur=Get-Content -LiteralPath $vf -Raw -ErrorAction SilentlyContinue } catch {}; $vok= if([string]::IsNullOrEmpty($ver)){ $true } else { [bool]($cur -and $cur.Contains(\"'\"+$ver+\"'\")) }; if($cerr.Count -eq 0 -and $vok){ $swapped=$true; break }; Start-Sleep -Milliseconds 500 } }\r\n"
+     << L"  if($zok){ $vf=Join-Path $app 'ui\\ui-config.js'; $vok=$false\r\n"
+     << L"    for($i=0;$i -lt 5;$i++){\r\n"
+     << L"      robocopy $src $app /E /R:2 /W:1 /NFL /NDL /NJH /NJS | Out-Null\r\n"
+     << L"      $rc=$LASTEXITCODE\r\n"
+     << L"      $cur=''; try { $cur=Get-Content -LiteralPath $vf -Raw -ErrorAction SilentlyContinue } catch {}\r\n"
+     << L"      $vok= if([string]::IsNullOrEmpty($ver)){ $true } else { [bool]($cur -and $cur.Contains(\"'\"+$ver+\"'\")) }\r\n"
+     << L"      UL(('swap pass '+$i+' rc='+$rc+' verOk='+$vok+' ver='+$ver))\r\n"
+     << L"      if(($rc -lt 8) -and $vok){ $swapped=$true; break }\r\n"
+     << L"      Start-Sleep -Milliseconds 700\r\n"
+     << L"    }\r\n"
+     << L"    if((-not $swapped) -and $vok){ $swapped=$true; UL('version verified despite robocopy failures — treating as success') }\r\n"
+     << L"  }\r\n"
      // Verified swap → reopen (+ drop the consumed staged zip); else failed briefly, still relaunch
      << L"  if($swapped){ St('reopen|100'); if($staged){ Remove-Item -LiteralPath $staged -Force -ErrorAction SilentlyContinue } } else { St('failed|-1'); Start-Sleep -Milliseconds 2600 }\r\n"
      // Schedule the relaunch in a detached helper so this updater window can close
