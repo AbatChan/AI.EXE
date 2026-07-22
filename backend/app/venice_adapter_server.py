@@ -1581,18 +1581,56 @@ def _aiexe_cleanup_transient_ui(driver, reason=""):
         pass
 
 
+def _aiexe_row_variant_tag(driver, title_el):
+    """The privacy/tier tag on a model row (Private | Anon | TEE | ''). Venice shows the
+    SAME model name as several rows differing only by this tag; capturing it is how we
+    tell a free variant apart from a paid/encrypted one."""
+    try:
+        return driver.execute_script("""
+          const title = arguments[0];
+          const row = title.closest('[role="group"], [role="menuitem"], [role="menuitemradio"]');
+          if (!row) return '';
+          const txt = String(row.textContent || '');
+          if (/TEE/i.test(txt)) return 'TEE';
+          if (/\\bAnon\\b/i.test(txt)) return 'Anon';
+          if (/\\bPrivate\\b/i.test(txt)) return 'Private';
+          return '';
+        """, title_el) or ""
+    except Exception:
+        return ""
+
+
+AIEXE_MODEL_VARIANTS = {}   # name -> set of variant tags seen (diagnostic)
+
+
 def _aiexe_model_titles(driver):
     """Model names from the visible picker rows. Also records which rows carry Venice's
-    coin icon (= the model debits credits per use) into AIEXE_PRICED_MODELS."""
+    coin icon (= the model debits credits per use) into AIEXE_PRICED_MODELS.
+
+    A model can appear as SEVERAL rows under one name (e.g. a free GLM 5.2 and a
+    paid/TEE variant). We keep checking each row's coin icon until one is found — so a
+    paid variant isn't missed just because the free row came first — and log the
+    distinct variant tags so same-name free/paid pairs are visible in the log."""
     names = []
     for p in driver.find_elements(By.CSS_SELECTOR, VC_MODEL_ROW_TITLE_CSS):
         try:
             t = (p.get_attribute("title") or "").strip()
         except Exception:
             t = ""
-        if t and t not in names:
-            names.append(t)
+        if not t:
+            continue
+        if t not in AIEXE_PRICED_MODELS:   # stop once any variant is known priced
             _aiexe_note_priced_model(driver, p, t)
+        if t in names:
+            # A repeat title = a potential distinct variant; record its tag once.
+            tag = _aiexe_row_variant_tag(driver, p)
+            seen = AIEXE_MODEL_VARIANTS.setdefault(t, set())
+            if tag and tag not in seen:
+                seen.add(tag)
+                print("AIEXE_MODEL_VARIANT %r variant tag=%r priced=%s" % (
+                    t, tag, t in AIEXE_PRICED_MODELS), flush=True)
+        else:
+            names.append(t)
     return names
 
 
