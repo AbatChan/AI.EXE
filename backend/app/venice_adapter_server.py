@@ -1166,6 +1166,7 @@ def _aiexe_save_chat_map():
 # survive crashes; capped so the ledger can't grow unbounded.
 AIEXE_STALE_THREADS = set()
 AIEXE_STALE_MAX = 60
+AIEXE_SWEEP_BACKOFF_UNTIL = 0.0   # fruitless restore → don't pop the window again for a while
 AIEXE_STALE_PATH = AIEXE_CHAT_MAP_PATH + ".stale"
 
 
@@ -2647,12 +2648,43 @@ def _aiexe_close_sidebar(driver):
     return False
 
 
+def _aiexe_sidebar_scroll_to_slug(driver, slug):
+    """The sidebar is a virtuoso list — rows below the fold don't exist in the DOM.
+    Step-scroll the container until the slug's row materializes (or the list ends)."""
+    try:
+        return bool(driver.execute_async_script("""
+            const done = arguments[arguments.length - 1];
+            const slug = arguments[0];
+            const sc = document.querySelector('[data-virtuoso-scroller="true"]');
+            if (!sc) { done(false); return; }
+            const found = () => !!document.querySelector('a[href*="/chat/classic/' + slug + '"]');
+            (async () => {
+              try {
+                sc.scrollTop = 0;
+                for (let i = 0; i < 60; i++) {
+                  await new Promise(r => setTimeout(r, 120));
+                  if (found()) { done(true); return; }
+                  const before = sc.scrollTop;
+                  sc.scrollTop = before + Math.max(120, sc.clientHeight - 40);
+                  await new Promise(r => setTimeout(r, 120));
+                  if (found()) { done(true); return; }
+                  if (sc.scrollTop <= before) break;   // bottom reached
+                }
+                done(found());
+              } catch (e) { done(false); }
+            })();
+        """, slug))
+    except Exception:
+        return False
+
+
 def _aiexe_sidebar_row(driver, slug, tries=12):
     """Find the sidebar row for `slug`, retrying — the list is server-fetched and can lag on
     slow internet, and a just-opened sidebar may still be rendering. Scrolls it into view."""
     if not slug:
         return None
-    for _ in range(max(1, tries)):
+    scanned = False
+    for _i in range(max(1, tries)):
         try:
             row = driver.find_element(By.XPATH, VC_SIDEBAR_CHAT_ROW_XPATH.format(slug))
             if row is not None:
@@ -2663,6 +2695,11 @@ def _aiexe_sidebar_row(driver, slug, tries=12):
                 return row
         except Exception:
             pass
+        # Not in the rendered window — scroll-scan the virtualized list once
+        if not scanned and _i >= 1:
+            scanned = True
+            if _aiexe_sidebar_scroll_to_slug(driver, slug):
+                continue
         time.sleep(0.5)
     return None
 
@@ -2840,11 +2877,12 @@ def _aiexe_sweep_stale_threads(limit=4):
     failures (minimized Chrome renders a rowless sidebar — the reason the old
     single-shot delete silently leaked nearly every rotated thread). Failures stay
     ledgered for the next idle pass; no hot retries."""
-    global driver
-    if not AIEXE_STALE_THREADS:
+    global driver, AIEXE_SWEEP_BACKOFF_UNTIL
+    if not AIEXE_STALE_THREADS or time.time() < AIEXE_SWEEP_BACKOFF_UNTIL:
         return
     if not selenium_lock.acquire(blocking=False):
         return
+    restored = False
     try:
         if not _aiexe_driver_alive(driver):
             return
@@ -2855,7 +2893,8 @@ def _aiexe_sweep_stale_threads(limit=4):
                 done.append(slug)   # re-mapped to an active chat — keep it
                 continue
             (done if _aiexe_delete_chat(driver, slug, nav_fallback=False) else failed).append(slug)
-        if failed and _aiexe_restore_unobtrusive(driver):
+        if failed and _aiexe_park_offscreen(driver):   # invisible: parked, not shown
+            restored = True
             time.sleep(0.8)
             try:
                 for slug in failed:
@@ -2866,6 +2905,8 @@ def _aiexe_sweep_stale_threads(limit=4):
                     driver.minimize_window()
                 except Exception:
                     pass
+        if restored and not done:   # popped the window for nothing — cool off
+            AIEXE_SWEEP_BACKOFF_UNTIL = time.time() + 1800
         for slug in done:
             AIEXE_STALE_THREADS.discard(slug)
         if done:
@@ -2890,7 +2931,7 @@ def _aiexe_sidebar_op_with_restore(driver, op, label):
     if ok:
         return True
     print("AIEXE_%s failed while minimized — restoring window for one retry" % label, flush=True)
-    if not _aiexe_restore_unobtrusive(driver):
+    if not _aiexe_park_offscreen(driver):
         return False
     time.sleep(0.8)
     try:
@@ -3023,6 +3064,19 @@ def aiexe_scrape_models(driver):
         _aiexe_cleanup_transient_ui(driver, "model scrape")
 
 
+def _aiexe_park_offscreen(driver):
+    """Un-minimize WITHOUT showing anything: normal-size window parked below the
+    visible desktop. Minimized breaks LAYOUT (0x0 at -32000 → virtuoso renders no
+    rows); off-screen keeps real geometry and the launch flags disable occlusion
+    throttling, so the sidebar renders while the user sees nothing."""
+    try:
+        dims = driver.execute_script("return [screen.availWidth || screen.width || 1440, screen.availHeight || screen.height || 900];") or [1440, 900]
+        driver.set_window_rect(x=20, y=int(dims[1]) * 2 + 400, width=670, height=570)
+        return True
+    except Exception:
+        return _aiexe_restore_unobtrusive(driver)
+
+
 def _aiexe_restore_unobtrusive(driver):
     """Restore into the normal compact adapter window, always fully on-screen."""
     try:
@@ -3080,8 +3134,8 @@ def aiexe_scrape_models_with_restore(driver):
     global AIEXE_PRICED_MODELS, AIEXE_PRICED_CHECKED_MODELS
     names = aiexe_scrape_models(driver)
     if not names:
-        print("AIEXE_MODELS scrape empty while minimized — restoring window for one retry", flush=True)
-        _aiexe_restore_unobtrusive(driver)
+        print("AIEXE_MODELS scrape empty while minimized — parking off-screen for one retry", flush=True)
+        _aiexe_park_offscreen(driver)
         time.sleep(1.0)
         try:
             names = aiexe_scrape_models(driver)
@@ -3322,7 +3376,7 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
                 # small corner window (not a face-popping maximize), retry once, and keep
                 # it restored for the settings dialog below; re-minimized after.
                 print("AIEXE_MODEL retrying with window restored", flush=True)
-                _restored_for_ui = _aiexe_restore_unobtrusive(driver)
+                _restored_for_ui = _aiexe_park_offscreen(driver)
                 time.sleep(0.8)
                 aiexe_select_model(driver, request_model_id)
         except Exception:
@@ -4111,7 +4165,7 @@ def aiexe_sidebar_debug_route():
     out = {}
     with selenium_lock:
         try:
-            _aiexe_restore_unobtrusive(driver)
+            _aiexe_park_offscreen(driver)
             time.sleep(0.8)
             if slug:
                 driver.get("%s/%s" % (VC_CHAT_URL, slug))
@@ -4319,7 +4373,7 @@ def _aiexe_cleanup_internal_batch(min_count=1, respect_user_window=True, cap=20)
                 pass
         batch = internal[:cap]
         print("AIEXE_CLEANUP deleting %d internal one-shot chats (%d tracked)" % (len(batch), len(internal)), flush=True)
-        _aiexe_restore_unobtrusive(driver)
+        _aiexe_park_offscreen(driver)
         time.sleep(0.8)
         done = 0
         try:
