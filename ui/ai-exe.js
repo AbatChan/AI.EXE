@@ -1992,47 +1992,71 @@ try {
     }
   }
   // Background staging: download the new build while the app keeps working, so
-  // clicking the badge is a fast local install instead of download-while-closed.
+  // install is always a fast local swap. A click BEFORE staging finishes waits
+  // for the download (button shows progress) instead of closing the app to
+  // download — the app only closes for the seconds-long install itself.
   let stagePoll = null;
   let updateStaged = false;
+  let pendingInstall = false;
+  let lastStageBytes = 0;
+  let lastStageProgressAt = Date.now();
   const setBadgeText = (t) => { const el = document.getElementById('updateBadgeText'); if (el) el.textContent = t; };
+  function doApplyUpdate(label) {
+    const badge = document.getElementById('updateBadge');
+    if (badge) badge.disabled = true;
+    setBadgeText(label);
+    nativeBridge.invoke('applyUpdate', { url: updateInfo.url, version: updateInfo.version });
+  }
   function startBackgroundStage() {
     const nativeOk = typeof nativeBridge !== 'undefined'
       && nativeBridge && nativeBridge.available && nativeBridge.available();
     if (!nativeOk || !updateInfo || !updateInfo.url || stagePoll) return;
     try { nativeBridge.invoke('stageUpdate', { url: updateInfo.url, version: updateInfo.version }); } catch (_) { return; }
     ulog('update_stage_started', { version: updateInfo.version });
+    lastStageProgressAt = Date.now();
     stagePoll = setInterval(async () => {
       try {
         const badge = document.getElementById('updateBadge');
-        if (badge && badge.disabled) return;              // install already clicked
+        if (!pendingInstall && badge && badge.disabled) return;   // direct install already running
         const res = await nativeBridge.invoke('updateStageStatus', { version: updateInfo.version });
         const st = res && typeof res.output === 'string' && res.output ? JSON.parse(res.output) : null;
         if (!st) return;
         if (st.staged) {
           updateStaged = true;
           clearInterval(stagePoll);
+          ulog('update_staged', { version: updateInfo.version, pendingInstall: String(pendingInstall) });
+          if (pendingInstall) { doApplyUpdate('Installing…'); return; }
           setBadgeText(`Restart to update v${updateInfo.version}`);
           if (badge) badge.title = `v${updateInfo.version} is downloaded — installs in seconds`;
-          ulog('update_staged', { version: updateInfo.version });
-        } else if (st.bytes > 0) {
+          return;
+        }
+        if (st.bytes > lastStageBytes) { lastStageBytes = st.bytes; lastStageProgressAt = Date.now(); }
+        if (st.bytes > 0) {
           const pct = updateInfo.size > 0 ? Math.min(99, Math.round((st.bytes * 100) / updateInfo.size)) : 0;
-          setBadgeText(pct ? `Downloading v${updateInfo.version}… ${pct}%` : `Downloading v${updateInfo.version}…`);
+          const base = pct ? `Downloading v${updateInfo.version}… ${pct}%` : `Downloading v${updateInfo.version}…`;
+          setBadgeText(pendingInstall ? `${base} — restarting when ready` : base);
+        }
+        // Download stalled after an install click — fall back to the classic flow
+        // so the update is never unreachable.
+        if (pendingInstall && Date.now() - lastStageProgressAt > 90000) {
+          clearInterval(stagePoll);
+          ulog('update_stage_stalled_fallback', { version: updateInfo.version });
+          doApplyUpdate('Updating…');
         }
       } catch (_) {}
     }, 2000);
   }
   function onBadgeClick() {
     if (!updateInfo) return;
-    const badge = document.getElementById('updateBadge');
-    const text = document.getElementById('updateBadgeText');
     const nativeOk = typeof nativeBridge !== 'undefined'
       && nativeBridge && nativeBridge.available && nativeBridge.available();
     if (nativeOk && updateInfo.url) {
-      if (text) text.textContent = updateStaged ? 'Installing…' : 'Updating…';
-      if (badge) badge.disabled = true;
-      // Native handler prefers the staged zip (seconds); else downloads then swaps.
-      nativeBridge.invoke('applyUpdate', { url: updateInfo.url, version: updateInfo.version });
+      if (updateStaged) { doApplyUpdate('Installing…'); return; }
+      pendingInstall = true;
+      lastStageProgressAt = Date.now();
+      startBackgroundStage();
+      if (!stagePoll) { doApplyUpdate('Updating…'); return; }   // staging unavailable — classic flow
+      setBadgeText(`Downloading v${updateInfo.version}… — restarting when ready`);
     } else if (updateInfo.page) {
       openExternalUrl(updateInfo.page);
     }
