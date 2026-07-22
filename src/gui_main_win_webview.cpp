@@ -1438,24 +1438,17 @@ bool LaunchUpdater(const std::string &url, const std::string &version,
      << L"  if(-not $ok){ St('download|-1'); curl.exe -L -o $zip $u }\r\n"
      << L"  St('install|-1')\r\n"
      << L"  $x=Join-Path $t 'x'\r\n"
-     // Guard: a truncated/failed download yields a tiny or missing zip. Bail to a
-     // 'failed' state instead of extracting garbage and reporting a phantom success.
+     // Missing/tiny zip = failed download; bail
      << L"  $zok=$false; try { if((Test-Path -LiteralPath $zip) -and ((Get-Item -LiteralPath $zip).Length -gt 102400)){ $zok=$true } } catch {}\r\n"
      << L"  if($zok){ try { Expand-Archive -Path $zip -DestinationPath $x -Force -ErrorAction Stop } catch { $zok=$false } }\r\n"
-     // Some release zips wrap everything in one top-level folder; copy from inside it.
+     // Unwrap single top-level folder zips
      << L"  $src=$x; try { $kids=@(Get-ChildItem -LiteralPath $x -Force); if($kids.Count -eq 1 -and $kids[0].PSIsContainer -and -not (Test-Path -LiteralPath (Join-Path $x 'ui'))){ $src=$kids[0].FullName } } catch {}\r\n"
-     // Root cause of the locks: old backend adapter / stray children still running
-     // FROM INSIDE $app after the main exe exits (Wait-Process only covered the main
-     // pid). Kill anything whose image path lives under $app before swapping.
+     // Kill stragglers running from inside $app — they hold the file locks
      << L"  if($zok){ $pfx=$app.TrimEnd('\\')+'\\'; Get-Process -ErrorAction SilentlyContinue | ForEach-Object { $pp=$null; try { $pp=$_.Path } catch {}; if($pp -and $pp.StartsWith($pfx,[StringComparison]::OrdinalIgnoreCase)){ try { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue } catch {} } }; Start-Sleep -Milliseconds 400 }\r\n"
-     // Retry the swap until PROVABLY complete: zero copy errors (ErrorVariable still
-     // records skips/locks under SilentlyContinue — a lone locked backend exe must
-     // fail the pass, not ship a new-UI/old-backend hybrid) AND ui-config.js reports
-     // the new version on disk. Never silently relaunch a half-applied build.
+     // Retry until proven: no copy errors AND new version on disk
      << L"  $swapped=$false\r\n"
      << L"  if($zok){ $vf=Join-Path $app 'ui\\ui-config.js'; for($i=0;$i -lt 30;$i++){ $cerr=@(); Copy-Item -Path (Join-Path $src '*') -Destination $app -Recurse -Force -ErrorAction SilentlyContinue -ErrorVariable cerr; $cur=''; try { $cur=Get-Content -LiteralPath $vf -Raw -ErrorAction SilentlyContinue } catch {}; $vok= if([string]::IsNullOrEmpty($ver)){ $true } else { [bool]($cur -and $cur.Contains(\"'\"+$ver+\"'\")) }; if($cerr.Count -eq 0 -and $vok){ $swapped=$true; break }; Start-Sleep -Milliseconds 500 } }\r\n"
-     // Only claim success when the version on disk verifiably changed; otherwise show
-     // a failed state (dwell so it's readable) and still relaunch the old build.
+     // Verified swap → reopen; else show failed briefly, still relaunch
      << L"  if($swapped){ St('reopen|100') } else { St('failed|-1'); Start-Sleep -Milliseconds 2600 }\r\n"
      // Schedule the relaunch in a detached helper so this updater window can close
      // cleanly first; otherwise both windows overlap for a visible beat.

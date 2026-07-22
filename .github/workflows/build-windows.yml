@@ -138,6 +138,17 @@ jobs:
             throw "Bundled AI.EXE backend is missing"
           }
 
+          # Trim non-Windows selenium-manager + codemirror build sources (~8MB zipped)
+          Remove-Item -Recurse -Force "$out/backend/_internal/selenium/webdriver/common/macos" -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force "$out/backend/_internal/selenium/webdriver/common/linux" -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force "$out/ui/vendor/codemirror/modules" -ErrorAction SilentlyContinue
+          if (-not (Test-Path "$out/backend/_internal/selenium/webdriver/common/windows/selenium-manager.exe")) {
+            Write-Host "note: windows selenium-manager not found (layout changed?) — continuing"
+          }
+          if (-not (Test-Path "$out/ui/vendor/codemirror/file-editor.bundle.js")) {
+            throw "CodeMirror bundle missing after vendor trim"
+          }
+
           # WebView2 loader next to the exe so it renders without a separate SDK install.
           # The end user still needs the (near-ubiquitous) Evergreen WebView2 Runtime.
           Copy-Item "$env:WEBVIEW2_DIR/build/native/x64/WebView2Loader.dll" "$out/WebView2Loader.dll"
