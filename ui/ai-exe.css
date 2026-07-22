@@ -7255,6 +7255,31 @@ html.platform-mac .settings-sidebar {
   background: transparent;
   outline: none;
 }
+.composer-model-tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+.composer-model-tab {
+  flex: 1;
+  padding: 4px 6px;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  letter-spacing: 0.2px;
+  color: var(--text2, #8f97a2);
+  background: transparent;
+  border: 1px solid var(--border2);
+  border-radius: 7px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color 0.15s var(--ease-out), border-color 0.15s var(--ease-out), background 0.15s var(--ease-out);
+}
+.composer-model-tab:hover { color: var(--text, #f5f7fa); border-color: var(--accent-soft, rgba(0,229,255,0.4)); }
+.composer-model-tab.active {
+  color: var(--accent, #00e5ff);
+  border-color: var(--accent, #00e5ff);
+  background: var(--accent-soft, rgba(0, 229, 255, 0.1));
+}
 .composer-model-list {
   max-height: 250px;
   overflow-y: auto;

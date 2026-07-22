@@ -16269,15 +16269,40 @@ if (composerAdapterStartBtn) {
   });
 }
 
+// Model-picker tier filter: 'all' | 'free' | 'paid'. Paid = the credit-metered
+// (coin-icon) Venice models; free = the rest. Only shown when BOTH kinds exist.
+let composerModelTier = 'all';
+const composerModelTabs = document.getElementById('composerModelTabs');
+function syncComposerModelTabs(c) {
+  if (!composerModelTabs) return;
+  const list = (c && Array.isArray(c.list)) ? c.list : [];
+  const paidCount = list.filter((m) => isProviderModelPriced(c.provider, m)).length;
+  const freeCount = list.length - paidCount;
+  // No point splitting if every model is one tier.
+  const show = paidCount > 0 && freeCount > 0;
+  composerModelTabs.style.display = show ? '' : 'none';
+  if (!show) composerModelTier = 'all';
+  const counts = { all: list.length, free: freeCount, paid: paidCount };
+  composerModelTabs.querySelectorAll('.composer-model-tab').forEach((tab) => {
+    const tier = tab.getAttribute('data-tier');
+    const base = tab.getAttribute('data-label') || tab.textContent.replace(/\s*\(\d+\)$/, '');
+    tab.setAttribute('data-label', base);
+    tab.textContent = `${base} (${counts[tier] || 0})`;
+    tab.classList.toggle('active', tier === composerModelTier);
+  });
+}
 function buildComposerModelList(filter) {
   if (!composerModelList) return;
   const c = composerModelChoices();
   composerModelList.innerHTML = '';
   if (!c) return;
+  syncComposerModelTabs(c);
   const cur = String(getProviderModel(c.provider) || '');
   const q = String(filter || '').trim().toLowerCase();
   c.list
     .filter((m) => !q || m.toLowerCase().includes(q))
+    .filter((m) => composerModelTier === 'all'
+      || (composerModelTier === 'paid') === isProviderModelPriced(c.provider, m))
     .slice(0, 200)
     .forEach((m) => {
       const item = document.createElement('button');
@@ -16309,6 +16334,7 @@ if (composerModelPill) {
     const opening = composerModelPop.classList.contains('hidden');
     if (opening) {
       if (composerModelPop.parentElement !== document.body) document.body.appendChild(composerModelPop);
+      composerModelTier = 'all';
       buildComposerModelList('');
       if (composerModelSearch) composerModelSearch.value = '';
       // position: fixed — anchor above the pill, kept on-screen (escapes overflow clipping)
@@ -16326,6 +16352,14 @@ if (composerModelPill) {
 if (composerModelSearch) {
   composerModelSearch.addEventListener('input', () => buildComposerModelList(composerModelSearch.value));
   composerModelSearch.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeComposerModelPop(); });
+}
+if (composerModelTabs) {
+  composerModelTabs.addEventListener('click', (e) => {
+    const tab = e.target.closest('.composer-model-tab');
+    if (!tab) return;
+    composerModelTier = tab.getAttribute('data-tier') || 'all';
+    buildComposerModelList(composerModelSearch ? composerModelSearch.value : '');
+  });
 }
 if (composerModelPop) composerModelPop.addEventListener('click', (e) => e.stopPropagation());
 document.addEventListener('click', () => closeComposerModelPop());
