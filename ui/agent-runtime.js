@@ -246,8 +246,10 @@
     // block, narrate, then restart the file in a second block — naive unwrap
     // stitched that prose INTO the file. Keep fenced code only; a second block
     // sharing the saved file's opening chars = restart.
-    function extractContinuationChunk(output, savedRaw) {
+    function extractContinuationChunk(output, savedRaw, path) {
       const text = String(output || '');
+      // md: inner fences are content — splitting on them inverts parity and drops code
+      if (/\.md$/i.test(String(path || ''))) return { chunk: unwrapWholeFence(text), restarted: false };
       const open = text.match(/^\s*(`{3,})[a-z0-9_+\-]*[^\S\n]*\n?/i);
       if (!open) return { chunk: unwrapWholeFence(text), restarted: false };
       const fence = open[1];
@@ -345,7 +347,7 @@
         const carried = raw;
         const next = await runRawAgentFileInference(continuationPrompt, (partial) => emitPartial(stitchFileContinuation(carried, partial)), `${path} (continue ${guard})`);
         beat();
-        const extracted = extractContinuationChunk(next.output, raw);
+        const extracted = extractContinuationChunk(next.output, raw, path);
         const chunk = extracted.chunk;
         if (!chunk || !chunk.trim()) { passTrace(guard, { reason, added: 0, note: 'empty_continuation' }); break; }
         const before = raw.length;

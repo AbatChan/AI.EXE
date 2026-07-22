@@ -2807,6 +2807,12 @@ export default config;
               : ' Note: this looks thin for a usable project file; expand it into a real MVP if the request needs more than a stub.';
           }
         }
+        // README isn't a "primary" file so the thin gate above skips it — a 4-line
+        // stub once saved silently and the run finalized claiming a full README
+        if (!primaryQualityNote && /(?:^|\/)README\.md$/i.test(path)
+          && String(content || '').trim().length < 300) {
+          primaryQualityNote = ' Note: this README looks like a stub; rewrite it with the real setup/run instructions and file names.';
+        }
         // Save a fresh file even if it's incomplete — never discard generated work;
         // the WARNING below + a continuation pass finish it from the saved state.
         // Only block a structure-breaking EDIT that would corrupt an existing good file.

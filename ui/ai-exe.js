@@ -9706,6 +9706,7 @@ async function streamOllamaChatCompletion(provider, prompt, handlers = {}, optio
     const decoder = new TextDecoder();
     let buf = '';
     let output = '';
+    let rawFinal = '';   // adapter's raw-copy upgrade (true model text vs rendered-DOM scrape)
     const completeJsonEnd = (text) => {
       const source = String(text || '');
       // Find the end of the first brace-balanced substring that PARSES as JSON.
@@ -9752,6 +9753,7 @@ async function streamOllamaChatCompletion(provider, prompt, handlers = {}, optio
         let obj = null;
         try { obj = JSON.parse(line); } catch (_) { continue; }
         if (obj && obj.error) { structuredStreamError = String(obj.error); continue; }
+        if (obj && typeof obj.aiexe_raw_final === 'string' && obj.aiexe_raw_final.trim()) { rawFinal = obj.aiexe_raw_final; continue; }
         const delta = obj && obj.message && typeof obj.message.content === 'string' ? obj.message.content : '';
         if (delta) {
           output += delta;
@@ -9785,6 +9787,10 @@ async function streamOllamaChatCompletion(provider, prompt, handlers = {}, optio
           }
         }
       }
+    }
+    // Prefer the raw-copy text over the accumulated rendered-DOM deltas
+    if (!stopOnCompleteJson && rawFinal && rawFinal.trim().length >= output.trim().length * 0.5) {
+      output = rawFinal;
     }
     if (output.trim()) {
       if (stopOnCompleteJson) {

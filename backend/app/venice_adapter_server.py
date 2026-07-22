@@ -2460,6 +2460,61 @@ def _aiexe_strip_reply_chrome(text):
     return "\n".join(kept).strip()
 
 
+def _aiexe_raw_reply_via_copy(driver):
+    """Raw (unrendered) text of the latest assistant message: intercept clipboard
+    writes in-page, click the message's Copy control, return what it tried to
+    write. Never touches the OS clipboard; patches restored after."""
+    try:
+        return driver.execute_async_script("""
+            const done = arguments[arguments.length - 1];
+            (async () => {
+              const cb = navigator.clipboard;
+              const origWriteText = cb ? cb.writeText : null;
+              const origWrite = cb ? cb.write : null;
+              const origExec = document.execCommand ? document.execCommand.bind(document) : null;
+              let captured = null;
+              try {
+                if (cb) {
+                  cb.writeText = (t) => { captured = String(t); return Promise.resolve(); };
+                  cb.write = async (items) => {
+                    try {
+                      for (const it of (items || [])) {
+                        if (it && it.types && it.types.includes('text/plain')) {
+                          captured = await (await it.getType('text/plain')).text();
+                        }
+                      }
+                    } catch (e) {}
+                    return Promise.resolve();
+                  };
+                }
+                document.execCommand = function(cmd) {
+                  if (String(cmd).toLowerCase() === 'copy') {
+                    try { captured = String(window.getSelection() || ''); } catch (e) {}
+                    return true;
+                  }
+                  return origExec ? origExec.apply(document, arguments) : false;
+                };
+                const row = document.querySelector('div.assistant[data-testid="text-chat-message"][data-latest-message="true"]')
+                  || Array.from(document.querySelectorAll('div.assistant[data-testid="text-chat-message"]')).at(-1);
+                if (!row) { done(null); return; }
+                const btn = row.querySelector('[data-testid*="copy" i]')
+                  || Array.from(row.querySelectorAll('button')).find(b => /copy/i.test(String(b.getAttribute('aria-label') || '')));
+                if (!btn) { done(null); return; }
+                btn.click();
+                for (let i = 0; i < 20 && captured === null; i++) await new Promise(r => setTimeout(r, 100));
+                done(captured);
+              } catch (e) { done(null); }
+              finally {
+                try { if (cb) { if (origWriteText) cb.writeText = origWriteText; if (origWrite) cb.write = origWrite; } } catch (e) {}
+                try { if (origExec) document.execCommand = origExec; } catch (e) {}
+              }
+            })();
+        """)
+    except Exception as exc:
+        print("AIEXE_RAWCOPY failed: %s" % exc, flush=True)
+        return None
+
+
 def _aiexe_read_last_assistant_text(driver, include_reasoning=True):
     """Read only the latest Venice assistant message body.
 
@@ -3694,6 +3749,24 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
                 _m = _emit('</thinking>')
                 if _m: yield _m
             _reasoning_open = False
+
+        # Raw-text upgrade: the DOM scrape is RENDERED markdown (lossy — stripped
+        # headings, mangled fences). The message's Copy carries the model's true
+        # text; swap it in at stream end when it plausibly matches. Best-effort.
+        if not _structured_limit and eval_count and response_format != ResponseFormat.COMPLETION_AS_STRING:
+            _scraped_full = streamed_content if response_format == ResponseFormat.CHAT_NON_STREAMED else _prev
+            if _scraped_full and len(_scraped_full) >= 40:
+                try:
+                    _raw = _aiexe_raw_reply_via_copy(driver)
+                except Exception:
+                    _raw = None
+                if (_raw and _raw.strip() and len(_raw) >= int(0.5 * len(_scraped_full))
+                        and _raw.strip() != _scraped_full.strip()):
+                    print("AIEXE_RAWCOPY upgraded reply: %d -> %d chars" % (len(_scraped_full), len(_raw)), flush=True)
+                    if response_format == ResponseFormat.CHAT_NON_STREAMED:
+                        streamed_content = _raw
+                    else:
+                        yield json.dumps({"aiexe_raw_final": _raw, "done": False}) + "\r\n"
 
         # Refresh the balance after the reply — but only OPEN the sidebar/account menu when
         # the model that just answered is credit-metered (the balance can't change otherwise;

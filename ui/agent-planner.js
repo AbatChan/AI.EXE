@@ -516,6 +516,9 @@
       if (/^```/.test(text)) {
         text = text.replace(/^```[a-z0-9_+\-]*[^\S\n]*\n?/i, '');
         text = text.replace(/\n?```\s*$/, '').trim();
+      } else if (/^md$/i.test(extension)) {
+        // Markdown IS prose and its inner fences are CONTENT — extracting "the
+        // matching block" here collapsed a full README to its file-tree fence.
       } else {
         // Prose-wrapped reply: extract the matching-language block.
         const fencedBlocks = [];
