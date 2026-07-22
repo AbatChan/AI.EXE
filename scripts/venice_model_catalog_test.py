@@ -71,6 +71,10 @@ assert restart_options == [
 ]
 
 assert 'AIEXE_MODEL_CACHE_VERSION = 7' in SOURCE
+assert 'AIEXE_MODEL_CACHE_MAX_AGE_SECONDS = 24 * 60 * 60' in SOURCE
+assert 'def _aiexe_restore_fresh_model_cache():' in SOURCE
+assert '_scraped = _aiexe_restore_fresh_model_cache()' in SOURCE
+assert 'age_seconds > AIEXE_MODEL_CACHE_MAX_AGE_SECONDS' in SOURCE
 assert '"row_options": row_options' in SOURCE
 assert 'os.replace(temp_path, AIEXE_MODEL_CACHE_FILE)' in SOURCE
 assert 'AIEXE_MODEL_CACHE_TTL' not in SOURCE
@@ -80,4 +84,4 @@ assert 'aiexe_scrape_models' not in tags_body
 assert '_aiexe_model_catalog()' in tags_body
 assert '"Kimi K3"' in SOURCE
 
-print("PASS: Venice model variants remain distinct and catalog refresh is launch-only")
+print("PASS: Venice model variants remain distinct and the complete catalog is cached for 24 hours")

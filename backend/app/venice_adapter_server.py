@@ -3343,8 +3343,9 @@ def _aiexe_restore_unobtrusive(driver):
 
 AIEXE_MODEL_CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "aiexe_model_cache.json")
 AIEXE_MODEL_CACHE_VERSION = 7
-# The live catalog is scraped once when the adapter launches. Runtime API reads are
-# cache-only so model discovery never takes Selenium's lock away from agent work.
+# A complete catalogue remains fresh across launches for one day. Runtime API reads
+# are cache-only, so model discovery never takes Selenium's lock away from agent work.
+AIEXE_MODEL_CACHE_MAX_AGE_SECONDS = 24 * 60 * 60
 AIEXE_MODEL_REFRESHING = False
 
 
@@ -3355,6 +3356,34 @@ def _aiexe_load_model_cache():
         return d if isinstance(d, dict) else {}
     except Exception:
         return {}
+
+
+def _aiexe_restore_fresh_model_cache():
+    """Restore a complete, recent catalogue without opening Venice's model picker."""
+    global AIEXE_PRICED_MODELS, AIEXE_PRICED_CHECKED_MODELS, AIEXE_UNCENSORED_MODELS
+    global AIEXE_MODEL_ROW_OPTIONS, AIEXE_ROW_METADATA_SWEPT, AIEXE_LAST_SCRAPE_SWEPT
+    cache = _aiexe_load_model_cache()
+    models = [m for m in (cache.get("models") or []) if m]
+    try:
+        age_seconds = max(0.0, time.time() - float(cache.get("ts") or 0))
+    except (TypeError, ValueError):
+        age_seconds = AIEXE_MODEL_CACHE_MAX_AGE_SECONDS + 1
+    if (cache.get("version") != AIEXE_MODEL_CACHE_VERSION or not cache.get("swept")
+            or not models or age_seconds > AIEXE_MODEL_CACHE_MAX_AGE_SECONDS):
+        return []
+
+    AIEXE_MODEL_ROW_OPTIONS = {}
+    _aiexe_merge_cached_model_rows(cache)
+    AIEXE_PRICED_MODELS = set(cache.get("priced") or [])
+    AIEXE_UNCENSORED_MODELS = set(cache.get("uncensored") or [])
+    AIEXE_PRICED_CHECKED_MODELS = {
+        _aiexe_decode_model_option(model)[0] for model in models if model
+    }
+    AIEXE_ROW_METADATA_SWEPT = bool(cache.get("row_options_complete"))
+    AIEXE_LAST_SCRAPE_SWEPT = True
+    print("AIEXE_MODELS restored 24-hour cache (%d models, %.1f hours old)" %
+          (len(models), age_seconds / 3600.0), flush=True)
+    return models
 
 
 def _aiexe_save_model_cache(models):
@@ -4623,11 +4652,15 @@ except Exception:
 _aiexe_load_chat_map()
 _aiexe_load_stale_threads()
 driver = login_to_venice()
-try:  # scrape Venice's real model list once (best-effort) so /api/tags advertises the truth
-    _scraped = aiexe_scrape_models_with_restore(driver)
+try:  # use today's complete cache; otherwise scrape once so /api/tags stays accurate
+    _scraped = _aiexe_restore_fresh_model_cache()
+    _model_catalog_source = "24-hour cache" if _scraped else "live scrape"
+    if not _scraped:
+        _scraped = aiexe_scrape_models_with_restore(driver)
     if _scraped:
         AIEXE_MODELS_CACHE = _scraped
-        print("AIEXE_MODELS scraped: %d models" % len(_scraped), flush=True)
+        print("AIEXE_MODELS ready from %s: %d models" %
+              (_model_catalog_source, len(_scraped)), flush=True)
 except Exception as _e:
     print("AIEXE_MODELS scrape failed: " + str(_e), flush=True)
 try:  # remember which model Venice is CURRENTLY on, so AI.EXE can adopt it (not pretend)
