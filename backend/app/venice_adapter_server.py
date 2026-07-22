@@ -3236,9 +3236,17 @@ def aiexe_select_model(driver, name):
         def _find_target():
             rows = driver.find_elements(By.CSS_SELECTOR, VC_MODEL_ROW_TITLE_CSS)
             print("AIEXE_MODEL rows=%d titles=%r" % (len(rows), [(r.get_attribute("title") or "")[:24] for r in rows[:10]]), flush=True)
-            for p in rows:
-                if (p.get_attribute("title") or "").strip().lower() == nl:
-                    return p
+            exact = [p for p in rows if (p.get_attribute("title") or "").strip().lower() == nl]
+            if exact:
+                # Venice lists the SAME name as free + pay-per-use variants (e.g. GLM 5.2
+                # Private free vs paid) and the paid one can come first. Prefer a row with
+                # no coin icon so the user isn't charged unexpectedly; fall back to first.
+                if len(exact) > 1:
+                    for p in exact:
+                        if not _aiexe_title_has_priced_icon(driver, p):
+                            print("AIEXE_MODEL picked FREE variant of %r (%d matches)" % (name, len(exact)), flush=True)
+                            return p
+                return exact[0]
             for p in rows:
                 if nl in (p.get_attribute("title") or "").strip().lower():
                     return p
