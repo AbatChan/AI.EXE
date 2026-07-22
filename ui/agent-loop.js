@@ -3090,6 +3090,7 @@
             approvedNewProject: Boolean(requestToken && requestToken.approvedNewProject),
             skipNewProjectConfirmation: Boolean(requestToken && requestToken.skipNewProjectConfirmation),
             forceCurrentWorkspace: Boolean(requestToken && requestToken.forceCurrentWorkspace),
+            isAgentResume: Boolean(requestToken && requestToken.isAgentResume),
           });
           toolPromise.catch(() => {});
           let toolSettled = false;
@@ -3198,6 +3199,7 @@
                 approvedNewProject: Boolean(requestToken && requestToken.approvedNewProject),
                 skipNewProjectConfirmation: Boolean(requestToken && requestToken.skipNewProjectConfirmation),
                 forceCurrentWorkspace: Boolean(requestToken && requestToken.forceCurrentWorkspace),
+                isAgentResume: Boolean(requestToken && requestToken.isAgentResume),
                 approvedCommand: permissionCommand,
               });
             } else {
@@ -3567,6 +3569,9 @@
         }
         appendAgentActivity(deps.buildAgentActivityFromToolResult(decision, toolResult, toolEvents));
         if (toolResult && toolResult.ok && String(decision.tool || '').toLowerCase() === 'new_project') {
+          if (typeof deps.syncWorkspaceStateFromNative === 'function') {
+            await deps.syncWorkspaceStateFromNative('new_project_created', { render: false, log: true });
+          }
           await precreatePlannedParentDirs('after_new_project');
         }
         // Flag a path whose content returned to a prior state (oscillation).

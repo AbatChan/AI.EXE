@@ -2093,6 +2093,13 @@ export default config;
       let observation = '';
 
       if (tool === 'new_project') {
+        if (runOptions.isAgentResume) {
+          return {
+            ok: false,
+            mutated,
+            observation: 'new_project blocked: Continue must resume this chat\'s existing workspace. Do not create a replacement project; restore or reopen the original workspace and continue its unfinished phase.',
+          };
+        }
         const alreadyCreatedWorkspace = Array.isArray(toolEvents)
           && toolEvents.some((event) => event && event.tool === 'new_project' && event.ok);
         if (alreadyCreatedWorkspace) {

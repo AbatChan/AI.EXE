@@ -1126,9 +1126,9 @@ AIEXE_CANCEL_KEYS = set()
 # the next send opens a New chat, and delete the stale thread in the background.
 AIEXE_THREAD_TURNS = {}          # chat_key -> turns sent on the CURRENT Venice thread
 try:
-    AIEXE_THREAD_MAX_TURNS = max(0, int(os.getenv('AIEXE_THREAD_MAX_TURNS', '12')))
+    AIEXE_THREAD_MAX_TURNS = max(0, int(os.getenv('AIEXE_THREAD_MAX_TURNS', '0')))
 except Exception:
-    AIEXE_THREAD_MAX_TURNS = 12  # 0 disables rotation
+    AIEXE_THREAD_MAX_TURNS = 0  # disabled by default; slow-thread rotation remains active
 # Latency-based rotation: chat_keys whose LAST turn was slow (cold empty-capture or a full
 # idle timeout) get a fresh thread on the next send — a fresh, small conversation loads and
 # first-tokens far faster than a huge saved one, which is exactly the cold-start pathology.
@@ -1144,8 +1144,19 @@ except Exception:
 
 
 def _aiexe_stable_chat_url(url):
-    """True for a materialized conversation URL like /chat/classic/<slug> (not ?refreshId=…)."""
-    return re.search(r"venice\.ai/chat/classic/[A-Za-z0-9_-]+(?:$|[?#])", str(url or "")) is not None
+    """True when a Venice URL identifies a materialized conversation.
+
+    Venice has used both /chat/classic/<slug> and newer path/query routes. Reuse
+    must not silently break whenever the SPA changes that presentation detail.
+    """
+    raw = str(url or "")
+    return "venice.ai/" in raw.lower() and bool(_aiexe_slug_from_url(raw))
+
+
+def _aiexe_same_chat_url(left, right):
+    left_slug = _aiexe_slug_from_url(left)
+    right_slug = _aiexe_slug_from_url(right)
+    return bool(left_slug and right_slug and left_slug == right_slug)
 
 
 def _aiexe_load_chat_map():
@@ -2927,8 +2938,15 @@ def _aiexe_sidebar_row(driver, slug, tries=12):
 
 
 def _aiexe_slug_from_url(url):
-    m = re.search(r"/chat/classic/([A-Za-z0-9_-]+)", str(url or ""))
-    return m.group(1) if m else ""
+    raw = str(url or "")
+    for pattern in (
+            r"/chat/classic/([A-Za-z0-9_-]+)",
+            r"/chat/(?!classic(?:[/?#]|$))([A-Za-z0-9_-]+)",
+            r"[?&](?:chatId|conversationId|conversation|chat)=([A-Za-z0-9_-]+)(?:&|$)"):
+        match = re.search(pattern, raw, re.I)
+        if match:
+            return match.group(1)
+    return ""
 
 
 def _aiexe_sidebar_diag(driver, slug, label):
@@ -3645,13 +3663,13 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
         if 'venice.ai/chat' not in _cur_url:
             driver.get(_mapped or VC_CHAT_URL)   # not on Venice at all → one real load
             print("AIEXE_NAV cold load -> %s" % (_mapped or VC_CHAT_URL), flush=True)
-        elif _mapped and _cur_url.split('?')[0] == _mapped.split('?')[0]:
+        elif _mapped and _aiexe_same_chat_url(_cur_url, _mapped):
             pass                                  # already on this chat's conversation
         elif _mapped:
             driver.get(_mapped)
             time.sleep(0.6)
             landed = str(driver.current_url or "")
-            if landed.split('?')[0] != _mapped.split('?')[0]:
+            if not _aiexe_same_chat_url(landed, _mapped):
                 # Venice deleted/lost that conversation → forget it; a new one gets mapped below.
                 AIEXE_CHAT_URLS.pop(_chat_key, None)
                 AIEXE_THREAD_TURNS[_chat_key] = 0

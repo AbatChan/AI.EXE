@@ -14157,6 +14157,41 @@ async function requestSelectedDeveloperAgentReply(requestToken, chatId, rawPromp
   // ..." also resumes, but only when this chat already has an unfinished build.
   if (requestToken) requestToken.isAgentResume = shouldTreatAsAgentResumeRequest(chatId, rawPromptText);
   const promptText = resolveAgentResumeTaskText(chatId, rawPromptText);
+  // A phased chat owns the project it created. The global explorer root can be
+  // cleared by a relaunch/native-state sync, so restore the chat's root before
+  // planning a Continue; otherwise deterministic project setup creates "(1)".
+  if (requestToken && requestToken.isAgentResume) {
+    const resumeChat = findChatById(chatId);
+    const binding = resumeChat && resumeChat.agentWorkspace && typeof resumeChat.agentWorkspace === 'object'
+      ? resumeChat.agentWorkspace
+      : null;
+    const boundRootPath = String(binding && binding.rootPath || '').trim();
+    if (boundRootPath && nativeBridge.available()) {
+      try {
+        const before = await requestWorkspaceStatusSnapshot();
+        const currentRootPath = String(before && before.rootPath || '').replace(/[/\\]+$/, '');
+        const wantedRootPath = boundRootPath.replace(/[/\\]+$/, '');
+        if (currentRootPath !== wantedRootPath) {
+          const restored = await invokeWorkspaceAction('workspaceRestoreRoot', { rootPath: wantedRootPath });
+          if (!restored || !restored.ok) {
+            throw new Error(String(restored && restored.message || 'workspace restore failed'));
+          }
+        }
+        const snapshot = await requestWorkspaceStatusSnapshot();
+        applyWorkspaceStatusSnapshot(snapshot);
+        await refreshWorkspaceTree(true);
+        recordDebugTrace('agent_resume_workspace_restored', {
+          chatId: String(chatId || ''),
+          workspaceRootName: String(snapshot && snapshot.rootName || binding.rootName || ''),
+        }, { chatId: String(chatId || ''), binding, snapshot });
+      } catch (restoreErr) {
+        recordDebugTrace('agent_resume_workspace_restore_failed', {
+          chatId: String(chatId || ''),
+          error: debugPreview(String(restoreErr && restoreErr.message || restoreErr || ''), 220),
+        }, { chatId: String(chatId || ''), binding, error: String(restoreErr && restoreErr.stack || restoreErr || '') });
+      }
+    }
+  }
   // For existing-workspace edits/debugging, load the root listing before the
   // planner locks file paths. This prevents stale guessed paths like /css/style.css
   // when the real project is flat (/style.css, /script.js).
@@ -14218,6 +14253,14 @@ async function requestSelectedDeveloperAgentReply(requestToken, chatId, rawPromp
     try {
       const chat = findChatById(chatId);
       if (chat) {
+        if (String(workspaceRootPath || '').trim()) {
+          chat.agentWorkspace = {
+            rootPath: String(workspaceRootPath).replace(/[/\\]+$/, ''),
+            rootName: String(workspaceRootName || '').trim(),
+            at: Date.now(),
+          };
+          saveChats();
+        }
         const task = String(promptText || '').trim();
         if (chat.needsContinue && task) {
           chat.pendingAgentResume = { task, at: Date.now() };
@@ -15245,6 +15288,14 @@ function loadStoredChats() {
         pendingAgentResume: (chat.pendingAgentResume && typeof chat.pendingAgentResume === 'object'
           && chat.pendingAgentResume.task)
           ? { task: String(chat.pendingAgentResume.task).slice(0, 8000), at: Number(chat.pendingAgentResume.at) || 0 }
+          : null,
+        agentWorkspace: (chat.agentWorkspace && typeof chat.agentWorkspace === 'object'
+          && String(chat.agentWorkspace.rootPath || '').trim())
+          ? {
+            rootPath: String(chat.agentWorkspace.rootPath).slice(0, 2000),
+            rootName: String(chat.agentWorkspace.rootName || '').slice(0, 240),
+            at: Number(chat.agentWorkspace.at) || 0,
+          }
           : null,
         branchLinks: normalizeBranchLinks(activeThread.branchLinks),
         pendingBranchLink: activeThread.pendingBranchLink ? { ...activeThread.pendingBranchLink } : null,
@@ -20195,6 +20246,10 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
         thinkActive: Boolean(thinkModeEnabled || requestToken.thinkForced),
         attachments: requestToken.attachments,
         chatName: requestToken.chatName,
+        // Pin the Venice conversation to the request owner. Falling back to the
+        // currently visible chat races with navigation and created one Venice
+        // thread per normal message in some desktop/Parallels sessions.
+        adapterChatId: String(requestToken.chatId || chatId || ''),
       };
       // No token for 70s = dropped connection: abort, retry once, then fail cleanly.
       // EXCEPT the Venice adapter: it is non-streaming end-to-end (one delta with the
@@ -20308,6 +20363,7 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
             maxTokens: requestToken.maxTokens,
             thinkActive: Boolean(thinkModeEnabled || requestToken.thinkForced),
             modelOverride: uncModel,
+            adapterChatId: String(requestToken.chatId || chatId || ''),
           };
           let escRes = null;
           let escRetried = false;

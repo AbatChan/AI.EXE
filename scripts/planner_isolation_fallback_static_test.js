@@ -58,12 +58,23 @@ assert.doesNotMatch(aiExe, /agentAdapterAttachmentsSentCount/);
 // A decision that inlines a whole file overflows the structured-output cap —
 // the loop must steer the model to a small decision shape, not kill the run.
 const agentLoopSrc = fs.readFileSync(path.join(__dirname, '..', 'ui', 'agent-loop.js'), 'utf8');
+const agentExecutorSrc = fs.readFileSync(path.join(__dirname, '..', 'ui', 'agent-executor.js'), 'utf8');
 assert.match(aiExe, /outputLimitExceeded: true/);
 assert.match(agentLoopSrc, /outputLimitNudges/);
 assert.match(agentLoopSrc, /agent_decision_output_limit_recovered/);
 // ...and the planner failure return must PROPAGATE the flag to the loop
 // (it rebuilds the object — dropping the flag silently disabled the recovery).
 assert.match(aiExe, /outputLimitExceeded: Boolean\(remote && remote\.outputLimitExceeded\)/);
+
+// Continue is bound to the workspace created by this chat. A missing global/native
+// root must restore that binding, never create a suffixed replacement project.
+assert.match(aiExe, /agentWorkspace/);
+assert.match(aiExe, /agent_resume_workspace_restored/);
+assert.match(aiExe, /workspaceRestoreRoot/);
+assert.match(agentLoopSrc, /isAgentResume: Boolean\(requestToken && requestToken\.isAgentResume\)/);
+assert.match(agentLoopSrc, /syncWorkspaceStateFromNative\('new_project_created'/);
+assert.match(agentExecutorSrc, /if \(runOptions\.isAgentResume\)/);
+assert.match(agentExecutorSrc, /Continue must resume this chat/);
 // Prevention lives in the decision prompt, template and fallback in sync.
 const decisionMd = fs.readFileSync(path.join(__dirname, '..', 'ui', 'prompts', 'developer_agent_decision.md'), 'utf8');
 const decisionRepairMd = fs.readFileSync(path.join(__dirname, '..', 'ui', 'prompts', 'developer_agent_decision_repair.md'), 'utf8');
