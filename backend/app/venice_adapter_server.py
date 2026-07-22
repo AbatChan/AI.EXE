@@ -1133,6 +1133,22 @@ except Exception:
 # idle timeout) get a fresh thread on the next send — a fresh, small conversation loads and
 # first-tokens far faster than a huge saved one, which is exactly the cold-start pathology.
 AIEXE_THREAD_SLOW = set()
+
+
+def _aiexe_should_rotate_after_turn(timeout_reason, eval_count):
+    """Rotate only when a turn truly failed, not when DOM fallback recovered it.
+
+    Venice commonly moves generation into a worker: the network interceptor then
+    misses the first chunk, but the complete answer still appears in the DOM. The
+    old code marked that recoverable boundary as slow before fallback ran, causing
+    every otherwise-successful normal message to open a new Venice conversation.
+    """
+    reason = str(timeout_reason or "")
+    try:
+        captured = int(eval_count or 0)
+    except (TypeError, ValueError):
+        captured = 0
+    return reason == "stream_idle_timeout" or captured <= 0
 # Cold first-token budget: if NOTHING has streamed AND the DOM is still empty this long after
 # send, give up and retry instead of burning the full idle --timeout (which cost ~120s x2 =
 # an 8-minute stall on cold starts). Only shortens the "no data at all" case; a reply that
@@ -3838,6 +3854,7 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
         _dom_probe_stable = 0
         _dom_probe_ts = 0.0
         _alert_probe_ts = 0.0
+        _turn_timeout_reason = ""
         try:
             _structured_limit = int(data.get('aiexe_max_output_chars') or 0) if data.get('aiexe_structured_output') else 0
         except (TypeError, ValueError):
@@ -4016,20 +4033,17 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
                         _dom_probe_stable = 0
                     _dom_probe_prev = _probe
             # Cold first-token miss: nothing streamed and nothing rendered in the DOM yet.
-            # Give up at the short first-chunk budget (not the full idle timeout) and flag the
-            # thread slow so the next send rotates to a fresh one — this is what turned a pair
-            # of dead captures into an 8-minute stall.
+            # Give up at the short first-chunk budget (not the full idle timeout) and try the
+            # DOM fallback. Do not rotate yet: worker-transport replies commonly recover here.
             if (eval_count == 0 and not streamed_content
                     and time.time() - last_data_time > AIEXE_FIRST_CHUNK_TIMEOUT):
                 print("Timeout: no first token in %ds (empty capture). Exiting loop."
                       % AIEXE_FIRST_CHUNK_TIMEOUT, flush=True)
-                if _chat_key:
-                    AIEXE_THREAD_SLOW.add(_chat_key)
+                _turn_timeout_reason = "empty_first_chunk"
                 break
             if time.time() - last_data_time > timeout:
                 print(f"Timeout: No data received for {timeout} seconds. Exiting loop.", flush=True)
-                if _chat_key:
-                    AIEXE_THREAD_SLOW.add(_chat_key)
+                _turn_timeout_reason = "stream_idle_timeout"
                 try:
                     _posts = driver.execute_script("return window.__aiexe_urls || []")
                     print("AIEXE_DIAG_FETCH posts=" + str(_posts)[:900], flush=True)
@@ -4058,11 +4072,11 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
                         return
                 # Nothing has rendered yet AND generation isn't running: no reply is coming
                 # (cold empty capture). Bail after a short probe instead of polling the full
-                # idle window into an empty result, and flag the thread slow so it rotates.
+                # idle window into an empty result. Rotation is decided after fallback ends.
                 if not _prev and eval_count == 0 and _i >= 12 and not _aiexe_generation_running(driver):
                     print("AIEXE_STREAM empty DOM, generation idle — bailing early", flush=True)
-                    if _chat_key:
-                        AIEXE_THREAD_SLOW.add(_chat_key)
+                    if not _turn_timeout_reason:
+                        _turn_timeout_reason = "empty_dom"
                     break
                 _txt = _aiexe_read_last_assistant_text(
                     driver, include_reasoning=(response_format != ResponseFormat.COMPLETION_AS_STRING))
@@ -4134,6 +4148,17 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
                 print("AIEXE_STRUCTURED DOM captured complete JSON (%d chars)" % len(_structured_dom_result), flush=True)
             if eval_count:
                 print("AIEXE_ATTACH DOM fallback captured %d chars" % len(_prev), flush=True)
+
+        # Decide rotation only after every recovery path has finished. A successful DOM
+        # capture clears the provisional first-chunk/empty-DOM signal; only a hard stream
+        # idle timeout or a genuinely empty turn rotates on the next request.
+        if _chat_key:
+            if _aiexe_should_rotate_after_turn(_turn_timeout_reason, eval_count):
+                AIEXE_THREAD_SLOW.add(_chat_key)
+            else:
+                if _chat_key in AIEXE_THREAD_SLOW:
+                    print("AIEXE_ROTATE cancelled: DOM fallback recovered chat %s" % _chat_key[:32], flush=True)
+                AIEXE_THREAD_SLOW.discard(_chat_key)
 
         # A timeout/client-side early boundary must never leave Venice producing
         # after this request releases selenium_lock. The next request is allowed
