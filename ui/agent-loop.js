@@ -1999,7 +1999,12 @@
       // still apply, so this cannot become an unlimited build loop.
       let executionStepLimit = Number(deps.agentMaxSteps) || 28;
       const runtimeRepairGraceSteps = 10;
-      let runtimeRepairGraceUsed = false;
+      // Progress-based: grace re-arms while each rebuild exposes a DIFFERENT
+      // error (real forward progress), capped at 3 extensions. Same error twice
+      // = no progress = no more grace. Wall-clock deadline still bounds it all.
+      const runtimeRepairGraceMax = 3;
+      let runtimeRepairGraceCount = 0;
+      let lastRepairErrorSignature = '';
       // "One repair, then ship": count how many times validate_files has failed. After
       // the first repair attempt (2nd failure), if only MINOR cross-file naming gaps
       // remain, the project finishes successfully with an advisory note instead of
@@ -3748,7 +3753,11 @@
           path: deps.normalizeWorkspacePath(toolResult && toolResult.writtenPath ? toolResult.writtenPath : decision.path || ''),
           srcPath: deps.normalizeWorkspacePath(decision.srcPath || ''),
           dstPath: deps.normalizeWorkspacePath(decision.dstPath || ''),
-          validationPassed: toolResult && toolResult.validationPassed === true,
+          // Only validate_files carries a real pass/fail; a boolean false on every
+          // other tool made ALL terminal results read as FAILED downstream.
+          validationPassed: String(decision.tool || '').toLowerCase() === 'validate_files'
+            ? Boolean(toolResult && toolResult.validationPassed === true)
+            : undefined,
           validationIssues: Array.isArray(toolResult && toolResult.validationIssues)
             ? toolResult.validationIssues.map((issue) => String(issue || '')).filter(Boolean)
             : [],
@@ -3881,7 +3890,9 @@
           offset: Number(decision.offset || 0),
           startLine: Number(decision.start_line || 0),
           endLine: Number(decision.end_line || 0),
-          validationPassed: toolResult && toolResult.validationPassed === true,
+          validationPassed: String(decision.tool || '').toLowerCase() === 'validate_files'
+            ? Boolean(toolResult && toolResult.validationPassed === true)
+            : undefined,
         });
         if (!toolResult.ok) {
           recordDebugTrace('agent_tool_blocked', {
@@ -3942,14 +3953,20 @@
               : `Progress ${cl.doneCount}/${cl.total} — continuing...`);
           }
         }
-        if (!runtimeRepairGraceUsed
+        const repairSignatureMatch = String((toolResult && toolResult.observation) || '')
+          .match(/(?:Type error:|error TS\d+:|SyntaxError:|ReferenceError:|Error:)[^\n]*/);
+        const repairErrorSignature = repairSignatureMatch ? repairSignatureMatch[0].slice(0, 200) : '';
+        if (runtimeRepairGraceCount < runtimeRepairGraceMax
           && step >= executionStepLimit - 1
           && String(decision.tool || '').toLowerCase() === 'run_app'
           && toolResult && toolResult.ok
           && Number(toolResult.runErrorCount || 0) > 0
           && countRunMutations() > 0
-          && Date.now() < deadlineAt) {
-          runtimeRepairGraceUsed = true;
+          && Date.now() < deadlineAt
+          && (runtimeRepairGraceCount === 0
+            || (repairErrorSignature && repairErrorSignature !== lastRepairErrorSignature))) {
+          runtimeRepairGraceCount += 1;
+          lastRepairErrorSignature = repairErrorSignature;
           executionStepLimit += runtimeRepairGraceSteps;
           if (planSpec) planSpec._executionStepLimit = executionStepLimit;
           toolEvents.push({

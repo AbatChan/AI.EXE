@@ -905,7 +905,10 @@
         .slice(-4)
         .map((item, index) => {
           const command = String(item.terminalCommand || item.command || '').trim();
-          const status = Number(item.runErrorCount || 0) > 0 || item.validationPassed === false
+          // validationPassed is meaningful only on validate_files events.
+          const rowTool = String(item.tool || '').toLowerCase();
+          const status = Number(item.runErrorCount || 0) > 0
+            || (rowTool === 'validate_files' && item.validationPassed === false)
             ? 'FAILED'
             : 'SUCCEEDED';
           return [
@@ -914,6 +917,15 @@
           ].join('\n');
         })
         .join('\n\n');
+      // A browser-runtime error can only be proven fixed in the browser. When the
+      // task IS such an error and no dev-server/runtime proof exists, forbid the
+      // completion from claiming the runtime error is verified gone.
+      const runtimeErrorTask = /\b(?:unhandled runtime error|runtime (?:type)?error|cannot read propert(?:y|ies) of|is not a function\b|hydration failed|minified react error)\b/i.test(String(taskText || ''));
+      const runtimeProofSeen = rows.some((item) => (item.devServer && item.devServer.ready)
+        || /dev server is READY at http/i.test(String(item.observation || '')));
+      const verifiedResultsBlock = runtimeErrorTask && !runtimeProofSeen && verifiedResults
+        ? `NOTE: the task reports a RUNTIME (in-browser) error. The results below are build/install outcomes only — a passing build does NOT prove the runtime error is gone. Describe the changes and the build result, tell the user to relaunch/reload the app to confirm, and do NOT claim the runtime error is verified fixed.\n\n${verifiedResults}`
+        : verifiedResults;
       let prompt = [
         'Write a natural completion message for the user.',
         'Output ONLY the message itself. Do NOT preface it with a label or lead-in like "Here\'s a completion message:" and do not wrap it in quotes — start with the first word of the actual message.',
@@ -935,7 +947,7 @@
         writtenPaths.length ? `Written files: ${Array.from(new Set(writtenPaths)).slice(0, 6).join(', ')}` : '',
         changeSummaries ? `CHANGES:\n${changeSummaries}` : '',
         readResults ? `READ_RESULTS:\n${readResults}` : '',
-        verifiedResults ? `VERIFIED_RESULTS:\n${verifiedResults}` : '',
+        verifiedResultsBlock ? `VERIFIED_RESULTS:\n${verifiedResultsBlock}` : '',
         'Completion message:',
       ].filter(Boolean).join('\n');
       if (loadPromptTemplate && renderPromptTemplate) {
@@ -951,7 +963,7 @@
               : '(none — NO files were created or modified this run)',
             CHANGES: changeSummaries || '(none — nothing was changed)',
             READ_RESULTS: readResults || '(none)',
-            VERIFIED_RESULTS: verifiedResults || '(none)',
+            VERIFIED_RESULTS: verifiedResultsBlock || '(none)',
           });
         }
       }

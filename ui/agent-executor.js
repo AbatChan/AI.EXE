@@ -2827,10 +2827,21 @@ export default config;
         const packageJsonTarget = /(?:^|\/)package\.json$/i.test(path);
         const tailwindConfigTarget = /(?:^|\/)tailwind\.config\.ts$/i.test(path);
         let primaryQualityNote = '';
+        let contentSubstituted = false;
         if (packageJsonTarget && !String(content || '').trim()) {
+          // Scaffolding is for NEW manifests only. Regenerating an existing
+          // package.json from task text silently drops its real dependencies.
+          if (!creatingNewFile) {
+            return {
+              ok: false,
+              mutated,
+              observation: `write_file blocked for ${path}: no content was provided and this file already exists — regenerating it would drop its real dependencies. Current on-disk content (ground truth — base your change on THIS):\n${originalContent}\nRe-issue edit_file with a targeted change, or write_file with the COMPLETE corrected JSON keeping every dependency the project imports.`,
+            };
+          }
           const deterministicPackage = buildDeterministicPackageJson(path, taskText, planSpec);
           if (deterministicPackage) {
             content = deterministicPackage;
+            contentSubstituted = true;
             primaryQualityNote = /"next"\s*:/.test(deterministicPackage)
               ? ' Note: generated deterministic Next.js package.json.'
               : ' Note: generated deterministic Vite React package.json.';
@@ -2841,6 +2852,7 @@ export default config;
           const suppliedIssue = String(content || '').trim() ? getStructuralIssueForPath(path, content) : 'empty';
           if (!String(content || '').trim() || suppliedIssue || String(content || '').length > 8000) {
             content = tailwindFallback;
+            contentSubstituted = true;
             primaryQualityNote = ' Note: used the bounded canonical Tailwind/shadcn configuration to avoid truncated or repeated generated blocks.';
           }
         }
@@ -2994,6 +3006,7 @@ export default config;
           const repairedPackage = repairPackageJsonDependencyVersions(content);
           if (repairedPackage.repaired && !repairedPackage.remainingBad.length) {
             content = repairedPackage.content;
+            contentSubstituted = true;
             primaryQualityNote = `${primaryQualityNote} Note: repaired mangled package.json dependency versions before saving.`;
             if (typeof deps.recordDebugTrace === 'function') {
               deps.recordDebugTrace('agent_package_json_versions_repaired', {
@@ -3092,7 +3105,12 @@ export default config;
             structuralIssue: String(newContentStructureIssue || 'none'),
           }, { path });
         }
-        observation = `write_file ok: ${path} (${content.length} chars)${primaryQualityNote}${docRedirectNote}\nThe saved file matches the generated content exactly — do not re-read ${path} to verify.${newContentStructureIssue ? `\nWARNING: the saved file looks incomplete — it ${newContentStructureIssue}. Continue it from where it ends by APPENDING the rest with edit_file — do NOT rewrite the whole file.` : ''}`;
+        // When the harness altered/substituted the bytes, "matches the generated
+        // content" is untrue for the model — show the real saved content instead.
+        const savedContentEcho = contentSubstituted && content.length <= 2400
+          ? `\nSaved content (this EXACT text is now on disk):\n${content}`
+          : '';
+        observation = `write_file ok: ${path} (${content.length} chars)${primaryQualityNote}${docRedirectNote}\n${contentSubstituted ? `The saved file differs from what you supplied (see the note above).${savedContentEcho}` : `The saved file matches the generated content exactly — do not re-read ${path} to verify.`}${newContentStructureIssue ? `\nWARNING: the saved file looks incomplete — it ${newContentStructureIssue}. Continue it from where it ends by APPENDING the rest with edit_file — do NOT rewrite the whole file.` : ''}`;
         return {
           ok: true,
           mutated,
@@ -3339,7 +3357,7 @@ export default config;
           return {
             ok: false,
             mutated,
-            observation: `edit_file rejected for ${path}: applying it would have broken the file — it ${editAfterIssue}. The file was left unchanged. Re-issue a corrected edit that keeps opening and closing tags/braces paired, or use write_file with the complete corrected file if a larger restructure is needed.`,
+            observation: `edit_file rejected for ${path}: applying it would have broken the file — it ${editAfterIssue}. The file was left unchanged.${/\.json$/i.test(path) && originalContent.length <= 2400 ? `\nCurrent on-disk content (ground truth — base the corrected edit on THIS, not on any rendered copy of it):\n${originalContent}` : ''}\nRe-issue a corrected edit that keeps opening and closing tags/braces paired, or use write_file with the complete corrected file if a larger restructure is needed.`,
           };
         }
         // Block edits that delete an import whose identifier is still used.
@@ -3465,6 +3483,12 @@ export default config;
           const status = parseRunCommandExitStatus(res.message);
           const tail = commandOutputTail(res.output);
           const terminalProof = buildTerminalProof(proofCommand, res, status);
+          // A build can't reproduce an in-browser runtime error — don't let a
+          // green build read as proof that such an error is fixed.
+          const runtimeErrorTask = /\b(?:unhandled runtime error|runtime (?:type)?error|cannot read propert(?:y|ies) of|is not a function\b|hydration failed|minified react error)\b/i.test(String(taskText || ''));
+          const runtimeAdvisory = runtimeErrorTask
+            ? ' NOTE: the task reports an in-browser RUNTIME error which this build cannot reproduce — a passing build alone does not prove that error is gone; the user must reload/rerun the app to confirm.'
+            : '';
 
           if (status.timedOut) {
             return {
@@ -3484,7 +3508,7 @@ export default config;
               runErrorCount: 0,
               terminalCommand: proofCommand,
               terminalProof,
-              observation: `run_app ${stackInfo.passLabel || 'proof passed'} (${proofCommand} exited 0).${tail ? `\nOutput:\n${tail}` : ''}`,
+              observation: `run_app ${stackInfo.passLabel || 'proof passed'} (${proofCommand} exited 0).${runtimeAdvisory}${tail ? `\nOutput:\n${tail}` : ''}`,
             };
           }
 
@@ -3563,13 +3587,29 @@ export default config;
             };
           }
 
+          // Next/tsc surface ONE type error per build; list them ALL once so the
+          // model batches related fixes instead of burning a step per rebuild.
+          let allTypeErrors = '';
+          if (/\bType error:/.test(String(tail || ''))) {
+            try {
+              deps.setActiveAgentStreamStatus(chatId, 'Collecting the full type-error list...');
+              const tscRes = await deps.invokeWorkspaceAction('runCommand', {
+                program: 'node',
+                argsLine: ['node_modules/typescript/bin/tsc', '--noEmit', '--pretty', 'false'].join('\n'),
+              });
+              const tscOut = String((tscRes && tscRes.output) || '').trim();
+              if (tscRes && tscRes.ok && tscOut && !/Cannot find module/.test(tscOut.slice(0, 200))) {
+                allTypeErrors = `\nAll current type errors (fix ALL of these before running again):\n${tscOut.length > 3000 ? `${tscOut.slice(0, 3000)}\n…(truncated)` : tscOut}`;
+              }
+            } catch (err) { /* advisory only */ }
+          }
           return {
             ok: true,
             mutated,
             runErrorCount: 1,
             terminalCommand: proofCommand,
             terminalProof,
-            observation: `run_app ${stackInfo.failLabel || 'proof failed'} (${proofCommand} exited ${status.exitCode}). Read these real errors, fix the root cause in the referenced files, then run_app again.\nOutput:\n${tail || '(no output)'}`,
+            observation: `run_app ${stackInfo.failLabel || 'proof failed'} (${proofCommand} exited ${status.exitCode}). Read these real errors, fix the root cause in the referenced files, then run_app again.\nOutput:\n${tail || '(no output)'}${allTypeErrors}`,
           };
         }
 
