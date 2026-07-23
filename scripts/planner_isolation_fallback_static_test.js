@@ -34,19 +34,17 @@ assert.match(promptCore, /Do not add adjacent pages, screens, or features/);
 assert.match(cmake, /AI_EXE_APP_VERSION "\d+\.\d+\.\d+"/);
 assert.equal(pkg.version, (cmake.match(/AI_EXE_APP_VERSION "([^"]+)"/) || [])[1]);
 
-// Venice thread hygiene: internal calls REUSE one stable scratch thread per chat
-// (no per-call timestamp/random ids → no per-call sidebar flood), the
-// adapter never renames internal threads, renames get ONE attempt (no Chrome
-// restore/park retry loop), and session cleanup deletes active + rotated scratch threads.
+// Venice thread hygiene: internal calls REUSE one stable scratch thread per chat.
+// Temporary mode resets through the SPA and local cleanup never renames/deletes
+// Venice history or restores/minimizes Chrome.
 const adapter = fs.readFileSync(path.join(__dirname, '..', 'backend', 'app', 'venice_adapter_server.py'), 'utf8');
 assert.match(aiExe, /return `internal:chat:\$\{String\(activeChatId \|\| 'shared'\)\}`/);
 assert.doesNotMatch(aiExe, /internal:\$\{cleanScope\}:\$\{nowTs\(\)/);
-assert.match(adapter, /not _chat_key\.startswith\("id:internal:"\)/);
-assert.match(adapter, /key\.startswith\("id:internal:"\)/);
 assert.match(adapter, /if k\.startswith\("id:internal:"\)/);
 assert.match(adapter, /stale = list\(AIEXE_STALE_THREADS\)/);
 assert.match(adapter, /AIEXE_STALE_THREADS\.discard\(slug\)/);
-assert.match(adapter, /gone or deleted manually/);
+assert.match(adapter, /def _aiexe_start_fresh_temp_chat/);
+assert.match(adapter, /no Venice UI/);
 assert.doesNotMatch(adapter, /_aiexe_sidebar_op_with_restore\(driver, lambda: _aiexe_rename_chat/);
 assert.doesNotMatch(adapter, /_aiexe_sweep_stale_threads\(\)\s+# rotated-thread ledger/);
 assert.match(aiExe, /agentAdapterUploadedAttachmentIds\.delete\(String\(chatId \|\| ''\)\)/);
@@ -94,4 +92,4 @@ assert.match(adapter, /"swept": bool\(AIEXE_LAST_SCRAPE_SWEPT\)/);
 assert.doesNotMatch(adapter, /swept_cache_fresh|AIEXE_MODEL_CACHE_TTL|_aiexe_schedule_model_refresh/);
 assert.match(adapter, /live launch discovery failed; reused cached catalog/);
 
-console.log('PASS: planner calls are isolated, router-shaped plan JSON is rejected, Venice scratch threads rotate on stalls and are deleted at session end, and version is synced');
+console.log('PASS: planner calls are isolated, router-shaped plan JSON is rejected, Temporary Chat resets through SPA without history cleanup, and version is synced');

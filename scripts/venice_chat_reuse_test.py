@@ -54,4 +54,11 @@ assert '_prev, _stable = "", 0' not in SOURCE
 
 assert "AIEXE_THREAD_MAX_TURNS = 0" in SOURCE
 assert "AIEXE_THREAD_SLOW.add(_chat_key)" in SOURCE
-print("PASS: Venice chats reuse stable routes and DOM-recovered turns never rotate conversations")
+assert "def _aiexe_temporary_chat_mode" in SOURCE
+assert "def _aiexe_start_fresh_temp_chat" in SOURCE
+assert "if _chat_key and not _temporary_mode:" in SOURCE
+assert 'driver.get(VC_CHAT_URL)  # normal saved mode has no unsaved-page prompt' in SOURCE
+rotation_start = SOURCE.index("        if _rotate_turns or _rotate_slow:")
+rotation_end = SOURCE.index("        _cur_url =", rotation_start)
+assert "_aiexe_stale_add" not in SOURCE[rotation_start:rotation_end]
+print("PASS: saved chats reuse routes; temporary chats reset through SPA without reload/delete")

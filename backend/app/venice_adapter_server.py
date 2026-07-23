@@ -75,6 +75,7 @@ VC_MODEL_SEARCH_BUTTON_XPATH = _vcfg('MODEL_SEARCH_BUTTON_XPATH', "//button[cont
 VC_MODEL_ROW_TITLE_CSS = _vcfg('MODEL_ROW_TITLE_CSS', "p[title]")
 VC_CLOSE_BUTTON_XPATH = _vcfg('CLOSE_BUTTON_XPATH', "//button[@aria-label='Close']")
 VC_NEW_CHAT_XPATH = _vcfg('NEW_CHAT_XPATH', "//button[@aria-label='New chat']")
+VC_TEMP_CHAT_OPTION_XPATH = _vcfg('TEMP_CHAT_OPTION_XPATH', "//button[@role='menuitemradio' and @value='temporary']")
 VC_CHAT_SETTINGS_BUTTON_XPATH = _vcfg('CHAT_SETTINGS_BUTTON_XPATH', "//button[@aria-label='Settings']")
 VC_STOP_GENERATING_XPATH = _vcfg('STOP_GENERATING_XPATH', "//button[translate(@aria-label,'STOP','stop')='stop' or @aria-label='Stop generating']")
 VC_PRICED_ICON_PATH_PREFIX = _vcfg('PRICED_ICON_PATH_PREFIX', "M9 14c0")   # the coin-stack svg's first path
@@ -987,7 +988,7 @@ def _aiexe_driver_alive(active_driver):
 
 
 def _aiexe_reopen_driver(reason):
-    global driver, AIEXE_MODELS_CACHE
+    global driver, AIEXE_MODELS_CACHE, AIEXE_ACTIVE_TEMP_KEY
     print("AIEXE_BROWSER restarting Venice browser: %s" % reason, flush=True)
     try:
         old_driver = driver
@@ -996,6 +997,7 @@ def _aiexe_reopen_driver(reason):
     except Exception:
         pass
     driver = login_to_venice()
+    AIEXE_ACTIVE_TEMP_KEY = ""
     try:
         scraped = aiexe_scrape_models_with_restore(driver)
         if scraped:
@@ -1107,6 +1109,7 @@ AIEXE_CURRENT_MODEL = ""   # last model name observed on Venice's composer butto
 # context in every prompt — so every step is best-effort.
 AIEXE_CHAT_MAP_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "aiexe_chat_map.json")
 AIEXE_CHAT_URLS = {}
+AIEXE_ACTIVE_TEMP_KEY = ""      # current AI.EXE owner of Venice's unsaved temporary thread
 AIEXE_LAST_REQUEST_TS = time.time()
 # Attachment IDs already uploaded to each Venice thread (dedupe: full history re-sends every
 # turn, but an attachment stays pinned to the conversation — upload once, never again).
@@ -1119,11 +1122,8 @@ AIEXE_THREAD_NAMED = {}
 # lock, so HTTP cancel routes set this flag and the loop clicks Venice's Stop button itself.
 AIEXE_CANCEL_KEYS = set()
 
-# Rotate to a FRESH Venice conversation once a chat's thread grows large. Venice keeps every
-# prior turn server-side, but AI.EXE re-sends the full context in every prompt (see chat-map
-# note above), so a fresh thread loses NOTHING and sheds the accumulated weight that slows
-# replies on long runs. Count turns per thread; when it crosses the cap, forget the mapping so
-# the next send opens a New chat, and delete the stale thread in the background.
+# Rotate to a FRESH Venice conversation once a chat's thread grows large. AI.EXE re-sends the
+# full context in every prompt, so a fresh thread loses NOTHING and sheds accumulated weight.
 AIEXE_THREAD_TURNS = {}          # chat_key -> turns sent on the CURRENT Venice thread
 try:
     AIEXE_THREAD_MAX_TURNS = max(0, int(os.getenv('AIEXE_THREAD_MAX_TURNS', '0')))
@@ -1149,6 +1149,36 @@ def _aiexe_should_rotate_after_turn(timeout_reason, eval_count):
     except (TypeError, ValueError):
         captured = 0
     return reason == "stream_idle_timeout" or captured <= 0
+
+
+def _aiexe_temporary_chat_mode(active_driver):
+    """True when Venice's Temporary Chat option is selected.
+
+    Venice keeps both menu options mounted even while the menu is collapsed, so this is a
+    passive DOM read: no sidebar/menu animation and no window restore.
+    """
+    try:
+        option = active_driver.find_element(By.XPATH, VC_TEMP_CHAT_OPTION_XPATH)
+        return str(option.get_attribute("aria-checked") or "").lower() == "true"
+    except Exception:
+        return False
+
+
+def _aiexe_start_fresh_temp_chat(active_driver, reason):
+    """Reset Temporary Chat through Venice's SPA button—never reload the page.
+
+    Reloading an unsaved temporary thread raises Chrome's blocking "Leave site?" prompt.
+    The New chat button performs the same reset without navigation or a beforeunload dialog.
+    """
+    try:
+        button = active_driver.find_element(By.XPATH, VC_NEW_CHAT_XPATH)
+        active_driver.execute_script("arguments[0].click();", button)
+        time.sleep(0.45)
+        print("AIEXE_TEMP fresh chat via SPA (%s)" % reason, flush=True)
+        return True
+    except Exception as exc:
+        print("AIEXE_TEMP SPA reset failed (%s): %s" % (reason, exc), flush=True)
+        return False
 # Cold first-token budget: if NOTHING has streamed AND the DOM is still empty this long after
 # send, give up and retry instead of burning the full idle --timeout (which cost ~120s x2 =
 # an 8-minute stall on cold starts). Only shortens the "no data at all" case; a reply that
@@ -3630,7 +3660,7 @@ def aiexe_select_model(driver, name):
 
 
 def generate_selenium_streamed_response(data, driver, response_format=ResponseFormat.CHAT, retry_browser_restart=True):
-    global timeout
+    global timeout, AIEXE_ACTIVE_TEMP_KEY
     request_id = str(uuid.uuid4())[:8]
     model_id = data.get('model', 'llama-3.1-405b-akash-api')
     request_model_id = model_id
@@ -3649,21 +3679,18 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
 
     api_data_json = json.dumps(api_data)
     _chat_key = _aiexe_chat_key(data)
-    _wanted_chat_name = _aiexe_requested_chat_name(data)
     _aiexe_clear_cancel_key(_chat_key)
     try:
         # ONE Venice conversation per AI.EXE chat (see the chat-map block up top). Nav policy:
         #   same chat + already on its conversation → no navigation at all (the common case);
         #   different chat with a known conversation  → navigate to it (deleted → new + remap);
         #   unknown chat                              → New chat (SPA), remembered after send.
-        # Rotate off a thread that has accumulated too many turns: drop its mapping so the
-        # nav policy below opens a fresh New chat, and delete the stale thread in the
-        # background. Correctness is unaffected — the full context rides in every prompt.
+        # Rotate off a thread that has accumulated too many turns. Correctness is unaffected
+        # because the full AI.EXE context rides in every prompt.
         _rotate_turns = bool(_chat_key and AIEXE_THREAD_MAX_TURNS
                              and AIEXE_THREAD_TURNS.get(_chat_key, 0) >= AIEXE_THREAD_MAX_TURNS)
         # A slow/cold thread may be wedged in Venice itself. Rotate every chat type,
-        # including internal file generation; the session-end cleanup owns deleting
-        # both the active scratch thread and every rotated-away slug it produced.
+        # including internal file generation.
         _rotate_slow = bool(_chat_key and _chat_key in AIEXE_THREAD_SLOW)
         if _rotate_turns or _rotate_slow:
             AIEXE_THREAD_SLOW.discard(_chat_key)
@@ -3674,16 +3701,33 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
             _why = 'slow last turn' if _rotate_slow else ('%d turns' % AIEXE_THREAD_MAX_TURNS)
             print("AIEXE_ROTATE %s (%s, old=%s)"
                   % (_chat_key[:32], _why, _old_slug or "?"), flush=True)
-            if _old_slug:   # ledger only (internal threads included) — idle loop sweeps
-                _aiexe_stale_add(_old_slug)
+            # Do not rename or delete Venice history. In Temporary Chat mode nothing is
+            # saved; in Normal mode an old thread is simply left alone.
         _cur_url = str(driver.current_url or "")
         _mapped = AIEXE_CHAT_URLS.get(_chat_key, "") if _chat_key else ""
-        if 'venice.ai/chat' not in _cur_url:
+        _temporary_mode = _aiexe_temporary_chat_mode(driver)
+        if _temporary_mode:
+            # Temporary conversations have no stable /<slug> URL. Track only the current
+            # owner in memory and reset with Venice's SPA button when the AI.EXE chat/scope
+            # changes or a thread is rotated. This avoids sidebar history and the blocking
+            # browser "Leave site?" dialog caused by driver.get()/reload.
+            _temp_changed = bool(_chat_key and AIEXE_ACTIVE_TEMP_KEY != _chat_key)
+            if _rotate_turns or _rotate_slow or _temp_changed:
+                _reason = ('slow/large thread' if (_rotate_turns or _rotate_slow)
+                           else 'AI.EXE chat changed')
+                _aiexe_start_fresh_temp_chat(driver, _reason)
+            AIEXE_ACTIVE_TEMP_KEY = _chat_key
+            if _chat_key and _mapped:
+                AIEXE_CHAT_URLS.pop(_chat_key, None)
+                _aiexe_save_chat_map()
+        else:
+            AIEXE_ACTIVE_TEMP_KEY = ""
+        if not _temporary_mode and 'venice.ai/chat' not in _cur_url:
             driver.get(_mapped or VC_CHAT_URL)   # not on Venice at all → one real load
             print("AIEXE_NAV cold load -> %s" % (_mapped or VC_CHAT_URL), flush=True)
-        elif _mapped and _aiexe_same_chat_url(_cur_url, _mapped):
+        elif not _temporary_mode and _mapped and _aiexe_same_chat_url(_cur_url, _mapped):
             pass                                  # already on this chat's conversation
-        elif _mapped:
+        elif not _temporary_mode and _mapped:
             driver.get(_mapped)
             time.sleep(0.6)
             landed = str(driver.current_url or "")
@@ -3695,7 +3739,7 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
                 print("AIEXE_NAV mapped chat GONE (%s) — will remap" % _mapped, flush=True)
             else:
                 print("AIEXE_NAV switched to mapped chat %s" % _mapped, flush=True)
-        elif _aiexe_stable_chat_url(_cur_url):
+        elif not _temporary_mode and _aiexe_stable_chat_url(_cur_url):
             # Unknown chat while sitting on some OTHER conversation → fresh chat (SPA click).
             try:
                 _nc = driver.find_element(By.XPATH, VC_NEW_CHAT_XPATH)
@@ -4219,7 +4263,7 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
             pass
         # Remember which Venice conversation this AI.EXE chat lives in (URL materializes to
         # /chat/classic/<slug> once the first message is sent — poll briefly).
-        if _chat_key:
+        if _chat_key and not _temporary_mode:
             try:
                 for _w in range(16):
                     _u = str(driver.current_url or "")
@@ -4232,25 +4276,9 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
                     time.sleep(0.5)
             except Exception:
                 pass
+        if _chat_key:
             # Count this turn on the current thread (drives rotation on the next send).
             AIEXE_THREAD_TURNS[_chat_key] = AIEXE_THREAD_TURNS.get(_chat_key, 0) + 1
-
-        # If AI.EXE already has a real title on a later turn, mirror it here too. The first
-        # turn usually arrives as "New Chat", so the UI still calls /api/aiexe/rename_chat
-        # when smart naming completes; this backend path catches missed/raced attempts.
-        # Spawned, NOT inline: the greenlet blocks on selenium_lock until this request
-        # closes, so the rename never delays the final done message.
-        try:
-            _slug = _aiexe_slug_from_url(AIEXE_CHAT_URLS.get(_chat_key, "")) if _chat_key else ""
-            if (_chat_key and _slug and _wanted_chat_name
-                    and not _chat_key.startswith("id:internal:")
-                    and AIEXE_THREAD_NAMED.get(_chat_key) != _wanted_chat_name):
-                # ONE attempt per wanted name, success or not — a failing rename retried
-                # on every request made Chrome restore/park visibly over and over.
-                AIEXE_THREAD_NAMED[_chat_key] = _wanted_chat_name
-                gevent.spawn(_aiexe_rename_after_stream, _slug, _wanted_chat_name)
-        except Exception as _e:
-            print("AIEXE_RENAME deferred path failed: %s" % _e, flush=True)
 
         capture_and_redirect_browser_logs(driver)
 
@@ -4284,7 +4312,11 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
             except Exception as restart_error:
                 print("AIEXE_BROWSER restart failed: %s" % restart_error, flush=True)
         try:
-            driver.get(VC_CHAT_URL)  # keep the session; no re-login/recursion
+            if _aiexe_temporary_chat_mode(driver):
+                _aiexe_start_fresh_temp_chat(driver, "error recovery")
+                AIEXE_ACTIVE_TEMP_KEY = ""
+            else:
+                driver.get(VC_CHAT_URL)  # normal saved mode has no unsaved-page prompt
         except Exception:
             pass
 
@@ -4343,79 +4375,31 @@ def chat():
 
 @app.route('/api/aiexe/delete_chat', methods=['POST'])
 def aiexe_delete_chat():
-    """Silently delete the Venice conversation paired with an explicit AI.EXE chat delete.
-    The local delete has already succeeded, so this is best-effort cleanup only: never
-    start, restore, reposition, or otherwise surface Chrome for it."""
-    global driver
+    """Forget AI.EXE's local Venice mapping; never rename/delete remote history or drive UI."""
     req = parse_json_request(request) or {}
     key = _aiexe_chat_key(req)
     slug = str(req.get('slug') or '').strip() or _aiexe_slug_from_url(AIEXE_CHAT_URLS.get(key, ''))
-    if not slug:
-        return Response(json.dumps({"ok": False, "reason": "no mapped Venice conversation"}),
-                        content_type='application/json; charset=utf-8')
-    with selenium_lock:
-        reason = ""
-        if not _aiexe_driver_alive(driver):
-            # Deleting one local chat must not relaunch Chrome just to clean a remote
-            # convenience copy. Forget the stale link and let the user carry on.
-            ok = False
-            reason = "browser unavailable; skipped remote cleanup"
-        else:
-            # Venice has no delete API. Drive its existing UI only while the already
-            # running Chrome stays minimized; missing/manual-deleted threads simply
-            # become stale links below, with no restore/park retry.
-            ok = _aiexe_delete_chat(driver, slug, nav_fallback=True, allow_hidden_nav=True)
-            if not ok:
-                reason = "Venice thread missing or unavailable; cleared stale mapping"
-        if key:
-            AIEXE_CHAT_URLS.pop(key, None)
-            AIEXE_THREAD_ATTACHMENTS.pop(key, None)
-            AIEXE_THREAD_NAMED.pop(key, None)
-            AIEXE_THREAD_TURNS.pop(key, None)
-            AIEXE_THREAD_SLOW.discard(key)
-            _aiexe_save_chat_map()
-    return Response(json.dumps({"ok": bool(ok), "slug": slug, "reason": reason,
-                                "mapping_cleared": bool(key)}),
+    if key:
+        AIEXE_CHAT_URLS.pop(key, None)
+        AIEXE_THREAD_ATTACHMENTS.pop(key, None)
+        AIEXE_THREAD_NAMED.pop(key, None)
+        AIEXE_THREAD_TURNS.pop(key, None)
+        AIEXE_THREAD_SLOW.discard(key)
+        _aiexe_save_chat_map()
+    return Response(json.dumps({"ok": True, "slug": slug, "forgotten": bool(key)}),
                     content_type='application/json; charset=utf-8')
 
 @app.route('/api/aiexe/cleanup_internal', methods=['POST'])
 def aiexe_cleanup_internal_route():
-    """On-demand sweep of the internal one-shot threads — AI.EXE calls this when an
-    agent run ends so they vanish in ONE restore/park pass instead of dribbling out
-    of the idle loop for the next ten minutes."""
+    """Forget internal mappings after an agent run; never touch Venice history or UI."""
     result = _aiexe_cleanup_internal_batch(min_count=1)
-    return Response(json.dumps({"ok": result >= 0, "deleted": max(0, result)}),
+    return Response(json.dumps({"ok": result >= 0, "forgotten": max(0, result)}),
                     content_type='application/json; charset=utf-8')
 
 @app.route('/api/aiexe/rename_chat', methods=['POST'])
 def aiexe_rename_chat_route():
-    """Rename the Venice conversation for an AI.EXE chat to `name`. The app calls this ONCE,
-    when it applies the smart chat title (the name isn't known until after the first reply)."""
-    global driver
-    req = parse_json_request(request) or {}
-    key = _aiexe_chat_key(req)
-    name = str(req.get('name') or req.get('aiexe_chat_name') or '').strip()
-    slug = str(req.get('slug') or '').strip() or _aiexe_slug_from_url(AIEXE_CHAT_URLS.get(key, ''))
-    if not name or not slug:
-        return Response(json.dumps({"ok": False, "reason": "missing name or mapped conversation"}),
-                        content_type='application/json; charset=utf-8')
-    if key and AIEXE_THREAD_NAMED.get(key) == name:
-        return Response(json.dumps({"ok": True, "slug": slug, "skipped": "already named"}),
-                        content_type='application/json; charset=utf-8')
-    if key.startswith("id:internal:"):
-        return Response(json.dumps({"ok": True, "slug": slug, "skipped": "internal thread"}),
-                        content_type='application/json; charset=utf-8')
-    with selenium_lock:
-        if not _aiexe_driver_alive(driver):
-            driver = _aiexe_reopen_driver("browser session was closed before rename_chat")
-        # ONE attempt per wanted name — record it before trying so a failure is never
-        # retried into a visible Chrome restore/park loop.
-        if key:
-            AIEXE_THREAD_NAMED[key] = name
-        # Smart naming must not pop the adapter window open. If Venice has suspended
-        # its minimized sidebar layout, leave the label alone instead of restoring.
-        ok = _aiexe_rename_chat(driver, slug, name[:80])
-    return Response(json.dumps({"ok": bool(ok), "slug": slug}),
+    """Compatibility no-op: AI.EXE titles are local and Venice history is untouched."""
+    return Response(json.dumps({"ok": True, "skipped": "local titles only"}),
                     content_type='application/json; charset=utf-8')
 
 @app.route('/api/aiexe/stop_generation', methods=['POST'])
@@ -4740,91 +4724,30 @@ try:  # startup done — ONE minimize, after all window-dependent work finished
 except Exception:
     pass
 def _aiexe_cleanup_internal_batch(min_count=1, respect_user_window=True, cap=60):
-    """Delete active internal scratch threads plus rotated-away threads in ONE pass.
-    Returns deleted count, or -1 when skipped (busy/user has the window)."""
-    global driver
-    # The id is stable only DURING an agent session so all file/planner calls reuse a
-    # bounded set of threads. Once that session ends, keeping it buys nothing and
-    # leaves raw implementation prompts in the user's Venice sidebar.
+    """Forget obsolete local mappings without opening, restoring, or driving Chrome."""
     internal = [k for k in list(AIEXE_CHAT_URLS.keys())
                 if k.startswith("id:internal:")]
     stale = list(AIEXE_STALE_THREADS)
     if len(internal) + len(stale) < max(1, int(min_count)):
         return 0
-    if not selenium_lock.acquire(blocking=False):
-        return -1
-    try:
-        if respect_user_window:
-            try:
-                if driver.execute_script("return document.hidden === false") is True:
-                    return -1  # the user is looking at / using the Chrome window — stay out
-            except Exception:
-                pass
-        batch = internal[:cap]
-        stale_batch = stale[:max(0, int(cap) - len(batch))]
-        print("AIEXE_CLEANUP deleting %d active internal + %d rotated chats"
-              % (len(batch), len(stale_batch)), flush=True)
-        _aiexe_park_offscreen(driver)
-        time.sleep(0.8)
-        done = 0
-        try:
-            for key in batch:
-                slug = _aiexe_slug_from_url(AIEXE_CHAT_URLS.get(key, ""))
-                deleted = False
-                if slug:
-                    try:
-                        deleted = _aiexe_delete_chat(driver, slug, nav_fallback=False)
-                    except Exception as exc:
-                        print("AIEXE_CLEANUP delete failed for %s: %s" % (slug, exc), flush=True)
-                AIEXE_CHAT_URLS.pop(key, None)
-                AIEXE_THREAD_ATTACHMENTS.pop(key, None)
-                AIEXE_THREAD_NAMED.pop(key, None)
-                AIEXE_THREAD_TURNS.pop(key, None)
-                AIEXE_THREAD_SLOW.discard(key)
-                if deleted:
-                    done += 1
-                # One cleanup attempt is enough. A missing row normally means the
-                # user already deleted the Venice chat; keeping it in the stale
-                # ledger created a restore/sidebar/minimize loop every minute.
-                if slug:
-                    AIEXE_STALE_THREADS.discard(slug)
-                print("AIEXE_CLEANUP %s -> %s" % (
-                    slug or key[:36], "deleted" if deleted else "gone or deleted manually"), flush=True)
-            for slug in stale_batch:
-                deleted = False
-                try:
-                    deleted = _aiexe_delete_chat(driver, slug, nav_fallback=False)
-                except Exception as exc:
-                    print("AIEXE_CLEANUP rotated delete failed for %s: %s" % (slug, exc), flush=True)
-                # Always retire the ledger entry after one best-effort attempt.
-                # Repeated UI retries cannot distinguish an unavailable virtualized
-                # row from a thread the user has already deleted.
-                AIEXE_STALE_THREADS.discard(slug)
-                if deleted:
-                    done += 1
-                print("AIEXE_CLEANUP rotated %s -> %s" % (
-                    slug, "deleted" if deleted else "gone or deleted manually"), flush=True)
-            _aiexe_save_chat_map()
-            _aiexe_save_stale_threads()
-        finally:
-            try:
-                driver.minimize_window()
-            except Exception:
-                pass
-        return done
-    finally:
-        selenium_lock.release()
+    batch = internal[:cap]
+    for key in batch:
+        AIEXE_CHAT_URLS.pop(key, None)
+        AIEXE_THREAD_ATTACHMENTS.pop(key, None)
+        AIEXE_THREAD_NAMED.pop(key, None)
+        AIEXE_THREAD_TURNS.pop(key, None)
+        AIEXE_THREAD_SLOW.discard(key)
+    for slug in stale[:max(0, int(cap) - len(batch))]:
+        AIEXE_STALE_THREADS.discard(slug)
+    _aiexe_save_chat_map()
+    _aiexe_save_stale_threads()
+    print("AIEXE_CLEANUP forgot %d local mappings (no Venice UI)" %
+          (len(batch) + min(len(stale), max(0, int(cap) - len(batch)))), flush=True)
+    return len(batch)
 
 
 def _aiexe_internal_cleanup_loop():
-    """Idle-time sidebar hygiene: an agent session may open scratch/rotated threads;
-    delete them when the adapter has
-    been idle, so the user's Venice sidebar isn't buried in them. Manners matter:
-    never touch the window while the user has it restored (document.hidden False),
-    do ONE restore per batch, no per-thread navigation, then a cooldown —
-    otherwise Chrome visibly 'has a mind of its own' every 45 seconds. AI.EXE also
-    triggers /api/aiexe/cleanup_internal the moment an agent run ends, so this loop
-    is only the backstop."""
+    """Idle backstop for local mapping cleanup; never manipulates the Venice UI."""
     while True:
         gevent.sleep(60)
         try:

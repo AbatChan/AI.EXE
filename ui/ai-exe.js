@@ -1643,7 +1643,6 @@ function abortAllInFlightInferenceControllers(reason = 'cancelled') {
 }
 const thinkingStartedByChatId = new Map();
 const pendingPreflightConfirmations = new Map();
-const smartTitleRenamePending = new Set();
 let notificationContainer = null;
 let urlContextMode = 'chat';
 // --- Central knobs: flip once here, applies everywhere -----------------------
@@ -6609,14 +6608,6 @@ function resolveChatNamingFallback(chatId, fallbackName = 'New Chat') {
   if (!chat || chat.customName || !chat.isNaming) {
     return false;
   }
-  // A smart-rename scheduled moments earlier (agent edit/analysis chats have no inline
-  // or project namer to set autoNamed) is still in flight — clobbering the name to
-  // "New Chat" and clearing isNaming here makes the async namer abort on its own guard,
-  // stranding the chat on "New Chat". Let the in-flight namer (and its own deterministic
-  // fallback) settle instead.
-  if (smartTitleRenamePending.has(String(chatId || ''))) {
-    return false;
-  }
   // Never downgrade a seeded/derived name to "New Chat".
   const nextName = normalizeChatName(fallbackName || 'New Chat');
   if (/^new chat$/i.test(nextName) && !/^new chat$/i.test(String(chat.name || '').trim())) {
@@ -6683,46 +6674,6 @@ function applyAgentProjectChatName(chatId, planSpec = null) {
   return true;
 }
 
-// Rename the Venice conversation to the chat's current real name (adapter only). The first
-// request usually starts as "New Chat"; smart/inline/manual names arrive later, sometimes
-// before Venice has materialized the slug. Track the exact name pushed instead of a one-shot
-// boolean so later title changes and retry-after-map both work.
-function maybeRenameVeniceChat(chat) {
-  if (!chat || !isVeniceAdapterSelected()) return;
-  const name = String(chat.name || '').trim();
-  if (!name || /^new chat$/i.test(name)) return;
-  if (String(chat.veniceRenamedTo || '').trim() === name) return;
-  if (String(chat.veniceRenamePendingName || '').trim() === name) return;
-  chat.veniceRenamePendingName = name;
-  try {
-    fetch(getAIExeBackendUrl() + '/api/provider/rename_chat', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chat_id: String(chat.id || ''), name }),
-    }).then((r) => r.json()).then((res) => {
-      if (res && res.ok) {
-        chat.veniceRenamed = true;
-        chat.veniceRenamedTo = name;
-      } else {
-        chat.veniceRenamed = false;
-      }
-      if (String(chat.veniceRenamePendingName || '').trim() === name) {
-        chat.veniceRenamePendingName = '';
-      }
-      saveChats();
-    }).catch(() => {
-      chat.veniceRenamed = false;
-      if (String(chat.veniceRenamePendingName || '').trim() === name) {
-        chat.veniceRenamePendingName = '';
-      }
-    });
-  } catch (_) {
-    chat.veniceRenamed = false;
-    if (String(chat.veniceRenamePendingName || '').trim() === name) {
-      chat.veniceRenamePendingName = '';
-    }
-  }
-}
-
 function applyInlineChatNameFromResponse(chatId, text) {
   const parsed = extractInlineChatNameMarker(text);
   const chat = findChatById(chatId);
@@ -6741,7 +6692,7 @@ function applyInlineChatNameFromResponse(chatId, text) {
       });
     } else {
       chat.name = deriveFallbackChatName(chat, text);
-      chat.autoNamed = true; // weak fallback — let smart-rename improve it
+      chat.autoNamed = false;
       pushDebugTrace('inline_namer_fallback', {
         chatId: String(chatId || ''),
         reason: 'marker_missing_or_invalid',
@@ -6752,79 +6703,14 @@ function applyInlineChatNameFromResponse(chatId, text) {
     chat.updatedAt = nowTs();
     saveChats();
     renderHistory();
-    maybeRenameVeniceChat(chat);   // once — mirror the name onto the Venice conversation
   }
   return { text: parsed.cleaned || String(text || '') };
 }
 
-function extractSmartChatTitle(rawText) {
-  const raw = String(rawText || '').trim();
-  if (!raw) return '';
-  const parsed = extractFirstJsonObject(raw);
-  const rawTitle = parsed && typeof parsed.title === 'string'
-    ? parsed.title
-    : raw
-      .replace(/^```(?:json)?\s*/i, '')
-      .replace(/\s*```$/i, '')
-      .split('\n')
-      .map((line) => String(line || '').trim())
-      .find(Boolean);
-  let title = sanitizeAutoTitle(rawTitle || '');
-  title = title.replace(/\b(Chat|Conversation|User Request)\b/gi, '').replace(/\s+/g, ' ').trim();
-  title = sanitizeAutoTitle(title);
-  if (!title) return '';
-  if (/^(New|Untitled|Title|Chat|Conversation)$/i.test(title)) return '';
-  if (/^(We Need|The User|I Need|Need To|Generate A|Create A Concise)\b/i.test(title)) return '';
-  return title;
-}
-
-function deriveChatTitleFromFirstUserMessage(chat) {
-  const thread = chat ? getChatActiveThread(chat) : null;
-  const msgs = thread && Array.isArray(thread.messages) ? thread.messages : [];
-  const firstUser = msgs.find((m) => m && m.role === 'user' && String(m.text || '').trim());
-  return firstUser ? sanitizeUserRequestTitle(String(firstUser.text || '')) : '';
-}
-
-function settleSmartChatTitleFallback(chatId, reason = 'fallback', assistantText = '') {
-  const key = String(chatId || '');
-  const chat = findChatById(key);
-  if (!chat || chat.customName || !chat.isNaming) return false;
-  // When the smart (remote) namer fails, don't leave the chat as "New Chat" —
-  // derive a real title from the first user message deterministically.
-  const derived = deriveChatTitleFromFirstUserMessage(chat);
-  chat.name = derived ? makeUniqueChatName(derived, key, derived) : 'New Chat';
-  chat.isNaming = false;
-  chat.autoNamed = false;
-  saveChats();
-  renderHistory();
-  pushDebugTrace('smart_chat_title_fallback', {
-    chatId: key,
-    reason: String(reason || 'fallback'),
-    title: chat.name,
-  });
-  return true;
-}
-
 function scheduleSmartChatRename(chatId) {
   const key = String(chatId || '');
-  if (!key || smartTitleRenamePending.has(key)) return;
+  if (!key) return;
   const chat = findChatById(key);
-  // Self-heal a chat left stuck on "New Chat" by an earlier failed naming attempt
-  // (e.g. the remote namer erred / was out of credits): name it deterministically
-  // from the first user message — no remote call.
-  if (chat && !chat.customName && chat.smartTitleAttempted
-    && String(chat.name || '').trim().toLowerCase() === 'new chat') {
-    const derived = deriveChatTitleFromFirstUserMessage(chat);
-    if (derived) {
-      chat.name = makeUniqueChatName(derived, key, derived);
-      chat.isNaming = false;
-      chat.autoNamed = false;
-      saveChats();
-      renderHistory();
-      pushDebugTrace('smart_chat_title_healed', { chatId: key, title: chat.name });
-    }
-    return;
-  }
   const needsGeneratedTitle = Boolean(chat && (chat.isNaming || chat.autoNamed));
   if (!chat || chat.customName || !needsGeneratedTitle || chat.smartTitleAttempted) {
     pushDebugTrace('smart_chat_title_skipped', {
@@ -6835,146 +6721,32 @@ function scheduleSmartChatRename(chatId) {
   }
   const activeThread = getChatActiveThread(chat);
   const messages = activeThread && Array.isArray(activeThread.messages) ? activeThread.messages : [];
-  const firstUser = messages.find((msg) => msg && msg.role === 'user' && String(msg.text || '').trim());
   const firstAssistant = messages.find((msg) => msg && msg.role === 'ai' && String(msg.text || '').trim());
-  const aiCount = messages.filter((msg) => msg && msg.role === 'ai' && String(msg.text || '').trim()).length;
-  if (!firstUser || !firstAssistant || aiCount !== 1 || !remoteProvidersEnabled) {
+  if (!firstAssistant) {
     pushDebugTrace('smart_chat_title_skipped', {
       chatId: key,
-      reason: !remoteProvidersEnabled ? 'remote_disabled' : !firstUser ? 'missing_user' : !firstAssistant ? 'missing_assistant' : 'not_first_assistant',
-      aiCount: String(aiCount),
+      reason: 'missing_assistant',
     });
-    if (!remoteProvidersEnabled || !firstAssistant) {
-      settleSmartChatTitleFallback(key, !remoteProvidersEnabled ? 'remote_disabled' : 'missing_assistant');
-    }
     return;
   }
-  // The only reply is a provider-failure notice: naming remotely would burn an
-  // inference on the SAME broken provider (and open a Venice scratch thread) just
-  // to title an error. Derive the title from the user's message instead.
-  if (firstAssistant.inferenceFailure) {
-    chat.smartTitleAttempted = true;
-    pushDebugTrace('smart_chat_title_skipped', { chatId: key, reason: 'inference_failure_reply' });
-    settleSmartChatTitleFallback(key, 'inference_failure_reply');
-    return;
+  // Naming is free and local. The first reply already carries either [[CHAT_NAME]]
+  // or an <AIcanvas title="...">. applyInlineChatNameFromResponse handles the marker;
+  // this fallback uses the canvas title and otherwise preserves the seeded local name.
+  const canvasMatch = String(firstAssistant.text || '').match(/<AIcanvas[^>]*\btitle="([^"]{2,90})"/i);
+  if (canvasMatch && canvasMatch[1]) {
+    const canvasTitle = sanitizeAutoTitle(canvasMatch[1]);
+    if (canvasTitle) chat.name = makeUniqueChatName(canvasTitle, key, canvasTitle);
   }
-
   chat.smartTitleAttempted = true;
+  chat.isNaming = false;
+  chat.autoNamed = false;
   saveChats();
-  smartTitleRenamePending.add(key);
-  pushDebugTrace('smart_chat_title_started', {
+  renderHistory();
+  pushDebugTrace('local_chat_title_settled', {
     chatId: key,
-    currentTitle: String(chat.name || ''),
+    title: String(chat.name || ''),
+    source: canvasMatch ? 'canvas' : 'existing',
   });
-
-  window.setTimeout(() => {
-    void (async () => {
-      try {
-        const latestChat = findChatById(key);
-        if (!latestChat || latestChat.customName || (!latestChat.isNaming && !latestChat.autoNamed)) return;
-        const prompt = [
-          'Generate a concise sidebar title for this chat.',
-          '',
-          'Rules:',
-          '- 3 to 6 words',
-          '- Same language as the chat',
-          '- Descriptive, not clickbait',
-          '- No quotes, markdown, or trailing punctuation',
-          '- Do not use the words chat, conversation, or user',
-          '- Return only valid JSON in this format:',
-          '{"title":"..."}',
-          '',
-          'Examples:',
-          'User: hello',
-          'Assistant: Hello! How can I help you today?',
-          'Output: {"title":"Greeting Exchange"}',
-          '',
-          'User: how are you doing?',
-          'Assistant: Doing well, thanks for asking.',
-          'Output: {"title":"Casual Check-in"}',
-          '',
-          'User: what can you do?',
-          'Assistant: I can help with coding, debugging, architecture, documentation, and technical questions.',
-          'Output: {"title":"Assistant Capabilities"}',
-          '',
-          'User: Create a desktop-style web app UI that looks like a modern operating system home screen.',
-          'Assistant: Here is an interactive desktop-style web app UI.',
-          'Output: {"title":"Desktop OS Interface"}',
-          '',
-          'Chat:',
-          `User: ${String(firstUser.text || '').trim().slice(0, 1200)}`,
-          `Assistant: ${String(firstAssistant.text || '').trim().slice(0, 1200)}`,
-        ].join('\n');
-        // One adapter, one Venice tab: a title request mid-run switches threads
-        // under a live capture. Wait for idle; give up to the derived fallback.
-        for (let waits = 0; activeInferenceRequest && waits < 6; waits += 1) {
-          await new Promise((resolve) => window.setTimeout(resolve, 15000));
-        }
-        if (activeInferenceRequest) {
-          pushDebugTrace('smart_chat_title_deferred_busy', { chatId: key });
-          settleSmartChatTitleFallback(key, 'adapter_busy');
-          return;
-        }
-        // A stalled adapter left chats as "New Chat" for minutes — cap the wait.
-        const result = await Promise.race([
-          requestRemoteTextCompletionForCapability('chat.reply', prompt, 40, { preferStreaming: true }),
-          new Promise((resolve) => window.setTimeout(() => resolve(null), 60000)),
-        ]);
-        if (!result) {
-          pushDebugTrace('smart_chat_title_timeout', { chatId: key });
-          settleSmartChatTitleFallback(key, 'remote_title_timeout');
-          return;
-        }
-        const nextTitle = extractSmartChatTitle(result && result.ok ? result.output : '');
-        const current = String(latestChat.name || '').trim();
-        if (!nextTitle) {
-          pushDebugTrace('smart_chat_title_failed', {
-            chatId: key,
-            error: result && result.message ? String(result.message) : 'empty_or_invalid_title',
-            rawPreview: debugPreview(String(result && result.output ? result.output : ''), 300),
-            ok: String(Boolean(result && result.ok)),
-            provider: String((result && result.provider) || ''),
-            model: String((result && result.model) || ''),
-          });
-          settleSmartChatTitleFallback(key, 'empty_or_invalid_title', String(firstAssistant.text || ''));
-          return;
-        }
-        if (nextTitle.toLowerCase() === current.toLowerCase()) {
-          pushDebugTrace('smart_chat_title_skipped', {
-            chatId: key,
-            reason: 'same_title',
-            title: nextTitle,
-          });
-          latestChat.isNaming = false;
-          latestChat.autoNamed = false;
-          saveChats();
-          renderHistory();
-          maybeRenameVeniceChat(latestChat);
-          return;
-        }
-        latestChat.name = makeUniqueChatName(nextTitle, key, nextTitle);
-        latestChat.isNaming = false;
-        latestChat.autoNamed = false;
-        saveChats();
-        renderHistory();
-        maybeRenameVeniceChat(latestChat);   // once — mirror onto the Venice conversation
-        pushDebugTrace('smart_chat_title_applied', {
-          chatId: key,
-          title: latestChat.name,
-          provider: String((result && result.provider) || ''),
-          model: String((result && result.model) || ''),
-        });
-      } catch (err) {
-        pushDebugTrace('smart_chat_title_failed', {
-          chatId: key,
-          error: String(err && err.message ? err.message : err || 'unknown error'),
-        });
-        settleSmartChatTitleFallback(key, 'exception', String(firstAssistant.text || ''));
-      } finally {
-        smartTitleRenamePending.delete(key);
-      }
-    })();
-  }, 0);
 }
 
 function buildPromptWithInputAugments(basePrompt) {
@@ -14228,17 +14000,16 @@ async function requestSelectedDeveloperAgentReply(requestToken, chatId, rawPromp
     return await requestDeveloperAgentReply(requestToken, chatId, devTaskText);
   } finally {
     stopAgentElapsedTimer();
-    // Agent one-shot calls each opened an isolated Venice thread — sweep them NOW
-    // (one restore/park pass) instead of letting the idle loop dribble them out
-    // for the next ten minutes while Chrome "has a mind of its own".
+    // Forget the agent's scratch mapping at session end. Temporary Venice chats are
+    // unsaved, and this route never opens a sidebar, renames, deletes, or restores Chrome.
     if (isVeniceAdapterSelected()) {
       setTimeout(() => {
         fetch(getAIExeBackendUrl() + '/api/provider/cleanup_internal', { method: 'POST' })
           .then((resp) => (resp && resp.ok ? resp.json() : null))
           .then((data) => {
             if (data) {
-              recordDebugTrace('venice_internal_cleanup', { deleted: String((data && data.deleted) || 0), ok: String(Boolean(data && data.ok)) });
-              // The stable scratch conversation was deleted at this session boundary,
+              recordDebugTrace('venice_internal_cleanup', { forgotten: String((data && data.forgotten) || 0), ok: String(Boolean(data && data.ok)) });
+              // The stable scratch mapping was forgotten at this session boundary,
               // so attachments must be eligible for upload again on the next run.
               if (data.ok) agentAdapterUploadedAttachmentIds.delete(String(chatId || ''));
             }
@@ -15367,7 +15138,6 @@ function saveChatNameFromModal() {
   chat.updatedAt = nowTs();
   saveChats();
   renderHistory();
-  maybeRenameVeniceChat(chat);
   closeChatActionModal();
 }
 
@@ -15380,16 +15150,6 @@ function deleteChatFromModal() {
     return;
   }
   const deletedChatId = String(modalChatId);
-  // Best-effort: also delete this chat's Venice conversation (adapter only). Fire-and-forget
-  // — a failure never blocks the local delete.
-  if (isVeniceAdapterSelected()) {
-    try {
-      fetch(getAIExeBackendUrl() + '/api/provider/delete_chat', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chat_id: deletedChatId }),
-      }).catch(() => {});
-    } catch (_) { /* noop */ }
-  }
   if (
     activeInferenceRequest
     && String(activeInferenceRequest.chatId || '') === deletedChatId
@@ -18916,7 +18676,6 @@ async function sendMessage() {
   const replyOptions = {
     thinkForced: Boolean(thinkControl.thinkForced),
     attachments: adapterImages,
-    chatName: String((chat && (chat.name || chat.title)) || '').trim(),
   };
   if (operationRunning) {
     queuedSends.push({
@@ -20430,13 +20189,6 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
           return;
         }
         const displayText = stripCanvasBlocksForDisplay(finalText).trim();
-        // Retry the Venice rename now the turn is done: on a FAST first turn the smart name was
-        // applied mid-stream, before the adapter had mapped the conversation's slug — so the
-        // rename-at-naming call no-op'd. By finish the slug exists; the guard makes it fire once.
-        try {
-          const _rc = findChatById(requestToken.chatId);
-          if (_rc) setTimeout(() => maybeRenameVeniceChat(_rc), 900);
-        } catch (_) { /* noop */ }
         recordDebugTrace('request_finish_ok', {
           chatId: requestToken.chatId,
           streamId: requestToken.streamId,

@@ -40,6 +40,7 @@
     "test:venice-model-catalog": "python3 scripts/venice_model_catalog_test.py",
     "test:venice-chat-reuse": "python3 scripts/venice_chat_reuse_test.py",
     "test:venice-cleanup-retry": "python3 scripts/venice_cleanup_retry_test.py",
+    "test:local-chat-title": "node scripts/local_chat_title_static_test.js",
     "test:agent-unicode-search": "node scripts/agent_unicode_search_test.js",
     "test:agent-run-events": "node scripts/agent_run_events_static_test.js",
     "test:agent-activity-subgroups": "node scripts/agent_activity_subgroup_state_test.js",
@@ -74,7 +75,7 @@
     "markdown-it-texmath": "^1.0.0",
     "rollup": "^4.59.0"
   },
-  "version": "9.4.4",
+  "version": "9.4.5",
   "devDependencies": {
     "eslint-linter-browserify": "^10.7.0"
   }
