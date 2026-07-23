@@ -110,20 +110,6 @@ svg {
   vector-effect: non-scaling-stroke;
 }
 
-/* ─── SCANLINE OVERLAY ─── */
-body::before {
-  content: '';
-  position: fixed;
-  inset: 0;
-  background: repeating-linear-gradient(0deg,
-      transparent,
-      transparent 2px,
-      rgba(0, 0, 0, 0.035) 2px,
-      rgba(0, 0, 0, 0.035) 4px);
-  pointer-events: none;
-  z-index: 9999;
-}
-
 /* ─── TOP BAR ─── */
 .window-chrome-spacer {
   height: var(--window-chrome-h);
@@ -7948,6 +7934,7 @@ html.platform-mac .settings-sidebar {
   height: 100%;
   display: block;
   object-fit: cover;
+  image-rendering: auto;
   border-radius: inherit;
 }
 

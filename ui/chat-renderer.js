@@ -2890,15 +2890,15 @@
         const rawKind = String(item.kind || '').toLowerCase();
         const kind = rawKind === 'image' ? 'IMAGE' : (rawKind === 'text' ? 'TEXT' : 'FILE');
         const typeLabel = ext ? ext.toUpperCase() : kind;
-        const previewDataUrl = rawKind === 'image' && /^data:image\//i.test(String(item.previewDataUrl || item.thumbDataUrl || ''))
-          ? String(item.previewDataUrl || item.thumbDataUrl || '')
+        const previewDataUrl = rawKind === 'image' && /^data:image\//i.test(String(item.thumbDataUrl || item.previewDataUrl || ''))
+          ? String(item.thumbDataUrl || item.previewDataUrl || '')
           : '';
         // Prefer the crisp session-original for the actual pixels shown/enlarged; the small
         // preview stays the layout gate and the after-reload fallback.
         const fullDisplayUrl = rawKind === 'image' && item.id && typeof window.aiexeGetAttachmentDisplayImage === 'function'
           ? String(window.aiexeGetAttachmentDisplayImage(item.id) || '')
           : '';
-        const displayUrl = (/^data:image\//i.test(fullDisplayUrl) ? fullDisplayUrl : '') || previewDataUrl;
+        const displayUrl = (/^(?:data:image\/|blob:|https:\/\/)/i.test(fullDisplayUrl) ? fullDisplayUrl : '') || previewDataUrl;
         const chip = document.createElement('div');
         chip.className = `attach-chip msg-attachment-chip${previewDataUrl ? ' image' : ''}`;
         chip.title = name;
@@ -2909,7 +2909,7 @@
         if (previewDataUrl) {
           const img = document.createElement('img');
           img.className = 'attach-chip-thumb';
-          img.src = displayUrl;
+          img.src = previewDataUrl;
           img.alt = '';
           icon.appendChild(img);
         } else {
@@ -2933,7 +2933,7 @@
           chip.setAttribute('aria-label', `Open ${name}`);
           const openPreview = () => {
             if (typeof window.openAttachmentImageOverlay === 'function') {
-              window.openAttachmentImageOverlay(displayUrl, name);
+              window.openAttachmentImageOverlay(displayUrl, name, previewDataUrl);
             }
           };
           chip.addEventListener('click', openPreview);

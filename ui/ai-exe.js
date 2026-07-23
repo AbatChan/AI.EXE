@@ -10,6 +10,8 @@ const layoutStorageKey = 'ai_exe_layout_v1';
 const chatsStoragePrefix = 'ai_exe_chats_v3';
 const activeChatStoragePrefix = 'ai_exe_active_chat_v2';
 const pendingAttachmentsStoragePrefix = 'ai_exe_pending_attachments_v2';
+const attachmentMediaDbName = 'ai_exe_attachment_media_v1';
+const attachmentMediaStoreName = 'original_images';
 const artifactsStoragePrefix = 'ai_exe_artifacts_v1';
 const workspaceStoragePrefix = 'ai_exe_workspace_v1';
 const fileTabsStoragePrefix = 'ai_exe_file_tabs_v1';
@@ -5275,7 +5277,7 @@ function normalizePendingAttachmentMeta(item) {
     ? String(item.previewDataUrl || '').slice(0, 180000)
     : '';
   const thumbDataUrl = kind === 'image' && /^data:image\//i.test(String(item.thumbDataUrl || ''))
-    ? String(item.thumbDataUrl || '').slice(0, 60000)
+    ? String(item.thumbDataUrl || '').slice(0, 120000)
     : '';
   return {
     id,
@@ -5327,22 +5329,220 @@ function rememberAttachmentFullText(id, text) {
 // Model-upload image data (in-memory, id -> data URL): an optimized-but-detailed copy
 // sent to Venice. Transient like attachmentFullText; cleared on send.
 const attachmentFullImage = new Map();
-// Original-quality image for the CHAT DISPLAY (id -> data URL). Unlike the upload map this
-// is NOT cleared on send, so the chat keeps showing the crisp original for the rest of the
-// session (after a full app reload the small preview is the fallback). Bounded so it can't
-// grow without limit.
+// Original image used only by AI.EXE's UI. The visible chat and lightbox use the exact local
+// Blob while Venice receives the separate optimized copy above. Originals are persisted in
+// IndexedDB so a relaunch does not silently downgrade old messages to their tiny thumbnails.
 const attachmentDisplayImage = new Map();
-function rememberAttachmentDisplayImage(id, dataUrl) {
-  if (!id || !dataUrl) return;
-  attachmentDisplayImage.set(id, dataUrl);
+const attachmentDisplayObjectUrls = new Map();
+const attachmentDisplayHydrationPending = new Set();
+const attachmentPickedFileHandles = new WeakMap();
+const attachmentRemoteSourceUrls = new WeakMap();
+let attachmentMediaDbPromise = null;
+let attachmentMediaPruneTimer = null;
+
+function isAttachmentImageSource(value) {
+  return /^data:image\//i.test(String(value || '')) || /^blob:/i.test(String(value || '')) || /^https:\/\//i.test(String(value || ''));
+}
+
+function revokeAttachmentDisplayObjectUrl(id) {
+  const key = String(id || '');
+  const url = attachmentDisplayObjectUrls.get(key);
+  if (url) {
+    try { URL.revokeObjectURL(url); } catch (_) { }
+    attachmentDisplayObjectUrls.delete(key);
+  }
+}
+
+function rememberAttachmentDisplayImage(id, source, objectUrl = false) {
+  const key = String(id || '');
+  if (!key || !isAttachmentImageSource(source)) return;
+  revokeAttachmentDisplayObjectUrl(key);
+  attachmentDisplayImage.set(key, String(source));
+  if (objectUrl) attachmentDisplayObjectUrls.set(key, String(source));
   while (attachmentDisplayImage.size > 40) {
     const oldest = attachmentDisplayImage.keys().next().value;
     if (oldest === undefined) break;
+    revokeAttachmentDisplayObjectUrl(oldest);
     attachmentDisplayImage.delete(oldest);
   }
 }
-// Read accessor for the chat renderer (separate module) to fetch the crisp image by id.
-window.aiexeGetAttachmentDisplayImage = (id) => (id && attachmentDisplayImage.get(id)) || '';
+
+function clearAttachmentDisplayMemory() {
+  Array.from(attachmentDisplayObjectUrls.keys()).forEach(revokeAttachmentDisplayObjectUrl);
+  attachmentDisplayImage.clear();
+}
+
+function attachmentMediaOwner() {
+  const user = currentAuthUser();
+  return String(user && user.usernameKey || '').trim();
+}
+
+function attachmentMediaRecordKey(id, owner = attachmentMediaOwner()) {
+  const cleanId = String(id || '').trim();
+  const cleanOwner = String(owner || '').trim();
+  return cleanOwner && cleanId ? `${cleanOwner}::${cleanId}` : '';
+}
+
+function openAttachmentMediaDb() {
+  if (attachmentMediaDbPromise) return attachmentMediaDbPromise;
+  if (!window.indexedDB) return Promise.reject(new Error('IndexedDB unavailable'));
+  attachmentMediaDbPromise = new Promise((resolve, reject) => {
+    const request = window.indexedDB.open(attachmentMediaDbName, 1);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(attachmentMediaStoreName)) {
+        const store = db.createObjectStore(attachmentMediaStoreName, { keyPath: 'key' });
+        store.createIndex('owner', 'owner', { unique: false });
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error('Could not open attachment media database'));
+  }).catch((err) => {
+    attachmentMediaDbPromise = null;
+    throw err;
+  });
+  return attachmentMediaDbPromise;
+}
+
+function attachmentMediaRequest(request) {
+  return new Promise((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error('Attachment media request failed'));
+  });
+}
+
+function attachmentMediaTransaction(transaction) {
+  return new Promise((resolve, reject) => {
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error || new Error('Attachment media transaction failed'));
+    transaction.onabort = () => reject(transaction.error || new Error('Attachment media transaction aborted'));
+  });
+}
+
+async function rememberAndPersistAttachmentFile(id, file) {
+  if (!id || !file) return;
+  const extension = String(file.name || '').split('.').pop().toLowerCase();
+  const inferredMime = ({ jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp', gif: 'image/gif', svg: 'image/svg+xml' })[extension] || '';
+  const exactMime = String(file.type || inferredMime || '').toLowerCase();
+  const isImage = exactMime.startsWith('image/');
+  const exactBlob = file.slice(0, file.size, exactMime);
+  if (isImage) rememberAttachmentDisplayImage(id, URL.createObjectURL(exactBlob), true);
+  const owner = attachmentMediaOwner();
+  const key = attachmentMediaRecordKey(id, owner);
+  if (!key) return;
+  const sourceHandle = attachmentPickedFileHandles.get(file) || null;
+  const remoteUrl = String(attachmentRemoteSourceUrls.get(file) || '');
+  // Browsers that cannot persist file handles only need a copied fallback for
+  // images. Regular files already retain their compact name/type/size card.
+  if (!sourceHandle && !remoteUrl && !isImage) return;
+  try {
+    const db = await openAttachmentMediaDb();
+    const tx = db.transaction(attachmentMediaStoreName, 'readwrite');
+    const completed = attachmentMediaTransaction(tx);
+    tx.objectStore(attachmentMediaStoreName).put({
+      key,
+      owner,
+      attachmentId: String(id),
+      kind: isImage ? 'image' : 'file',
+      mime: exactMime,
+      name: String(file.name || 'attachment'),
+      size: Number(file.size || 0),
+      ...(sourceHandle ? { handle: sourceHandle } : {}),
+      ...(remoteUrl ? { remoteUrl } : {}),
+      ...(!sourceHandle && !remoteUrl && isImage ? { blob: exactBlob } : {}),
+      updatedAt: nowTs(),
+    });
+    await completed;
+  } catch (_) { /* the in-session exact image still works when persistence is unavailable */ }
+}
+
+async function hydrateAttachmentDisplayImage(id) {
+  const attachmentId = String(id || '').trim();
+  const owner = attachmentMediaOwner();
+  const key = attachmentMediaRecordKey(attachmentId, owner);
+  if (!key || attachmentDisplayImage.has(attachmentId) || attachmentDisplayHydrationPending.has(key)) return;
+  attachmentDisplayHydrationPending.add(key);
+  try {
+    const db = await openAttachmentMediaDb();
+    const tx = db.transaction(attachmentMediaStoreName, 'readonly');
+    const record = await attachmentMediaRequest(tx.objectStore(attachmentMediaStoreName).get(key));
+    if (attachmentMediaOwner() !== owner || !record) return;
+    let blob = record.blob;
+    if (record.handle && typeof record.handle.getFile === 'function') {
+      try { blob = await record.handle.getFile(); } catch (_) { blob = null; }
+    }
+    if (blob instanceof Blob && String(blob.type || '').toLowerCase().startsWith('image/')) {
+      rememberAttachmentDisplayImage(attachmentId, URL.createObjectURL(blob), true);
+      renderActiveChat();
+      renderInputAttachments();
+    } else if (record.kind === 'image' && /^https:\/\//i.test(String(record.remoteUrl || ''))) {
+      rememberAttachmentDisplayImage(attachmentId, String(record.remoteUrl), false);
+      renderActiveChat();
+      renderInputAttachments();
+    }
+  } catch (_) { /* the stored preview remains the safe fallback */ }
+  finally { attachmentDisplayHydrationPending.delete(key); }
+}
+
+function collectReferencedAttachmentIds() {
+  const ids = new Set();
+  const scanAttachments = (list) => Array.from(list || []).forEach((item) => {
+    if (item && item.id) ids.add(String(item.id));
+  });
+  const scanMessages = (messages) => Array.from(messages || []).forEach((message) => {
+    if (message && Array.isArray(message.attachments)) scanAttachments(message.attachments);
+  });
+  chats.forEach((chat) => {
+    scanAttachments(chat && chat.pendingAttachments);
+    scanMessages(chat && chat.messages);
+    Array.from(chat && chat.threads || []).forEach((thread) => scanMessages(thread && thread.messages));
+  });
+  scanAttachments(pendingAttachments);
+  scanAttachments(pendingNewChatAttachments);
+  return ids;
+}
+
+async function hydrateAndPruneAttachmentDisplayImages() {
+  const owner = attachmentMediaOwner();
+  if (!owner) return;
+  const referenced = collectReferencedAttachmentIds();
+  try {
+    const db = await openAttachmentMediaDb();
+    const tx = db.transaction(attachmentMediaStoreName, 'readonly');
+    const store = tx.objectStore(attachmentMediaStoreName);
+    const index = store.index('owner');
+    const records = await attachmentMediaRequest(index.getAll(owner));
+    if (attachmentMediaOwner() !== owner) return;
+    const pruneTx = db.transaction(attachmentMediaStoreName, 'readwrite');
+    const pruneStore = pruneTx.objectStore(attachmentMediaStoreName);
+    Array.from(records || []).forEach((record) => {
+      const id = String(record && record.attachmentId || '');
+      if (!id || !referenced.has(id)) {
+        if (record && record.key) pruneStore.delete(record.key);
+        revokeAttachmentDisplayObjectUrl(id);
+        attachmentDisplayImage.delete(id);
+        return;
+      }
+    });
+  } catch (_) { /* previews remain available when IndexedDB is unavailable */ }
+}
+
+function scheduleAttachmentMediaPrune() {
+  if (attachmentMediaPruneTimer) clearTimeout(attachmentMediaPruneTimer);
+  attachmentMediaPruneTimer = setTimeout(() => {
+    attachmentMediaPruneTimer = null;
+    void hydrateAndPruneAttachmentDisplayImages();
+  }, 250);
+}
+
+// Read accessor for the chat renderer. A cache miss starts a background restore and the
+// already-persisted preview is used only for the brief first paint.
+window.aiexeGetAttachmentDisplayImage = (id) => {
+  const key = String(id || '');
+  const source = key ? attachmentDisplayImage.get(key) : '';
+  if (!source && key) void hydrateAttachmentDisplayImage(key);
+  return source || '';
+};
 async function createImageAttachmentFullData(file) {
   const size = Number((file && file.size) || 0);
   if (size > 0 && size <= 3.5 * 1024 * 1024) {
@@ -5625,7 +5825,7 @@ function buildAttachmentFileIcon(itemOrName = {}) {
 }
 
 
-function openAttachmentImageOverlay(src, alt = 'Attachment image') {
+function openAttachmentImageOverlay(src, alt = 'Attachment image', fallbackSrc = '') {
   const cleanSrc = String(src || '').trim();
   if (!/^data:image\//i.test(cleanSrc) && !/^blob:/i.test(cleanSrc) && !/^https?:\/\//i.test(cleanSrc)) return;
 
@@ -5659,6 +5859,13 @@ function openAttachmentImageOverlay(src, alt = 'Attachment image') {
 
   const img = overlay.querySelector('.attachment-lightbox-img');
   if (!img) return;
+  const cleanFallback = String(fallbackSrc || '').trim();
+  img.onerror = () => {
+    if (/^data:image\//i.test(cleanFallback) && img.src !== cleanFallback) {
+      img.onerror = null;
+      img.src = cleanFallback;
+    }
+  };
   img.src = cleanSrc;
   img.alt = String(alt || 'Attachment image');
   overlay.hidden = false;
@@ -5682,9 +5889,15 @@ function renderInputAttachments() {
   }
   pendingAttachments.forEach((item) => {
     const chip = document.createElement('div');
-    const imageDisplayDataUrl = item.kind === 'image'
-      ? (String(item.previewDataUrl || '') || String(item.thumbDataUrl || ''))
+    const originalDisplayUrl = item.kind === 'image' && item.id
+      ? String(window.aiexeGetAttachmentDisplayImage(item.id) || '')
       : '';
+    const imageDisplayDataUrl = item.kind === 'image'
+      ? (String(item.thumbDataUrl || '') || String(item.previewDataUrl || ''))
+      : '';
+    const imageOpenDataUrl = isAttachmentImageSource(originalDisplayUrl)
+      ? originalDisplayUrl
+      : (String(item.previewDataUrl || '') || imageDisplayDataUrl);
     chip.className = `attach-chip${imageDisplayDataUrl ? ' image' : ''}`;
     const typeLabel = getAttachmentTypeLabel(item);
     const iconHtml = imageDisplayDataUrl
@@ -5704,11 +5917,11 @@ function renderInputAttachments() {
       chip.tabIndex = 0;
       chip.setAttribute('role', 'button');
       chip.setAttribute('aria-label', `Open ${item.name || 'image attachment'}`);
-      chip.addEventListener('click', () => openAttachmentImageOverlay(item.previewDataUrl || item.thumbDataUrl, item.name || 'Attachment image'));
+      chip.addEventListener('click', () => openAttachmentImageOverlay(imageOpenDataUrl, item.name || 'Attachment image', imageDisplayDataUrl));
       chip.addEventListener('keydown', (evt) => {
         if (evt.key === 'Enter' || evt.key === ' ') {
           evt.preventDefault();
-          openAttachmentImageOverlay(item.previewDataUrl || item.thumbDataUrl, item.name || 'Attachment image');
+          openAttachmentImageOverlay(imageOpenDataUrl, item.name || 'Attachment image', imageDisplayDataUrl);
         }
       });
     }
@@ -5723,6 +5936,7 @@ function renderInputAttachments() {
       pendingAttachments = pendingAttachments.filter((a) => a.id !== item.id);
       persistPendingAttachmentsForCurrentContext();
       renderInputAttachments();
+      scheduleAttachmentMediaPrune();
     });
     chip.appendChild(removeBtn);
     inputAttachments.appendChild(chip);
@@ -5873,17 +6087,27 @@ async function createImageAttachmentThumbnail(file) {
       image.onerror = reject;
       image.src = objectUrl;
     });
-    const maxSide = 180;
     const width = Math.max(1, Number(img.naturalWidth || img.width) || 1);
     const height = Math.max(1, Number(img.naturalHeight || img.height) || 1);
-    const scale = Math.min(1, maxSide / Math.max(width, height));
-    const canvas = document.createElement('canvas');
-    canvas.width = Math.max(1, Math.round(width * scale));
-    canvas.height = Math.max(1, Math.round(height * scale));
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return '';
-    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-    return canvas.toDataURL('image/jpeg', 0.64).slice(0, 60000);
+    const encodeAt = (maxSide, quality) => {
+      const scale = Math.min(1, maxSide / Math.max(width, height));
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.max(1, Math.round(width * scale));
+      canvas.height = Math.max(1, Math.round(height * scale));
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return '';
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      return canvas.toDataURL('image/jpeg', quality);
+    };
+    // Render the small card from a prepared ~2x thumbnail. Asking WebKit to shrink a
+    // multi-megapixel original into 145px creates visible gradient bands and aliasing.
+    for (const [side, quality] of [[360, 0.9], [320, 0.86], [280, 0.82]]) {
+      const encoded = encodeAt(side, quality);
+      if (encoded && encoded.length <= 120000) return encoded;
+    }
+    return '';
   } catch (_) {
     return '';
   } finally {
@@ -5910,11 +6134,9 @@ async function parseAttachmentFile(file) {
   if (isLikelyImageAttachment(file)) {
     const previewDataUrl = await createImageAttachmentPreview(file);
     const thumbDataUrl = await createImageAttachmentThumbnail(file);
-    // Chat shows the crisp original; the model gets an optimized-but-detailed copy
-    // (falls back to the original if the downscale encode fails).
-    const fullDataUrl = await createImageAttachmentFullData(file);
-    if (fullDataUrl) rememberAttachmentDisplayImage(base.id, fullDataUrl);
-    const modelDataUrl = (await createImageAttachmentModelData(file)) || fullDataUrl;
+    // AI.EXE keeps the exact original locally; the model gets an independent optimized copy.
+    await rememberAndPersistAttachmentFile(base.id, file);
+    const modelDataUrl = (await createImageAttachmentModelData(file)) || (await createImageAttachmentFullData(file));
     if (modelDataUrl) attachmentFullImage.set(base.id, modelDataUrl);
     return {
       ...base,
@@ -5926,6 +6148,7 @@ async function parseAttachmentFile(file) {
   }
   const isText = isLikelyTextAttachment(file);
   const isDoc = isLikelyDocumentAttachment(file);
+  await rememberAndPersistAttachmentFile(base.id, file);
   if (!isText && !isDoc) {
     return {
       ...base,
@@ -6000,12 +6223,32 @@ async function parseAttachmentFile(file) {
   };
 }
 
-function openAttachPicker() {
+async function openAttachPicker() {
   if (pendingInferenceCount > 0 && isCurrentViewInferenceChat()) return;
   if (!ensureSignedIn()) return;
+  if (typeof window.showOpenFilePicker === 'function') {
+    try {
+      const handles = await window.showOpenFilePicker({ multiple: true });
+      const files = [];
+      for (const handle of handles) {
+        if (!handle || typeof handle.getFile !== 'function') continue;
+        const file = await handle.getFile();
+        attachmentPickedFileHandles.set(file, handle);
+        files.push(file);
+      }
+      if (files.length) await handleAttachSelection(files);
+      return;
+    } catch (err) {
+      if (err && String(err.name || '') === 'AbortError') return;
+      // WebViews may expose the API without allowing it for file:// pages.
+      // Fall through to the standard picker and byte-backed image persistence.
+    }
+  }
   if (attachFileInput) {
     attachFileInput.accept = attachAcceptTypes;
     attachFileInput.multiple = true;
+    // Allow choosing the same file again after removing it from the composer.
+    attachFileInput.value = '';
     try {
       if (typeof attachFileInput.showPicker === 'function') {
         attachFileInput.showPicker();
@@ -6169,6 +6412,122 @@ function dataTransferHasFiles(dataTransfer) {
   }
 }
 
+function dataTransferHasRemoteAttachment(dataTransfer) {
+  if (!dataTransfer) return false;
+  try {
+    const types = Array.from(dataTransfer.types || []).map((type) => String(type || '').toLowerCase());
+    return types.includes('text/uri-list') || types.includes('text/html');
+  } catch (_) {
+    return false;
+  }
+}
+
+function getRemoteAttachmentUrl(dataTransfer) {
+  if (!dataTransfer || typeof dataTransfer.getData !== 'function') return '';
+  const uriList = String(dataTransfer.getData('text/uri-list') || '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => line && !line.startsWith('#')) || '';
+  let candidate = uriList;
+  if (!candidate) {
+    const html = String(dataTransfer.getData('text/html') || '');
+    if (html) {
+      try {
+        const doc = new DOMParser().parseFromString(html, 'text/html');
+        const node = doc.querySelector('img[src], a[href]');
+        candidate = node ? String(node.getAttribute(node.matches('img') ? 'src' : 'href') || '') : '';
+      } catch (_) { /* ignore malformed drag HTML */ }
+    }
+  }
+  try {
+    const parsed = new URL(candidate);
+    return parsed.protocol === 'https:' ? parsed.href : '';
+  } catch (_) {
+    return '';
+  }
+}
+
+function remoteAttachmentName(url, contentType = '', disposition = '') {
+  const encodedName = String(disposition || '').match(/filename\*=UTF-8''([^;]+)/i);
+  const plainName = String(disposition || '').match(/filename="?([^";]+)"?/i);
+  let name = '';
+  try { name = decodeURIComponent(encodedName ? encodedName[1] : (plainName ? plainName[1] : '')); } catch (_) { name = ''; }
+  if (!name) {
+    try { name = decodeURIComponent(new URL(url).pathname.split('/').pop() || ''); } catch (_) { name = ''; }
+  }
+  name = String(name || '').replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_').trim();
+  if (getAttachmentExtension(name)) return name.slice(0, 180);
+  const extension = ({
+    'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/gif': 'gif',
+    'image/svg+xml': 'svg', 'image/bmp': 'bmp', 'image/tiff': 'tiff', 'application/pdf': 'pdf',
+    'application/json': 'json', 'text/plain': 'txt', 'text/markdown': 'md', 'text/csv': 'csv',
+  })[String(contentType || '').split(';')[0].trim().toLowerCase()] || '';
+  return `${name || 'online-attachment'}${extension ? `.${extension}` : ''}`.slice(0, 180);
+}
+
+async function fetchRemoteAttachmentFile(url) {
+  const cleanUrl = String(url || '').trim();
+  if (!/^https:\/\//i.test(cleanUrl)) throw new Error('Only secure HTTPS attachment links are supported.');
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 20000);
+  try {
+    const response = await fetch(cleanUrl, {
+      method: 'GET',
+      credentials: 'omit',
+      referrerPolicy: 'no-referrer',
+      cache: 'no-store',
+      signal: controller.signal,
+    });
+    if (!response.ok) throw new Error(`The online file could not be downloaded (${response.status}).`);
+    if (response.url && !/^https:\/\//i.test(response.url)) throw new Error('The attachment redirected to an insecure address.');
+    const contentType = String(response.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+    const name = remoteAttachmentName(response.url || cleanUrl, contentType, response.headers.get('content-disposition') || '');
+    const announcedSize = Math.max(0, Number(response.headers.get('content-length') || 0));
+    const globalLimit = Math.max(...Object.values(attachmentLimitBytes));
+    if (announcedSize > globalLimit) throw new Error(`Online files can be up to ${formatBytes(globalLimit)}.`);
+    if (announcedSize) {
+      const announcedValidation = validateAttachmentFile({ name, type: contentType, size: announcedSize });
+      if (!announcedValidation.ok) throw new Error(announcedValidation.reason);
+    }
+    let blob;
+    if (response.body && typeof response.body.getReader === 'function') {
+      const reader = response.body.getReader();
+      const chunks = [];
+      let total = 0;
+      while (true) {
+        const part = await reader.read();
+        if (part.done) break;
+        total += Number(part.value && part.value.byteLength || 0);
+        if (total > globalLimit) {
+          try { await reader.cancel(); } catch (_) { }
+          throw new Error(`Online files can be up to ${formatBytes(globalLimit)}.`);
+        }
+        chunks.push(part.value);
+      }
+      blob = new Blob(chunks, { type: contentType });
+    } else {
+      blob = await response.blob();
+    }
+    const file = new File([blob], name, { type: contentType || blob.type || '', lastModified: nowTs() });
+    const validation = validateAttachmentFile(file);
+    if (!validation.ok) throw new Error(validation.reason);
+    attachmentRemoteSourceUrls.set(file, response.url || cleanUrl);
+    return file;
+  } catch (err) {
+    if (err && String(err.name || '') === 'AbortError') throw new Error('The online attachment took too long to download.');
+    throw err;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function showRemoteAttachmentError(error) {
+  showAttachmentRejectedToast([{
+    name: 'Online attachment',
+    reason: `${String(error && error.message || 'The online attachment could not be read.')} Save it locally and attach it if the website blocks downloads.`,
+  }]);
+}
+
 function setComposerDragOver(active) {
   if (!inputRow) return;
   inputRow.classList.toggle('drag-over', Boolean(active));
@@ -6180,32 +6539,53 @@ function installComposerAttachmentDropTarget() {
   let dragDepth = 0;
 
   inputRow.addEventListener('dragenter', (evt) => {
-    if (!dataTransferHasFiles(evt.dataTransfer)) return;
+    if (!dataTransferHasFiles(evt.dataTransfer) && !dataTransferHasRemoteAttachment(evt.dataTransfer)) return;
     evt.preventDefault();
     dragDepth += 1;
     setComposerDragOver(true);
   });
 
   inputRow.addEventListener('dragover', (evt) => {
-    if (!dataTransferHasFiles(evt.dataTransfer)) return;
+    if (!dataTransferHasFiles(evt.dataTransfer) && !dataTransferHasRemoteAttachment(evt.dataTransfer)) return;
     evt.preventDefault();
     if (evt.dataTransfer) evt.dataTransfer.dropEffect = 'copy';
     setComposerDragOver(true);
   });
 
   inputRow.addEventListener('dragleave', (evt) => {
-    if (!dataTransferHasFiles(evt.dataTransfer)) return;
+    if (!dataTransferHasFiles(evt.dataTransfer) && !dataTransferHasRemoteAttachment(evt.dataTransfer)) return;
     dragDepth = Math.max(0, dragDepth - 1);
     if (dragDepth === 0) setComposerDragOver(false);
   });
 
   inputRow.addEventListener('drop', (evt) => {
-    if (!dataTransferHasFiles(evt.dataTransfer)) return;
+    const hasFiles = dataTransferHasFiles(evt.dataTransfer);
+    const remoteUrl = hasFiles ? '' : getRemoteAttachmentUrl(evt.dataTransfer);
+    if (!hasFiles && !remoteUrl) return;
     evt.preventDefault();
     dragDepth = 0;
     setComposerDragOver(false);
     if (pendingInferenceCount > 0 && isCurrentViewInferenceChat()) return;
-    void filesFromDataTransfer(evt.dataTransfer).then((files) => handleAttachSelection(files));
+    if (hasFiles) {
+      void filesFromDataTransfer(evt.dataTransfer).then((files) => handleAttachSelection(files));
+      return;
+    }
+    void fetchRemoteAttachmentFile(remoteUrl)
+      .then((file) => handleAttachSelection([file]))
+      .catch(showRemoteAttachmentError);
+  });
+}
+
+function installComposerAttachmentPasteTarget() {
+  if (!mainInput || mainInput.dataset.attachmentPasteInstalled === 'true') return;
+  mainInput.dataset.attachmentPasteInstalled = 'true';
+  mainInput.addEventListener('paste', (evt) => {
+    const clipboard = evt.clipboardData;
+    const files = Array.from(clipboard && clipboard.files || []);
+    if (!files.length) return;
+    evt.preventDefault();
+    if (pendingInferenceCount > 0 && isCurrentViewInferenceChat()) return;
+    void handleAttachSelection(files);
   });
 }
 
@@ -11650,6 +12030,7 @@ function closeSettingsModal() {
 }
 
 function refreshWorkspaceForCurrentUser() {
+  clearAttachmentDisplayMemory();
   clearTypingIndicator();
   cancelLiveStreamRender();
   activeStreamRawText = '';
@@ -11696,6 +12077,7 @@ function refreshWorkspaceForCurrentUser() {
   syncCanvasPanelFromArtifacts();
   syncSidebarNavState();
   syncInputAugmentState();
+  void hydrateAndPruneAttachmentDisplayImages();
 
   if (!currentAuthUser()) {
     closeChatActionModal();
@@ -15191,6 +15573,7 @@ function deleteChatFromModal() {
   saveChats();
   void flushNativeUiStorageBackup();
   saveArtifacts();
+  scheduleAttachmentMediaPrune();
 
   const refreshSteps = [
     ['renderArtifacts', () => renderArtifacts()],
@@ -16804,10 +17187,13 @@ document.addEventListener('click', (evt) => {
 });
 if (attachFileInput) {
   attachFileInput.addEventListener('change', () => {
-    void handleAttachSelection(attachFileInput.files);
+    const selectedFiles = Array.from(attachFileInput.files || []);
+    attachFileInput.value = '';
+    void handleAttachSelection(selectedFiles);
   });
 }
 installComposerAttachmentDropTarget();
+installComposerAttachmentPasteTarget();
 if (authUserInput) {
   authUserInput.addEventListener('input', () => setAuthNote(''));
   authUserInput.addEventListener('keydown', (e) => {
