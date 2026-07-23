@@ -42,6 +42,16 @@ assert should_rotate("empty_first_chunk", 0)
 assert should_rotate("empty_dom", 0)
 assert should_rotate("stream_idle_timeout", 1)
 
+# Successful network-interceptor streams skip the DOM-fallback branch. `_prev`
+# must already exist before the stream loop because raw-copy upgrade reads it
+# before the conversation URL mapping block runs.
+stream_setup = SOURCE.index("        eval_count = 0")
+prev_init = SOURCE.index('        _prev = ""', stream_setup)
+stream_loop = SOURCE.index("        while True:", stream_setup)
+mapping_block = SOURCE.index("        # Remember which Venice conversation", stream_loop)
+assert stream_setup < prev_init < stream_loop < mapping_block
+assert '_prev, _stable = "", 0' not in SOURCE
+
 assert "AIEXE_THREAD_MAX_TURNS = 0" in SOURCE
 assert "AIEXE_THREAD_SLOW.add(_chat_key)" in SOURCE
 print("PASS: Venice chats reuse stable routes and DOM-recovered turns never rotate conversations")

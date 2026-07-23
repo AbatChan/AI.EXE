@@ -74,7 +74,7 @@
     "markdown-it-texmath": "^1.0.0",
     "rollup": "^4.59.0"
   },
-  "version": "9.4.3",
+  "version": "9.4.4",
   "devDependencies": {
     "eslint-linter-browserify": "^10.7.0"
   }

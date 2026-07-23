@@ -3851,6 +3851,11 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
         eval_count = 0
         last_data_time = time.time()
         streamed_content = ""
+        # Raw-copy upgrade reads `_prev` after either transport path. It used to
+        # exist only inside the DOM-fallback branch, so a successful intercepted
+        # stream crashed here before the chat URL could be saved. The following
+        # message then appeared unmapped and deliberately opened a new Venice chat.
+        _prev = ""
         _reasoning_open = False   # True while we're inside a <thinking>…</thinking> block
         _dom_probe_prev = ""
         _dom_probe_stable = 0
@@ -4057,7 +4062,7 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
         # DOM-read fallback: interceptor caught nothing but Venice rendered a reply (worker
         # transport). Poll the last assistant bubble until it stabilizes, emit deltas.
         if eval_count == 0 and not streamed_content:
-            _prev, _stable = "", 0
+            _stable = 0
             _structured_dom_result = ""
             for _i in range(int(max(timeout, 30) / 0.8)):
                 if _aiexe_cancel_key_requested(_chat_key):
