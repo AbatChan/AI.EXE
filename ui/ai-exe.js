@@ -16817,10 +16817,16 @@ function composerChipLabel(chip) {
 function closeComposerOverflowPop() {
   if (composerOverflowPop) composerOverflowPop.classList.add('hidden');
   if (composerOverflowBtn) composerOverflowBtn.classList.remove('open');
+  scheduleComposerChipOverflow(0);
 }
 
 function visibleComposerOverflowChips() {
   return composerOverflowChips.filter((chip) => chip && chip.isConnected && chip.classList.contains('chip-overflowed'));
+}
+
+function scheduleComposerChipOverflow(delayMs = 30) {
+  clearTimeout(recalcComposerChipOverflow._t);
+  recalcComposerChipOverflow._t = setTimeout(recalcComposerChipOverflow, Math.max(0, Number(delayMs) || 0));
 }
 
 function recalcComposerChipOverflow() {
@@ -16833,22 +16839,34 @@ function recalcComposerChipOverflow() {
   composerOverflowChips = [];
   composerOverflowBtn.classList.add('hidden');
   if (!chips.length) return;
-  const avail = inputControlsLeftEl.getBoundingClientRect().right - inputActionsEl.getBoundingClientRect().left;
-  const gap = 8;
+  const inputActionsRect = inputActionsEl.getBoundingClientRect();
+  const avail = Math.max(0, inputControlsLeftEl.getBoundingClientRect().right - inputActionsRect.left);
+  const actionStyles = window.getComputedStyle(inputActionsEl);
+  const gap = Math.max(0, Number.parseFloat(actionStyles.columnGap || actionStyles.gap || '0') || 0);
   const widths = chips.map((c) => c.getBoundingClientRect().width);
   const total = widths.reduce((a, w) => a + w, 0) + gap * (chips.length - 1);
   if (total <= avail) return;                                    // everything fits
-  const reserve = 46;                                            // room for the +N pill
+
+  // Let the browser lay out the REAL +N pill before deciding how many chips fit. The
+  // previous fixed 46px reserve drifted from the live font/padding/gap and could leave
+  // the final Web Search chip clipped without increasing +N. Use the largest possible
+  // count while measuring so +9 -> +10 cannot grow after the calculation.
+  composerOverflowBtn.textContent = `+${chips.length}`;
+  composerOverflowBtn.style.visibility = 'hidden';
+  composerOverflowBtn.classList.remove('hidden');
+  const fittedActionsWidth = Math.max(0, inputActionsEl.getBoundingClientRect().width);
+
   let used = 0; let keep = 0;
   for (let i = 0; i < chips.length; i++) {
     const w = widths[i] + (i ? gap : 0);
-    if (used + w <= avail - reserve) { used += w; keep = i + 1; } else break;
+    if (used + w <= fittedActionsWidth + 0.5) { used += w; keep = i + 1; } else break;
   }
   const overflowed = chips.slice(keep);
   overflowed.forEach((c) => c.classList.add('chip-overflowed'));
   composerOverflowChips = overflowed;
   composerOverflowBtn.textContent = '+' + overflowed.length;
-  composerOverflowBtn.classList.remove('hidden');
+  composerOverflowBtn.style.visibility = '';
+  composerOverflowBtn.classList.toggle('hidden', overflowed.length === 0);
 }
 
 function removeComposerOverflowChip(chip) {
@@ -16962,8 +16980,7 @@ if (composerOverflowBtn) {
 if (composerOverflowPop) composerOverflowPop.addEventListener('click', (e) => e.stopPropagation());
 document.addEventListener('click', () => closeComposerOverflowPop());
 window.addEventListener('resize', () => {
-  clearTimeout(recalcComposerChipOverflow._t);
-  recalcComposerChipOverflow._t = setTimeout(recalcComposerChipOverflow, 80);
+  scheduleComposerChipOverflow(80);
 });
 if (inputActionsEl) {
   // Recalc when chips get toggled by the + tools menu — but ignore our own
@@ -16976,9 +16993,13 @@ if (inputActionsEl) {
   };
   new MutationObserver((muts) => {
     if (muts.every(onlyOverflowToggle)) return;
-    clearTimeout(recalcComposerChipOverflow._t);
-    recalcComposerChipOverflow._t = setTimeout(recalcComposerChipOverflow, 30);
+    scheduleComposerChipOverflow(30);
   }).observe(inputActionsEl, { attributes: true, attributeFilter: ['class'], subtree: true, attributeOldValue: true });
+}
+if (typeof ResizeObserver === 'function' && inputControlsLeftEl) {
+  const composerOverflowResizeObserver = new ResizeObserver(() => scheduleComposerChipOverflow(30));
+  composerOverflowResizeObserver.observe(inputControlsLeftEl);
+  if (composerModelWrap) composerOverflowResizeObserver.observe(composerModelWrap);
 }
 setTimeout(recalcComposerChipOverflow, 900);
 
