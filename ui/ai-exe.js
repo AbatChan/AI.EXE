@@ -1678,6 +1678,9 @@ function veniceHidePromptOn() {
 let pendingAttachments = [];
 let pendingNewChatAttachments = [];
 let pendingManualContext = '';
+// "Always allow" lasts for this running AI.EXE session only. Dependency-write
+// authority must not silently survive an app restart.
+const sessionAlwaysAllowedAgentCommands = [];
 let authStore = {
   users: [],
   currentUser: null,
@@ -1685,7 +1688,6 @@ let authStore = {
 let appSettings = {
   inferenceProvider: 'local',
   workMode: 'coding',
-  alwaysAllowedAgentCommands: [],
   huggingFaceToken: '',
   huggingFaceModel: 'Qwen/Qwen2.5-Coder-32B-Instruct:fastest',
   customOpenAiApiKey: '',
@@ -4306,7 +4308,27 @@ window.openExternalUrl = openExternalUrl;
 // Live dev-server chips at the bottom of the composer: one pill per running
 // server (click opens the app, hover reveals a stop button). Signature-diffed
 // so the 5s poll doesn't churn the DOM.
-const _devServerChipState = { sig: '', urls: {} };
+const _devServerChipState = { sig: '', urls: {}, ready: {} };
+async function isLocalDevServerReady(url) {
+  const clean = String(url || '').trim().replace('://0.0.0.0', '://127.0.0.1');
+  if (!/^https?:\/\/(?:127\.0\.0\.1|localhost)(?::\d+)?(?:\/|$)/i.test(clean)) return false;
+  const controller = typeof AbortController === 'function' ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), 1800) : null;
+  try {
+    await fetch(clean, {
+      method: 'GET',
+      mode: 'no-cors',
+      cache: 'no-store',
+      signal: controller ? controller.signal : undefined,
+    });
+    return true;
+  } catch (_) {
+    return false;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+window.isLocalDevServerReady = isLocalDevServerReady;
 async function syncDevServerChips() {
   const box = document.getElementById('devServerChips');
   if (!box || !nativeBridge.available()) return;
@@ -4320,43 +4342,51 @@ async function syncDevServerChips() {
       return { id: Number(parts[0]) || 0, running: parts[1] === 'running', pid: Number(parts[2]) || 0, command: parts.slice(3).join(' ').trim() };
     })
     .filter((row) => row.id > 0 && row.running);
-  for (const row of rows) {
-    if (_devServerChipState.urls[row.id]) continue;
+  await Promise.all(rows.map(async (row) => {
     try {
       const status = await invokeWorkspaceAction('devServerStatus', { serverId: row.id });
       const match = String(status && status.output || '').match(/https?:\/\/(?:127\.0\.0\.1|localhost|0\.0\.0\.0)[^\s"']*/i);
-      if (match) _devServerChipState.urls[row.id] = match[0].replace(/[),.]+$/, '');
+      if (match) {
+        _devServerChipState.urls[row.id] = match[0]
+          .replace(/[),.]+$/, '')
+          .replace('://0.0.0.0', '://127.0.0.1');
+      }
     } catch (_) { }
-  }
+    const url = _devServerChipState.urls[row.id] || '';
+    _devServerChipState.ready[row.id] = url ? await isLocalDevServerReady(url) : false;
+  }));
   // '(none)' keeps the empty list distinct from the '' force-refresh sentinel —
   // otherwise the render that clears the last (stopping) chip never runs.
-  const sig = rows.map((row) => `${row.id}:${row.command}:${_devServerChipState.urls[row.id] || ''}:${row.pid}`).join('|') || '(none)';
+  const sig = rows.map((row) => `${row.id}:${row.command}:${_devServerChipState.urls[row.id] || ''}:${_devServerChipState.ready[row.id] ? 'ready' : 'starting'}:${row.pid}`).join('|') || '(none)';
   if (sig === _devServerChipState.sig) return;
   _devServerChipState.sig = sig;
   closeDevServerDetails();
   box.innerHTML = '';
   rows.forEach((row) => {
     const url = _devServerChipState.urls[row.id] || '';
+    const ready = _devServerChipState.ready[row.id] === true;
+    row.ready = ready;
     const port = url ? (url.match(/:(\d+)/) || [])[1] : '';
     const chip = document.createElement('div');
-    chip.className = 'dev-server-chip';
-    chip.setAttribute('role', 'button');
+    chip.className = `dev-server-chip ${ready ? 'ready' : 'starting'}`;
+    chip.setAttribute('role', ready ? 'button' : 'status');
     chip.tabIndex = 0;
     chip.innerHTML = `
         <span class="dsc-dot"></span>
-        <span class="dsc-copy"><span class="dsc-cmd">${escapeHtml(row.command)}</span>${port ? `<span class="dsc-port">:${port}</span>` : ''}</span>
+        <span class="dsc-copy"><span class="dsc-cmd">${escapeHtml(ready ? row.command : `Starting ${row.command}`)}</span>${ready && port ? `<span class="dsc-port">:${port}</span>` : ''}</span>
         <span class="dsc-actions">
-          <button type="button" class="dsc-btn dsc-open ui-tooltip-anchor" data-tooltip="Open in browser">
+          ${ready ? `<button type="button" class="dsc-btn dsc-open ui-tooltip-anchor" data-tooltip="Open in browser">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M14 4h6v6"></path><path d="M20 4 10 14"></path><path d="M20 14v5a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 19V6a1.5 1.5 0 0 1 1.5-1.5H10"></path></svg>
-          </button>
+          </button>` : ''}
           <button type="button" class="dsc-btn dsc-stop ui-tooltip-anchor" data-tooltip="Stop server">
             <span class="dsc-stop-square"></span>
           </button>
         </span>`;
     chip.addEventListener('click', () => toggleDevServerDetails(chip, row, url));
-    chip.querySelector('.dsc-open').addEventListener('click', (evt) => {
+    const openButton = chip.querySelector('.dsc-open');
+    if (openButton) openButton.addEventListener('click', (evt) => {
       evt.stopPropagation();
-      if (url) openExternalUrl(url);
+      openExternalUrl(url);
     });
     chip.querySelector('.dsc-stop').addEventListener('click', async (evt) => {
       evt.stopPropagation();
@@ -4365,6 +4395,7 @@ async function syncDevServerChips() {
       closeDevServerDetails();
       try { await invokeWorkspaceAction('devServerStop', { serverId: row.id }); } catch (_) { }
       delete _devServerChipState.urls[row.id];
+      delete _devServerChipState.ready[row.id];
       _devServerChipState.sig = '';
       void syncDevServerChips();
     });
@@ -4388,8 +4419,8 @@ function toggleDevServerDetails(chip, row, url) {
   panel.id = 'devServerDetails';
   panel.dataset.serverId = String(row.id);
   panel.innerHTML = `
-      <div class="dsd-row"><span>Status</span><strong class="dsd-running">Running</strong></div>
-      ${url ? `<div class="dsd-row"><span>Local URL</span><a href="#" class="dsd-url">${escapeHtml(url.replace(/^https?:\/\//, ''))} ↗</a></div>` : ''}
+      <div class="dsd-row"><span>Status</span><strong class="${row.ready ? 'dsd-running' : 'dsd-starting'}">${row.ready ? 'Ready' : 'Starting / building'}</strong></div>
+      ${row.ready && url ? `<div class="dsd-row"><span>Local URL</span><a href="#" class="dsd-url">${escapeHtml(url.replace(/^https?:\/\//, ''))} ↗</a></div>` : ''}
       <div class="dsd-row"><span>Process</span><strong>${escapeHtml(row.command)}</strong></div>
       <div class="dsd-row"><span>PID</span><strong>${Number(row.pid) || '—'}</strong></div>`;
   panel.style.left = `${Math.max(10, Math.round(rect.left))}px`;
@@ -4912,10 +4943,20 @@ function getComposerCommandApprovalChoices() {
 function rememberAlwaysAllowedAgentCommand(command) {
   const clean = String(command || '').trim();
   if (!clean) return;
-  if (!Array.isArray(appSettings.alwaysAllowedAgentCommands)) appSettings.alwaysAllowedAgentCommands = [];
-  if (!appSettings.alwaysAllowedAgentCommands.includes(clean)) {
-    appSettings.alwaysAllowedAgentCommands.push(clean);
-    saveAppSettings();
+  const parts = clean.split(/\s+/).filter(Boolean);
+  const head = String(parts[0] || '').toLowerCase();
+  const args = parts.slice(1).map((part) => String(part || '').toLowerCase());
+  let scope = '';
+  if (head === 'npm' && ['install', 'i', 'add'].includes(args[0])) scope = 'scope:npm:install';
+  else if (['pip', 'pip3'].includes(head) && args[0] === 'install') scope = 'scope:pip:install';
+  else if (['python', 'python3'].includes(head) && args[0] === '-m'
+    && ['pip', 'pip3'].includes(args[1]) && args[2] === 'install') scope = 'scope:pip:install';
+  else if (head === 'go' && ['get', 'install'].includes(args[0])) scope = `scope:go:${args[0]}`;
+  else if (head === 'cargo' && ['add', 'install'].includes(args[0])) scope = `scope:cargo:${args[0]}`;
+  else if (head === 'dotnet' && ['restore', 'add'].includes(args[0])) scope = `scope:dotnet:${args[0]}`;
+  const saved = scope || clean;
+  if (!sessionAlwaysAllowedAgentCommands.includes(saved)) {
+    sessionAlwaysAllowedAgentCommands.push(saved);
   }
 }
 
@@ -6637,6 +6678,10 @@ function sanitizeAutoTitle(rawTitle) {
 function sanitizeUserRequestTitle(rawTitle) {
   let out = String(rawTitle || '').split(/\r?\n/).find((line) => String(line || '').trim()) || '';
   out = out.trim();
+  const explicitQuotedName = out.match(/^(?:please\s+)?(?:create|build|make|design|develop|generate|start|setup|set\s+up|implement)\s+(?:(?:a|an|the)\s+)?["'“]([^"'”]{2,52})["'”]/i);
+  if (explicitQuotedName && explicitQuotedName[1]) {
+    return sanitizeAutoTitle(explicitQuotedName[1]);
+  }
   const intentTitle = getCommonIntentChatTitle(out);
   if (intentTitle) return intentTitle;
   const greetingTitle = getGreetingChatTitle(out);
@@ -7509,7 +7554,6 @@ function formatBytes(bytes) {
 function loadAppSettings() {
   appSettings = {
     inferenceProvider: 'local',
-    alwaysAllowedAgentCommands: [],
     huggingFaceToken: '',
     huggingFaceModel: 'Qwen/Qwen2.5-Coder-32B-Instruct:fastest',
     customOpenAiApiKey: '',
@@ -7550,10 +7594,6 @@ function loadAppSettings() {
     if (typeof parsed.workMode === 'string') {
       const workMode = parsed.workMode.trim().toLowerCase();
       appSettings.workMode = workMode === 'everyday' ? 'everyday' : 'coding';
-    }
-    if (Array.isArray(parsed.alwaysAllowedAgentCommands)) {
-      appSettings.alwaysAllowedAgentCommands = parsed.alwaysAllowedAgentCommands
-        .map((c) => String(c || '').trim()).filter(Boolean).slice(0, 100);
     }
     if (typeof parsed.huggingFaceToken === 'string') appSettings.huggingFaceToken = parsed.huggingFaceToken.trim();
     if (typeof parsed.huggingFaceModel === 'string' && parsed.huggingFaceModel.trim()) {
@@ -13356,10 +13396,39 @@ const promptCoreApi = promptCore || {};
 const agentDecisionGrammar = String(promptCoreApi.agentDecisionGrammar || '');
 const agentPlanGrammar = String(promptCoreApi.agentPlanGrammar || '');
 
-// Live project file tree for agent prompts — fresh each step, system noise
-// (.DS_Store, node_modules, .git, .aiexe, build output) excluded. Short cache
-// so decision + repair prompts within one step don't re-walk.
+// Live project file tree for agent prompts — fresh each step and source-first.
+// Generated/dependency folders are represented by one compact marker rather
+// than traversed, so installed environments cannot crowd real project files
+// and manifests out of the prompt. Short cache avoids duplicate walks.
 let _workspaceTreeSummaryCache = { at: 0, text: '', paths: new Set() };
+let _projectMemoryCache = { root: '', at: 0, text: '' };
+
+function invalidateProjectMemoryCache() {
+  _projectMemoryCache = { root: '', at: 0, text: '' };
+}
+
+async function getProjectMemoryContext() {
+  const ctx = typeof getWorkspaceContext === 'function' ? getWorkspaceContext() || {} : {};
+  const root = String(ctx.workspaceRootName || '');
+  if (!root && !ctx.rootLoaded) return '';
+  const now = Date.now();
+  if (_projectMemoryCache.root === root && now - _projectMemoryCache.at < 5000) {
+    return _projectMemoryCache.text;
+  }
+  let text = '';
+  try {
+    const response = await invokeWorkspaceAction('workspaceReadFile', { path: '/.aiexe/MEMORY.md' });
+    const memory = response && response.ok ? String(response.output || '').trim().slice(0, 12000) : '';
+    if (memory) {
+      text = [
+        'PROJECT MEMORY (explicit project-local knowledge approved by the user; follow it unless a newer user request overrides it):',
+        memory,
+      ].join('\n');
+    }
+  } catch (_) { }
+  _projectMemoryCache = { root, at: now, text };
+  return text;
+}
 
 // Sync existence check against the last tree walk (the decision-prompt build
 // refreshes it just before pending requirements are computed).
@@ -13378,8 +13447,23 @@ async function getWorkspaceFileTreeSummary(markPaths = null) {
   const marks = markPaths instanceof Set && markPaths.size ? markPaths : null;
   const now = Date.now();
   if (!marks && now - _workspaceTreeSummaryCache.at < 5000) return _workspaceTreeSummaryCache.text;
-  const HIDDEN = new Set(['.DS_Store', 'Thumbs.db', 'desktop.ini', '.Spotlight-V100', '.Trashes',
-    '.fseventsd', '.aiexe', '.git', 'node_modules', 'dist', 'build', '.venv', '__pycache__', '.next', 'coverage']);
+  const HIDDEN = new Set(['.ds_store', 'thumbs.db', 'desktop.ini', '.spotlight-v100', '.trashes',
+    '.fseventsd', '.aiexe', '.git']);
+  const OMITTED_DIRS = new Map([
+    ['node_modules', 'dependencies'], ['vendor', 'dependencies'],
+    ['.venv', 'virtual environment'], ['venv', 'virtual environment'], ['env', 'virtual environment'],
+    ['.tox', 'test environment'], ['.nox', 'test environment'],
+    ['dist', 'generated output'], ['build', 'generated output'], ['out', 'generated output'],
+    ['target', 'generated output'], ['bin', 'generated output'], ['obj', 'generated output'],
+    ['cmakefiles', 'CMake output'], ['.next', 'Next.js output'], ['.nuxt', 'Nuxt output'],
+    ['.output', 'generated output'], ['coverage', 'coverage output'], ['htmlcov', 'coverage output'],
+    ['__pycache__', 'Python cache'], ['.pytest_cache', 'Python test cache'],
+    ['.mypy_cache', 'Python type cache'], ['.ruff_cache', 'Python lint cache'],
+    ['.gradle', 'Gradle cache'], ['.cache', 'tool cache'], ['.parcel-cache', 'bundler cache'],
+    ['.turbo', 'build cache'], ['.idea', 'IDE metadata'],
+  ]);
+  const IMPORTANT_MANIFEST = /^(?:package\.json|package-lock\.json|pnpm-lock\.yaml|yarn\.lock|bun\.lockb?|pyproject\.toml|requirements(?:[-_.][^/]*)?\.txt|setup\.py|setup\.cfg|pipfile|poetry\.lock|pom\.xml|build\.gradle(?:\.kts)?|settings\.gradle(?:\.kts)?|gradlew(?:\.bat)?|cmakelists\.txt|makefile|meson\.build|conanfile\.(?:txt|py)|cargo\.toml|cargo\.lock|go\.mod|go\.sum|dockerfile|compose\.ya?ml|docker-compose\.ya?ml|[^/]+\.(?:sln|csproj|fsproj)|\.env\.example)$/i;
+  const SOURCE_DIR = /^(?:src|app|apps|lib|libs|include|components|pages|routes|server|client|backend|frontend|tests?|spec|public|assets|resources|config|scripts)$/i;
   const lines = [];
   const paths = new Set();
   let budget = 120;
@@ -13391,20 +13475,44 @@ async function getWorkspaceFileTreeSummary(markPaths = null) {
     let parsed = {};
     try { parsed = JSON.parse(String(res.output || '{}')); } catch (_) { return; }
     const entries = (Array.isArray(parsed.entries) ? parsed.entries : [])
-      .filter((e) => e && e.name && !HIDDEN.has(e.name) && !String(e.name).startsWith('._'))
-      .sort((a, b) => (a.kind === b.kind ? String(a.name).localeCompare(String(b.name)) : (a.kind === 'folder' ? -1 : 1)));
-    for (const entry of entries) {
+      .filter((e) => e && e.name && !HIDDEN.has(String(e.name).toLowerCase()) && !String(e.name).startsWith('._'))
+      .sort((a, b) => {
+        const rank = (entry) => {
+          const name = String(entry.name || '');
+          const lower = name.toLowerCase();
+          if (entry.kind === 'folder' && OMITTED_DIRS.has(lower)) return 0;
+          if (entry.kind !== 'folder' && IMPORTANT_MANIFEST.test(name)) return 1;
+          if (entry.kind === 'folder' && SOURCE_DIR.test(name)) return 2;
+          if (depth > 0 && entry.kind === 'folder') return 3;
+          if (entry.kind !== 'folder') return 4;
+          return 5;
+        };
+        const delta = rank(a) - rank(b);
+        return delta || String(a.name).localeCompare(String(b.name));
+      });
+    const visibleEntries = entries.slice(0, 40);
+    for (const entry of visibleEntries) {
       if (budget <= 0) { lines.push(`${'  '.repeat(depth)}…`); return; }
-      budget -= 1;
       const indent = '  '.repeat(depth);
       const entryPath = normalizeWorkspacePath(entry.path || `${dirPath}/${entry.name}`);
+      const lowerName = String(entry.name || '').toLowerCase();
+      const omittedKind = entry.kind === 'folder' ? OMITTED_DIRS.get(lowerName) : '';
+      if (omittedKind) {
+        lines.push(`${indent}${entry.name}/ [${omittedKind} omitted]`);
+        continue;
+      }
+      budget -= 1;
       if (entryPath) paths.add(entryPath);
       if (entry.kind === 'folder') {
         lines.push(`${indent}${entry.name}/`);
-        await walk(entryPath, depth + 1);
+        if (depth >= 4) lines.push(`${'  '.repeat(depth + 1)}… [deeper files omitted]`);
+        else await walk(entryPath, depth + 1);
       } else {
         lines.push(`${indent}${entry.name}${marks && marks.has(entryPath) ? ' ●' : ''}`);
       }
+    }
+    if (entries.length > visibleEntries.length && budget > 0) {
+      lines.push(`${'  '.repeat(depth)}… [${entries.length - visibleEntries.length} more entries omitted]`);
     }
   };
   try { await walk('/', 0); } catch (_) { }
@@ -13897,6 +14005,7 @@ const agentPlanner = window.AIExeAgentPlanner && typeof window.AIExeAgentPlanner
   ? window.AIExeAgentPlanner.createAgentPlanner({
     normalizeWorkspacePath,
     getWorkspaceFileTreeSummary,
+    getProjectMemoryContext,
     workspaceTreeHasFile,
     isAgentTaskGameLike,
     hasReadmeRunInstructions,
@@ -14009,7 +14118,7 @@ const {
 const agentExecutor = window.AIExeAgentExecutor && typeof window.AIExeAgentExecutor.createAgentExecutor === 'function'
   ? window.AIExeAgentExecutor.createAgentExecutor({
     normalizeWorkspacePath,
-    getAlwaysAllowedAgentCommands: () => (Array.isArray(appSettings.alwaysAllowedAgentCommands) ? appSettings.alwaysAllowedAgentCommands : []),
+    getAlwaysAllowedAgentCommands: () => sessionAlwaysAllowedAgentCommands.slice(),
     mapWorkspaceEntry,
     isIgnoredWorkspaceEntryName,
     deriveProjectNameFromTask,
@@ -14057,6 +14166,7 @@ const agentExecutor = window.AIExeAgentExecutor && typeof window.AIExeAgentExecu
     removeWorkspaceTab,
     reviewAgentProjectCoherence,
     runWorkspaceAppSmokeTest,
+    invalidateProjectMemoryCache,
   })
   : null;
 const {
@@ -14153,6 +14263,7 @@ const agentLoop = window.AIExeAgentLoop && typeof window.AIExeAgentLoop.createAg
     scheduleWorkspaceExplorerBackgroundRefresh,
     sanitizeAssistantText,
     describeAgentToolPhase,
+    surfaceAgentInferenceUnavailable,
   })
   : null;
 const {
@@ -14202,6 +14313,7 @@ const aiNativeAgentLoop = window.AIExeAiNativeAgentLoop && typeof window.AIExeAi
     getWorkspaceRootName: () => workspaceRootName,
     resetWorkspaceForNewProject,
     syncWorkspaceStateFromNative,
+    surfaceAgentInferenceUnavailable,
   })
   : null;
 const {
@@ -14218,14 +14330,15 @@ function shouldUseExperimentalAgentLoop(promptText = '') {
   // Explicit per-message overrides win regardless of the stored setting.
   if (/^\/dev-agent\b/i.test(text)) return false;
   const explicit = /^\/ai-agent\b/i.test(text);
-  // AI-native loop is now the default. Opt out by setting the flag to '0'.
-  let disabled = false;
+  // The phased developer agent remains the reliable default. The native loop is
+  // experimental and must be explicitly selected with /ai-agent or the opt-in flag.
+  let enabled = false;
   try {
-    disabled = String(localStorage.getItem('aiExeExperimentalAgent') || '') === '0';
+    enabled = String(localStorage.getItem('aiExeExperimentalAgent') || '') === '1';
   } catch (_) {
-    disabled = false;
+    enabled = false;
   }
-  return Boolean(requestAiNativeAgentReply) && (explicit || !disabled);
+  return Boolean(requestAiNativeAgentReply) && (explicit || enabled);
 }
 
 function getExperimentalAgentTaskText(promptText = '') {
@@ -18077,17 +18190,56 @@ function safePostMessageRefresh(chatId, reason = 'message_append') {
 
 
 function appendErrorMessageToChat(chatId, text, forcedTs = 0) {
-  // Adapter-down error: also offer the one-click start toast so recovery is one tap.
-  if (/adapter (stream )?error/i.test(String(text || '')) && isVeniceAdapterSelected()) {
-    showAppNotification({
-      title: "You're on Venice Pro (local adapter)",
-      message: "It isn't running. Click here to start it (~30s) — then resend your message.",
-      kind: 'warning',
-      durationMs: 14000,
-      onClick: () => { void startVeniceAdapterThenResend(); },
-    });
+  if (isInternalInferenceFailureText(text)) {
+    showInferenceUnavailableNotice(text);
+    return null;
   }
   return appendMessageToChat(chatId, 'error', humanizeAssistantErrorText(text), forcedTs);
+}
+
+function isInternalInferenceFailureText(text) {
+  return /adapter (?:stream )?error|connection refused|econnrefused|winerror 10061|errno 61|inference (?:unavailable|failed)|agent step timed out|provider did not respond|api unavailable/i
+    .test(String(text || ''));
+}
+
+function showInferenceUnavailableNotice(rawReason) {
+  const adapterDown = isVeniceAdapterSelected()
+    && /adapter|connection refused|econnrefused|winerror 10061|errno 61/i.test(String(rawReason || ''));
+  showAppNotification({
+    title: adapterDown ? 'Start Venice Pro to continue' : 'AI service temporarily unavailable',
+    message: adapterDown
+      ? 'Venice Pro is not running. Start it, then press Continue — your chat, phase, and project are unchanged.'
+      : 'Nothing was lost. Check the provider, then press Continue to resume from the same phase.',
+    kind: 'warning',
+    durationMs: 14000,
+    onClick: adapterDown ? () => { void startVeniceAdapterThenResend({ resendPending: false }); } : undefined,
+  });
+}
+
+function surfaceAgentInferenceUnavailable(chatId, rawReason) {
+  const chat = findChatById(chatId);
+  if (chat) {
+    const activeThread = getChatActiveThread(chat);
+    const messages = activeThread && Array.isArray(activeThread.messages)
+      ? activeThread.messages
+      : (Array.isArray(chat.messages) ? chat.messages : []);
+    const lastMessage = messages[messages.length - 1];
+    if (lastMessage && lastMessage.role === 'user' && lastMessage.syntheticAgentResume === true) {
+      messages.pop();
+    }
+    if (activeThread) activeThread.needsContinue = true;
+    chat.needsContinue = true;
+    saveChats();
+  }
+  cancelLiveStreamRender();
+  if (activeStreamRow && activeStreamRow.parentNode) activeStreamRow.remove();
+  activeStreamRow = null;
+  activeStreamRawText = '';
+  activeStreamText = '';
+  resetActiveAgentStreamState();
+  showInferenceUnavailableNotice(rawReason);
+  if (activeChatId === chatId) renderActiveChat();
+  updateContinueButtonVisibility();
 }
 
 function appendMessageToChat(chatId, role, text, forcedTs = 0, options = {}) {
@@ -18100,6 +18252,9 @@ function appendMessageToChat(chatId, role, text, forcedTs = 0, options = {}) {
 
   const ts = Number(forcedTs) || nowTs();
   const message = { role, text: cleaned, ts };
+  if (options.syntheticAgentResume === true) {
+    message.syntheticAgentResume = true;
+  }
   if (Array.isArray(options.attachments) && options.attachments.length) {
     message.attachments = normalizeMessageAttachmentList(options.attachments);
   }
@@ -18788,7 +18943,8 @@ function dispatchNextQueuedSend() {
 // prompt and returns false. The clicked prompt starts it, waits, then resends the message.
 let _adapterStartingForSend = false;
 let veniceAdapterLastKnownServing = false; // sync-readable cache for dispatch paths that can't await
-async function ensureVeniceAdapterReady() {
+async function ensureVeniceAdapterReady(options = {}) {
+  const resendPending = options.resendPending !== false;
   const backend = getAIExeBackendUrl();
   let status = null;
   try {
@@ -18808,12 +18964,14 @@ async function ensureVeniceAdapterReady() {
   // Prompt — the user decides. Clicking the toast starts it and then sends the message.
   showAppNotification({
     title: "You're on Venice Pro (local adapter)",
-    message: user && pass
-      ? "It isn't running yet. Click here to start it (~30s) — then I'll send your message."
-      : "It isn't running yet. Click here to start it with your saved Venice browser session.",
+    message: resendPending
+      ? (user && pass
+        ? "It isn't running yet. Click here to start it (~30s) — then I'll send your message."
+        : "It isn't running yet. Click here to start it with your saved Venice browser session.")
+      : "It isn't running yet. Click here to start it, then press Continue. Your current phase is preserved.",
     kind: 'warning',
     durationMs: 14000,
-    onClick: () => { void startVeniceAdapterThenResend(); },
+    onClick: () => { void startVeniceAdapterThenResend({ resendPending }); },
   });
   return false;
 }
@@ -19238,7 +19396,7 @@ function sendChip(el) {
   }
 }
 
-function continueMessage() {
+async function continueMessage() {
   // Starts a new operation — stays globally gated (single-operation architecture).
   if (pendingInferenceCount > 0) return;
   maybeStopDictationForSend();
@@ -19247,12 +19405,17 @@ function continueMessage() {
   const chat = getActiveChat();
   if (!chat) return;
   if (!chat.needsContinue) return;
+  if (isVeniceAdapterSelected()) {
+    const adapterReady = await ensureVeniceAdapterReady({ resendPending: false });
+    if (!adapterReady) return;
+    if (pendingInferenceCount > 0 || !chat.needsContinue) return;
+  }
 
   const lastAssistant = findLastAssistantMessage(chat);
   const lastWasAgentRun = Boolean(lastAssistant && Array.isArray(lastAssistant.agentActivities) && lastAssistant.agentActivities.length > 0);
   chat.needsContinue = false;
   // Show a visible "Continue" bubble (resume still recovers the original task).
-  appendMessageToChat(chat.id, 'user', 'Continue');
+  appendMessageToChat(chat.id, 'user', 'Continue', 0, { syntheticAgentResume: true });
   chatAutoScrollPinned = true;
   if (developerAgentEnabled && lastWasAgentRun) {
     void requestAssistantReply(chat.id, 'continue', false, {

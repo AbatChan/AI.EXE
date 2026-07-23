@@ -66,6 +66,24 @@ console.log('PASS: static architecture and DOM checks are advisory');
   assert.equal(aliasResult.validationPassed, false);
   assert.match(aliasResult.observation, /imports @\/components\/providers, but none of its local files exist/);
   console.log('PASS: unresolved @/ aliases are blocking build errors');
+
+  const readmeContent = '# RoboForge Simulator\n\nA real-time robotic arm simulator.\n\n## Setup\n\n```bash\nnpm install\nnpm run dev\n```\n';
+  const readmeExecutor = global.AIExeAgentExecutor.createAgentExecutor({
+    normalizeWorkspacePath: (value) => String(value || '/').replace(/\\/g, '/').replace(/^\/?/, '/'),
+    invokeWorkspaceAction: async (action, data) => action === 'workspaceReadFile'
+      ? { ok: data.path === '/README.md', output: data.path === '/README.md' ? readmeContent : '' }
+      : { ok: true },
+    isLikelyCompletePrimarySource: () => true,
+    reviewAgentProjectCoherence: async () => [],
+  });
+  const readmeResult = await readmeExecutor.executeDeveloperToolCall('document RoboForge', { tool: 'validate_files' }, '', [], {
+    expectedFiles: ['/README.md'],
+    _allExpectedFiles: ['/README.md'],
+    _activePhase: { number: 4, total: 5, title: 'Documentation' },
+  });
+  assert.equal(readmeResult.validationPassed, true);
+  assert.doesNotMatch(readmeResult.observation, /no planned project files/i);
+  console.log('PASS: README-only phase validates the existing document without a fake edit');
 })().catch((error) => {
   console.error(error);
   process.exit(1);

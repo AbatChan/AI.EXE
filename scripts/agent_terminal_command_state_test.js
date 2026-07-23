@@ -10,7 +10,7 @@ function normalizeWorkspacePath(raw) {
   return parts.length ? `/${parts.join('/')}` : '/';
 }
 
-function createExecutor(commandResult) {
+function createExecutor(commandResult, alwaysAllowed = []) {
   const statuses = [];
   const calls = [];
   const executor = global.AIExeAgentExecutor.createAgentExecutor({
@@ -22,6 +22,7 @@ function createExecutor(commandResult) {
       return { ok: true };
     },
     setActiveAgentStreamStatus: (_chatId, text) => statuses.push(String(text || '')),
+    getAlwaysAllowedAgentCommands: () => alwaysAllowed,
   });
   return { executor, statuses, calls };
 }
@@ -121,11 +122,50 @@ function createRenderer() {
     installResult,
     [],
   );
-  assert.equal(permissionRow.kind, 'command');
-  assert.equal(permissionRow.title, 'Permission needed');
-  assert.equal(permissionRow.detail, 'npm install');
-  assert.equal(permissionRow.meta, 'ask first');
-  assert.equal(permissionRow.status, 'error');
+  assert.equal(permissionRow, null, 'the composer approval card is the only permission UI; no duplicate timeline row');
+
+  const alwaysInstallCase = createExecutor(commandResult, ['npm install framer-motion']);
+  const alwaysInstallResult = await alwaysInstallCase.executor.executeDeveloperToolCall(
+    'chat_terminal_policy_scope',
+    { action: 'tool', tool: 'run_command', command: 'npm install @react-three/drei@9.114.0' },
+    'Install another dependency.',
+    [],
+    null,
+  );
+  assert.equal(alwaysInstallResult.permissionRequired, undefined);
+  assert.equal(alwaysInstallResult.runErrorCount, 0);
+  assert.equal(
+    alwaysInstallCase.calls.some((call) => call.action === 'runCommand'),
+    true,
+    'Always allow for npm install covers later npm install packages',
+  );
+
+  const alwaysDoesNotBroadenCase = createExecutor(commandResult, ['scope:npm:install']);
+  const uninstallResult = await alwaysDoesNotBroadenCase.executor.executeDeveloperToolCall(
+    'chat_terminal_policy_scope_boundary',
+    { action: 'tool', tool: 'run_command', command: 'npm uninstall react' },
+    'Remove a dependency.',
+    [],
+    null,
+  );
+  assert.equal(uninstallResult.permissionRequired, true, 'npm install approval never covers uninstall');
+
+  const corruptedVersionCase = createExecutor(commandResult, ['scope:npm:install']);
+  const corruptedVersionResult = await corruptedVersionCase.executor.executeDeveloperToolCall(
+    'chat_terminal_corrupted_version',
+    { action: 'tool', tool: 'run_command', command: 'npm install @react-three/drei@^1^.114.0' },
+    'Install a dependency.',
+    [],
+    null,
+  );
+  assert.equal(corruptedVersionResult.ok, false);
+  assert.equal(corruptedVersionResult.commandPolicy, 'blocked');
+  assert.match(corruptedVersionResult.observation, /corrupted caret-version marker/i);
+  assert.equal(
+    corruptedVersionCase.calls.some((call) => call.action === 'runCommand'),
+    false,
+    'a Venice-corrupted semver command must never execute even after npm-install approval',
+  );
 
   const blockedCase = createExecutor({
     ok: true,
@@ -286,5 +326,22 @@ function createRenderer() {
   );
 
 
-  console.log('PASS: terminal command state carries live status, proof metadata, merged activity rows, expanded command policy, ask-first install/restore policy, and blocked shell syntax');
+  const longOutput = `${'PRIMARY ERROR\\n'.repeat(140)}${'stack tail\\n'.repeat(500)}`;
+  const longOutputCase = createExecutor({
+    ok: true,
+    message: 'exit_code=1',
+    output: longOutput,
+  });
+  const longOutputResult = await longOutputCase.executor.executeDeveloperToolCall(
+    'chat_terminal_output_digest',
+    { action: 'tool', tool: 'run_command', command: 'npm run build' },
+    'Build the app.',
+    [],
+    null,
+  );
+  assert.match(longOutputResult.observation, /PRIMARY ERROR/);
+  assert.match(longOutputResult.observation, /stack tail/);
+  assert.match(longOutputResult.observation, /chars omitted/);
+
+  console.log('PASS: terminal state carries proof metadata, scoped approvals, corrupted-semver blocking, and head+tail failure diagnostics');
 })();

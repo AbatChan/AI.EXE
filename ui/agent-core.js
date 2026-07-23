@@ -61,6 +61,10 @@
     function deriveProjectNameFromTask(taskText) {
       const source = String(taskText || '').toLowerCase();
       if (!source) return '';
+      const explicitQuotedName = source.match(/\b(?:create|build|make|design|develop|craft|start)\s+(?:(?:a|an|the)\s+)?["'“]([^"'”\r\n]{2,48})["'”]/i);
+      if (explicitQuotedName && explicitQuotedName[1]) {
+        return sanitizeProjectSlug(explicitQuotedName[1]);
+      }
       const landingSubjectMatch = source.match(/\blanding\s+page\s+(?:for|about|of)\s+([a-z0-9][a-z0-9\s_-]{1,44}?)(?=\s+(?:with|featuring|that|which|using|including)\b|[,.!?]|$)/i);
       if (landingSubjectMatch && landingSubjectMatch[1]) {
         return sanitizeProjectSlug(`${landingSubjectMatch[1]} landing`);
@@ -79,7 +83,7 @@
       const kindMatch = source.match(/\b(project|app|site|tool|game|dashboard|website|page|cli|api|service|bot|assistant|tracker|manager|generator|editor)\b/);
       const projectKind = kindMatch ? kindMatch[1] : '';
       const patterns = [
-        /\b(?:create|build|make|design|develop|craft|start)\s+(?:a|an)?\s*new?\s*([a-z0-9][a-z0-9\s_-]{1,40}?)\s+(?:project|app|site|tool|game|dashboard|website|page|cli|api|service|bot|assistant|tracker|manager|generator|editor)\b/i,
+        /\b(?:create|build|make|design|develop|craft|start)\s+(?:(?:a|an|the|new)\s+)*([a-z0-9][a-z0-9\s_-]{1,40}?)\s+(?:project|app|site|tool|game|dashboard|website|page|cli|api|service|bot|assistant|tracker|manager|generator|editor)\b/i,
         /\b([a-z0-9][a-z0-9\s_-]{1,28}?)\s+(?:project|app|site|tool|game|dashboard|website|page|cli|api|service|bot|assistant|tracker|manager|generator|editor)\b/i,
       ];
       let candidate = '';
@@ -532,7 +536,7 @@
         return null;
       }
       const normalizedAction = String(action || '').trim().toLowerCase();
-      const validTools = ['none', 'new_project', 'generate_project', 'list_dir', 'search_files', 'read_file', 'read_files', 'write_file', 'write_files', 'edit_file', 'validate_files', 'check_code', 'run_app', 'run_command', 'mkdir', 'move', 'delete'];
+      const validTools = ['none', 'new_project', 'generate_project', 'list_dir', 'search_files', 'read_file', 'read_files', 'write_file', 'write_files', 'edit_file', 'validate_files', 'check_code', 'run_app', 'run_command', 'mkdir', 'move', 'delete', 'remember_project', 'read_project_memory', 'forget_project_memory'];
       let resolvedAction = normalizedAction;
       let resolvedTool = String(tool || '').toLowerCase();
       // Auto-repair: model put tool name in action field (e.g. "action": "read_file")
@@ -587,11 +591,14 @@
         // Phased = fully model-driven: only new_project below is deterministic.
         const phasedProject = Array.isArray(planSpec && planSpec.phases)
           && planSpec.phases.filter((p) => p && p.title).length >= 2;
-        const explicitSeparateWorkspaceIntent = /\b(new project|new workspace|fresh workspace|another project|separate project|different project|start from scratch|from scratch)\b/i.test(String(taskText || ''));
         const hasWorkspace = hasOpenWorkspaceContext();
         const projectCreated = Array.isArray(toolEvents)
           && toolEvents.some((event) => event && event.ok && String(event.tool || '').toLowerCase() === 'new_project');
-        if ((!hasWorkspace || explicitSeparateWorkspaceIntent) && !projectCreated) {
+        // Never infer "replace the open workspace" from task wording here. Phrases
+        // such as "implement FABRIK from scratch" describe a feature, not project
+        // scope. A semantic planner decision can still request new_project and the
+        // executor will ask for confirmation when a workspace is already open.
+        if (!hasWorkspace && !projectCreated) {
           return {
             action: 'tool',
             tool: 'new_project',

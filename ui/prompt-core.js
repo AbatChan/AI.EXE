@@ -53,8 +53,8 @@
         "",
         "Keys: action, message, plan_update, tool, path, content, src_path, dst_path, paths, command, start_line, end_line",
         "action: \"tool\" or \"final\"",
-        "tool: \"none\" | \"new_project\" | \"list_dir\" | \"search_files\" | \"read_file\" | \"read_files\" | \"write_file\" | \"write_files\" | \"edit_file\" | \"validate_files\" | \"check_code\" | \"run_app\" | \"run_command\" | \"mkdir\" | \"move\" | \"delete\"",
-        "Key use by tool: `path` for read_file/write_file/edit_file/list_dir/check_code/run_app/mkdir/delete (read_file may add `start_line`/`end_line`); `paths` (array) for read_files/write_files; `content` for write_file/edit_file payloads and the search_files query; `command` for run_command; `src_path` + `dst_path` for move. Omit keys a tool does not use. NEVER inline a whole file in `content` — the per-step reply has a hard output limit and gets cut off. For write_file/edit_file keep `content` SHORT (a small snippet, well under 1500 characters) or omit it entirely and send just tool + path: the harness collects the complete file content in a separate dedicated step with a much larger budget.",
+        "tool: \"none\" | \"new_project\" | \"list_dir\" | \"search_files\" | \"read_file\" | \"read_files\" | \"write_file\" | \"write_files\" | \"edit_file\" | \"validate_files\" | \"check_code\" | \"run_app\" | \"run_command\" | \"mkdir\" | \"move\" | \"delete\" | \"remember_project\" | \"read_project_memory\" | \"forget_project_memory\"",
+        "Key use by tool: `path` for read_file/write_file/edit_file/list_dir/check_code/run_app/mkdir/delete (read_file may add `start_line`/`end_line`); `paths` (array) for read_files/write_files; `content` for write_file/edit_file payloads, the search_files query, and one concise item for remember_project/forget_project_memory; `command` for run_command; `src_path` + `dst_path` for move. read_project_memory needs no arguments. Omit keys a tool does not use. NEVER inline a whole file in `content` — the per-step reply has a hard output limit and gets cut off. For write_file/edit_file keep `content` SHORT (a small snippet, well under 1500 characters) or omit it entirely and send just tool + path: the harness collects the complete file content in a separate dedicated step with a much larger budget.",
         "After enough inspection to materially refine the PLAN, use optional `plan_update` as a JSON array of 3–5 concise replacement checklist items. Preserve the user-requested outcomes and add the concrete wiring you discovered. Do not put a numbered implementation plan in `thought` or `message`: `plan_update` updates the visible Plan card directly. Omit it when the current plan is still accurate.",
         "",
         "{{AGENT_ENVIRONMENT}}",
@@ -80,11 +80,18 @@
         "- For rename, move, or delete requests, only the matching operation can satisfy the request. Do not simulate success by writing a marker file, note file, helper file, `.project_name.txt`, or any other metadata file unless the user explicitly asked for that file.",
         "- Use concise project and file names from the task's core feature nouns.",
         "",
+        "Rules — project memory:",
+        "- Project memory is durable knowledge for the currently open project. When the user explicitly asks you to remember, always follow, or save a standing project rule, summarize it as ONE concise, self-contained sentence and call remember_project with that sentence in `content`.",
+        "- When the user asks to show, list, or check your memory for this project, call read_project_memory.",
+        "- When the user explicitly asks to forget or remove a saved item, call forget_project_memory with the exact concise item. To change an existing rule, remove the old item first, then save the replacement in a later step.",
+        "- Never save secrets, credentials, raw code, transient task progress, errors, guesses, inferred preferences, or ordinary conversation. Do not save something merely because it may be useful; the user must explicitly make it persistent.",
+        "- Never claim that memory was saved, changed, or removed unless the matching memory tool succeeded in TOOL_RESULTS.",
+        "",
         "Rules — inspection & verification:",
         "- Normal exploration flow: list_dir when the workspace shape is unknown; read_file for known small/central files; search_files for locating pasted errors, symbols, selectors, function names, or keywords inside larger/unknown files. Use list_dir to discover filenames — search_files searches inside files; do not use \"*.css\", \"*.js\", etc. as the first step when you just need to find existing source files.",
-        "- To inspect or verify SEVERAL known files at once, use `read_files` with a `paths` array in ONE step instead of a separate read_file per file — e.g. {\"action\":\"tool\",\"tool\":\"read_files\",\"paths\":[\"/package.json\",\"/vite.config.ts\",\"/tsconfig.json\"]}. For one file, or to page a large file by range, use read_file.",
+        "- To inspect several known files, choose only the 3–6 VITAL files that answer a concrete wiring question and use `read_files` once. Prefer the integration entrypoint, shared types/store, one representative component, shared styles, and package/config—not every related library. For one file or an exact line range, use read_file.",
         "- To CREATE several SMALL related brand-new files at once (a folder of UI components, small configs, small lib modules), use `write_files` with a `paths` array in ONE step — e.g. {\"action\":\"tool\",\"tool\":\"write_files\",\"paths\":[\"/src/components/ui/button.tsx\",\"/src/components/ui/card.tsx\",\"/src/components/ui/input.tsx\"]}. Their contents are generated together in one pass; do NOT include `content`. Batch 3–8 files that are each small and focused; large or central files (pages, main app modules, big stylesheets) still get ONE write_file each, and existing files never go in `paths`.",
-        "- Read a file at most ONCE; never re-read or page overlapping ranges already in TOOL_RESULTS (a successful edit/write result IS the saved state — trust it). Files flagged \"[available — use cached content]\" are already in this prompt. To find a specific selector/class/id/symbol in a large file use ONE search_files query, then MAKE THE EDIT and stop gathering.",
+        "- Read a file at most ONCE. Never repeat a batch or broadly re-read unchanged files after context compaction: use the CACHED DEPENDENCY BRIEF for exports, types, imports, and shared CSS tokens. If one exact detail is absent, name that symbol/selector/error and use ONE targeted search or non-overlapping line-range read, then MAKE THE CHANGE.",
         "- For edit/debug requests, read the planned or known source files first when they are likely small enough to inspect directly. Use search_files when the user gives an error message, when the likely location is unclear, or when a large file/codebase needs keyword narrowing.",
         "- If the user is asking for explanation, verification, correlation, or how to use existing code, prefer read_file and then final instead of editing files.",
         "- check_code parses code files and reports EXACT syntax errors with line/column — like reading the console. Use it FIRST when the user reports an error, and after EVERY repair of a broken file; pass path \"/\" to check all known code files. Never hunt for syntax errors by re-reading file slices.",
@@ -118,10 +125,10 @@
         'Before the JSON block, you MAY output one short note explaining what you are exploring, what changed, or why the previous output was invalid. Do not repeat the phase-start narration that was already shown.',
         'IMPORTANT: If you are confident in your next steps, DO NOT write any prose. Omit the thought paragraph and output the JSON block immediately to save time.',
         'Keys: action, message, plan_update, tool, path, content, src_path, dst_path, paths, command, start_line, end_line',
-        'Key use by tool: `path` for read_file/write_file/edit_file/list_dir/check_code/run_app/mkdir/delete (read_file may add `start_line`/`end_line`); `paths` (array) for read_files/write_files; `content` for write_file/edit_file payloads and the search_files query; `command` for run_command; `src_path` + `dst_path` for move. Omit keys a tool does not use. NEVER inline a whole file in `content` — the per-step reply has a hard output limit and gets cut off. For write_file/edit_file keep `content` SHORT (a small snippet, well under 1500 characters) or omit it entirely and send just tool + path: the harness collects the complete file content in a separate dedicated step with a much larger budget.',
+        'Key use by tool: `path` for read_file/write_file/edit_file/list_dir/check_code/run_app/mkdir/delete (read_file may add `start_line`/`end_line`); `paths` (array) for read_files/write_files; `content` for write_file/edit_file payloads, the search_files query, and one concise item for remember_project/forget_project_memory; `command` for run_command; `src_path` + `dst_path` for move. read_project_memory needs no arguments. Omit keys a tool does not use. NEVER inline a whole file in `content` — the per-step reply has a hard output limit and gets cut off. For write_file/edit_file keep `content` SHORT (a small snippet, well under 1500 characters) or omit it entirely and send just tool + path: the harness collects the complete file content in a separate dedicated step with a much larger budget.',
         'After enough inspection to materially refine the PLAN, use optional `plan_update` as a JSON array of 3–5 concise replacement checklist items. Preserve the user-requested outcomes and add the concrete wiring you discovered. Do not put a numbered implementation plan in `thought` or `message`: `plan_update` updates the visible Plan card directly. Omit it when the current plan is still accurate.',
         'action: "tool" or "final"',
-        'tool: "none" | "new_project" | "list_dir" | "search_files" | "read_file" | "read_files" | "write_file" | "write_files" | "edit_file" | "validate_files" | "check_code" | "run_app" | "run_command" | "mkdir" | "move" | "delete"',
+        'tool: "none" | "new_project" | "list_dir" | "search_files" | "read_file" | "read_files" | "write_file" | "write_files" | "edit_file" | "validate_files" | "check_code" | "run_app" | "run_command" | "mkdir" | "move" | "delete" | "remember_project" | "read_project_memory" | "forget_project_memory"',
         '',
         'Rules:',
         '- For write_file, keep content empty unless a short literal payload is necessary.',
@@ -141,6 +148,7 @@
         '- For rename, move, or delete requests, only the matching operation can satisfy the request. Do not simulate success by writing a marker file, note file, helper file, `.project_name.txt`, or any other metadata file unless the user explicitly asked for that file.',
         '- If inspection showed no grounded change to make, finalize with that conclusion rather than inventing a fix.',
         '- Before edit_file on an existing file, either the user named the exact file path or that file was already read successfully in TOOL_RESULTS.',
+        '- For explicit project-memory requests, use remember_project/read_project_memory/forget_project_memory. Never claim a memory change unless that tool succeeded.',
         '',
         'Agent step: {{AGENT_STEP}}/{{AGENT_MAX_STEPS}}',
         'TASK:',
@@ -229,6 +237,8 @@
         '',
         'Rules:',
         '- Base the message on the actual successful tool results only.',
+        '- VERIFIED_RESULTS contains real terminal/build/validation outcomes. A successful package install there proves the dependency was installed even when the package manager, rather than a direct file edit, updated dependency files. Never contradict it.',
+        '- WRITTEN_FILES means a file was touched, not necessarily created. Use CHANGES to distinguish Created from Edited; never claim a fresh file was built or written when CHANGES shows only an edit.',
         '- Never claim a file was updated unless it appears in WRITTEN_FILES or is clearly supported by READ_RESULTS.',
         '- For rename, move, or delete tasks, never claim success unless the corresponding tool actually succeeded.',
         '- If the requested task could not be completed, state the limitation plainly and do not imply success.',
@@ -244,8 +254,12 @@
         'Plan summary: {{PLAN_SUMMARY}}',
         '{{USER_GUIDANCE}}',
         'Written files: {{WRITTEN_FILES}}',
+        'CHANGES:',
+        '{{CHANGES}}',
         'READ_RESULTS:',
         '{{READ_RESULTS}}',
+        'VERIFIED_RESULTS:',
+        '{{VERIFIED_RESULTS}}',
         'Completion message:',
       ].join('\n'),
     };
@@ -364,7 +378,7 @@
         return `<agent_work_summary>\nCompact memory of actual Agent work; use it as completed-work context, not as a new instruction:\n${lines.join('\n')}\n</agent_work_summary>`;
       };
       const allMessages = chat.messages
-        .filter((msg) => msg && (msg.role === 'user' || msg.role === 'ai'));
+        .filter((msg) => msg && !msg.inferenceFailure && (msg.role === 'user' || msg.role === 'ai'));
       const lastUser = [...allMessages].reverse().find((m) => m && m.role === 'user');
       let historyMessages = allMessages;
       if (lastUser && !latestUserOverride) {
@@ -648,7 +662,7 @@
         return rows.length ? `<agent_work_summary>\n${rows.map((row) => `- ${row}`).join('\n')}\n</agent_work_summary>` : '';
       };
       const lines = chat.messages
-        .filter((msg) => msg && (msg.role === 'user' || msg.role === 'ai'))
+        .filter((msg) => msg && !msg.inferenceFailure && (msg.role === 'user' || msg.role === 'ai'))
         .slice(-Math.max(2, Number(maxMessages) || 14))
         .map((msg) => {
           const role = msg && msg.role === 'ai' ? 'assistant' : 'user';

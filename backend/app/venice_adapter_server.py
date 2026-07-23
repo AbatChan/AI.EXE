@@ -2797,6 +2797,29 @@ def _aiexe_raw_reply_via_copy(driver):
         return None
 
 
+def _aiexe_raw_copy_is_safe_upgrade(scraped, copied):
+    """Reject clipboard text when Venice's renderer rewrote code punctuation.
+
+    Venice occasionally turns caret-prefixed semver tokens such as ``^9.114.0``
+    into footnote-looking ``^1^.114.0`` text in its Copy payload. Length alone
+    cannot establish fidelity, so preserve the streamed/DOM capture whenever the
+    copy introduces those ordinal markers or drops caret-version tokens that were
+    present in the original capture.
+    """
+    source = str(scraped or "")
+    candidate = str(copied or "")
+    if not source.strip() or not candidate.strip():
+        return False
+    introduced_ordinals = set(re.findall(r"\^\d+\^", candidate)) - set(re.findall(r"\^\d+\^", source))
+    if introduced_ordinals:
+        return False
+    source_versions = set(re.findall(r"\^(?:\d+)(?:\.\d+){1,3}(?:[-+][0-9A-Za-z.-]+)?", source))
+    if source_versions and not source_versions.issubset(set(re.findall(
+            r"\^(?:\d+)(?:\.\d+){1,3}(?:[-+][0-9A-Za-z.-]+)?", candidate))):
+        return False
+    return True
+
+
 def _aiexe_read_last_assistant_text(driver, include_reasoning=True):
     """Read only the latest Venice assistant message body.
 
@@ -3877,12 +3900,15 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
                 except Exception:
                     _raw = None
                 if (_raw and _raw.strip() and len(_raw) >= int(0.5 * len(_scraped_full))
-                        and _raw.strip() != _scraped_full.strip()):
+                        and _raw.strip() != _scraped_full.strip()
+                        and _aiexe_raw_copy_is_safe_upgrade(_scraped_full, _raw)):
                     print("AIEXE_RAWCOPY upgraded reply: %d -> %d chars" % (len(_scraped_full), len(_raw)), flush=True)
                     if response_format == ResponseFormat.CHAT_NON_STREAMED:
                         streamed_content = _raw
                     else:
                         yield json.dumps({"aiexe_raw_final": _raw, "done": False}) + "\r\n"
+                elif _raw and _raw.strip() and _raw.strip() != _scraped_full.strip():
+                    print("AIEXE_RAWCOPY rejected: clipboard text changed protected code tokens", flush=True)
 
         # Refresh the balance after the reply — but only OPEN the sidebar/account menu when
         # the model that just answered is credit-metered (the balance can't change otherwise;

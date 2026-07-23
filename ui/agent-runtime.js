@@ -251,6 +251,13 @@
       return out;
     }
 
+    function hasClosedWholeReplyFence(text) {
+      const source = String(text || '');
+      const open = source.match(/^\s*(`{3,})[a-z0-9_+\-]*[^\S\n]*\n?/i);
+      if (!open) return false;
+      return new RegExp(`\\n${open[1]}[^\\S\\n]*$`).test(source.trimEnd());
+    }
+
     // Continuation replies promise ONE fenced block, but weak models close the
     // block, narrate, then restart the file in a second block — naive unwrap
     // stitched that prose INTO the file. Keep fenced code only; a second block
@@ -329,7 +336,12 @@
         recordAgentFileGenTrace(path, promptChars, 0, 0, first.truncated, 'empty_output');
         return '';
       }
-      let wasTruncated = first.truncated;
+      // A provider may report finish_reason=length even when the model already
+      // emitted the matching wrapper fence. That fence is definitive completion;
+      // starting a continuation here made Markdown models restart a finished
+      // README from line 1 and appear to hang.
+      const closedWholeReplyFence = hasClosedWholeReplyFence(first.output);
+      let wasTruncated = Boolean(first.truncated && !closedWholeReplyFence);
       let guard = 0;
       const passTrace = (pass, info) => {
         if (typeof deps.recordDebugTrace !== 'function') return;
@@ -337,7 +349,7 @@
           path: String(path || ''), pass: String(pass), ...Object.fromEntries(Object.entries(info).map(([k, v]) => [k, String(v)])),
         }, { path: String(path || ''), pass, ...info });
       };
-      passTrace(0, { len: raw.length, truncatedSignal: Boolean(first.truncated), looksTruncated: looksTruncatedFileContent(raw, path), tail: raw.slice(-120) });
+      passTrace(0, { len: raw.length, truncatedSignal: Boolean(first.truncated), closedWholeReplyFence, looksTruncated: looksTruncatedFileContent(raw, path), tail: raw.slice(-120) });
       // Persist after the first pass so the file is created + visible in the
       // workspace and the partial isn't lost if generation stops.
       const persistPartial = (text) => {
@@ -888,6 +900,20 @@
           String(item.content || '').slice(0, 8000),
         ].join('\n'))
         .join('\n\n');
+      const verifiedResults = rows
+        .filter((item) => ['run_command', 'run_app', 'validate_files'].includes(String(item.tool || '').toLowerCase()))
+        .slice(-4)
+        .map((item, index) => {
+          const command = String(item.terminalCommand || item.command || '').trim();
+          const status = Number(item.runErrorCount || 0) > 0 || item.validationPassed === false
+            ? 'FAILED'
+            : 'SUCCEEDED';
+          return [
+            `VerifiedResult ${index + 1}: ${String(item.tool || '')}${command ? ` (${command})` : ''} — ${status}`,
+            String(item.observation || '').slice(0, 3500),
+          ].join('\n');
+        })
+        .join('\n\n');
       let prompt = [
         'Write a natural completion message for the user.',
         'Output ONLY the message itself. Do NOT preface it with a label or lead-in like "Here\'s a completion message:" and do not wrap it in quotes — start with the first word of the actual message.',
@@ -900,6 +926,8 @@
         'Never mention internal tool names (write_file, edit_file, validate_files, run_app, run_command, read_file) — say it plainly: "edited", "checked the files", "ran the app".',
         'Never invent a localhost URL or say the app was opened/running in a browser. Mention a local URL only when it appears verbatim in the tool results.',
         'CHANGES below lists the only real modifications made this run. Describe an outcome ONLY if those diffs actually implement it; if part of the request has no supporting change there, say plainly that it was not changed.',
+        'VERIFIED_RESULTS records real terminal/build/validation outcomes. Treat successful dependency-install commands as proof that the dependency was installed, even when package-manager edits are not represented as direct file edits. Never contradict these results.',
+        'WRITTEN_FILES means touched, not necessarily created. Use CHANGES to distinguish Created from Edited. If CHANGES shows a tiny edit, describe only that edit; never claim you built, wrote, dropped, or created a fresh file.',
         `Workspace name: ${workspaceLabel || deps.deriveProjectNameFromTask(taskText) || 'project'}`,
         `Task: ${String(taskText || '').trim()}`,
         planSpec && planSpec.summary ? `Plan summary: ${planSpec.summary}` : '',
@@ -907,6 +935,7 @@
         writtenPaths.length ? `Written files: ${Array.from(new Set(writtenPaths)).slice(0, 6).join(', ')}` : '',
         changeSummaries ? `CHANGES:\n${changeSummaries}` : '',
         readResults ? `READ_RESULTS:\n${readResults}` : '',
+        verifiedResults ? `VERIFIED_RESULTS:\n${verifiedResults}` : '',
         'Completion message:',
       ].filter(Boolean).join('\n');
       if (loadPromptTemplate && renderPromptTemplate) {
@@ -922,6 +951,7 @@
               : '(none — NO files were created or modified this run)',
             CHANGES: changeSummaries || '(none — nothing was changed)',
             READ_RESULTS: readResults || '(none)',
+            VERIFIED_RESULTS: verifiedResults || '(none)',
           });
         }
       }
@@ -978,6 +1008,7 @@
       const srcPath = deps.normalizeWorkspacePath(decision && (decision.srcPath || decision.src_path) ? (decision.srcPath || decision.src_path) : '');
       const dstPath = deps.normalizeWorkspacePath(decision && (decision.dstPath || decision.dst_path) ? (decision.dstPath || decision.dst_path) : '');
       if (tool === 'new_project') return 'new project';
+      if (tool === 'read_project_memory' || tool === 'remember_project' || tool === 'forget_project_memory') return '/.aiexe/MEMORY.md';
       if (tool === 'run_command') return String((decision && decision.command) || '').trim();
       if ((tool === 'read_files' || tool === 'write_files') && Array.isArray(decision && decision.paths) && decision.paths.length) {
         const n = decision.paths.length;
@@ -999,6 +1030,7 @@
       generateAgentRewriteExistingFileContent,
       looksTruncatedFileContent,
       stitchFileContinuation,
+      hasClosedWholeReplyFence,
       buildAgentCompletionFallbackText,
       generateAgentCompletionText,
       stripUnverifiedLocalUrls,

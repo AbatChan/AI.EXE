@@ -380,6 +380,9 @@
     }
 
     const packageJsonSafeVersions = {
+      '@react-three/drei': '^9.114.0',
+      '@react-three/fiber': '^8.17.10',
+      '@types/three': '^0.169.0',
       '@types/react': '^18.3.3',
       '@types/react-dom': '^18.3.0',
       '@typescript-eslint/eslint-plugin': '^7.18.0',
@@ -394,12 +397,14 @@
       'eslint-plugin-react-refresh': '^0.4.9',
       'framer-motion': '^11.5.4',
       'lucide-react': '^0.468.0',
+      next: '^15.0.0',
       postcss: '^8.4.45',
       react: '^18.3.1',
       'react-dom': '^18.3.1',
       'react-router-dom': '^6.26.2',
       tailwindcss: '^3.4.10',
       'tailwind-merge': '^2.5.2',
+      three: '^0.169.0',
       typescript: '^5.5.4',
       vite: '^5.4.3',
       zustand: '^4.5.5',
@@ -488,7 +493,7 @@
         .replace(/^-+|-+$/g, '') || 'app';
       if (hasNext) {
         const dependencies = {
-          next: 'latest',
+          next: /\bnext(?:\.js)?\s*15\b/i.test(task) ? packageJsonSafeVersions.next : 'latest',
           react: packageJsonSafeVersions.react,
           'react-dom': packageJsonSafeVersions['react-dom'],
         };
@@ -506,21 +511,29 @@
         Object.entries(requestedDependencies).forEach(([needle, name]) => {
           if (task.toLowerCase().includes(needle)) dependencies[name] = packageJsonSafeVersions[name] || 'latest';
         });
+        const wantsReactThreeFiber = /\breact\s+three\s+fiber\b|@react-three\/fiber/i.test(task);
+        const wantsThree = wantsReactThreeFiber || /\bthree\.?js\b/i.test(task);
+        const wantsDrei = /\bdrei\b|@react-three\/drei/i.test(task);
+        if (wantsThree) dependencies.three = packageJsonSafeVersions.three;
+        if (wantsReactThreeFiber) dependencies['@react-three/fiber'] = packageJsonSafeVersions['@react-three/fiber'];
+        if (wantsDrei) dependencies['@react-three/drei'] = packageJsonSafeVersions['@react-three/drei'];
+        const devDependencies = {
+          '@types/node': 'latest',
+          '@types/react': packageJsonSafeVersions['@types/react'],
+          '@types/react-dom': packageJsonSafeVersions['@types/react-dom'],
+          typescript: packageJsonSafeVersions.typescript,
+          tailwindcss: packageJsonSafeVersions.tailwindcss,
+          postcss: packageJsonSafeVersions.postcss,
+          autoprefixer: packageJsonSafeVersions.autoprefixer,
+        };
+        if (wantsThree) devDependencies['@types/three'] = packageJsonSafeVersions['@types/three'];
         return `${JSON.stringify({
           name: rawName,
           private: true,
           version: '0.1.0',
           scripts: { dev: 'next dev', build: 'next build', start: 'next start' },
           dependencies,
-          devDependencies: {
-            '@types/node': 'latest',
-            '@types/react': packageJsonSafeVersions['@types/react'],
-            '@types/react-dom': packageJsonSafeVersions['@types/react-dom'],
-            typescript: packageJsonSafeVersions.typescript,
-            tailwindcss: packageJsonSafeVersions.tailwindcss,
-            postcss: packageJsonSafeVersions.postcss,
-            autoprefixer: packageJsonSafeVersions.autoprefixer,
-          },
+          devDependencies,
         }, null, 2)}\n`;
       }
       return `${JSON.stringify({
@@ -784,7 +797,11 @@ export default config;
     function commandOutputTail(output, maxChars = 5000) {
       const raw = stripAnsiSequences(output).trim();
       if (!raw) return '';
-      return raw.length > maxChars ? `...(truncated)\n${raw.slice(-maxChars)}` : raw;
+      if (raw.length <= maxChars) return raw;
+      const headChars = Math.max(800, Math.floor(maxChars * 0.42));
+      const tailChars = Math.max(800, maxChars - headChars);
+      const omitted = Math.max(0, raw.length - headChars - tailChars);
+      return `${raw.slice(0, headChars)}\n\n...(${omitted} chars omitted)...\n\n${raw.slice(-tailChars)}`;
     }
 
     function parseRunCommandExitStatus(message) {
@@ -801,7 +818,7 @@ export default config;
         command: String(command || '').trim(),
         exitCode: parsed.exitCode == null ? null : Number(parsed.exitCode),
         timedOut: Boolean(parsed.timedOut),
-        outputPreview: output.length > maxPreviewChars ? `...(truncated)\n${output.slice(-maxPreviewChars)}` : output,
+        outputPreview: commandOutputTail(output, maxPreviewChars),
       };
     }
 
@@ -937,9 +954,32 @@ export default config;
 
       const args = parts.slice(1);
       const lowerArgs = args.map((arg) => String(arg || '').toLowerCase());
+      const corruptedCaretArg = args.find((arg) => /\^\d+\^/.test(String(arg || '')));
+      if (corruptedCaretArg) {
+        return {
+          policy: 'blocked',
+          command,
+          program,
+          args,
+          reason: `argument "${corruptedCaretArg}" contains a corrupted caret-version marker. Re-read the real package version or omit the explicit version instead of executing it.`,
+        };
+      }
       const first = lowerArgs[0] || '';
       const second = lowerArgs[1] || '';
       const third = lowerArgs[2] || '';
+      const approvalScopeForParts = (programName, commandArgs) => {
+        const p = String(programName || '').toLowerCase();
+        const a = Array.isArray(commandArgs) ? commandArgs.map((arg) => String(arg || '').toLowerCase()) : [];
+        if (p === 'npm' && ['install', 'i', 'add'].includes(a[0])) return 'scope:npm:install';
+        if (p === 'pip' && a[0] === 'install') return 'scope:pip:install';
+        if (p === 'python' && a[0] === '-m' && ['pip', 'pip3'].includes(a[1]) && a[2] === 'install') {
+          return 'scope:pip:install';
+        }
+        if (p === 'go' && ['get', 'install'].includes(a[0])) return `scope:go:${a[0]}`;
+        if (p === 'cargo' && ['add', 'install'].includes(a[0])) return `scope:cargo:${a[0]}`;
+        if (p === 'dotnet' && ['restore', 'add'].includes(a[0])) return `scope:dotnet:${a[0]}`;
+        return '';
+      };
 
       const npmAskFirst = program === 'npm' && (
         // deps mutation + anything that fetches-and-RUNS remote code (exec/x/create/init)
@@ -971,16 +1011,30 @@ export default config;
       );
 
       if (npmAskFirst || pipAskFirst || pythonPipAskFirst || goAskFirst || cargoAskFirst || dotnetAskFirst) {
-        // "Always allow" — the user promoted this exact command from ask-first.
+        // "Always allow" is scoped to the parsed package operation, not one
+        // literal dependency argument. Thus allowing `npm install foo` covers a
+        // later `npm install bar`, but never npm uninstall/publish or a shell.
         const alwaysAllowed = typeof deps.getAlwaysAllowedAgentCommands === 'function'
           ? deps.getAlwaysAllowedAgentCommands() : [];
-        if (Array.isArray(alwaysAllowed) && alwaysAllowed.includes(command)) {
+        const approvalScope = approvalScopeForParts(program, lowerArgs);
+        const legacyScopeAllowed = Array.isArray(alwaysAllowed) && approvalScope
+          ? alwaysAllowed.some((entry) => {
+            const saved = String(entry || '').trim();
+            if (saved === approvalScope) return true;
+            const savedParts = splitAgentCommand(saved);
+            const savedHead = String(savedParts[0] || '').toLowerCase();
+            const savedProgram = savedHead === 'python3' ? 'python'
+              : (savedHead === 'pip3' ? 'pip' : savedHead);
+            return approvalScopeForParts(savedProgram, savedParts.slice(1)) === approvalScope;
+          })
+          : false;
+        if (Array.isArray(alwaysAllowed) && (alwaysAllowed.includes(command) || legacyScopeAllowed)) {
           return {
             policy: 'auto_safe',
             command,
             program,
             args,
-            reason: 'user chose Always allow for this command.',
+            reason: `user chose Always allow for ${approvalScope || 'this command'}.`,
           };
         }
         return {
@@ -2231,6 +2285,108 @@ export default config;
         return { ok: true, mutated, observation, projectName: deps.getWorkspaceRootName() || projectName || 'new project' };
       }
 
+      if (tool === 'read_project_memory' || tool === 'remember_project' || tool === 'forget_project_memory') {
+        const memoryPath = '/.aiexe/MEMORY.md';
+        if (!hasOpenWorkspace && !workspaceCreatedThisTurn) {
+          return {
+            ok: false,
+            mutated,
+            observation: 'Project memory is unavailable because no project workspace is open.',
+            userFacingMessage: 'Open a project first so I can use its project memory.',
+          };
+        }
+        const readResponse = await deps.invokeWorkspaceAction('workspaceReadFile', { path: memoryPath });
+        const existing = readResponse && readResponse.ok ? String(readResponse.output || '') : '';
+        const currentItems = existing.split(/\r?\n/)
+          .map((line) => String(line || '').trim())
+          .filter((line) => /^-\s+\S/.test(line))
+          .map((line) => line.replace(/^-\s+/, '').trim())
+          .filter(Boolean);
+        if (tool === 'read_project_memory') {
+          return {
+            ok: true,
+            mutated,
+            observation: currentItems.length
+              ? `Project memory (${currentItems.length} items):\n${currentItems.map((item) => `- ${item}`).join('\n')}`
+              : 'Project memory is empty.',
+            path: memoryPath,
+            content: existing,
+          };
+        }
+        const normalizeMemoryItem = (value) => String(value || '')
+          .replace(/\r?\n+/g, ' ')
+          .replace(/^\s*(?:[-*+]|\d+[.)])\s+/, '')
+          .replace(/\s+/g, ' ')
+          .trim()
+          .slice(0, 280);
+        const requestedItem = normalizeMemoryItem(decision.content || decision.message || '');
+        if (!requestedItem) {
+          return {
+            ok: false,
+            mutated,
+            observation: `${tool} requires one concise project-memory item in content.`,
+          };
+        }
+        const comparable = (value) => String(value || '').trim().toLocaleLowerCase();
+        let nextItems = currentItems.slice();
+        if (tool === 'remember_project') {
+          if (!nextItems.some((item) => comparable(item) === comparable(requestedItem))) {
+            nextItems.push(requestedItem);
+          }
+          nextItems = nextItems.slice(-80);
+        } else {
+          const before = nextItems.length;
+          nextItems = nextItems.filter((item) => comparable(item) !== comparable(requestedItem));
+          if (nextItems.length === before) {
+            return {
+              ok: false,
+              mutated,
+              observation: `Project memory item was not found: ${requestedItem}`,
+            };
+          }
+        }
+        const nextContent = [
+          '# Project memory',
+          '',
+          ...nextItems.map((item) => `- ${item}`),
+          '',
+        ].join('\n');
+        const mkdirResponse = await deps.invokeWorkspaceAction('workspaceMkdir', { path: '/.aiexe' });
+        if (mkdirResponse && mkdirResponse.ok === false && !/exist/i.test(String(mkdirResponse.message || ''))) {
+          return {
+            ok: false,
+            mutated,
+            observation: `Project memory could not be prepared: ${mkdirResponse.message || 'unknown error'}`,
+          };
+        }
+        const writeResponse = await deps.invokeWorkspaceAction('workspaceWriteFile', {
+          path: memoryPath,
+          content: nextContent,
+        });
+        if (!writeResponse || !writeResponse.ok) {
+          return {
+            ok: false,
+            mutated,
+            observation: `Project memory could not be updated: ${(writeResponse && writeResponse.message) || 'unknown error'}`,
+          };
+        }
+        if (typeof deps.invalidateProjectMemoryCache === 'function') deps.invalidateProjectMemoryCache();
+        mutated = nextContent !== existing;
+        return {
+          ok: true,
+          mutated,
+          observation: tool === 'remember_project'
+            ? `Project memory updated: ${requestedItem}`
+            : `Project memory removed: ${requestedItem}`,
+          path: memoryPath,
+          writtenPath: memoryPath,
+          content: nextContent,
+          writtenContent: nextContent,
+          originalContent: existing,
+          createdNewFile: !existing,
+        };
+      }
+
       if (!hasOpenWorkspace && !workspaceCreatedThisTurn && existingProjectMutationRequest) {
         const confirmationMessage = 'I do not see a project open in the workspace explorer. If you want, I can create a new project for this request, or you can open an existing folder first.';
         if (typeof deps.recordDebugTrace === 'function') {
@@ -2726,7 +2882,7 @@ export default config;
           return getStructuralIssueForPath(path, content);
         };
         if (shouldAutoGenerate && !modelSuppliedComplete && !(packageJsonTarget && String(content).trim())) {
-          const generated = await deps.generateAgentWriteFileContent(taskText, toolEvents, path, content, planSpec, { persistPartials: false });
+          const generated = await deps.generateAgentWriteFileContent(taskText, toolEvents, path, content, planSpec, { persistPartials: creatingNewFile });
           if (generated) content = generated;
           // generateFullAgentFile already performs bounded continuation passes.
           // Starting a second COMPLETE-file generation here made large files visibly
@@ -2734,7 +2890,7 @@ export default config;
           // Save a still-incomplete new file with the structural warning below; the
           // next agent step can append a focused repair with edit_file.
         } else if (!shouldAutoGenerate && !String(content).trim()) {
-          const generated = await deps.generateAgentWriteFileContent(taskText, toolEvents, path, '', planSpec, { persistPartials: false });
+          const generated = await deps.generateAgentWriteFileContent(taskText, toolEvents, path, '', planSpec, { persistPartials: creatingNewFile });
           if (generated) content = generated;
         }
         if (tailwindConfigTarget && (getStructuralIssueForPath(path, content) || String(content || '').length > 8000)) {
@@ -2755,10 +2911,17 @@ export default config;
         const pythonTarget = /\.py$/i.test(path);
         const readmeTarget = deps.normalizeWorkspacePath(path) === '/README.md';
         const latestPrimarySourceWrite = deps.getLatestSuccessfulAgentSourceWrite(toolEvents);
+        const readmeScheduledInActivePhase = Boolean(
+          planSpec
+          && planSpec._activePhase
+          && Array.isArray(planSpec._activePhase.tasks)
+          && planSpec._activePhase.tasks.some((task) => /(?:^|[\s/])readme\.md\b/i.test(String(task || '')))
+        );
         if (
           projectStyleTask
           && readmeTarget
           && !deps.isExplicitReadmeOrDocsTask(taskText)
+          && !readmeScheduledInActivePhase
           && ((planSpec && planSpec.finalRequiresRealFiles) || !planSpec)
           && !latestPrimarySourceWrite
         ) {
@@ -3557,8 +3720,8 @@ export default config;
             runErrorCount: 0,
             terminalCommand: rawCommand,
             terminalProof,
-            devServer: { id: serverId, url, running: true, command: rawCommand },
-            observation: `run_command \`${rawCommand}\`: dev server is RUNNING${url ? ` at ${url}` : ''} — tracked as server #${serverId}, left running in the background with a Stop button in the chat. Do NOT run this command again; continue with the next step or finalize.${logTail ? `\nStartup output:\n${logTail}` : ''}`,
+            devServer: { id: serverId, url, running: true, ready: Boolean(url), command: rawCommand },
+            observation: `run_command \`${rawCommand}\`: dev server is ${url ? `READY at ${url}` : 'still STARTING'} — tracked as server #${serverId} with live status and a Stop button in the chat. Do NOT run this command again; continue with the next step or finalize.${logTail ? `\nStartup output:\n${logTail}` : ''}`,
           };
         }
         deps.setActiveAgentStreamStatus(chatId, `Running terminal command: ${rawCommand}`);
@@ -3571,7 +3734,7 @@ export default config;
         }
         const status = String(res.message || '');
         const rawOut = String(res.output || '').trim();
-        const tail = rawOut.length > 4000 ? `…(truncated)\n${rawOut.slice(-4000)}` : rawOut;
+        const tail = commandOutputTail(rawOut, 4000);
         const timedOut = status === 'timed_out';
         const exitMatch = status.match(/exit_code=(-?\d+)/);
         const exitCode = exitMatch ? Number(exitMatch[1]) : (timedOut ? null : 0);
@@ -3654,7 +3817,19 @@ export default config;
       if (tool === 'validate_files') {
         const expectedFiles = getActivePlannedFiles(planSpec);
         const allExpectedFiles = getAllPlannedFiles(planSpec);
-        let targets = expectedFiles.filter((path) => path && path !== '/README.md' && path !== '/src');
+        const validationPhase = planSpec && planSpec._activePhase;
+        const isNonFinalValidationPhase = Boolean(
+          validationPhase && Number(validationPhase.number) < Number(validationPhase.total)
+        );
+        const meaningfulExpectedFiles = expectedFiles.filter((path) => path && path !== '/src');
+        const documentationOnlyPhase = meaningfulExpectedFiles.length > 0
+          && meaningfulExpectedFiles.every((path) => /\.(?:md|mdx)$/i.test(path));
+        // README is normally context, not a source-validation target. In a dedicated
+        // documentation phase it IS the deliverable, so validate the existing file
+        // directly instead of demanding a meaningless edit merely to create a mutation.
+        let targets = meaningfulExpectedFiles.filter((path) => (
+          documentationOnlyPhase || path !== '/README.md'
+        ));
         if (!targets.length) {
           const mutatedPaths = Array.isArray(toolEvents) ? toolEvents
             .filter((e) => e && e.ok && ['write_file', 'edit_file'].includes(String(e.tool || '').toLowerCase()) && e.path)
@@ -3680,7 +3855,8 @@ export default config;
           fileContents[path] = content;
           const fileIssues = validateGeneratedFile(path, content, taskText, planSpec);
           fileIssues.forEach((issue) => issues.push(`${path}: ${issue}`));
-          if (/\.(html|js|ts|jsx|tsx|py)$/i.test(deps.normalizeWorkspacePath(path))
+          if (!isNonFinalValidationPhase
+            && /\.(html|js|ts|jsx|tsx|py)$/i.test(deps.normalizeWorkspacePath(path))
             && !deps.isLikelyCompletePrimarySource(path, content, taskText)) {
             completenessAdvisory.push(`${path}: may be thinner than the requested feature set — expand it only if something is actually missing`);
           }
@@ -3805,13 +3981,17 @@ export default config;
               const activePhase = planSpec && planSpec._activePhase;
               const phasesRemain = Boolean(activePhase && Number(activePhase.number) < Number(activePhase.total));
               if (plannedMatch) {
-                mechanicalAdvisory.push(`${path}: imports ${spec}, which is planned but not built yet (a later phase creates it) — not a blocker for this phase.`);
+                if (!isNonFinalValidationPhase) {
+                  mechanicalAdvisory.push(`${path}: imports ${spec}, which is planned but not built yet.`);
+                }
               } else if (phasesRemain) {
                 // Vague later-phase task lists ("Remaining deliverables") can't
                 // enumerate every module, so an in-project import is not "invented"
                 // mid-phase — blocking here made models amputate imports the next
                 // phase needed. The FINAL phase still blocks on it.
-                mechanicalAdvisory.push(`${path}: imports ${spec}, which does not exist yet and is not in the plan's file list. Create it in a later phase — the final phase will treat it as an error if it is still missing.`);
+                // An intermediate phase can legitimately reference integration
+                // modules scheduled later. The final phase performs the complete
+                // import audit, so do not surface repetitive advisory noise now.
               } else {
                 issues.push(`${path}: imports ${spec}, but none of its local files exist (${candidates.slice(0, 5).join(', ')}). Remove the invented import or create the explicitly planned module.`);
               }
@@ -3835,7 +4015,7 @@ export default config;
           }
           // Advisory model-driven cross-file review; never blocks.
           let advisoryNotes = mechanicalAdvisory.slice();
-          if (typeof deps.reviewAgentProjectCoherence === 'function') {
+          if (!isNonFinalValidationPhase && typeof deps.reviewAgentProjectCoherence === 'function') {
             try {
               const ap = planSpec && planSpec._activePhase;
               const phaseNote = ap && Number(ap.number) < Number(ap.total)
@@ -3844,6 +4024,7 @@ export default config;
               advisoryNotes = advisoryNotes.concat(await deps.reviewAgentProjectCoherence(fileContents, taskText, phaseNote) || []);
             } catch (_) { }
           }
+          advisoryNotes = Array.from(new Set(advisoryNotes.map((note) => String(note || '').trim()).filter(Boolean)));
           const advisoryBlock = advisoryNotes.length
             ? `\nAdvisory cross-file review (non-blocking — fix only what is real and quick):\n- ${advisoryNotes.slice(0, 5).join('\n- ')}`
             : '';
@@ -3853,6 +4034,7 @@ export default config;
             observation: `validate_files ok: no obvious file-role, syntax, or MVP completeness issues found in ${targets.join(', ')}${advisoryBlock}`,
             validationPassed: true,
             validationAdvisory: advisoryNotes.slice(0, 5),
+            validationAdvisoryTotal: advisoryNotes.length,
             autoWrittenFiles,
           };
         }
@@ -3999,6 +4181,9 @@ export default config;
       const target = String(targetInfo || '').trim();
       const withTarget = (base) => (target ? `${base} ${target}` : base);
       if (phase === 'start') {
+        if (name === 'read_project_memory') return 'Recalling project memory';
+        if (name === 'remember_project') return 'Saving to project memory';
+        if (name === 'forget_project_memory') return 'Updating project memory';
         if (name === 'new_project') return 'Creating project workspace';
         if (name === 'generate_project') return 'Generating all project files';
         if (name === 'list_dir') return withTarget('Scanning folder');
@@ -4019,6 +4204,9 @@ export default config;
         return withTarget(`Running ${name || 'tool'}`);
       }
       if (phase === 'done') {
+        if (name === 'read_project_memory') return 'Recalled project memory';
+        if (name === 'remember_project') return 'Saved to project memory';
+        if (name === 'forget_project_memory') return 'Updated project memory';
         if (name === 'new_project') return 'Created project workspace';
         if (name === 'generate_project') return 'Generated project files';
         if (name === 'list_dir') return withTarget('Scanned');

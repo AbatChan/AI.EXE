@@ -30,7 +30,7 @@ const planner = global.AIExeAgentPlanner.createAgentPlanner({ normalizeWorkspace
 const { selectRelevantOlderEvents } = planner;
 const { deriveAgentFailureSignature } = global.AIExeAgentLoop;
 const runtime = global.AIExeAgentRuntime.createAgentRuntime({});
-const { looksTruncatedFileContent, stitchFileContinuation } = runtime;
+const { looksTruncatedFileContent, stitchFileContinuation, hasClosedWholeReplyFence } = runtime;
 
 let passed = 0;
 function ok(name, cond) {
@@ -192,6 +192,12 @@ const completeJsonWithBracesInStrings = `{
 ok('complete package.json with braces inside strings is NOT flagged',
   looksTruncatedFileContent(completeJsonWithBracesInStrings, '/package.json') === false);
 
+ok('matching four-backtick Markdown wrapper proves the reply completed',
+  hasClosedWholeReplyFence(['````markdown', '# App', '', '```bash', 'npm run dev', '```', '````'].join('\n')) === true);
+
+ok('missing Markdown wrapper close does not pretend the reply completed',
+  hasClosedWholeReplyFence(['````markdown', '# App', '', '```bash', 'npm run dev', '```'].join('\n')) === false);
+
 const completeTsWithHtmlString = [
   'const markup = `<header><script>window.ok = true</script></header>`',
   'export function render() {',
@@ -254,6 +260,14 @@ ok('read + search both count toward the budget',
     { tool: 'search_files', ok: true },
     { tool: 'read_file', ok: true },
   ]) === 3);
+
+ok('one batch counts as one inspection instead of one per returned file',
+  countInspectionsSinceMutation([
+    { tool: 'read_files', ok: true },
+    ...Array.from({ length: 10 }, (_, index) => ({
+      tool: 'read_file', ok: true, path: `/src/file-${index}.ts`, _fromBatchRead: true,
+    })),
+  ]) === 1);
 
 ok('a successful mutation resets the count (only post-mutation inspections count)',
   countInspectionsSinceMutation([

@@ -1,6 +1,6 @@
 // Unit tests for live phase sub-task progress. File-grounded phase tasks can tick
-// as soon as their write/edit succeeds, without marking plan.md's source-of-truth
-// checkbox done.
+// as soon as their write/edit succeeds. Active work stays live until validation;
+// an early future-phase file is durably credited to its owning phase.
 const assert = require('node:assert/strict');
 const path = require('node:path');
 
@@ -83,9 +83,11 @@ assert.deepEqual(
 
 assert.equal(
   loop.markPhaseTaskLiveProgressForPath(phaseState, '/features.html', normalizeWorkspacePath),
-  0,
-  'does not mark tasks from inactive phases',
+  1,
+  'credits an early-created file to its owning future phase',
 );
+assert.equal(phaseState.phases[1].tasks[0].liveDone, true, 'future task updates in the live tracker');
+assert.equal(phaseState.phases[1].tasks[0].done, true, 'future task is durable so it is not regenerated later');
 assert.equal(
   loop.markPhaseTaskLiveProgressForPath(phaseState, '/README.md', normalizeWorkspacePath),
   0,
@@ -112,6 +114,130 @@ assert.equal(
   loop.shouldForcePhaseValidation({ action: 'final', tool: 'none' }, phaseState, [], null, true),
   false,
   'a phase with fresh passing validation may finish normally',
+);
+const finalPhaseState = {
+  activeIndex: 1,
+  phases: [
+    { title: 'Foundation', tasks: [{ text: '/src/app/page.tsx', done: true }] },
+    { title: 'Integration', tasks: [{ text: '/src/components/Scene.tsx', done: true }] },
+  ],
+};
+const runnableWebPlan = {
+  taskKind: 'project',
+  primaryStack: 'web',
+  expectedFiles: ['/package.json', '/src/app/page.tsx', '/src/components/Scene.tsx'],
+};
+assert.equal(
+  loop.shouldForceProjectRuntimeProof(
+    { action: 'final', tool: 'none' },
+    finalPhaseState,
+    runnableWebPlan,
+    true,
+    false,
+    normalizeWorkspacePath,
+  ),
+  true,
+  'the final runnable phase requires a clean stack-aware runtime proof',
+);
+assert.equal(
+  loop.shouldForceProjectRuntimeProof(
+    { action: 'final', tool: 'none' },
+    phaseState,
+    runnableWebPlan,
+    true,
+    false,
+    normalizeWorkspacePath,
+  ),
+  false,
+  'an intermediate phase never installs or runs the incomplete project',
+);
+assert.equal(
+  loop.shouldForceProjectRuntimeProof(
+    { action: 'final', tool: 'none' },
+    finalPhaseState,
+    runnableWebPlan,
+    true,
+    true,
+    normalizeWorkspacePath,
+  ),
+  false,
+  'one clean runtime proof after the latest mutation allows finalization',
+);
+assert.equal(
+  loop.planHasRunnableFiles(
+    { taskKind: 'project', expectedFiles: ['/README.md'] },
+    normalizeWorkspacePath,
+  ),
+  false,
+  'documentation-only work does not trigger a fake application run',
+);
+for (const file of ['/main.py', '/src/Main.java', '/src/main.cpp', '/src/main.go', '/src/main.rs']) {
+  assert.equal(
+    loop.planHasRunnableFiles({ taskKind: 'project', expectedFiles: [file] }, normalizeWorkspacePath),
+    true,
+    `${file} is recognized as a runnable project source without task-word heuristics`,
+  );
+}
+
+const durablePhases = [
+  { title: 'Foundation', tasks: [{ text: '/src/app/page.tsx', done: true }] },
+  { title: 'Documentation', tasks: [{ text: '/README.md', done: false }] },
+  { title: 'Integration', tasks: [{ text: '/src/components/Scene.tsx', done: false }] },
+];
+assert.equal(
+  loop.planTargetsUnfinishedPhaseFiles(
+    { expectedFiles: ['/README.md'] },
+    durablePhases,
+    normalizeWorkspacePath,
+  ),
+  true,
+  'a focused README follow-up reconnects to its unfinished durable phase without text keywords',
+);
+assert.equal(
+  loop.planTargetsUnfinishedPhaseFiles(
+    { expectedFiles: ['/notes.md'] },
+    durablePhases,
+    normalizeWorkspacePath,
+  ),
+  false,
+  'an unrelated file edit does not resurrect the phased build',
+);
+assert.equal(
+  loop.planTargetsUnfinishedPhaseFiles(
+    { expectedFiles: ['/src/app/page.tsx'] },
+    durablePhases,
+    normalizeWorkspacePath,
+  ),
+  false,
+  'a file owned only by a completed phase does not resume that phase',
+);
+
+assert.equal(
+  loop.activePhaseFileDeliverablesAreGrounded(
+    {
+      activeIndex: 1,
+      phases: durablePhases.map((phase) => ({
+        ...phase,
+        tasks: phase.tasks.map((task) => ({ ...task })),
+      })),
+    },
+    normalizeWorkspacePath,
+  ),
+  false,
+  'an unfinished phase is not considered grounded merely because its file is planned',
+);
+const recoveredDocumentation = {
+  activeIndex: 1,
+  phases: durablePhases.map((phase) => ({
+    ...phase,
+    tasks: phase.tasks.map((task) => ({ ...task })),
+  })),
+};
+recoveredDocumentation.phases[1].tasks[0].liveDone = true;
+assert.equal(
+  loop.activePhaseFileDeliverablesAreGrounded(recoveredDocumentation, normalizeWorkspacePath),
+  true,
+  'a disk-recovered README can complete its phase without a pointless rewrite',
 );
 
 assert.equal(

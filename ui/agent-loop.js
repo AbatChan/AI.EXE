@@ -100,7 +100,9 @@
       if (!e || !e.ok) continue;
       const tool = String(e.tool || '').toLowerCase();
       if (tool === 'write_file' || tool === 'edit_file' || tool === 'new_project') break;
-      if (tool === 'read_file' || tool === 'search_files') inspections += 1;
+      if (tool === 'read_files') inspections += 1;
+      else if (tool === 'read_file' && !e._fromBatchRead) inspections += 1;
+      else if (tool === 'search_files') inspections += 1;
     }
     return inspections;
   }
@@ -237,18 +239,26 @@
     if (!path) return 0;
     const comparablePath = path.toLowerCase();
     const activeIndex = Math.max(0, Math.min(phaseState.phases.length - 1, Number(phaseState.activeIndex) || 0));
-    const phase = phaseState.phases[activeIndex];
-    const tasks = Array.isArray(phase && phase.tasks) ? phase.tasks : [];
     let changed = 0;
-    tasks.forEach((task) => {
-      if (!task || task.done || task.liveDone) return;
-      const matches = extractFileLikeTaskPaths(task.text || task, norm);
-      const globPrefixes = extractDirGlobTaskPrefixes(task.text || task, norm);
-      if (matches.some((candidate) => String(candidate || '').toLowerCase() === comparablePath)
-        || globPrefixes.some((prefix) => comparablePath.startsWith(`${String(prefix).toLowerCase()}/`))) {
-        task.liveDone = true;
-        changed += 1;
-      }
+    // Credit the file to whichever phase owns it, even when the model creates it
+    // early as support work for the active phase. Marking it durably complete
+    // prevents the later phase from regenerating the same file.
+    phaseState.phases.forEach((phase, phaseIndex) => {
+      const tasks = Array.isArray(phase && phase.tasks) ? phase.tasks : [];
+      tasks.forEach((task) => {
+        if (!task || task.done || task.liveDone) return;
+        const matches = extractFileLikeTaskPaths(task.text || task, norm);
+        const globPrefixes = extractDirGlobTaskPrefixes(task.text || task, norm);
+        if (matches.some((candidate) => String(candidate || '').toLowerCase() === comparablePath)
+          || globPrefixes.some((prefix) => comparablePath.startsWith(`${String(prefix).toLowerCase()}/`))) {
+          task.liveDone = true;
+          // Active-phase tasks remain "live" until that phase passes validation
+          // and finalizes. Future-phase ownership is durable immediately so the
+          // later phase cannot regenerate an already-created file.
+          if (phaseIndex !== activeIndex) task.done = true;
+          changed += 1;
+        }
+      });
     });
     return changed;
   }
@@ -287,6 +297,21 @@
     return paths;
   }
 
+  function activePhaseFileDeliverablesAreGrounded(phaseState, normalizeWorkspacePath) {
+    if (!phaseState || !Array.isArray(phaseState.phases)) return false;
+    const activeIndex = Math.max(0, Math.min(
+      phaseState.phases.length - 1,
+      Number(phaseState.activeIndex) || 0,
+    ));
+    const phase = phaseState.phases[activeIndex];
+    const tasks = Array.isArray(phase && phase.tasks) ? phase.tasks : [];
+    if (!tasks.length) return false;
+    const fileTasks = tasks.filter((task) => (
+      task && extractFileLikeTaskPaths(task.text || task, normalizeWorkspacePath).length > 0
+    ));
+    return fileTasks.length > 0 && tasks.every((task) => task && (task.done || task.liveDone));
+  }
+
   // Durable whole-project file list (every phase's files) from plan.md-backed phases.
   // The re-planner shrinks planSpec.expectedFiles on a Continue, so the foundation
   // css/js drops out of validation scope — use this instead so cross-page checks fire.
@@ -303,6 +328,27 @@
       });
     });
     return paths;
+  }
+
+  // Reconnect a semantically planned follow-up to the durable phase plan when the
+  // planner targets a file owned by an unfinished phase. This is deliberately
+  // file/state based: natural wording such as "Continue chief" does not need to
+  // match a resume keyword list, and an unrelated edit does not resurrect plan.md.
+  function planTargetsUnfinishedPhaseFiles(planSpec, phases, normalizeWorkspacePath) {
+    const list = Array.isArray(phases) ? phases : [];
+    const norm = typeof normalizeWorkspacePath === 'function' ? normalizeWorkspacePath : (p) => String(p || '');
+    const targets = new Set((Array.isArray(planSpec && planSpec.expectedFiles) ? planSpec.expectedFiles : [])
+      .map((path) => norm(path || '').toLowerCase())
+      .filter(Boolean));
+    if (!targets.size) return false;
+    return list.some((phase) => {
+      const tasks = Array.isArray(phase && phase.tasks) ? phase.tasks : [];
+      return tasks.some((task) => (
+        task && !task.done
+        && extractFileLikeTaskPaths(task.text || task, norm)
+          .some((path) => targets.has(String(path || '').toLowerCase()))
+      ));
+    });
   }
 
   // Natural phase-handoff line: rotate phrasings by phase index so back-to-back
@@ -341,6 +387,39 @@
       && Array.isArray(missingFiles) && missingFiles.length === 0
       && !validationFailure
       && !validationPassed);
+  }
+
+  function planHasRunnableFiles(planSpec, normalizeWorkspacePath) {
+    if (!planSpec || String(planSpec.taskKind || '').toLowerCase() !== 'project') return false;
+    const normalize = typeof normalizeWorkspacePath === 'function'
+      ? normalizeWorkspacePath
+      : (value) => String(value || '');
+    const files = [
+      ...(Array.isArray(planSpec.expectedFiles) ? planSpec.expectedFiles : []),
+      ...(Array.isArray(planSpec.affectedFiles) ? planSpec.affectedFiles : []),
+    ];
+    return files.some((file) => /\.(?:html?|jsx?|tsx?|mjs|cjs|py|php|java|c|cc|cpp|cxx|go|rs|cs)$/i
+      .test(normalize(file || '')));
+  }
+
+  function shouldForceProjectRuntimeProof(
+    decision,
+    phaseState,
+    planSpec,
+    validationPassed,
+    runtimePassed,
+    normalizeWorkspacePath,
+  ) {
+    const finishing = !decision || decision.action !== 'tool' || decision.tool === 'none';
+    const finalPhase = !phaseState
+      || (Array.isArray(phaseState.phases) && phaseState.activeIndex === phaseState.phases.length - 1);
+    return Boolean(
+      finishing
+      && finalPhase
+      && validationPassed
+      && !runtimePassed
+      && planHasRunnableFiles(planSpec, normalizeWorkspacePath)
+    );
   }
 
   // Cross-run done-work memory per chat: survives Continue/stream crashes so
@@ -789,13 +868,13 @@
       const agentHasWorkspaceMutations = () => toolEvents.some((event) => (
         event
         && event.ok
-        && ['new_project', 'write_file', 'edit_file', 'mkdir', 'move', 'delete'].includes(String(event.tool || '').toLowerCase())
+        && ['new_project', 'write_file', 'edit_file', 'mkdir', 'move', 'delete', 'remember_project', 'forget_project_memory'].includes(String(event.tool || '').toLowerCase())
       ));
 
       const agentHasUsefulInspectionEvidence = () => toolEvents.some((event) => (
         event
         && event.ok
-        && ['read_file', 'read_files', 'search_files', 'validate_files', 'check_code', 'run_app', 'run_command']
+        && ['read_file', 'read_files', 'read_project_memory', 'search_files', 'validate_files', 'check_code', 'run_app', 'run_command']
           .includes(String(event.tool || '').toLowerCase())
       ));
 
@@ -846,22 +925,26 @@
               }
             }
             const url = runDevServer.url;
-            if (url && autoOpen) {
+            let ready = false;
+            if (url && typeof window.isLocalDevServerReady === 'function') {
+              try { ready = await window.isLocalDevServerReady(url); } catch (_) { }
+            }
+            if (url && ready && autoOpen) {
               try {
                 if (typeof window.openExternalUrl === 'function') window.openExternalUrl(url);
                 else window.open(url, '_blank');
               } catch (_) { }
             }
             const restartNote = restarted ? ' I restarted the dev server so it serves your latest changes.' : '';
-            if (url) {
+            if (url && ready) {
               return {
                 note: `${restartNote} The app is running at ${url} — I opened it in your browser (the dev-server card above also has Open and Stop buttons).`,
                 runHint: { kind: 'devserver', url },
               };
             }
             return {
-              note: `${restartNote} The dev server is running — its card above has the startup log and a Stop button.`,
-              runHint: { kind: 'run' },
+              note: `${restartNote} The dev server process is still starting or building. Its status stays amber until the local app is reachable; the Stop button remains available.`,
+              runHint: null,
             };
           }
           runDevServer = null;
@@ -870,21 +953,27 @@
           && ['write_file', 'edit_file'].includes(String(e.tool || '').toLowerCase())
           && /\.(html?|js|mjs|cjs|ts|tsx|jsx|css|py)$/i.test(String(e.path || '')));
         if (!runnableMutation) return { note: '', runHint: null };
-        // Fresh build (new entry page written this run) → launch it now; native
-        // Smart Run serves web projects over http:// and opens the browser.
+        // A clean final runtime proof may be a production build/smoke check,
+        // which does not leave a preview server behind. For web projects,
+        // launch the workspace preview now; native Smart Run waits for the
+        // port before opening the browser.
         const webPlan = String(planSpec && planSpec.primaryStack || '').toLowerCase() === 'web';
-        const wroteEntryHtml = webPlan && toolEvents.some((e) => e && e.ok && e.createdNewFile
-          && String(e.tool || '').toLowerCase() === 'write_file'
-          && /(?:^|\/)index\.html?$/i.test(String(e.path || '')));
-        if (wroteEntryHtml && autoOpen) {
+        const cleanRuntimeProof = toolEvents.some((e) => e
+          && String(e.tool || '').toLowerCase() === 'run_app'
+          && e.ok
+          && Number(e.runErrorCount || 0) === 0);
+        if (webPlan && cleanRuntimeProof && autoOpen) {
           let res = null;
           try { res = await deps.invokeWorkspaceAction('runWorkspaceApp', {}); } catch (_) { }
           if (res && res.ok) {
             const url = String(res.output || '').trim();
-            const where = /^https?:/i.test(url) ? `at ${url} in your browser` : (String(res.message || '').trim() || 'now');
+            const message = String(res.message || '').trim();
+            const alreadyReady = /already running|app running/i.test(message);
             return {
-              note: ` I opened the app for you — it's running ${where}. Use the Run button below (or ▶ above the file explorer) to open it again anytime.`,
-              runHint: { kind: 'run', url: /^https?:/i.test(url) ? url : '' },
+              note: alreadyReady
+                ? ` The complete check passed and I opened the app${url ? ` at ${url}` : ''}.`
+                : ' The complete check passed. The preview is starting now; its chip stays amber while dependencies/building finish, turns green only when reachable, and the browser opens automatically then.',
+              runHint: alreadyReady && /^https?:/i.test(url) ? { kind: 'run', url } : null,
             };
           }
         }
@@ -940,7 +1029,7 @@
         && ['run_app', 'run_command'].includes(String(event.tool || '').toLowerCase())
       ));
 
-      const isMutationTool = (tool) => ['new_project', 'write_file', 'edit_file', 'mkdir', 'move', 'delete'].includes(String(tool || '').toLowerCase());
+      const isMutationTool = (tool) => ['new_project', 'write_file', 'edit_file', 'mkdir', 'move', 'delete', 'remember_project', 'forget_project_memory'].includes(String(tool || '').toLowerCase());
       const normalizeDecisionPath = (value) => deps.normalizeWorkspacePath ? deps.normalizeWorkspacePath(value || '') : String(value || '');
       // read_files carries no `path`, so without a paths signature every call
       // shares one guard bucket — one malformed call blocked all later (valid,
@@ -951,6 +1040,28 @@
           ? decision.paths.join(',')
           : String((decision && (decision.paths || decision.path || decision.content)) || '');
         return raw.toLowerCase().replace(/\s+/g, '').slice(0, 500);
+      };
+      const selectVitalReadPaths = (rawPaths, limit = 6) => {
+        const paths = Array.from(new Set((Array.isArray(rawPaths) ? rawPaths : [])
+          .map((path) => deps.normalizeWorkspacePath(path || ''))
+          .filter((path) => path && path !== '/')));
+        if (paths.length <= limit) return paths;
+        const buckets = [[], [], [], [], [], []];
+        paths.forEach((path) => {
+          if (/(?:^|\/)package\.json$|(?:^|\/)(?:tsconfig|jsconfig|vite\.config|next\.config|tailwind\.config)/i.test(path)) buckets[0].push(path);
+          else if (/(?:^|\/)(?:page|layout|app|main|index)\.[cm]?[jt]sx?$|\.html?$/i.test(path)) buckets[1].push(path);
+          else if (/\.(?:css|scss|sass|less)$/i.test(path)) buckets[2].push(path);
+          else if (/(?:^|\/)(?:types?|store|state)(?:\/|\.|$)/i.test(path)) buckets[3].push(path);
+          else if (/(?:^|\/)components?\//i.test(path)) buckets[4].push(path);
+          else buckets[5].push(path);
+        });
+        const selected = [];
+        while (selected.length < limit && buckets.some((bucket) => bucket.length)) {
+          for (const bucket of buckets) {
+            if (bucket.length && selected.length < limit) selected.push(bucket.shift());
+          }
+        }
+        return selected;
       };
       const buildDecisionSignature = (decision) => ({
         tool: String(decision && decision.tool ? decision.tool : '').toLowerCase(),
@@ -1063,6 +1174,11 @@
             const lastContent = String(lastEvent.content || '').trim();
             if (newContent && newContent !== lastContent) return '';
           }
+          if (['remember_project', 'forget_project_memory'].includes(signature.tool)) {
+            const newContent = String(decision && decision.content ? decision.content : '').trim();
+            const lastContent = String(lastEvent.content || '').trim();
+            if (newContent && newContent !== lastContent) return '';
+          }
           if (signature.tool === 'read_file' && /file not found/i.test(String(lastEvent.observation || ''))) {
             return `read_file blocked for ${signature.path || 'this file'}: it does not exist — re-reading cannot help. If it is a planned file, CREATE it now with write_file; otherwise take the next planned step.`;
           }
@@ -1084,6 +1200,19 @@
       const hasSuccessfulNewProject = () => toolEvents.some((event) => (
         event && event.ok && String(event.tool || '').toLowerCase() === 'new_project'
       ));
+      const isResumeWithOpenWorkspace = () => {
+        if (!(requestToken && requestToken.isAgentResume)) return false;
+        const context = typeof deps.getWorkspaceContext === 'function'
+          ? deps.getWorkspaceContext()
+          : null;
+        if (!context || typeof context !== 'object') return false;
+        return Boolean(
+          String(context.workspaceRootName || '').trim()
+          || Number(context.rootEntryCount) > 0
+          || context.rootLoaded === true
+          || String(context.currentPath || '/') !== '/'
+        );
+      };
       // (Removed: keyword-based "coordinated frontend edit" helpers — only the
       // deleted read-before-edit hijack used them.)
       const repairDecisionBeforeExecution = (decision, step) => {
@@ -1158,7 +1287,33 @@
           }
         }
         if (String(decision.tool || '').toLowerCase() !== 'new_project') return decision;
-        if (!hasSuccessfulNewProject()) return decision;
+        if (!hasSuccessfulNewProject() && !isResumeWithOpenWorkspace()) return decision;
+        if (!hasSuccessfulNewProject() && isResumeWithOpenWorkspace()) {
+          toolEvents.push({
+            tool: 'new_project',
+            ok: true,
+            path: '/',
+            observation: 'Project creation was completed in an earlier phase. The existing workspace is restored; continue the active phase without creating another project.',
+            _syntheticResumeContext: true,
+          });
+          recordDebugTrace('agent_resume_new_project_blocked', {
+            chatId: String(chatId || ''),
+            step: String(step),
+            path: '/',
+          }, { chatId: String(chatId || ''), step, originalDecision: decision });
+          return {
+            action: 'tool',
+            tool: 'validate_files',
+            path: '',
+            content: '',
+            srcPath: '',
+            dstPath: '',
+            message: 'The existing workspace already belongs to this build; continuing the active phase in place.',
+            thought: 'Project creation is already complete, so I am continuing the active phase.',
+            raw: '[resume-project-already-created]',
+            _deterministic: true,
+          };
+        }
         const lastValidateIndex = findLastToolEventIndex((e) => String(e && e.tool || '').toLowerCase() === 'validate_files');
         if (lastValidateIndex >= 0 && !hasWorkspaceMutationSince(lastValidateIndex)) {
           const validateEvent = toolEvents[lastValidateIndex];
@@ -1231,20 +1386,9 @@
       if (planSpec && planSpec._planHardError) {
         deps.setThinkingStatus('');
         setAgentProgress('Stopped.');
-        appendAgentActivity({
-          kind: 'error',
-          title: 'Inference unavailable',
-          detail: String(planSpec._planHardError),
-          status: 'error',
-        });
-        deps.consumeLiveAssistantText();
-        const msg = `I couldn't plan this build — ${String(planSpec._planHardError)}`;
-        deps.commitAssistantMessage(chatId, msg, msg, {
-          agentActivities,
-          agentMeta: agentMetaWithRevert({ startedAt, completedAt: Date.now(), collapsed: false }),
-          forceNeedsContinue: true,
-          inferenceFailure: true,
-        });
+        if (typeof deps.surfaceAgentInferenceUnavailable === 'function') {
+          deps.surfaceAgentInferenceUnavailable(chatId, String(planSpec._planHardError));
+        }
         recordDebugTrace('agent_plan_hard_error', {
           chatId: String(chatId || ''),
           reason: deps.debugPreview(String(planSpec._planHardError), 240),
@@ -1337,6 +1481,32 @@
         if (planSpec) planSpec.phases = [];
       }
       const isResume = Boolean(requestToken && requestToken.isAgentResume);
+      const resumeWorkspaceContext = typeof deps.getWorkspaceContext === 'function'
+        ? deps.getWorkspaceContext()
+        : null;
+      const resumeHasOpenWorkspace = Boolean(
+        isResume
+        && resumeWorkspaceContext
+        && (
+          String(resumeWorkspaceContext.workspaceRootName || '').trim()
+          || Number(resumeWorkspaceContext.rootEntryCount) > 0
+          || resumeWorkspaceContext.rootLoaded === true
+          || String(resumeWorkspaceContext.currentPath || '/') !== '/'
+        )
+      );
+      if (resumeHasOpenWorkspace && !hasSuccessfulNewProject()) {
+        toolEvents.push({
+          tool: 'new_project',
+          ok: true,
+          path: '/',
+          observation: 'Project creation was completed in an earlier phase. Continue in the restored workspace and do not create a second project.',
+          _syntheticResumeContext: true,
+        });
+        recordDebugTrace('agent_resume_workspace_seeded', {
+          chatId: String(chatId || ''),
+          workspaceRootName: String(resumeWorkspaceContext.workspaceRootName || ''),
+        }, { chatId: String(chatId || ''), workspace: resumeWorkspaceContext });
+      }
       const filePhases = await readAgentPlanFilePhases();
       const fileHasUnfinished = filePhases && filePhases.length >= 2
         && typeof deps.firstUnfinishedPhaseIndex === 'function'
@@ -1350,20 +1520,9 @@
         const reason = String(planSpec && planSpec._planRaw || '').trim() || 'the inference provider did not respond';
         deps.setThinkingStatus('');
         setAgentProgress('Stopped.');
-        appendAgentActivity({
-          kind: 'error',
-          title: 'Inference unavailable',
-          detail: reason,
-          status: 'error',
-        });
-        deps.consumeLiveAssistantText();
-        const msg = `I couldn't plan this build — ${reason} Once the provider is reachable, send the request again.`;
-        deps.commitAssistantMessage(chatId, msg, msg, {
-          agentActivities,
-          agentMeta: agentMetaWithRevert({ startedAt, completedAt: Date.now(), collapsed: false }),
-          forceNeedsContinue: true,
-          inferenceFailure: true,
-        });
+        if (typeof deps.surfaceAgentInferenceUnavailable === 'function') {
+          deps.surfaceAgentInferenceUnavailable(chatId, reason);
+        }
         recordDebugTrace('agent_plan_infer_failed_stop', {
           chatId: String(chatId || ''),
           reason: deps.debugPreview(reason, 240),
@@ -1372,7 +1531,13 @@
       }
       // plan.md wins when it has unfinished phases and we're still phased (resume OR the
       // fresh decompose is phased) — stops each Continue re-partitioning the plan.
-      const preferPlanFile = Boolean(fileHasUnfinished && (isResume || planPhases.length >= 2));
+      const plannedFollowupHitsUnfinishedPhase = planTargetsUnfinishedPhaseFiles(
+        planSpec,
+        filePhases,
+        deps.normalizeWorkspacePath,
+      );
+      const preferPlanFile = Boolean(fileHasUnfinished
+        && (isResume || planPhases.length >= 2 || plannedFollowupHitsUnfinishedPhase));
       const phasesSource = preferPlanFile ? filePhases : planPhases;
       const phasedProjectRun = phasesSource.length >= 2;
       if (!phasedProjectRun) {
@@ -1508,7 +1673,7 @@
           title: String(active.title || ''),
           tasks: (Array.isArray(active.tasks) ? active.tasks : []).filter((t) => t && !t.done).map((t) => (
             t.liveDone
-              ? `${t.text} — ALREADY BUILT by an earlier run (file exists). Do not recreate it; edit only if something in it needs fixing.`
+              ? `${t.text} — ALREADY PRESENT from an earlier attempt of THIS SAME PHASE (file exists). Do not call it work from an earlier phase. Do not recreate or edit it unless its content genuinely needs changing.`
               : t.text
           )),
         };
@@ -1713,10 +1878,18 @@
         if (nextIdx < 0) keepPhaseTrackerPinned = false;
         return { idx, donePhase, nextIdx };
       };
-      const refreshPhaseLiveProgress = (rawPath) => {
+      const refreshPhaseLiveProgress = async (rawPath) => {
         if (!phaseState || typeof deps.setAgentPhaseTracker !== 'function') return 0;
         const changed = markPhaseTaskLiveProgressForPath(phaseState, rawPath, deps.normalizeWorkspacePath);
         if (!changed) return 0;
+        planSpec.phases = phaseState.phases;
+        const activePhase = phaseState.phases[phaseState.activeIndex] || {};
+        if (planSpec._activePhase) {
+          planSpec._activePhase.tasks = (Array.isArray(activePhase.tasks) ? activePhase.tasks : [])
+            .filter((task) => task && !task.done && !task.liveDone)
+            .map((task) => task.text);
+        }
+        await persistAgentPlanFile();
         deps.setAgentPhaseTracker({
           chatId,
           projectName: projectDisplayName,
@@ -1777,6 +1950,18 @@
         }
         return Boolean(latestValidation && latestValidationIndex > latestMutation && latestValidation.validationPassed === true);
       };
+      const hasCleanRuntimeProofSinceLatestMutation = () => {
+        let latestMutation = -1;
+        let latestCleanRun = -1;
+        for (let i = 0; i < toolEvents.length; i += 1) {
+          const event = toolEvents[i];
+          if (!event) continue;
+          const tool = String(event.tool || '').toLowerCase();
+          if (event.ok && ['write_file', 'edit_file'].includes(tool)) latestMutation = i;
+          if (tool === 'run_app' && event.ok && Number(event.runErrorCount || 0) === 0) latestCleanRun = i;
+        }
+        return latestCleanRun > latestMutation;
+      };
       const latestValidationFailureSinceLatestMutation = () => {
         let latestMutation = -1;
         let latestValidation = null;
@@ -1807,6 +1992,14 @@
 
       const sameFailureLimit = 3;
       const failureStreak = { key: '', count: 0 };
+      // Most runs keep the normal ceiling. If the final verification reaches that
+      // ceiling after real edits and exposes a new compiler/runtime error, grant one
+      // bounded repair window instead of stopping exactly when the next actionable
+      // error appears. The wall-clock deadline and repeated-failure circuit breakers
+      // still apply, so this cannot become an unlimited build loop.
+      let executionStepLimit = Number(deps.agentMaxSteps) || 28;
+      const runtimeRepairGraceSteps = 10;
+      let runtimeRepairGraceUsed = false;
       // "One repair, then ship": count how many times validate_files has failed. After
       // the first repair attempt (2nd failure), if only MINOR cross-file naming gaps
       // remain, the project finishes successfully with an advisory note instead of
@@ -1821,7 +2014,8 @@
           || /toggles\s+\.[\w-]+.*define that class/.test(s)
           || /but (?:neither|the)\b.*\bdefine/.test(s);
       };
-      for (let step = 1; step <= deps.agentMaxSteps; step += 1) {
+      for (let step = 1; step <= executionStepLimit; step += 1) {
+        if (planSpec) planSpec._executionStepLimit = executionStepLimit;
         if (!deps.isInferenceActive(requestToken)) return true;
         await ensureAgentPlanFile();
         if (Date.now() >= deadlineAt) {
@@ -2075,12 +2269,9 @@
             if (agentHasWorkspaceMutations()) {
               await deps.refreshWorkspaceTree(true);
             }
-            deps.commitAssistantMessage(chatId, failure, failure, {
-              agentActivities,
-              agentMeta: agentMetaWithRevert({ startedAt, completedAt: Date.now(), collapsed: false }),
-              forceNeedsContinue: true,
-              inferenceFailure: true,
-            });
+            if (typeof deps.surfaceAgentInferenceUnavailable === 'function') {
+              deps.surfaceAgentInferenceUnavailable(chatId, (res && res.message) || failure);
+            }
             if (runLog) runLog.end({ errored: !(res && res.timedOut), timedOut: Boolean(res && res.timedOut), message: (res && res.message) || 'agent step failed' });
             return true;
           }
@@ -2191,12 +2382,9 @@
           if (agentHasWorkspaceMutations()) {
             await deps.refreshWorkspaceTree(true);
           }
-          deps.commitAssistantMessage(chatId, failure, failure, {
-            agentActivities,
-            agentMeta: agentMetaWithRevert({ startedAt, completedAt: Date.now(), collapsed: false }),
-            forceNeedsContinue: true,
-            inferenceFailure: true,
-          });
+          if (typeof deps.surfaceAgentInferenceUnavailable === 'function') {
+            deps.surfaceAgentInferenceUnavailable(chatId, failure);
+          }
           return true;
         }
 
@@ -2205,6 +2393,45 @@
         decision.srcPath = normalizeDecisionPath(decision.srcPath || '');
         decision.dstPath = normalizeDecisionPath(decision.dstPath || '');
         applyDecisionPlanUpdate(decision, step);
+
+        // Intermediate phases are intentionally incomplete. Running a full
+        // framework build here turns missing future-phase modules/dependencies
+        // into fake repair work (including framework downgrades and install
+        // loops). Validate each intermediate phase statically; install and run
+        // once, in the final phase, when the dependency graph is complete.
+        const isNonFinalPhase = Boolean(
+          phaseState && phaseState.activeIndex < phaseState.phases.length - 1
+        );
+        const decisionTool = String(decision && decision.tool || '').toLowerCase();
+        const dependencyInstallCommand = decisionTool === 'run_command'
+          && /^\s*(?:npm|pnpm|yarn|bun)\s+(?:install|i|add)\b/i.test(String(decision.command || decision.content || ''));
+        if (isNonFinalPhase && (decisionTool === 'run_app' || dependencyInstallCommand)) {
+          const deferredDecision = decision;
+          const validationPassed = hasValidationPassedSinceLatestMutation();
+          decision = validationPassed
+            ? {
+              action: 'final',
+              tool: 'none',
+              message: 'This phase is complete and statically validated. Full dependency installation and runtime verification are deferred until the final phase.',
+              raw: '[defer-runtime-until-final-phase]',
+              _deterministic: true,
+            }
+            : {
+              action: 'tool',
+              tool: 'validate_files',
+              path: '/',
+              message: 'Checking this phase statically; the complete app will be installed and run in the final phase.',
+              raw: '[defer-runtime-validate-phase]',
+              _deterministic: true,
+            };
+          recordDebugTrace('agent_nonfinal_phase_runtime_deferred', {
+            chatId: String(chatId || ''),
+            step: String(step),
+            phase: String(phaseState.activeIndex + 1),
+            originalTool: decisionTool,
+            validationPassed: String(validationPassed),
+          }, { chatId: String(chatId || ''), step, phaseState, originalDecision: deferredDecision, repairedDecision: decision });
+        }
 
         if (phaseState && decision.action === 'tool' && String(decision.tool || '').toLowerCase() === 'validate_files') {
           const missingPhaseFiles = getKnownActivePhaseFileTaskGaps();
@@ -2508,6 +2735,34 @@
           }, { chatId: String(chatId || ''), step, phaseState, toolEvents });
         }
 
+        // Static validation proves file shape, not that a complete program
+        // installs, builds, starts, or survives its smoke interaction. Require
+        // one clean stack-aware run before a project (or its final phase) can
+        // finish. run_app selects the correct verifier for web, Python, native,
+        // JVM, .NET, and other supported workspace types.
+        if (shouldForceProjectRuntimeProof(
+          decision,
+          phaseState,
+          planSpec,
+          hasValidationPassedSinceLatestMutation(),
+          hasCleanRuntimeProofSinceLatestMutation(),
+          deps.normalizeWorkspacePath,
+        )) {
+          decision = {
+            action: 'tool',
+            tool: 'run_app',
+            path: '/',
+            message: 'Running the complete project check before finishing.',
+            _deterministic: true,
+          };
+          recordDebugTrace('agent_final_runtime_forced', {
+            chatId: String(chatId || ''),
+            step: String(step),
+            phase: phaseState ? String(phaseState.activeIndex + 1) : '',
+            stack: String(planSpec && planSpec.primaryStack || ''),
+          }, { chatId: String(chatId || ''), step, phaseState, planSpec, toolEvents });
+        }
+
         if (decision.action !== 'tool' || decision.tool === 'none') {
           // Don't accept a finish (incl. a no-op tool:none) over an unrepaired run_app
           // failure — push the errors back and force a real repair attempt. (This is
@@ -2636,8 +2891,15 @@
               setAgentProgress('Checking files...');
               continue;
             }
-            // No files written this run → don't complete the phase; push to build.
-            if (countRunMutations() === 0 && phaseEmptyFinalNudges < 2) {
+            // A resumed phase may already have its successful write on disk from a
+            // prior run whose UI finalizer failed. Disk-seeded liveDone tasks plus a
+            // fresh validation are enough to reconcile the phase without rewriting
+            // the file. Keep the no-work guard for genuinely unbuilt phases.
+            const existingPhaseDeliverablesGrounded = activePhaseFileDeliverablesAreGrounded(
+              phaseState,
+              deps.normalizeWorkspacePath,
+            );
+            if (countRunMutations() === 0 && !existingPhaseDeliverablesGrounded && phaseEmptyFinalNudges < 2) {
               phaseEmptyFinalNudges += 1;
               const activeP = phaseState.phases[phaseState.activeIndex] || {};
               const pendingTasks = (Array.isArray(activeP.tasks) ? activeP.tasks : [])
@@ -2655,7 +2917,7 @@
               continue;
             }
             // Still nothing after nudges — stop for Continue-retry, don't false-complete.
-            if (countRunMutations() === 0) {
+            if (countRunMutations() === 0 && !existingPhaseDeliverablesGrounded) {
               const activeP = phaseState.phases[phaseState.activeIndex] || {};
               setAgentProgress('Stopped.');
               deps.consumeLiveAssistantText();
@@ -2851,6 +3113,51 @@
           }
         }
 
+        // A batch read is one inspection, not N independent reads. Keep it small
+        // and diverse, and remove unchanged paths already cached this run. This
+        // prevents the "read the same 10 files twice" loop while still allowing a
+        // second focused batch for genuinely new dependencies.
+        if (decision.action === 'tool' && String(decision.tool || '').toLowerCase() === 'read_files') {
+          const requested = Array.isArray(decision.paths) ? decision.paths : [];
+          const unread = requested.filter((rawPath) => {
+            const target = deps.normalizeWorkspacePath(rawPath || '');
+            if (!target) return false;
+            let lastRead = -1;
+            let lastMutation = -1;
+            toolEvents.forEach((event, index) => {
+              if (!event || !event.ok || deps.normalizeWorkspacePath(event.path || '') !== target) return;
+              const eventTool = String(event.tool || '').toLowerCase();
+              if (eventTool === 'read_file') lastRead = index;
+              if (['write_file', 'edit_file', 'move', 'delete'].includes(eventTool)) lastMutation = index;
+            });
+            return lastRead < 0 || lastMutation > lastRead;
+          });
+          const selected = selectVitalReadPaths(unread, 6);
+          if (!selected.length) {
+            toolEvents.push({
+              tool: 'read_files',
+              ok: false,
+              _guardBlock: true,
+              pathsSig: decisionPathsSignature(decision),
+              observation: 'Every requested file is already cached and unchanged. Do not repeat the batch. Use the dependency/signature brief in TOOL_RESULTS, make the planned change now, or run one targeted search for a specific unresolved symbol.',
+            });
+            recordDebugTrace('agent_batch_reread_blocked', {
+              chatId: String(chatId || ''), step: String(step), requested: String(requested.length),
+            }, { chatId: String(chatId || ''), step, requested });
+            continue;
+          }
+          if (selected.length !== requested.length) {
+            decision.paths = selected;
+            decision._readPathsOmitted = requested
+              .map((path) => deps.normalizeWorkspacePath(path || ''))
+              .filter((path) => path && !selected.includes(path));
+            recordDebugTrace('agent_read_batch_focused', {
+              chatId: String(chatId || ''), step: String(step),
+              requested: String(requested.length), selected: String(selected.length),
+            }, { chatId: String(chatId || ''), step, selected, omitted: decision._readPathsOmitted });
+          }
+        }
+
         // Read-loop guard (see evaluateRepeatedRead).
         if (decision.action === 'tool' && String(decision.tool || '').toLowerCase() === 'read_file') {
           const readPath = deps.normalizeWorkspacePath(decision.path || '');
@@ -2921,9 +3228,13 @@
         // search_files query", so it must not block that query at the read cap.
         if (decision.action === 'tool'
           && (String(decision.tool || '').toLowerCase() === 'read_file'
+            || String(decision.tool || '').toLowerCase() === 'read_files'
             || String(decision.tool || '').toLowerCase() === 'search_files')) {
           const inspections = countInspectionsSinceMutation(toolEvents);
-          const inspectionCap = String(decision.tool || '').toLowerCase() === 'search_files' ? 12 : 8;
+          const phaseCreationWork = Boolean(phaseState && countRunMutations() === 0);
+          const inspectionCap = phaseCreationWork
+            ? (String(decision.tool || '').toLowerCase() === 'search_files' ? 4 : 3)
+            : (String(decision.tool || '').toLowerCase() === 'search_files' ? 7 : 6);
           // Never budget-block a read the edit gate itself demanded (guard deadlock)
           const readTarget = deps.normalizeWorkspacePath(decision.path || '');
           const editGateDemandedRead = Boolean(readTarget) && toolEvents.slice(-4).some((event) => (
@@ -2947,7 +3258,7 @@
               ok: false,
               _guardBlock: true,
               path: deps.normalizeWorkspacePath(decision.path || ''),
-              observation: `You have inspected the workspace ${inspections} times without making a single change — you already have enough context. STOP inspecting: no more read_file or search_files. Make the change now with edit_file using the lines you have already located, CREATE any missing planned file with write_file (creation is not inspection), or finalize if the task is done. Anchors do NOT need to be byte-exact — close matches (whitespace/indent differences) are accepted, so edit from what you have.${checklistSteer}`,
+              observation: `You already have ${inspections} focused inspection result${inspections === 1 ? '' : 's'} and no unresolved symbol or error was named for this request. Stop gathering broad context. Create the next missing planned file now, make the targeted edit using cached evidence, or run ONE search only if you can name the exact symbol/selector/error you still need.${checklistSteer}`,
             });
             continue;
           }
@@ -3166,8 +3477,24 @@
           // Ask-first commands are a hard human-in-the-loop boundary — but the run
           // HOLDS on the shared confirmation card (like project-scope and delete)
           // and continues seamlessly after the choice, instead of ending the run.
+          // Remove the optimistic "Running command" row while held. The composer
+          // approval card is the single permission surface; once chosen, only the
+          // real command outcome is added to the timeline.
+          for (let i = agentActivities.length - 1; i >= 0; i -= 1) {
+            const activity = agentActivities[i];
+            if (!activity || String(activity.status || '') !== 'pending') continue;
+            const pendingCommand = String(activity.terminal && activity.terminal.command || '').trim();
+            const decisionCommand = String(decision.command || toolResult.terminalCommand || '').trim();
+            const pendingMatches = String(activity.kind || '') === 'command'
+              ? (!pendingCommand || pendingCommand === decisionCommand)
+              : String(decision.tool || '').toLowerCase() === 'run_app';
+            if (pendingMatches) {
+              agentActivities.splice(i, 1);
+              deps.scheduleLiveStreamRender();
+              break;
+            }
+          }
           setAgentProgress('Waiting for approval.');
-          appendAgentActivity(deps.buildAgentActivityFromToolResult(decision, toolResult, toolEvents));
           const permissionCommand = String(
             (toolResult && toolResult.terminalCommand)
             || (toolResult && toolResult.terminalProof && toolResult.terminalProof.command)
@@ -3427,9 +3754,11 @@
             : [],
           content: ['write_file', 'edit_file'].includes(String(decision.tool || '').toLowerCase())
             ? String(toolResult && typeof toolResult.writtenContent === 'string' ? toolResult.writtenContent : decision.content || '')
+            : (['remember_project', 'forget_project_memory'].includes(String(decision.tool || '').toLowerCase())
+              ? String(decision.content || '')
             : (String(decision.tool || '').toLowerCase() === 'read_file'
               ? String(toolResult && typeof toolResult.readContent === 'string' ? toolResult.readContent : '')
-              : ''),
+              : '')),
           // Pre-change content — lets the change-summary/diff builders ground the
           // completion message and the finish audit in what actually changed.
           originalContent: ['write_file', 'edit_file'].includes(String(decision.tool || '').toLowerCase())
@@ -3474,7 +3803,7 @@
               observation: `write_file ok: ${autoPath} ${String(autoFile.note || '(synchronized automatically from project imports).')}`,
               _automaticSupportFile: true,
             });
-            refreshPhaseLiveProgress(autoPath);
+            await refreshPhaseLiveProgress(autoPath);
           }
         }
         // Track the run's dev server + staleness (source mutated after start).
@@ -3605,13 +3934,35 @@
           && (toolResult.mutated || String(decision.tool || '').toLowerCase() === 'validate_files')) {
           const cl = refreshChecklist();
           if (toolResult.mutated) {
-            refreshPhaseLiveProgress(toolResult.writtenPath || decision.path || '');
+            await refreshPhaseLiveProgress(toolResult.writtenPath || decision.path || '');
           }
           if (cl && cl.total) {
             setAgentProgress(cl.allDone
               ? `All ${cl.total} planned items addressed — preparing the summary...`
               : `Progress ${cl.doneCount}/${cl.total} — continuing...`);
           }
+        }
+        if (!runtimeRepairGraceUsed
+          && step >= executionStepLimit - 1
+          && String(decision.tool || '').toLowerCase() === 'run_app'
+          && toolResult && toolResult.ok
+          && Number(toolResult.runErrorCount || 0) > 0
+          && countRunMutations() > 0
+          && Date.now() < deadlineAt) {
+          runtimeRepairGraceUsed = true;
+          executionStepLimit += runtimeRepairGraceSteps;
+          if (planSpec) planSpec._executionStepLimit = executionStepLimit;
+          toolEvents.push({
+            tool: 'runtime_repair_budget',
+            ok: true,
+            observation: `The final project check exposed another actionable error after real edits. Continue repairing and rerunning; ${runtimeRepairGraceSteps} bounded repair steps were added to this run.`,
+          });
+          setAgentProgress('Build found another issue — continuing the repair...');
+          recordDebugTrace('agent_runtime_repair_budget_extended', {
+            chatId: String(chatId || ''),
+            step: String(step),
+            newLimit: String(executionStepLimit),
+          }, { chatId: String(chatId || ''), step, executionStepLimit, toolEvents });
         }
         // Backstop: bound the run at the phase's mutation budget so it can't time out.
         if (phaseState && toolResult && toolResult.ok && toolResult.mutated
@@ -3900,26 +4251,23 @@
           // its own final (which states honestly that nothing was changed).
           const isAnalysisRun = String(planSpec && planSpec.taskKind || '').toLowerCase() === 'analysis';
           if (finalCheck.ok && !isWeakEditPlan() && (agentHasWorkspaceMutations() || isAnalysisRun || shouldSummarizeReadOnlyRun())) {
-            // Don't finish a browser-runnable project until a CLEAN run_app has run
-            // since the last write — static validation can't see a crash-on-load.
-            // Not-yet-run -> deriveFallbackAgentDecision sequences run_app next step;
-            // ran-with-errors -> the model repairs from the run_app observation.
-            const browserRunnableProject = !isAnalysisRun && toolEvents.some((e) => e && e.ok
-              && ['write_file', 'edit_file'].includes(String(e.tool || '').toLowerCase())
-              && /\.(html?|js|mjs|cjs)$/i.test(deps.normalizeWorkspacePath(e.path || '')));
-            if (browserRunnableProject) {
-              let lastWriteIdx = -1;
-              let lastCleanRunIdx = -1;
-              for (let i = 0; i < toolEvents.length; i += 1) {
-                const ev = toolEvents[i];
-                if (!ev) continue;
-                const t = String(ev.tool || '').toLowerCase();
-                if (ev.ok && ['write_file', 'edit_file'].includes(t)) lastWriteIdx = i;
-                if (t === 'run_app' && ev.ok && Number(ev.runErrorCount) === 0) lastCleanRunIdx = i;
-              }
-              if (lastCleanRunIdx <= lastWriteIdx) continue;
-            }
-            const unmetCriteria = await getUnmetCriteriaNudge();
+            // The deterministic final-proof rule applies here too: this
+            // auto-finalization path must not bypass the decision-level guard.
+            // It is stack/file metadata driven, so TSX, Python, C++, Java, Go,
+            // Rust, and other runnable projects get the same protection.
+            const runtimeProofRequired = shouldForceProjectRuntimeProof(
+              { action: 'final', tool: 'none' },
+              phaseState,
+              planSpec,
+              hasValidationPassedSinceLatestMutation(),
+              hasCleanRuntimeProofSinceLatestMutation(),
+              deps.normalizeWorkspacePath,
+            );
+            if (runtimeProofRequired) continue;
+            // Whole-project criteria are broader than one phase. The phase's file
+            // contract and validation govern phased completion; auditing every final
+            // criterion here made a docs phase reread unrelated source files.
+            const unmetCriteria = phaseState ? null : await getUnmetCriteriaNudge();
             if (unmetCriteria) {
               pushCriteriaNudgeObservation(unmetCriteria);
               continue;
@@ -3935,14 +4283,30 @@
               continue;
             }
             setAgentProgress('Preparing the summary...');
-            // Auto-finalizing while on the LAST phase must tick plan.md + fade the
-            // tracker — it used to leave Phase N's boxes open under a "complete" final.
-            if (phaseState && phaseState.activeIndex >= phaseState.phases.length - 1) {
-              try { await completeActivePhase(); } catch (_) { }
+            // Auto-finalization ends the ACTIVE phase, not only the final one.
+            // Previously a successful Phase 4/5 README write posted its completion
+            // summary but left Phase 4 unchecked because only Phase 5 was advanced.
+            let autoPhaseCompletion = null;
+            if (phaseState) {
+              try { autoPhaseCompletion = await completeActivePhase(); } catch (_) { }
             }
+            const hasNextPhase = Boolean(autoPhaseCompletion && autoPhaseCompletion.nextIdx >= 0);
             let finalText = String(await deps.generateAgentCompletionText(taskText, toolEvents, getWorkspaceLabel(), planSpec) || '');
-            const surface = await buildFinishRunSurface({ autoOpen: true });
-            if (surface.note) finalText += surface.note;
+            let surface = { note: '', runHint: null };
+            if (hasNextPhase) {
+              const nextPhase = phaseState.phases[autoPhaseCompletion.nextIdx] || {};
+              const handoff = buildPhaseHandoffMessage(
+                autoPhaseCompletion.idx,
+                autoPhaseCompletion.donePhase.title,
+                autoPhaseCompletion.nextIdx,
+                nextPhase.title,
+                { forwardOnly: Boolean(finalText.trim()) },
+              );
+              finalText = finalText.trim() ? `${finalText.trim()}\n\n${handoff}` : handoff;
+            } else {
+              surface = await buildFinishRunSurface({ autoOpen: true });
+              if (surface.note) finalText += surface.note;
+            }
             if (agentHasWorkspaceMutations()) {
               await deps.refreshWorkspaceTree(true);
             }
@@ -3950,7 +4314,7 @@
             deps.commitAssistantMessage(chatId, finalText, finalText, {
               agentActivities,
               agentMeta: agentMetaWithRevert({ startedAt, completedAt: Date.now(), collapsed: true, runHint: surface.runHint }),
-              forceNeedsContinue: false,
+              forceNeedsContinue: hasNextPhase,
             });
             recordDebugTrace('agent_done', {
               chatId: String(chatId || ''),
@@ -4090,11 +4454,11 @@
       });
       recordDebugTrace('agent_done', {
         chatId: String(chatId || ''),
-        step: String(deps.agentMaxSteps),
+        step: String(executionStepLimit),
         fallback: 'true',
       }, {
         chatId: String(chatId || ''),
-        step: deps.agentMaxSteps,
+        step: executionStepLimit,
         fallback: true,
         toolEvents,
       });
@@ -4168,7 +4532,11 @@
     markPhaseTaskLiveProgressForPath,
     getActivePhaseFileTaskGaps,
     activePhaseFilePaths,
+    activePhaseFileDeliverablesAreGrounded,
+    planTargetsUnfinishedPhaseFiles,
     shouldForcePhaseValidation,
+    planHasRunnableFiles,
+    shouldForceProjectRuntimeProof,
     buildAgentLineDiffPreview,
   };
 })(window);

@@ -8080,8 +8080,8 @@ html.platform-mac .settings-sidebar {
   padding: 2px 2px 0 0;
 }
 
-/* Running dev servers: green glass pill; hover slides in Open + Stop, click
-   opens a details popover, stopping shows an amber spinner. */
+/* Dev servers stay amber while dependencies/build/startup are in progress.
+   Green is reserved for a URL that has answered a reachability probe. */
 .dev-server-chips {
   display: flex;
   align-items: center;
@@ -8119,6 +8119,29 @@ html.platform-mac .settings-sidebar {
   box-shadow: 0 0 9px rgba(47, 212, 124, 0.65);
   flex-shrink: 0;
 }
+.dev-server-chip.starting {
+  border-color: rgba(245, 164, 35, 0.42);
+  background: linear-gradient(180deg, rgba(38, 27, 9, 0.97), rgba(23, 17, 7, 0.97));
+}
+.dev-server-chip.starting:hover,
+.dev-server-chip.starting:focus-within {
+  border-color: rgba(245, 164, 35, 0.7);
+  background: linear-gradient(180deg, rgba(43, 31, 11, 0.98), rgba(27, 19, 8, 0.98));
+  box-shadow: 0 0 0 1px rgba(245, 164, 35, 0.06), 0 8px 20px rgba(0, 0, 0, 0.3);
+}
+.dev-server-chip.starting .dsc-dot {
+  background: transparent;
+  border: 2px solid rgba(245, 164, 35, 0.25);
+  border-top-color: #f5a423;
+  box-shadow: none;
+  animation: dsc-spin 0.75s linear infinite;
+}
+.dev-server-chip.starting .dsc-actions {
+  width: 21px;
+  margin-left: 7px;
+  opacity: 1;
+}
+.dev-server-chip.starting .dsc-port { color: #c38a2d; }
 .dsc-copy {
   display: flex;
   align-items: baseline;
@@ -8203,6 +8226,7 @@ html.platform-mac .settings-sidebar {
   margin-left: 0 !important;
   opacity: 0 !important;
 }
+.dsd-starting { color: #f5a423; }
 @keyframes dsc-spin { to { transform: rotate(360deg); } }
 #devServerDetails {
   position: fixed;

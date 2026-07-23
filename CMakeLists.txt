@@ -24,8 +24,8 @@ option(AI_EXE_UI_REMEMBER_LAYOUT "Remember panel layout in local storage" ON)
 option(AI_EXE_ENABLE_REMOTE_PROVIDERS "Enable hosted/API inference providers in the UI" ON)
 option(AI_EXE_ENABLE_DEV_PLANNER "Enable localhost development planner endpoint in the UI" OFF)
 set(AI_EXE_WEBVIEW2_DIR "" CACHE PATH "Microsoft.Web.WebView2 NuGet package root (provides WebView2.h + WebView2Loader.dll for the Windows GUI). Without it the GUI builds in a non-rendering fallback mode.")
-set(AI_EXE_APP_VERSION "9.5.4" CACHE STRING "AI.EXE app and UI version" FORCE)
-set(AI_EXE_BUILD_TAG "fast-incomplete-final-recovery" CACHE STRING "Human-readable AI.EXE build tag" FORCE)
+set(AI_EXE_APP_VERSION "9.6.0" CACHE STRING "AI.EXE app and UI version" FORCE)
+set(AI_EXE_BUILD_TAG "project-memory-agent-reliability" CACHE STRING "Human-readable AI.EXE build tag" FORCE)
 set(AI_EXE_BUILD_LABEL "v${AI_EXE_APP_VERSION} (${AI_EXE_BUILD_TAG} 2026-07-23)")
 
 if(AI_EXE_UI_ANIMATIONS_DEFAULT)
@@ -106,6 +106,7 @@ if(WIN32)
   set(WIN_AGENT_RUNTIME_JS "${CMAKE_SOURCE_DIR}/ui/agent-runtime.js")
   set(WIN_AGENT_EXECUTOR_JS "${CMAKE_SOURCE_DIR}/ui/agent-executor.js")
   set(WIN_AGENT_LOOP_JS "${CMAKE_SOURCE_DIR}/ui/agent-loop.js")
+  set(WIN_AGENT_AI_LOOP_JS "${CMAKE_SOURCE_DIR}/ui/agent-ai-loop.js")
   set(WIN_CHAT_SHELL_JS "${CMAKE_SOURCE_DIR}/ui/chat-shell.js")
   set(WIN_CHAT_RENDERER_JS "${CMAKE_SOURCE_DIR}/ui/chat-renderer.js")
   set(WIN_FILE_VIEWER_JS "${CMAKE_SOURCE_DIR}/ui/file-viewer.js")
@@ -177,6 +178,9 @@ if(WIN32)
       "${WIN_AGENT_LOOP_JS}"
       "$<TARGET_FILE_DIR:ai_exe_gui>/ui/agent-loop.js"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      "${WIN_AGENT_AI_LOOP_JS}"
+      "$<TARGET_FILE_DIR:ai_exe_gui>/ui/agent-ai-loop.js"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
       "${WIN_CHAT_SHELL_JS}"
       "$<TARGET_FILE_DIR:ai_exe_gui>/ui/chat-shell.js"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
@@ -224,6 +228,7 @@ if(APPLE)
   set(MAC_AGENT_RUNTIME_JS ui/agent-runtime.js)
   set(MAC_AGENT_EXECUTOR_JS ui/agent-executor.js)
   set(MAC_AGENT_LOOP_JS ui/agent-loop.js)
+  set(MAC_AGENT_AI_LOOP_JS ui/agent-ai-loop.js)
   set(MAC_CHAT_SHELL_JS ui/chat-shell.js)
   set(MAC_CHAT_RENDERER_JS ui/chat-renderer.js)
   set(MAC_FILE_VIEWER_JS ui/file-viewer.js)
@@ -245,6 +250,7 @@ if(APPLE)
   set_source_files_properties(${MAC_AGENT_RUNTIME_JS} PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
   set_source_files_properties(${MAC_AGENT_EXECUTOR_JS} PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
   set_source_files_properties(${MAC_AGENT_LOOP_JS} PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
+  set_source_files_properties(${MAC_AGENT_AI_LOOP_JS} PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
   set_source_files_properties(${MAC_CHAT_SHELL_JS} PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
   set_source_files_properties(${MAC_CHAT_RENDERER_JS} PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
   set_source_files_properties(${MAC_FILE_VIEWER_JS} PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
@@ -275,6 +281,7 @@ if(APPLE)
     ${MAC_AGENT_RUNTIME_JS}
     ${MAC_AGENT_EXECUTOR_JS}
     ${MAC_AGENT_LOOP_JS}
+    ${MAC_AGENT_AI_LOOP_JS}
     ${MAC_CHAT_SHELL_JS}
     ${MAC_CHAT_RENDERER_JS}
     ${MAC_FILE_VIEWER_JS}

@@ -1243,9 +1243,8 @@ bool LaunchNodeDevServerWin(const std::filesystem::path &root, int port,
       << "  echo %RUNNER% is still missing after install.\r\n"
       << "  goto end\r\n"
       << ")\r\n"
-      << "start \"\" \"" << url << "\"\r\n"
       << "echo Starting dev server at " << url << "\r\n"
-      << "rem The launcher opened the URL; BROWSER=none prevents a second browser tab.\r\n"
+      << "rem AI.EXE opens the URL only after the port is reachable.\r\n"
       << "set BROWSER=none\r\n"
       << "call npm run dev -- "
       << (next_project ? "--hostname 127.0.0.1 --port " : "--host 127.0.0.1 --port ")
@@ -1276,6 +1275,56 @@ bool LaunchNodeDevServerWin(const std::filesystem::path &root, int port,
                                    temp_dir, SW_SHOWNORMAL);
   if (reinterpret_cast<INT_PTR>(result) <= 32) {
     if (err) *err = "Could not open a console to run the Vite project.";
+    return false;
+  }
+  return true;
+}
+
+void OpenUrlWhenReadyWin(int port, const std::string &url) {
+  std::thread([port, url]() {
+    for (int attempt = 0; attempt < 240; ++attempt) {
+      if (IsLoopbackTcpPortOpen(port)) {
+        const std::wstring url_w(url.begin(), url.end());
+        ShellExecuteW(nullptr, L"open", url_w.c_str(), nullptr, nullptr,
+                      SW_SHOWNORMAL);
+        return;
+      }
+      std::this_thread::sleep_for(std::chrono::seconds(1));
+    }
+  }).detach();
+}
+
+bool LaunchNodeDevServerTrackedWin(const std::filesystem::path &root, int port,
+                                   bool next_project, std::string *err) {
+  wchar_t system_root[MAX_PATH] = {0};
+  const DWORD root_len = GetEnvironmentVariableW(
+      L"SystemRoot", system_root, MAX_PATH);
+  const std::filesystem::path cmd = root_len > 0
+      ? std::filesystem::path(system_root) / "System32" / "cmd.exe"
+      : std::filesystem::path(L"C:\\Windows\\System32\\cmd.exe");
+  if (!std::filesystem::exists(cmd)) {
+    if (err) *err = "Windows command shell was not found.";
+    return false;
+  }
+
+  const std::string runner = next_project
+      ? "node_modules\\.bin\\next.cmd"
+      : "node_modules\\.bin\\vite.cmd";
+  std::ostringstream script;
+  script << "where npm >nul 2>nul || (echo Node.js/npm is required. & exit /b 1)"
+         << " & if not exist \"" << runner << "\""
+         << " (call npm install || call npm install --legacy-peer-deps || exit /b 1)"
+         << " & if not exist \"" << runner << "\""
+         << " (echo " << runner << " is still missing after install. & exit /b 1)"
+         << " & call npm run dev -- "
+         << (next_project ? "--hostname 127.0.0.1 --port " : "--host 127.0.0.1 --port ")
+         << port << (next_project ? "" : " --strictPort");
+
+  std::string start_err;
+  const int sid = DevServerManager::Instance().Start(
+      cmd, {"/d", "/s", "/c", script.str()}, root, "npm run dev", &start_err);
+  if (sid <= 0) {
+    if (err) *err = start_err.empty() ? "Could not start the dev server." : start_err;
     return false;
   }
   return true;
@@ -2442,7 +2491,9 @@ private:
             ShellExecuteW(nullptr, L"open", url_w.c_str(), nullptr, nullptr,
                           SW_SHOWNORMAL);
             message = "Vite dev server already running.";
-          } else if (LaunchNodeDevServerWin(root, port, false, &op_err)) {
+          } else if (LaunchNodeDevServerTrackedWin(root, port, false, &op_err)
+                     || LaunchNodeDevServerWin(root, port, false, &op_err)) {
+            OpenUrlWhenReadyWin(port, output);
             message = "Starting Vite dev server.";
           } else {
             ok = false;
@@ -2456,7 +2507,9 @@ private:
             ShellExecuteW(nullptr, L"open", url_w.c_str(), nullptr, nullptr,
                           SW_SHOWNORMAL);
             message = "Next.js dev server already running.";
-          } else if (LaunchNodeDevServerWin(root, port, true, &op_err)) {
+          } else if (LaunchNodeDevServerTrackedWin(root, port, true, &op_err)
+                     || LaunchNodeDevServerWin(root, port, true, &op_err)) {
+            OpenUrlWhenReadyWin(port, output);
             message = "Starting Next.js dev server.";
           } else {
             ok = false;

@@ -40,15 +40,22 @@ assert.match(executor, /function isDevServerCommand/);
 assert.match(executor, /devServerStart/);
 assert.match(executor, /do NOT run this command again/i);
 assert.match(executor, /devServer: \{ id: serverId/);
+assert.match(executor, /ready: Boolean\(url\)/);
 
 // UI: card with Stop/Open buttons survives activity normalization.
-assert.match(renderer, /title: 'Dev server running'/);
+assert.match(renderer, /'Dev server ready' : 'Dev server starting'/);
+assert.match(renderer, /status: devServerReady \? 'done' : 'running'/);
 assert.match(renderer, /devServerStop/);
 assert.match(renderer, /devServerOpenUrl/);
 assert.match(renderer, /devServer: item\.devServer && typeof item\.devServer === 'object'/);
 assert.match(aiExe, /function handleDevServerCardClick/);
 assert.match(aiExe, /devServerStop', \{ serverId \}/);
+assert.match(aiExe, /async function isLocalDevServerReady/);
+assert.match(aiExe, /Starting \/ building/);
+assert.match(aiExe, /ready \? 'button' : 'status'/);
 assert.match(css, /\.msg-agent-devserver-btn/);
+assert.match(css, /\.dev-server-chip\.starting/);
+assert.match(css, /\.dsd-starting/);
 assert.match(aiExe, /classList\.add\('platform-windows'\)/);
 assert.match(css, /html\.platform-windows \*::\-webkit-scrollbar/);
 assert.match(css, /html\.platform-windows \*::\-webkit-scrollbar-button/);
@@ -76,5 +83,9 @@ assert.match(releaseWorkflow, /Smoke-test bundled backend/);
 assert.match(releaseWorkflow, /Bundled AI\.EXE backend did not become healthy/);
 assert.match(win, /Downloading update/);
 assert.doesNotMatch(win, /Downloading update…/);
+assert.match(win, /OpenUrlWhenReadyWin/);
+assert.match(win, /LaunchNodeDevServerTrackedWin/);
+assert.doesNotMatch(win, /start \\"\\" \\".*127\.0\.0\.1/);
+assert.match(mac, /OpenViteUrlWhenReady/);
 
 console.log('PASS: dev-server process manager (tracked start/stop, bridge actions, UI card, adapter thread cleanup)');

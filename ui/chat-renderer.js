@@ -266,6 +266,8 @@
           const detail = clipActivityText(item.detail || '', 640);
           const meta = clipActivityText(item.meta || '', 140);
           if (!title && !detail && !meta) return null;
+          if (String(item.kind || '').trim().toLowerCase() === 'command'
+            && title.toLowerCase() === 'permission needed') return null;
           const status = String(item.status || '').trim().toLowerCase();
           // Structured checklist rows (for kind:'checklist') survive normalization
           // so the plan renders as a real UI element, not raw markdown text, and is
@@ -324,7 +326,9 @@
             openKind: String(item.openKind || '').trim().toLowerCase() === 'folder' ? 'folder' : 'file',
             openStartLine: Math.max(0, Number(item.openStartLine) || 0),
             openEndLine: Math.max(0, Number(item.openEndLine) || 0),
-            status: status === 'error' ? 'error' : (status === 'pending' ? 'pending' : 'done'),
+            status: status === 'error'
+              ? 'error'
+              : (status === 'pending' ? 'pending' : (status === 'running' ? 'running' : 'done')),
             // Structured outcome flag (validate/run cards) — group headers key off it;
             // dropping it here made "Checked files — no issues found" wrap failed checks.
             hasIssues: item.hasIssues === true,
@@ -340,6 +344,7 @@
               id: Math.max(0, Number(item.devServer.id) || 0),
               url: String(item.devServer.url || '').slice(0, 300),
               running: item.devServer.running !== false,
+              ready: item.devServer.ready === true || Boolean(String(item.devServer.url || '').trim()),
             } : null,
             ts: Number(item.ts) || nowTs(),
           };
@@ -854,6 +859,31 @@
         });
       }
       if (!ok) return null;
+      if (tool === 'read_project_memory') {
+        const itemCount = Number((observation.match(/^Project memory \((\d+) items?\)/i) || [])[1]) || 0;
+        return buildInlineAgentActivityBase({
+          kind: 'read',
+          title: 'Recalled project memory',
+          detail: itemCount ? `${itemCount} saved ${itemCount === 1 ? 'item' : 'items'}` : 'Nothing saved yet',
+          status: 'done',
+        });
+      }
+      if (tool === 'remember_project') {
+        return buildInlineAgentActivityBase({
+          kind: 'write',
+          title: 'Saved to project memory',
+          detail: String(decision && decision.content || '').trim().slice(0, 160),
+          status: 'done',
+        });
+      }
+      if (tool === 'forget_project_memory') {
+        return buildInlineAgentActivityBase({
+          kind: 'edit',
+          title: 'Removed from project memory',
+          detail: String(decision && decision.content || '').trim().slice(0, 160),
+          status: 'done',
+        });
+      }
       if (tool === 'new_project') {
         const projectName = String((toolResult && toolResult.projectName) || (typeof d.getWorkspaceRootName === 'function' && d.getWorkspaceRootName()) || 'New project').trim();
         return buildInlineAgentActivityBase({
@@ -991,21 +1021,7 @@
         const runErrors = Number(toolResult && toolResult.runErrorCount) || 0;
         const terminal = toolResult && toolResult.terminalProof ? toolResult.terminalProof : null;
         if (toolResult && toolResult.permissionRequired) {
-          const permTerminal = terminal || {
-            command: String((toolResult && toolResult.terminalCommand) || 'command').trim(),
-            exitCode: null,
-            timedOut: false,
-            outputPreview: '',
-          };
-          return buildInlineAgentActivityBase({
-            kind: 'command',
-            title: 'Permission needed',
-            detail: permTerminal.command || 'command',
-            terminal: permTerminal,
-            hasIssues: true,
-            meta: 'ask first',
-            status: 'error',
-          });
+          return null;
         }
         if (terminal && terminal.command) {
           const runtimeMissing = Boolean(toolResult && toolResult.runtimeMissing);
@@ -1041,42 +1057,30 @@
           ? toolResult.terminalProof
           : { command: String((toolResult && toolResult.terminalCommand) || (decision && decision.command) || '').trim() };
         if (toolResult && toolResult.permissionRequired) {
-          const permTerminal = terminal || {
-            command: String((toolResult && toolResult.terminalCommand) || (decision && decision.command) || 'command').trim(),
-            exitCode: null,
-            timedOut: false,
-            outputPreview: '',
-          };
-          return buildInlineAgentActivityBase({
-            kind: 'command',
-            title: 'Permission needed',
-            detail: permTerminal.command || String((decision && decision.command) || '').trim() || 'command',
-            terminal: permTerminal,
-            hasIssues: true,
-            meta: 'ask first',
-            status: 'error',
-          });
+          return null;
         }
         const devServer = toolResult && toolResult.devServer && typeof toolResult.devServer === 'object'
           ? toolResult.devServer
           : null;
         if (devServer && devServer.running) {
+          const devServerReady = devServer.ready === true || Boolean(String(devServer.url || '').trim());
           const devRows = String(terminal.outputPreview || '').trim()
             ? buildObservationPreviewRows(terminal.outputPreview)
             : null;
           return buildInlineAgentActivityBase({
             kind: 'command',
-            title: 'Dev server running',
+            title: devServerReady ? 'Dev server ready' : 'Dev server starting',
             detail: String(devServer.command || terminal.command || 'dev server'),
             terminal,
             devServer: {
               id: Number(devServer.id) || 0,
               url: String(devServer.url || ''),
               running: true,
+              ready: devServerReady,
             },
-            meta: String(devServer.url || `server #${devServer.id}`),
+            meta: String(devServer.url || 'waiting for the local URL…'),
             diffPreview: devRows && devRows.length ? devRows : null,
-            status: 'done',
+            status: devServerReady ? 'done' : 'running',
           });
         }
         const runtimeMissing = Boolean(toolResult && toolResult.runtimeMissing);
@@ -1110,7 +1114,7 @@
       }
       if (tool === 'validate_files') {
         const advisoryCount = Array.isArray(toolResult && toolResult.validationAdvisory)
-          ? toolResult.validationAdvisory.length
+          ? (Number(toolResult && toolResult.validationAdvisoryTotal) || toolResult.validationAdvisory.length)
           : 0;
         return buildInlineAgentActivityBase({
           kind: 'validate',
@@ -1177,6 +1181,30 @@
     function buildAgentPendingActivity(decision, toolEvents = []) {
       const tool = String(decision && decision.tool ? decision.tool : '').toLowerCase();
       const targetInfo = d.describeAgentToolTarget ? d.describeAgentToolTarget(decision) : '';
+      if (tool === 'read_project_memory') {
+        return buildInlineAgentActivityBase({
+          kind: 'read',
+          title: 'Recalling project memory…',
+          detail: '',
+          status: 'pending',
+        });
+      }
+      if (tool === 'remember_project') {
+        return buildInlineAgentActivityBase({
+          kind: 'write',
+          title: 'Saving that for this project…',
+          detail: String(decision && decision.content || '').trim().slice(0, 160),
+          status: 'pending',
+        });
+      }
+      if (tool === 'forget_project_memory') {
+        return buildInlineAgentActivityBase({
+          kind: 'edit',
+          title: 'Updating project memory…',
+          detail: String(decision && decision.content || '').trim().slice(0, 160),
+          status: 'pending',
+        });
+      }
       if (tool === 'new_project') {
         return buildInlineAgentActivityBase({
           kind: 'project',

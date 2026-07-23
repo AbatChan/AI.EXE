@@ -88,6 +88,7 @@ function makeExecutor(generator, options = {}) {
   const writes = [];
   const traces = [];
   const files = options.files || {};
+  let memoryCacheInvalidations = 0;
   const executor = global.AIExeAgentExecutor.createAgentExecutor({
     normalizeWorkspacePath,
     deriveProjectNameFromTask: core.deriveProjectNameFromTask,
@@ -138,8 +139,9 @@ function makeExecutor(generator, options = {}) {
     removeWorkspaceTab: () => {},
     reviewAgentProjectCoherence: async () => [],
     runWorkspaceAppSmokeTest: async () => null,
+    invalidateProjectMemoryCache: () => { memoryCacheInvalidations += 1; },
   });
-  return { executor, writes, traces };
+  return { executor, writes, traces, files, getMemoryCacheInvalidations: () => memoryCacheInvalidations };
 }
 
 const brokenScript = [
@@ -297,13 +299,34 @@ const repairedScript = [
   const nextPackage = JSON.parse(nextPackageWrites[0].content);
   assert.equal(nextPackage.scripts.dev, 'next dev');
   assert.equal(nextPackage.scripts.build, 'next build');
-  assert.equal(nextPackage.dependencies.next, 'latest');
+  assert.equal(nextPackage.dependencies.next, '^15.0.0');
   assert.ok(nextPackage.dependencies.zustand);
   assert.ok(nextPackage.dependencies.recharts);
   assert.ok(nextPackage.dependencies.dexie);
   assert.equal(nextPackage.devDependencies.vite, undefined, 'Next scaffolds must never be rewritten as Vite');
   assert.match(nextPackageSaved.observation, /deterministic Next\.js package\.json/);
   console.log('PASS: Next App Router package.json preserves the requested runtime and libraries');
+
+  const { executor: roboPackageExecutor, writes: roboPackageWrites } = makeExecutor(async () => '');
+  const roboPackageSaved = await roboPackageExecutor.executeDeveloperToolCall(
+    'chat_robo_package',
+    { action: 'tool', tool: 'write_file', path: '/package.json', content: '' },
+    'Build RoboForge with Next.js 15, TypeScript, React Three Fiber, Three.js, @react-three/drei, Framer Motion, and Zustand.',
+    [],
+    {
+      ...planSpec,
+      projectName: 'roboforge',
+      expectedFiles: ['/package.json', '/next.config.ts', '/src/app/page.tsx', '/src/components/Scene.tsx'],
+    }
+  );
+  assert.equal(roboPackageSaved.ok, true);
+  const roboPackage = JSON.parse(roboPackageWrites[0].content);
+  assert.equal(roboPackage.dependencies.next, '^15.0.0');
+  assert.equal(roboPackage.dependencies.three, '^0.169.0');
+  assert.equal(roboPackage.dependencies['@react-three/fiber'], '^8.17.10');
+  assert.equal(roboPackage.dependencies['@react-three/drei'], '^9.114.0');
+  assert.equal(roboPackage.devDependencies['@types/three'], '^0.169.0');
+  console.log('PASS: RoboForge package.json keeps Next 15 and coherent Three/R3F dependencies');
 
   const tailwindGeneratorCalls = [];
   const { executor: tailwindExecutor, writes: tailwindWrites, traces: tailwindTraces } = makeExecutor(async (...args) => {
@@ -476,4 +499,115 @@ const repairedScript = [
   assert.equal(syntaxGuardWrites.length, 0, 'original file is left untouched');
   assert.match(syntaxGuard.observation, /kept intact|kept the current file/i, 'response asks for an exact edit');
   console.log('PASS: syntax repair cannot trigger a destructive full-file rewrite');
+
+  const { executor: readmePhaseExecutor, writes: readmePhaseWrites } = makeExecutor(async (_task, _events, targetPath) => {
+    if (targetPath === '/README.md') {
+      return '# RoboForge\n\n## Run locally\n\n```bash\nnpm install\nnpm run dev\n```\n';
+    }
+    return '';
+  });
+  const readmePhaseWrite = await readmePhaseExecutor.executeDeveloperToolCall(
+    'chat_readme_phase',
+    { action: 'tool', tool: 'write_file', path: '/README.md' },
+    'Build RoboForge — a web app for robotic arm simulation.',
+    [],
+    {
+      ...planSpec,
+      expectedFiles: ['/README.md'],
+      finalRequiresRealFiles: true,
+      phases: [
+        { title: 'Foundation', tasks: [{ text: '/src/app/page.tsx', done: true }] },
+        { title: 'Documentation', tasks: [{ text: 'README.md', done: false }] },
+        { title: 'Final integration', tasks: [{ text: 'Run final build', done: false }] },
+      ],
+      _activePhase: { number: 4, total: 5, title: 'Documentation', tasks: ['README.md'] },
+    }
+  );
+  assert.equal(readmePhaseWrite.ok, true, `a scheduled documentation phase can create README without a same-run source write: ${readmePhaseWrite.observation}`);
+  assert.equal(readmePhaseWrites[0].path, '/README.md');
+  console.log('PASS: scheduled README phase is not blocked by the same-run source-write guard');
+
+  const phasePromptPlanner = global.AIExeAgentPlanner.createAgentPlanner({
+    normalizeWorkspacePath,
+    getWorkspaceFileTreeSummary: async () => 'package.json\nsrc/\n  app/\n    page.tsx',
+    getProjectMemoryContext: async () => '',
+    isAgentTaskGameLike: core.isAgentTaskGameLike,
+    hasReadmeRunInstructions: core.hasReadmeRunInstructions,
+    isLikelyCompleteReadme: core.isLikelyCompleteReadme,
+    isExplicitReadmeOrDocsTask: core.isExplicitReadmeOrDocsTask,
+    isDocsOnlyTask: core.isDocsOnlyTask,
+    buildFallbackAgentPlanSpec: core.buildFallbackAgentPlanSpec,
+    buildAgentFileGenerationHints: core.buildAgentFileGenerationHints,
+    loadPromptTemplate: async () => [
+      'PLAN:',
+      '{{PLAN_SUMMARY}}',
+      'Agent step: {{AGENT_STEP}}',
+      'TASK: {{TASK}}',
+    ].join('\n'),
+    renderPromptTemplate: (template, vars) => String(template).replace(/\{\{([A-Z0-9_]+)\}\}/g, (_match, key) => String(vars[key] || '')),
+    buildAgentHistoryTranscript: () => '',
+    buildAgentUserGuidance: () => '',
+    getWorkspaceContext: () => ({ workspaceRootName: rootName, currentPath: '/' }),
+    deriveProjectNameFromTask: core.deriveProjectNameFromTask,
+  });
+  const readmePhasePrompt = await phasePromptPlanner.buildAgentDecisionPrompt(
+    'chat_readme_phase',
+    'Build RoboForge.',
+    [],
+    1,
+    {
+      ...planSpec,
+      needsReadme: true,
+      phases: [
+        { title: 'Foundation', tasks: [{ text: '/src/app/page.tsx', done: true }] },
+        { title: 'Documentation', tasks: [{ text: 'README.md', done: false }] },
+        { title: 'Final integration', tasks: [{ text: 'Run final build', done: false }] },
+      ],
+      _activePhase: { number: 2, total: 3, title: 'Documentation', tasks: ['README.md'] },
+    }
+  );
+  assert.match(readmePhasePrompt.prompt, /README required: yes \(it is a sub-task of this phase\)/);
+  assert.doesNotMatch(readmePhasePrompt.prompt, /Do NOT write README\.md or other documentation in this phase/);
+  console.log('PASS: documentation phase prompt no longer contradicts its README sub-task');
+
+  const memoryHarness = makeExecutor(async () => '');
+  const savedMemory = await memoryHarness.executor.executeDeveloperToolCall(
+    'chat_project_memory',
+    { action: 'tool', tool: 'remember_project', content: 'Never add comments to code.' },
+    'Remember this for the project.',
+    [],
+    { taskKind: 'analysis', expectedFiles: [] }
+  );
+  assert.equal(savedMemory.ok, true, 'project memory can be saved');
+  assert.match(memoryHarness.files['/.aiexe/MEMORY.md'], /- Never add comments to code\./);
+  const duplicateMemory = await memoryHarness.executor.executeDeveloperToolCall(
+    'chat_project_memory',
+    { action: 'tool', tool: 'remember_project', content: 'never add comments to code.' },
+    'Remember this for the project.',
+    [{ tool: 'remember_project', ok: true, content: 'Never add comments to code.' }],
+    { taskKind: 'analysis', expectedFiles: [] }
+  );
+  assert.equal(duplicateMemory.ok, true, 'duplicate project memory is harmless');
+  assert.equal((memoryHarness.files['/.aiexe/MEMORY.md'].match(/Never add comments to code/gi) || []).length, 1,
+    'project memory deduplicates case-insensitively');
+  const recalledMemory = await memoryHarness.executor.executeDeveloperToolCall(
+    'chat_project_memory',
+    { action: 'tool', tool: 'read_project_memory' },
+    'Show your project memory.',
+    [],
+    { taskKind: 'analysis', expectedFiles: [] }
+  );
+  assert.equal(recalledMemory.ok, true, 'project memory can be recalled');
+  assert.match(recalledMemory.observation, /Never add comments to code\./);
+  const forgottenMemory = await memoryHarness.executor.executeDeveloperToolCall(
+    'chat_project_memory',
+    { action: 'tool', tool: 'forget_project_memory', content: 'Never add comments to code.' },
+    'Forget this project rule.',
+    [],
+    { taskKind: 'analysis', expectedFiles: [] }
+  );
+  assert.equal(forgottenMemory.ok, true, 'project memory can be removed');
+  assert.doesNotMatch(memoryHarness.files['/.aiexe/MEMORY.md'], /Never add comments to code/);
+  assert.ok(memoryHarness.getMemoryCacheInvalidations() >= 2, 'memory writes invalidate the prompt cache');
+  console.log('PASS: project memory saves, recalls, deduplicates, and forgets grounded items');
 })();

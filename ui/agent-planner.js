@@ -2,6 +2,9 @@
   function createAgentPlanner(deps) {
     const normalizeWorkspacePath = deps.normalizeWorkspacePath;
     const getWorkspaceFileTreeSummary = deps.getWorkspaceFileTreeSummary;
+    const getProjectMemoryContext = typeof deps.getProjectMemoryContext === 'function'
+      ? deps.getProjectMemoryContext
+      : async () => '';
     const isAgentTaskGameLike = deps.isAgentTaskGameLike;
     const hasReadmeRunInstructions = deps.hasReadmeRunInstructions;
     const isLikelyCompleteReadme = deps.isLikelyCompleteReadme;
@@ -43,6 +46,10 @@
     // adapter needs minutes; a snapshot froze the wrong value and the plan step timed out,
     // silently downgrading runs to the fallback plan: wrong name, 2 files, no phases).
     const agentStepTimeoutMs = () => Number(deps.agentStepTimeoutMs) || 20000;
+    const effectiveAgentMaxSteps = (planSpec = null) => Math.max(
+      agentMaxSteps,
+      Number(planSpec && planSpec._executionStepLimit) || 0,
+    );
 
     function stripCommentsForPlaceholderScan(content) {
       const source = String(content || '');
@@ -437,12 +444,12 @@
           met: hasSuccessfulAgentTool(toolEvents, (event) => {
             const tool = String(event.tool || '').toLowerCase();
             if (isAnalysisTask) {
-              return ['read_file', 'list_dir', 'validate_files'].includes(tool);
+              return ['read_file', 'list_dir', 'validate_files', 'read_project_memory'].includes(tool);
             }
             if (isRenameTask) {
               return tool === 'move';
             }
-            return ['write_file', 'edit_file', 'mkdir', 'move', 'delete'].includes(tool);
+            return ['write_file', 'edit_file', 'mkdir', 'move', 'delete', 'remember_project', 'forget_project_memory'].includes(tool);
           }),
         });
         if (!isAnalysisTask && hasMutation) {
@@ -467,7 +474,7 @@
 
     function buildImmediateNextAction(taskText, toolEvents = [], planSpec = null, stepIndex = 0) {
       const missing = buildAgentTaskRequirements(taskText, toolEvents, planSpec).filter((item) => !item.met);
-      const remainingSteps = Math.max(0, agentMaxSteps - Math.max(0, Number(stepIndex) || 0));
+      const remainingSteps = Math.max(0, effectiveAgentMaxSteps(planSpec) - Math.max(0, Number(stepIndex) || 0));
       if (!missing.length) {
         return `Execution budget: ${remainingSteps} tool step${remainingSteps === 1 ? '' : 's'} remain. NOW: return the final result; do not invent optional work.`;
       }
@@ -495,9 +502,10 @@
       }).join('\n\n');
       const template = await loadPromptTemplate('developer_agent_decision_repair');
       if (template) {
+        const effectiveMaxSteps = effectiveAgentMaxSteps(planSpec);
         return renderPromptTemplate(template, {
           AGENT_STEP: Number(stepIndex),
-          AGENT_MAX_STEPS: agentMaxSteps,
+          AGENT_MAX_STEPS: effectiveMaxSteps,
           TASK: String(taskText || '').trim(),
           USER_GUIDANCE: userGuidance || '(none)',
           PENDING_REQUIREMENTS: summarizeAgentPendingRequirements(taskText, toolEvents, planSpec),
@@ -513,13 +521,13 @@
         'If you are confident, DO NOT write prose. Omit the thought paragraph immediately to save time.',
         'Keys: action, message, tool, path, content, src_path, dst_path',
         'Valid action values: tool or final.',
-        'Valid tool values: none, new_project, list_dir, read_file, write_file, edit_file, validate_files, mkdir, move, delete.',
+        'Valid tool values: none, new_project, list_dir, read_file, write_file, edit_file, validate_files, mkdir, move, delete, remember_project, read_project_memory, forget_project_memory.',
         'For write_file, keep content empty unless a short literal payload is necessary.',
         'For edit_file, put the JSON edit program inside content.',
         'If the task is not done yet, return {"action":"tool",...}.',
         'If the task is complete, return {"action":"final","tool":"none",...}.',
         'If validate_files finds issues, DO NOT call validate_files again. Read and fix the specific files.',
-        `Agent step: ${Number(stepIndex)}/${agentMaxSteps}`,
+        `Agent step: ${Number(stepIndex)}/${effectiveAgentMaxSteps(planSpec)}`,
         'TASK:',
         String(taskText || '').trim(),
         userGuidance,
@@ -824,6 +832,8 @@
         }
       }
       const projectState = buildAgentProjectStateContext(toolEvents, planSpec, normalizedPath);
+      const projectMemory = await getProjectMemoryContext();
+      const groundedProjectState = [projectMemory, projectState].filter(Boolean).join('\n\n');
       const designFoundation = await loadDesignFoundationFor(normalizedPath);
       // Harvested foundation vocab (real tokens/classes/components) so the page reuses
       // existing names instead of inventing a new look.
@@ -837,7 +847,7 @@
           FILE_PATH: normalizedPath,
           MVP_REQUIREMENTS: generationHints.length ? `- ${generationHints.join('\n- ')}` : '',
           PROJECT_CONTRACT: String(planSpec && planSpec.projectContract ? planSpec.projectContract : ''),
-          PROJECT_STATE: projectState,
+          PROJECT_STATE: groundedProjectState,
           TASK: String(taskText || '').trim(),
           RECENT_TOOL_RESULTS: toolLog || '(none yet)',
           PREVIOUS_ATTEMPT_TO_IMPROVE: priorAttempt ? String(priorAttempt).slice(0, 1800) : '',
@@ -858,7 +868,7 @@
         '- If this is a main source file, include the core functionality requested by the task.',
         generationHints.length ? `MVP_REQUIREMENTS:\n- ${generationHints.join('\n- ')}` : '',
         planSpec && planSpec.projectContract ? `PROJECT_CONTRACT:\n${String(planSpec.projectContract)}` : '',
-        projectState ? `PROJECT_STATE:\n${projectState}` : '',
+        groundedProjectState ? `PROJECT_STATE:\n${groundedProjectState}` : '',
         'TASK:',
         String(taskText || '').trim(),
         'RECENT_TOOL_RESULTS:',
@@ -892,6 +902,8 @@
       }).join('\n\n');
       const normalizedPath = normalizeWorkspacePath(path || '');
       const projectState = buildAgentProjectStateContext(toolEvents, planSpec, normalizedPath);
+      const projectMemory = await getProjectMemoryContext();
+      const groundedProjectState = [projectMemory, projectState].filter(Boolean).join('\n\n');
       const planFiles = Array.isArray(planSpec && planSpec.expectedFiles) ? planSpec.expectedFiles.map((p) => String(p || '')) : [];
       const frameworkWeb = planFiles.some((p) => (
         /(?:^|\/)package\.json$/i.test(p)
@@ -916,7 +928,7 @@
           FILE_PATH: normalizedPath,
           MVP_REQUIREMENTS: editHints.length ? `- ${editHints.join('\n- ')}` : '',
           PROJECT_CONTRACT: String(planSpec && planSpec.projectContract ? planSpec.projectContract : ''),
-          PROJECT_STATE: projectState,
+          PROJECT_STATE: groundedProjectState,
           TASK: String(taskText || '').trim(),
           RECENT_TOOL_RESULTS: toolLog || '(none yet)',
           PREVIOUS_ATTEMPT_TO_IMPROVE: priorAttempt ? String(priorAttempt).slice(0, 1800) : '',
@@ -942,7 +954,7 @@
           : '',
         `File path: ${normalizedPath}`,
         planSpec && planSpec.projectContract ? `PROJECT_CONTRACT:\n${String(planSpec.projectContract)}` : '',
-        projectState ? `PROJECT_STATE:\n${projectState}` : '',
+        groundedProjectState ? `PROJECT_STATE:\n${groundedProjectState}` : '',
         'TASK:',
         String(taskText || '').trim(),
         'RECENT_TOOL_RESULTS:',
@@ -963,6 +975,8 @@
       }).join('\n\n');
       const normalizedPath = normalizeWorkspacePath(path || '');
       const projectState = buildAgentProjectStateContext(toolEvents, planSpec, normalizedPath);
+      const projectMemory = await getProjectMemoryContext();
+      const groundedProjectState = [projectMemory, projectState].filter(Boolean).join('\n\n');
       const planFiles = Array.isArray(planSpec && planSpec.expectedFiles) ? planSpec.expectedFiles.map((p) => String(p || '')) : [];
       const frameworkWeb = planFiles.some((p) => (
         /(?:^|\/)package\.json$/i.test(p)
@@ -977,7 +991,7 @@
           FILE_PATH: normalizedPath,
           MVP_REQUIREMENTS: rewriteHints.length ? `- ${rewriteHints.join('\n- ')}` : '',
           PROJECT_CONTRACT: String(planSpec && planSpec.projectContract ? planSpec.projectContract : ''),
-          PROJECT_STATE: projectState,
+          PROJECT_STATE: groundedProjectState,
           TASK: String(taskText || '').trim(),
           RECENT_TOOL_RESULTS: toolLog || '(none yet)',
           PREVIOUS_ATTEMPT_TO_IMPROVE: priorAttempt ? String(priorAttempt).slice(0, 1800) : '',
@@ -991,7 +1005,7 @@
           : 'Return the complete file inside ONE fenced code block (```<language> first line, ``` last line, nothing outside it). No explanation.',
         `File path: ${normalizedPath}`,
         planSpec && planSpec.projectContract ? `PROJECT_CONTRACT:\n${String(planSpec.projectContract)}` : '',
-        projectState ? `PROJECT_STATE:\n${projectState}` : '',
+        groundedProjectState ? `PROJECT_STATE:\n${groundedProjectState}` : '',
         'Rules:',
         '- Preserve unrelated working behavior.',
         '- Apply only the requested edits cleanly.',
@@ -1013,6 +1027,7 @@
     async function buildAgentPlanPrompt(chatId, taskText) {
       const transcript = buildAgentHistoryTranscript(chatId, 10);
       const userGuidance = String(buildAgentUserGuidance(chatId) || '').trim();
+      const projectMemory = await getProjectMemoryContext();
       const workspace = typeof getWorkspaceContext === 'function' ? getWorkspaceContext() : {};
       const template = await loadPromptTemplate('developer_agent_plan');
       let planWorkspaceRoot = workspace.workspaceRootName ? `/${workspace.workspaceRootName}` : '(none)';
@@ -1022,7 +1037,7 @@
       } catch (_) { }
       return renderPromptTemplate(template, {
         AGENT_ENVIRONMENT: getAgentEnvironmentContext('plan'),
-        CHAT_HISTORY: [transcript, userGuidance].filter(Boolean).join('\n\n') || '(none)',
+        CHAT_HISTORY: [projectMemory, transcript, userGuidance].filter(Boolean).join('\n\n') || '(none)',
         CURRENT_WORKSPACE_ROOT: planWorkspaceRoot,
         CURRENT_SELECTION: normalizeWorkspacePath(workspace.currentPath || '/'),
         CURRENT_SELECTION_KIND: workspace.currentKind === 'file' ? 'file' : 'folder',
@@ -1262,6 +1277,7 @@
 
     async function buildAgentDecisionPrompt(chatId, taskText, toolEvents, stepIndex, planSpec = null) {
       const transcript = buildAgentHistoryTranscript(chatId, 14);
+      const projectMemory = await getProjectMemoryContext();
       const workspace = typeof getWorkspaceContext === 'function' ? getWorkspaceContext() : {};
       const selectedPath = normalizeWorkspacePath(workspace.currentPath || '/');
       const selectedKind = workspace.currentKind === 'file' ? 'file' : 'folder';
@@ -1292,7 +1308,7 @@
       const allEvents = toolEvents || [];
       const recentEvents = allEvents.slice(-10);
       const olderEvents = allEvents.slice(0, allEvents.length - recentEvents.length);
-      const mutationTools = new Set(['write_file', 'edit_file', 'new_project', 'mkdir', 'move', 'delete']);
+      const mutationTools = new Set(['write_file', 'edit_file', 'new_project', 'mkdir', 'move', 'delete', 'remember_project', 'forget_project_memory']);
       const inspectedMap = new Map();
       allEvents.forEach((e, i) => {
         if (!e) return;
@@ -1353,6 +1369,37 @@
           return `EarlierResult ${index + 1}: ${String(event && event.tool ? event.tool : 'unknown')} ${String(event && event.path ? event.path : '')}\n${body.slice(0, agentMaxToolOutputChars)}`;
         }).join('\n\n')}\n\n`
         : '';
+      const buildDependencyBrief = (path, content) => {
+        const source = String(content || '');
+        if (!source.trim()) return '';
+        const lines = source.split(/\r?\n/);
+        const imports = lines.filter((line) => /^\s*import\b/.test(line)).slice(0, 5);
+        const api = lines.filter((line) => /^\s*export\s+(?:default\s+)?(?:async\s+)?(?:function|class|interface|type|const|let|var|enum)\b/.test(line)).slice(0, 14);
+        const cssClasses = /\.(?:css|scss|sass|less)$/i.test(path)
+          ? Array.from(new Set((source.match(/\.[A-Za-z_][\w-]*/g) || []).map((name) => name.slice(1)))).slice(0, 20)
+          : [];
+        const parts = [
+          imports.length ? `imports: ${imports.join(' | ')}` : '',
+          api.length ? `public API: ${api.join(' | ')}` : '',
+          cssClasses.length ? `shared classes: ${cssClasses.join(', ')}` : '',
+        ].filter(Boolean);
+        return parts.length ? `- ${path}: ${parts.join('\n  ')}` : '';
+      };
+      const dependencyBriefRows = [];
+      const briefSeen = new Set();
+      [...allEvents].reverse().forEach((event) => {
+        if (dependencyBriefRows.length >= 8 || !event || !event.ok) return;
+        if (String(event.tool || '').toLowerCase() !== 'read_file') return;
+        const path = normalizeWorkspacePath(event.path || '');
+        if (!path || briefSeen.has(path) || !String(event.content || '').trim()) return;
+        const row = buildDependencyBrief(path, event.content);
+        if (!row) return;
+        briefSeen.add(path);
+        dependencyBriefRows.push(row);
+      });
+      const dependencyBriefLog = dependencyBriefRows.length
+        ? `CACHED DEPENDENCY BRIEF (unchanged files; use these signatures/tokens instead of broad re-reading):\n${dependencyBriefRows.reverse().join('\n')}\nIf an exact implementation detail is still required, use ONE targeted search or line-range read for that named symbol only.\n\n`
+        : '';
       // Only claim "use cached content" for paths whose content this prompt
       // actually still carries — a false claim makes the model hallucinate the
       // file when editing instead of re-reading it.
@@ -1372,7 +1419,7 @@
             ? '[updated by your own edit — the edit result in TOOL_RESULTS is the current content; do not re-read]'
             : contentCarriedPaths.has(normalizeWorkspacePath(path))
             ? '[available — use cached content above/below; do not re-read]'
-            : '[inspected earlier; its content is NOT in this prompt — if you must edit it and need exact lines, ONE search_files or read_file is allowed]';
+            : '[inspected earlier; use the dependency brief above. Only a named symbol may justify ONE targeted search/range read]';
           return `- ${path}  ${flags}`;
         }).join('\n')}\n\n`
         : '';
@@ -1396,7 +1443,7 @@
         recentEvents.forEach((e, i) => { if (e && e.ok && String(e.tool || '').toLowerCase() === 'run_app') idx = i; });
         return idx;
       })();
-      const toolLog = appliedDigest + diagnosticsLog + expandedReadLog + relevantOlderLog + inspectedNote + recentEvents.map((event, index) => {
+      const toolLog = appliedDigest + diagnosticsLog + expandedReadLog + relevantOlderLog + dependencyBriefLog + inspectedNote + recentEvents.map((event, index) => {
         const tool = String(event && event.tool ? event.tool : 'unknown');
         const obs = String(event && event.observation ? event.observation : '');
         const isTail = index >= recentEvents.length - FULL_TOOL_TAIL;
@@ -1407,11 +1454,11 @@
         // the batch result itself was compacted away — restate honestly.
         if (!isTail && event && event._fromBatchRead) {
           const p = String(event.path || '');
-          return `ToolResult ${index + 1}: read_file ${p} — read earlier in a read_files batch; if that content is no longer shown in this prompt, re-reading it is allowed.`;
+          return `ToolResult ${index + 1}: read_file ${p} — already inspected in a batch and unchanged. Use the cached dependency brief; do NOT repeat the batch. If one exact implementation detail is missing, search that named symbol only.`;
         }
         if (!isTail && obs.length > 1200 && ['read_file', 'list_dir', 'search_files'].includes(tool.toLowerCase())) {
           const p = String(event && event.path ? event.path : '');
-          return `ToolResult ${index + 1}: ${tool} ${p} — ${obs.length} chars (omitted to save context; read_file again if you need it)`;
+          return `ToolResult ${index + 1}: ${tool} ${p} — ${obs.length} chars (compacted; use its cached brief/result and do not broadly re-read)`;
         }
         return `ToolResult ${index + 1}: ${tool}\n${obs.slice(0, agentMaxToolOutputChars)}`;
       }).join('\n\n');
@@ -1436,6 +1483,24 @@
       };
       const expectedSplit = isFinalPhase ? partitionByContract(planSpec && planSpec.expectedFiles) : null;
       const affectedSplit = isFinalPhase ? partitionByContract(planSpec && planSpec.affectedFiles) : null;
+      const phaseProgress = (() => {
+        if (!activePhase || !planSpec || !Array.isArray(planSpec.phases)) return '';
+        const tasks = planSpec.phases.flatMap((phase) => (Array.isArray(phase && phase.tasks) ? phase.tasks : []));
+        const done = tasks.filter((task) => task && (task.done || task.liveDone));
+        const creditedAhead = [];
+        planSpec.phases.forEach((phase, index) => {
+          if (index < Number(activePhase.number || 1)) return;
+          (Array.isArray(phase && phase.tasks) ? phase.tasks : []).forEach((task) => {
+            if (task && (task.done || task.liveDone)) creditedAhead.push(String(task.text || '').trim());
+          });
+        });
+        return [
+          `Project progress: ${done.length}/${tasks.length} phase tasks complete; ${Math.max(0, tasks.length - done.length)} remaining.`,
+          creditedAhead.length
+            ? `Already completed ahead of schedule (do NOT recreate later): ${creditedAhead.slice(0, 8).join(', ')}${creditedAhead.length > 8 ? ` (+${creditedAhead.length - 8} more)` : ''}`
+            : '',
+        ].filter(Boolean).join('\n');
+      })();
       const renderFileList = (label, list, split) => {
         if (split) {
           const parts = [];
@@ -1451,8 +1516,8 @@
           `Task kind: ${planSpec.taskKind || 'unknown'}`,
           `Primary stack: ${planSpec.primaryStack || 'generic'}`,
           planSpec.projectName ? `Project name: ${planSpec.projectName}` : '',
-          renderFileList('Expected files', planSpec.expectedFiles, expectedSplit),
-          renderFileList('Affected files', planSpec.affectedFiles, affectedSplit),
+          phaseProgress || renderFileList('Expected files', planSpec.expectedFiles, expectedSplit),
+          activePhase ? '' : renderFileList('Affected files', planSpec.affectedFiles, affectedSplit),
           Array.isArray(planSpec.filesToInspect) && planSpec.filesToInspect.length
             ? `Inspect first: ${planSpec.filesToInspect.join(', ')}`
             : '',
@@ -1506,20 +1571,26 @@
             : laterPhaseBuildLine,
           `STRICT SCOPE: build ONLY the files needed for the ${activePhase.tasks && activePhase.tasks.length ? activePhase.tasks.length : 'few'} sub-task(s) above (roughly that many files) — NOT the whole project. Do not create pages or screens that belong to later phases.`,
           'The sub-task list above is the authoritative contract for THIS run. Any PLAN Expected file or Done criterion that no phase sub-task covers is out of contract — do not build it now and do not let it block finalizing this phase.',
-          activePhase.number < activePhase.total
+          activePhase.number < activePhase.total && !readmeScheduledThisPhase
             ? 'Do NOT write README.md or other documentation in this phase — docs come in the FINAL phase only. Build the actual app/page files for this phase first.'
             : '',
-          'When this phase\'s sub-tasks are built and it runs, validate_files (and run_app if runnable) then return {"action":"final"} — do NOT continue into the next phase. The user presses Continue to advance; the next run picks up the next phase.',
+          activePhase.number < activePhase.total
+            ? 'For a NON-FINAL phase, use static file validation only. Do NOT install dependencies, run the full app/build, or change package/framework versions to make an intentionally partial project boot. Full dependency installation and runtime/build verification happen once in the FINAL phase, after every planned source file exists.'
+            : 'This is the FINAL phase: after all remaining files exist and static validation passes, install dependencies if approved and run the complete app/build once.',
+          activePhase.number < activePhase.total
+            ? 'When this phase\'s sub-tasks are built, validate_files then return {"action":"final"} — do NOT continue into the next phase. The user presses Continue to advance; the next run picks up the next phase.'
+            : 'When this final phase\'s sub-tasks are built, validate_files, then run_app and repair any real build/startup errors. Return {"action":"final"} only after the complete project has a clean runtime/build result.',
           'In the final message, state only what was actually done and verified this phase (files built, checks passed). Do NOT claim the app "renders", "works", or "displays" anything unless a run actually happened this phase and succeeded.',
           '===',
         ].filter(Boolean).join('\n')
         : '';
 
       const template = await loadPromptTemplate('developer_agent_decision');
+      const effectiveMaxSteps = effectiveAgentMaxSteps(planSpec);
       const vars = {
         AGENT_ENVIRONMENT: getAgentEnvironmentContext('decision'),
         AGENT_STEP: Number(stepIndex),
-        AGENT_MAX_STEPS: agentMaxSteps,
+        AGENT_MAX_STEPS: effectiveMaxSteps,
         CURRENT_WORKSPACE_ROOT: currentWorkspaceRoot,
         CURRENT_SELECTION: selectedPath,
         CURRENT_SELECTION_KIND: selectedKind,
@@ -1527,7 +1598,7 @@
         PENDING_REQUIREMENTS: summarizeAgentPendingRequirements(taskText, toolEvents, planSpec),
         TOOL_RESULTS: toolLog || '(none yet)',
         TASK: String(taskText || '').trim(),
-        PLAN_SUMMARY: [planSummary, userGuidance, phaseScope].filter(Boolean).join('\n'),
+        PLAN_SUMMARY: [projectMemory, planSummary, userGuidance, phaseScope].filter(Boolean).join('\n'),
         IMMEDIATE_NEXT_ACTION: buildImmediateNextAction(taskText, toolEvents, planSpec, stepIndex),
       };
       const prompt = renderPromptTemplate(template, vars);

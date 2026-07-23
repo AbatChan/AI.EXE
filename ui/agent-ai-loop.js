@@ -205,6 +205,15 @@
       for (let step = 1; step <= maxSteps && now() < deadlineAt; step += 1) {
         const nativePrompt = buildAiNativePrompt(taskText, toolEvents, previousInvalidOutput);
         const response = await deps.requestAgentPlannerInference(nativePrompt.prompt, maxTokens, '', nativePrompt.systemPrompt);
+        if (!response || !response.ok) {
+          if (typeof deps.surfaceAgentInferenceUnavailable === 'function') {
+            deps.surfaceAgentInferenceUnavailable(
+              chatId,
+              String(response && response.message ? response.message : 'The inference provider did not respond.')
+            );
+          }
+          return true;
+        }
         const raw = String(response && response.output ? response.output : '');
         const thought = splitThoughtAndJson(raw);
         if (thought) {

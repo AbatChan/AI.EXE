@@ -69,4 +69,55 @@ function normalizeWorkspacePath(raw) {
     'local URL reported by a tool is preserved'
   );
   console.log('PASS: tool-reported local URLs are preserved');
+
+  let capturedCompletionPrompt = '';
+  const editRuntime = global.AIExeAgentRuntime.createAgentRuntime({
+    normalizeWorkspacePath,
+    deriveProjectNameFromTask: () => 'roboforge',
+    sanitizeAssistantText: (value) => String(value || '').trim(),
+    requestSelectedRemoteTextCompletion: async (prompt) => {
+      capturedCompletionPrompt = String(prompt || '');
+      return { ok: true, output: 'Updated the README license line.' };
+    },
+  });
+  await editRuntime.generateAgentCompletionText(
+    'continue the documentation phase',
+    [{
+      tool: 'edit_file',
+      ok: true,
+      path: '/README.md',
+      originalContent: '## License\n\nPrivate project.',
+      content: '## License\n\nPrivate project. Built with care.',
+    }],
+    'roboforge',
+  );
+  assert.match(capturedCompletionPrompt, /Edited \/README\.md/);
+  assert.match(capturedCompletionPrompt, /never claim you built, wrote, dropped, or created a fresh file/i);
+  console.log('PASS: completion prompt distinguishes a tiny README edit from creating a fresh README');
+
+  capturedCompletionPrompt = '';
+  await editRuntime.generateAgentCompletionText(
+    'install framer-motion and fix the remaining build errors',
+    [
+      {
+        tool: 'run_command',
+        ok: true,
+        terminalCommand: 'npm install framer-motion',
+        runErrorCount: 0,
+        observation: 'run_command `npm install framer-motion`: finished cleanly (exit 0).',
+      },
+      {
+        tool: 'run_app',
+        ok: true,
+        terminalCommand: 'npm run build',
+        runErrorCount: 1,
+        observation: 'run_app Node build failed: TargetSphere.tsx still has a type error.',
+      },
+    ],
+    'roboforge',
+  );
+  assert.match(capturedCompletionPrompt, /VERIFIED_RESULTS:/);
+  assert.match(capturedCompletionPrompt, /npm install framer-motion[\s\S]*SUCCEEDED/);
+  assert.match(capturedCompletionPrompt, /npm run build[\s\S]*FAILED/);
+  console.log('PASS: completion prompt carries successful installs and unresolved build failures');
 })();

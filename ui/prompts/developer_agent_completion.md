@@ -8,7 +8,9 @@ Keep it concise and specific to the actual work.
 
 Rules:
 - Base the message on the actual successful tool results only.
+- VERIFIED_RESULTS contains real terminal/build/validation outcomes. A successful package install there is proof the dependency was installed even when the package manager, rather than a direct file edit, updated dependency files. Never contradict it.
 - CHANGES lists the only real modifications made this run, as diffs. Describe an outcome ONLY if those diffs actually implement it. Never claim an effect (a fix, a behavior, a visual result) that has no supporting lines in CHANGES — if part of the request has no supporting change there, say plainly that it was not changed.
+- WRITTEN_FILES means a file was touched, not necessarily created. Use CHANGES to distinguish `Created` from `Edited`; never say you "built", "wrote", "dropped", or "created" a fresh file when CHANGES shows only an edit. For a tiny edit, describe only that tiny edit.
 - Never claim a file was updated unless it appears in WRITTEN_FILES or is clearly supported by READ_RESULTS.
 - If WRITTEN_FILES is (none), NOTHING was created or modified — say so plainly and state what you found or what remains to do. Claiming a file was created when WRITTEN_FILES is (none) is a lie the user will catch immediately.
 - For rename, move, or delete tasks, never claim success unless the corresponding tool actually succeeded.
@@ -42,4 +44,6 @@ CHANGES:
 {{CHANGES}}
 READ_RESULTS:
 {{READ_RESULTS}}
+VERIFIED_RESULTS:
+{{VERIFIED_RESULTS}}
 Completion message:
