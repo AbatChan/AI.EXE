@@ -103,6 +103,50 @@ class ResponseFormat(Enum):
     CHAT_NON_STREAMED = 4
 
 
+def _aiexe_salvage_incomplete_final_json(text):
+    """Close a cut-off final decision without guessing any tool command.
+
+    Venice occasionally finishes rendering after the model has omitted the final
+    quote/brace.  Tool decisions must remain strict, but a final decision only
+    carries user-facing prose and is safe to preserve as a shorter completion.
+    """
+    source = str(text or "")
+    action = re.search(r'"action"\s*:\s*"final"', source, re.IGNORECASE)
+    if not action:
+        return ""
+    match = re.search(r'"message"\s*:\s*"', source[action.end():], re.IGNORECASE)
+    if not match:
+        return ""
+    start = action.end() + match.end()
+    escaped = False
+    end = len(source)
+    for idx in range(start, len(source)):
+        ch = source[idx]
+        if escaped:
+            escaped = False
+        elif ch == "\\":
+            escaped = True
+        elif ch == '"':
+            end = idx
+            break
+    raw = source[start:end]
+    while raw.endswith("\\"):
+        raw = raw[:-1]
+    if not raw.strip():
+        return ""
+    # DOM text can contain literal newlines inside the cut JSON string. Escape
+    # control characters before asking json.loads to decode normal JSON escapes.
+    encoded = raw.replace("\r", "\\r").replace("\n", "\\n").replace("\t", "\\t")
+    try:
+        message = json.loads('"' + encoded + '"')
+    except Exception:
+        message = raw.replace('\\"', '"').replace('\\n', '\n').replace('\\t', '\t')
+    message = str(message or "").strip()
+    if not message:
+        return ""
+    return json.dumps({"action": "final", "message": message})
+
+
 def capture_and_redirect_browser_logs(driver):
     global debug_browser
     if not debug_browser: return
@@ -3680,6 +3724,8 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
         if eval_count == 0 and not streamed_content:
             _stable = 0
             _structured_dom_result = ""
+            _structured_incomplete_prev = ""
+            _structured_incomplete_stable = 0
             for _i in range(int(max(timeout, 30) / 0.8)):
                 if _aiexe_cancel_key_requested(_chat_key):
                     _aiexe_stop_generation(driver, "cancel during DOM fallback")
@@ -3714,7 +3760,29 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
                     if len(_txt) > _structured_limit:
                         _aiexe_stop_generation(driver, "structured DOM output limit")
                         break
-                    # Never emit a partial structured DOM snapshot. Wait for balance.
+                    # A cut-off FINAL has no executable payload. Once Venice has
+                    # stopped and the same incomplete snapshot is stable, close it
+                    # locally instead of exhausting the adapter fallback window and
+                    # to write the same final message again. Tool decisions remain
+                    # strict and continue through the normal incomplete-JSON path.
+                    if not _aiexe_generation_running(driver):
+                        if _txt == _structured_incomplete_prev:
+                            _structured_incomplete_stable += 1
+                        else:
+                            _structured_incomplete_prev = _txt
+                            _structured_incomplete_stable = 0
+                        # Eight 200ms identical polls mirrors the conservative
+                        # stability window used for normal DOM replies without
+                        # making the user sit through the full fallback window.
+                        if _structured_incomplete_stable >= 8:
+                            _salvaged_final = _aiexe_salvage_incomplete_final_json(_txt)
+                            if _salvaged_final:
+                                _structured_dom_result = _salvaged_final
+                                print("AIEXE_STRUCTURED salvaged stable incomplete final (%d chars)" % len(_txt), flush=True)
+                                break
+                    else:
+                        _structured_incomplete_stable = 0
+                    # Never emit any other partial structured DOM snapshot.
                     time.sleep(0.2)
                     continue
                 if _txt and _txt == _prev:
