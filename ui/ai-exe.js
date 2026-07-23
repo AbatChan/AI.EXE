@@ -7275,6 +7275,25 @@ function syncCanvasPanelFromArtifacts() {
   setCanvasPanelContent(latest.content, latest.name);
 }
 
+function getCanvasContextForChat(chatId) {
+  const chatKey = String(chatId || '');
+  if (!chatKey) return null;
+  const latest = artifacts
+    .filter((item) => item
+      && item.type === 'canvas'
+      && String(item.chatId || '') === chatKey
+      && typeof item.content === 'string'
+      && item.content.trim())
+    .sort((a, b) => (Number(b.createdAt) || 0) - (Number(a.createdAt) || 0))[0];
+  if (!latest) return null;
+  return {
+    name: String(latest.name || 'Untitled'),
+    format: latest.canvasFormat === 'code' ? 'code' : 'text',
+    content: String(latest.content || ''),
+    truncated: Boolean(latest.truncated),
+  };
+}
+
 if (canvasCopyBtn) {
   canvasCopyBtn.addEventListener('click', async () => {
     const text = canvasEditor ? canvasEditor.value : '';
@@ -11633,6 +11652,9 @@ function updateLastAssistantMessage(chatId, text, options = {}) {
   if (options.agentMeta) {
     lastAssistant.agentMeta = cloneAgentMeta(options.agentMeta);
   }
+  if (options.webSearchEnabled === true) {
+    lastAssistant.webSearchEnabled = true;
+  }
   if (options.inferenceFailure) {
     lastAssistant.inferenceFailure = true;
   }
@@ -12697,6 +12719,7 @@ function commitAssistantMessage(chatId, text, rawTextForArtifacts = '', options 
         thinkingMeta: options.thinkingMeta,
         agentActivities: options.agentActivities,
         agentMeta: options.agentMeta,
+        webSearchEnabled: options.webSearchEnabled,
       })
       : appendMessageToChat(chatId, 'ai', display, 0, {
         forceNeedsContinue,
@@ -12705,6 +12728,7 @@ function commitAssistantMessage(chatId, text, rawTextForArtifacts = '', options 
         thinkingMeta: options.thinkingMeta,
         agentActivities: options.agentActivities,
         agentMeta: options.agentMeta,
+        webSearchEnabled: options.webSearchEnabled,
       });
   } else if (parsed.payloads.length > 0) {
     appendedMessage = appendMessageToChat(chatId, 'ai', 'Artifact created. Open details below.', 0, {
@@ -12713,6 +12737,7 @@ function commitAssistantMessage(chatId, text, rawTextForArtifacts = '', options 
       thinkingMeta: options.thinkingMeta,
       agentActivities: options.agentActivities,
       agentMeta: options.agentMeta,
+      webSearchEnabled: options.webSearchEnabled,
     });
   } else {
     appendedMessage = appendErrorMessageToChat(chatId, 'Offline inference backend returned empty output.', 0);
@@ -13324,6 +13349,7 @@ const promptCore = window.AIExePromptCore && typeof window.AIExePromptCore.creat
     getAssistantDateTimeContext: buildAssistantDateTimeContext,
     getUserProfileContext,
     getRecentWorkContext: buildRecentWorkContext,
+    getCanvasContextForChat,
   })
   : null;
 const promptCoreApi = promptCore || {};
@@ -15395,6 +15421,7 @@ function loadStoredChats() {
             agentMeta: m && m.role === 'ai'
               ? cloneAgentMeta(m.agentMeta)
               : null,
+            webSearchEnabled: Boolean(m && m.role === 'ai' && m.webSearchEnabled),
             attachments: m && m.role === 'user'
               ? normalizeMessageAttachmentList(m.attachments)
               : [],
@@ -18071,6 +18098,9 @@ function appendMessageToChat(chatId, role, text, forcedTs = 0, options = {}) {
   if (role === 'ai' && options.agentMeta) {
     message.agentMeta = cloneAgentMeta(options.agentMeta);
   }
+  if (role === 'ai' && options.webSearchEnabled === true) {
+    message.webSearchEnabled = true;
+  }
   // Attach before pushing/saving: appendMessageToChat schedules smart naming
   // synchronously, so a later mutation would race and still open a Venice title chat.
   if (role === 'ai' && options.inferenceFailure) {
@@ -20381,6 +20411,7 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
         suppressChatNameInstruction: requestToken.appendToLastAssistant || requestToken.suppressChatNameInstruction,
         contextWindowChars: getChatPromptContextBudgetChars(),
         maxLatestUserChars: getChatPromptLatestUserBudgetChars(),
+        webSearchActive: Boolean(requestToken.webSearchActive && inferenceProvider === VENICE_ADAPTER_PROVIDER_ID),
       });
       requestToken.promptPreview = debugPreview(fullPrompt, 1600);
       requestToken.abortController = new AbortController();
@@ -20570,6 +20601,7 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
               suppressChatNameInstruction: requestToken.appendToLastAssistant || requestToken.suppressChatNameInstruction,
               contextWindowChars: getChatPromptContextBudgetChars(),
               maxLatestUserChars: getChatPromptLatestUserBudgetChars(),
+              webSearchActive: Boolean(requestToken.webSearchActive),
             });
           } finally {
             suppressEscalationInstruction = false;
@@ -20691,6 +20723,7 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
           forceNeedsContinue: false,
           thinkingMeta: buildRequestThinkingMeta(requestToken),
           canvasModeResolved: canvasModeOverride === null ? canvasModeUiEnabled : canvasModeOverride,
+          webSearchEnabled: Boolean(requestToken.webSearchActive),
         });
         return;
       }
@@ -20729,6 +20762,7 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
           forceNeedsContinue: false,
           thinkingMeta: buildRequestThinkingMeta(requestToken),
           canvasModeResolved: canvasModeOverride === null ? canvasModeUiEnabled : canvasModeOverride,
+          webSearchEnabled: Boolean(requestToken.webSearchActive),
         });
         return;
       }
