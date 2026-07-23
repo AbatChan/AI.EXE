@@ -37,6 +37,14 @@ assert.match(executor, /regenerating it would drop its real dependencies/);
 // edit_file repairs Venice-mangled package.json versions instead of looping.
 assert.match(executor, /repairPackageJsonDependencyVersions\(applied\.output\)/);
 assert.match(executor, /Repaired Venice-mangled dependency versions from the known-good table/);
+// Runtime-error tasks hand back after a clean build instead of churning blindly.
+assert.match(loop, /runtime-error-build-settled-handback/);
+assert.match(loop, /hasCleanRuntimeProofSinceLatestMutation\(\)/);
+// Progress notes are capped to one sentence in BOTH synced copies.
+const decisionMd = fs.readFileSync(path.join(root, 'ui', 'prompts', 'developer_agent_decision.md'), 'utf8');
+const promptCore = fs.readFileSync(path.join(root, 'ui', 'prompt-core.js'), 'utf8');
+assert.match(decisionMd, /HARD LIMIT: ONE sentence/);
+assert.match(promptCore, /HARD LIMIT: ONE sentence/);
 // Type errors are surfaced as a full batch, not one per rebuild.
 assert.match(executor, /All current type errors/);
 // Harness-substituted saves show the real bytes instead of claiming a match.

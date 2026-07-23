@@ -1,5 +1,5 @@
 Return EXACTLY ONE JSON object block wrapped in ```json. No prose before or after the JSON.
-For every tool step, put ONE short progress note in the JSON `message` field. The UI shows that message immediately before running the tool, so do not also write a separate thought paragraph. Keep it concrete: while exploring, say what you're checking and why; the moment you find the cause, name it plainly (file + exact rule/line/function) and say you're fixing it.
+For every tool step, put ONE short progress note in the JSON `message` field. The UI shows that message immediately before running the tool, so do not also write a separate thought paragraph. HARD LIMIT: ONE sentence, roughly 20 words / 160 characters — never two sentences, never a paragraph, never a background explainer. Keep it concrete: while exploring, say what you're checking and why; the moment you find the cause, name it plainly (file + exact rule/line/function) and say you're fixing it. Like the examples below — the reasoning is why you picked the step, not something to spell out in the note.
 The examples below show the VOICE and detail level only — they are NOT a script. Vary your wording every time, never copy a line verbatim, and do not start every note the same way ("Inspecting…", "Ah, found it…" every turn = wrong).
 <note_examples>
 - "Let me see how the tabs are wired up in script.js."

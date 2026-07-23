@@ -2438,6 +2438,34 @@
           }, { chatId: String(chatId || ''), step, phaseState, originalDecision: deferredDecision, repairedDecision: decision });
         }
 
+        // Blind-loop brake for in-browser RUNTIME errors. `next build`/`vite build`
+        // cannot reproduce a client-side crash (ReactCurrentOwner, hydration, etc.),
+        // so once a build passes ON TOP of the latest edits there is nothing more the
+        // agent can verify — further edits are pure speculation and tend to introduce
+        // NEW bugs (this is what burned 28 steps + 5 churned files). Hand back for the
+        // one check only the user can do: reload the app. A failing build still keeps
+        // the agent fixing (clean-run must sit above the latest mutation).
+        {
+          const runtimeErrorTask = /\b(?:unhandled runtime error|runtime (?:type)?error|cannot read propert(?:y|ies) of|is not a function\b|hydration failed|minified react error|reactcurrentowner)\b/i.test(String(taskText || ''));
+          const decisionIsFinal = decision.action === 'final' || String(decision.tool || '').toLowerCase() === 'none';
+          if (runtimeErrorTask && !decisionIsFinal && !isNonFinalPhase
+            && countRunMutations() > 0 && hasCleanRuntimeProofSinceLatestMutation()) {
+            const deferredDecision = decision;
+            decision = {
+              action: 'final',
+              tool: 'none',
+              message: 'The build passes with these changes, but this is an in-browser runtime error that a build cannot reproduce — reload/rerun the app to confirm the fix. If it still crashes, send the new error and I\'ll continue from there.',
+              raw: '[runtime-error-build-settled-handback]',
+              _deterministic: true,
+            };
+            recordDebugTrace('agent_runtime_error_build_settled_handback', {
+              chatId: String(chatId || ''),
+              step: String(step),
+              originalTool: String(deferredDecision && deferredDecision.tool || ''),
+            }, { chatId: String(chatId || ''), step, originalDecision: deferredDecision });
+          }
+        }
+
         if (phaseState && decision.action === 'tool' && String(decision.tool || '').toLowerCase() === 'validate_files') {
           const missingPhaseFiles = getKnownActivePhaseFileTaskGaps();
           if (missingPhaseFiles.length) {
