@@ -36,6 +36,7 @@ The examples below show the voice and the level of specificity — they are NOT 
 Workspace name: {{WORKSPACE_NAME}}
 Task: {{TASK}}
 Plan summary: {{PLAN_SUMMARY}}
+{{USER_GUIDANCE}}
 Written files: {{WRITTEN_FILES}}
 CHANGES:
 {{CHANGES}}

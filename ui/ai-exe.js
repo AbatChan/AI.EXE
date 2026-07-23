@@ -7320,6 +7320,20 @@ function getUserProfileContext() {
   return String((appSettings && appSettings.userProfile) || '').trim();
 }
 
+function buildAgentUserGuidance(chatId = '') {
+  const chat = findChatById(chatId);
+  const manual = String((chat && chat.manualContext) || '').trim().slice(0, 4000);
+  const profile = getUserProfileContext().slice(0, 800);
+  const lines = [];
+  if (manual) {
+    lines.push(`Per-chat Context (apply to planning, decisions, deliverables, progress notes, and the final response):\n${manual}`);
+  }
+  if (profile) {
+    lines.push(`Personalization profile (use for user-facing tone and relevant preferences; never copy profile details, slang, or emojis into project source/content unless the user explicitly asks):\n${profile}`);
+  }
+  return lines.length ? `AGENT USER GUIDANCE:\n${lines.join('\n\n')}` : '';
+}
+
 // Recent OTHER chats so replies can say "yesterday we built X" across sessions.
 function buildRecentWorkContext(currentChatId = '') {
   try {
@@ -13464,6 +13478,7 @@ const agentPlanner = window.AIExeAgentPlanner && typeof window.AIExeAgentPlanner
     requestAgentPlannerInference,
     getWorkspaceContext,
     getAgentEnvironmentContext,
+    buildAgentUserGuidance,
     deriveProjectNameFromTask,
     agentMaxSteps,
     agentMaxToolOutputChars,
@@ -13534,6 +13549,7 @@ const agentRuntime = window.AIExeAgentRuntime && typeof window.AIExeAgentRuntime
     normalizeWorkspacePath,
     deriveProjectNameFromTask,
     sanitizeAssistantText,
+    buildAgentUserGuidance,
   })
   : null;
 const {
@@ -13688,6 +13704,7 @@ const agentLoop = window.AIExeAgentLoop && typeof window.AIExeAgentLoop.createAg
     generateAgentCompletionText,
     verifyAgentDoneCriteria,
     getChatManualContext: (chatId) => String((findChatById(chatId) || {}).manualContext || ''),
+    buildAgentUserGuidance,
     requestProjectScopeConfirmation,
     rememberAlwaysAllowedAgentCommand,
     requestAgentCommandApproval,

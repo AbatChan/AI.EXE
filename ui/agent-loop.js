@@ -1263,6 +1263,12 @@
       // decision prompt see earlier runs' accomplishments (attach after emitPlan
       // so the plan log stays clean of the live Set/Map).
       if (planSpec) planSpec._priorRunDone = doneWork;
+      if (planSpec) {
+        planSpec._chatId = String(chatId || '');
+        planSpec._agentUserGuidance = typeof deps.buildAgentUserGuidance === 'function'
+          ? String(deps.buildAgentUserGuidance(chatId) || '').trim()
+          : '';
+      }
       // The chat's manual context rides in the contract so every prompt sees it.
       const chatManualContext = typeof deps.getChatManualContext === 'function'
         ? String(deps.getChatManualContext(chatId) || '').trim()

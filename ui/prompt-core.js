@@ -241,6 +241,7 @@
         'Workspace name: {{WORKSPACE_NAME}}',
         'Task: {{TASK}}',
         'Plan summary: {{PLAN_SUMMARY}}',
+        '{{USER_GUIDANCE}}',
         'Written files: {{WRITTEN_FILES}}',
         'READ_RESULTS:',
         '{{READ_RESULTS}}',

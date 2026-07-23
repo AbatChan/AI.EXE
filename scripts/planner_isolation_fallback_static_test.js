@@ -5,7 +5,9 @@ const path = require('node:path');
 const aiExe = fs.readFileSync(path.join(__dirname, '..', 'ui', 'ai-exe.js'), 'utf8');
 const agentCore = fs.readFileSync(path.join(__dirname, '..', 'ui', 'agent-core.js'), 'utf8');
 const agentRuntime = fs.readFileSync(path.join(__dirname, '..', 'ui', 'agent-runtime.js'), 'utf8');
+const agentPlanner = fs.readFileSync(path.join(__dirname, '..', 'ui', 'agent-planner.js'), 'utf8');
 const planPrompt = fs.readFileSync(path.join(__dirname, '..', 'ui', 'prompts', 'developer_agent_plan.md'), 'utf8');
+const completionPrompt = fs.readFileSync(path.join(__dirname, '..', 'ui', 'prompts', 'developer_agent_completion.md'), 'utf8');
 const promptCore = fs.readFileSync(path.join(__dirname, '..', 'ui', 'prompt-core.js'), 'utf8');
 const cmake = fs.readFileSync(path.join(__dirname, '..', 'CMakeLists.txt'), 'utf8');
 const pkg = require('../package.json');
@@ -30,6 +32,17 @@ assert.match(agentCore, /Object\.prototype\.hasOwnProperty\.call\(parsedObj, 'ro
 assert.match(agentCore, /landingSubjectMatch/);
 assert.match(planPrompt, /Do not add adjacent pages, screens, or features/);
 assert.match(promptCore, /Do not add adjacent pages, screens, or features/);
+
+// Context applies to the whole agent contract; profile tone reaches planning,
+// progress, and completion without being copied into generated project source.
+assert.match(aiExe, /function buildAgentUserGuidance/);
+assert.match(aiExe, /never copy profile details, slang, or emojis into project source\/content/);
+assert.match(agentPlanner, /buildAgentUserGuidance\(chatId\)/);
+assert.match(agentPlanner, /CHAT_HISTORY: \[transcript, userGuidance\]/);
+assert.match(agentPlanner, /PLAN_SUMMARY: \[planSummary, userGuidance, phaseScope\]/);
+assert.match(agentPlanner, /USER_GUIDANCE: userGuidance/);
+assert.match(agentRuntime, /USER_GUIDANCE: userGuidance/);
+assert.match(completionPrompt, /\{\{USER_GUIDANCE\}\}/);
 
 assert.match(cmake, /AI_EXE_APP_VERSION "\d+\.\d+\.\d+"/);
 assert.equal(pkg.version, (cmake.match(/AI_EXE_APP_VERSION "([^"]+)"/) || [])[1]);

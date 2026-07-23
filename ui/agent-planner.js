@@ -29,6 +29,9 @@
         '- Prefer self-contained local projects that run without hosted services. If a requested framework/build step is unavailable locally, plan the closest static/local equivalent and say so honestly.',
       ].join('\n');
     const deriveProjectNameFromTask = deps.deriveProjectNameFromTask;
+    const buildAgentUserGuidance = typeof deps.buildAgentUserGuidance === 'function'
+      ? deps.buildAgentUserGuidance
+      : () => '';
     const agentMaxSteps = Number(deps.agentMaxSteps) || 16;
     const agentMaxToolOutputChars = Number(deps.agentMaxToolOutputChars) || 8000;
     const getAgentExpandedReadChars = typeof deps.getAgentExpandedReadChars === 'function'
@@ -485,6 +488,7 @@
     }
 
     async function buildAgentDecisionRepairPrompt(taskText, toolEvents, stepIndex, badOutput, planSpec = null) {
+      const userGuidance = String(planSpec && planSpec._agentUserGuidance || '').trim();
       const toolLog = (toolEvents || []).slice(-6).map((event, index) => {
         const observation = String(event && event.observation ? event.observation : '').slice(0, agentMaxToolOutputChars);
         return `ToolResult ${index + 1}: ${String(event && event.tool ? event.tool : 'unknown')}\n${observation}`;
@@ -495,6 +499,7 @@
           AGENT_STEP: Number(stepIndex),
           AGENT_MAX_STEPS: agentMaxSteps,
           TASK: String(taskText || '').trim(),
+          USER_GUIDANCE: userGuidance || '(none)',
           PENDING_REQUIREMENTS: summarizeAgentPendingRequirements(taskText, toolEvents, planSpec),
           TOOL_RESULTS: toolLog || '(none yet)',
           INVALID_OUTPUT_TO_AVOID: String(badOutput || '').slice(0, 1200),
@@ -517,6 +522,7 @@
         `Agent step: ${Number(stepIndex)}/${agentMaxSteps}`,
         'TASK:',
         String(taskText || '').trim(),
+        userGuidance,
         'PENDING_REQUIREMENTS:',
         summarizeAgentPendingRequirements(taskText, toolEvents, planSpec),
         'TOOL_RESULTS:',
@@ -1006,6 +1012,7 @@
 
     async function buildAgentPlanPrompt(chatId, taskText) {
       const transcript = buildAgentHistoryTranscript(chatId, 10);
+      const userGuidance = String(buildAgentUserGuidance(chatId) || '').trim();
       const workspace = typeof getWorkspaceContext === 'function' ? getWorkspaceContext() : {};
       const template = await loadPromptTemplate('developer_agent_plan');
       let planWorkspaceRoot = workspace.workspaceRootName ? `/${workspace.workspaceRootName}` : '(none)';
@@ -1015,7 +1022,7 @@
       } catch (_) { }
       return renderPromptTemplate(template, {
         AGENT_ENVIRONMENT: getAgentEnvironmentContext('plan'),
-        CHAT_HISTORY: transcript || '(none)',
+        CHAT_HISTORY: [transcript, userGuidance].filter(Boolean).join('\n\n') || '(none)',
         CURRENT_WORKSPACE_ROOT: planWorkspaceRoot,
         CURRENT_SELECTION: normalizeWorkspacePath(workspace.currentPath || '/'),
         CURRENT_SELECTION_KIND: workspace.currentKind === 'file' ? 'file' : 'folder',
@@ -1465,6 +1472,7 @@
               : 'README required: no'),
         ].filter(Boolean).join('\n')
         : '(none)';
+      const userGuidance = String(buildAgentUserGuidance(chatId) || '').trim();
       // Component/bundler projects (React/Vite/Vue/...) get component-stack
       // guidance; the HTML shared-CSS/data-site-header wording only fits static
       // multi-page sites and reads as noise (or worse, misdirection) in a SPA.
@@ -1519,7 +1527,7 @@
         PENDING_REQUIREMENTS: summarizeAgentPendingRequirements(taskText, toolEvents, planSpec),
         TOOL_RESULTS: toolLog || '(none yet)',
         TASK: String(taskText || '').trim(),
-        PLAN_SUMMARY: phaseScope ? `${planSummary}\n${phaseScope}` : planSummary,
+        PLAN_SUMMARY: [planSummary, userGuidance, phaseScope].filter(Boolean).join('\n'),
         IMMEDIATE_NEXT_ACTION: buildImmediateNextAction(taskText, toolEvents, planSpec, stepIndex),
       };
       const prompt = renderPromptTemplate(template, vars);

@@ -13,6 +13,9 @@
       ? deps.recordDebugTrace
       : () => {};
     const agentFileGenerationRequestTimeoutMs = Number(deps.agentFileGenerationRequestTimeoutMs) || 30000;
+    const buildAgentUserGuidance = typeof deps.buildAgentUserGuidance === 'function'
+      ? deps.buildAgentUserGuidance
+      : () => '';
 
     async function requestExternalAgentPlanner(prompt, maxTokens, timeoutMs = agentPlannerRequestTimeoutMs) {
       if (!agentPlannerEndpoint) return null;
@@ -872,6 +875,11 @@
         .slice(-6);
       const deterministicCompletion = buildAgentCompletionFallbackText(taskText, toolEvents, workspaceLabel);
       const changeSummaries = buildAgentChangeSummaries(toolEvents);
+      const userGuidance = String(
+        (planSpec && planSpec._agentUserGuidance)
+        || buildAgentUserGuidance(planSpec && planSpec._chatId ? planSpec._chatId : '')
+        || ''
+      ).trim();
       const readResults = rows
         .filter((item) => String(item.tool || '').toLowerCase() === 'read_file')
         .slice(-2)
@@ -895,6 +903,7 @@
         `Workspace name: ${workspaceLabel || deps.deriveProjectNameFromTask(taskText) || 'project'}`,
         `Task: ${String(taskText || '').trim()}`,
         planSpec && planSpec.summary ? `Plan summary: ${planSpec.summary}` : '',
+        userGuidance,
         writtenPaths.length ? `Written files: ${Array.from(new Set(writtenPaths)).slice(0, 6).join(', ')}` : '',
         changeSummaries ? `CHANGES:\n${changeSummaries}` : '',
         readResults ? `READ_RESULTS:\n${readResults}` : '',
@@ -907,6 +916,7 @@
             WORKSPACE_NAME: workspaceLabel || deps.deriveProjectNameFromTask(taskText) || 'project',
             TASK: String(taskText || '').trim(),
             PLAN_SUMMARY: planSpec && planSpec.summary ? planSpec.summary : '',
+            USER_GUIDANCE: userGuidance || '(none)',
             WRITTEN_FILES: writtenPaths.length
               ? Array.from(new Set(writtenPaths)).slice(0, 6).join(', ')
               : '(none — NO files were created or modified this run)',
