@@ -3122,7 +3122,9 @@ def _aiexe_rename_after_stream(slug, name):
         with selenium_lock:
             if not _aiexe_driver_alive(driver):
                 return
-            _aiexe_sidebar_op_with_restore(driver, lambda: _aiexe_rename_chat(driver, slug, name), "RENAME")
+            # Renaming is cosmetic. Never restore/flash a minimized adapter window
+            # merely to change a Venice sidebar label; try once in its current state.
+            _aiexe_rename_chat(driver, slug, name)
     except Exception as _e:
         print("AIEXE_RENAME background failed: %s" % _e, flush=True)
 
@@ -4405,7 +4407,9 @@ def aiexe_rename_chat_route():
         # retried into a visible Chrome restore/park loop.
         if key:
             AIEXE_THREAD_NAMED[key] = name
-        ok = _aiexe_sidebar_op_with_restore(driver, lambda: _aiexe_rename_chat(driver, slug, name[:80]), "RENAME")
+        # Smart naming must not pop the adapter window open. If Venice has suspended
+        # its minimized sidebar layout, leave the label alone instead of restoring.
+        ok = _aiexe_rename_chat(driver, slug, name[:80])
     return Response(json.dumps({"ok": bool(ok), "slug": slug}),
                     content_type='application/json; charset=utf-8')
 
@@ -4774,19 +4778,27 @@ def _aiexe_cleanup_internal_batch(min_count=1, respect_user_window=True, cap=60)
                 AIEXE_THREAD_SLOW.discard(key)
                 if deleted:
                     done += 1
-                elif slug:
-                    AIEXE_STALE_THREADS.add(slug)
-                print("AIEXE_CLEANUP %s -> %s" % (slug or key[:36], "deleted" if deleted else "dropped from map"), flush=True)
+                # One cleanup attempt is enough. A missing row normally means the
+                # user already deleted the Venice chat; keeping it in the stale
+                # ledger created a restore/sidebar/minimize loop every minute.
+                if slug:
+                    AIEXE_STALE_THREADS.discard(slug)
+                print("AIEXE_CLEANUP %s -> %s" % (
+                    slug or key[:36], "deleted" if deleted else "gone or deleted manually"), flush=True)
             for slug in stale_batch:
                 deleted = False
                 try:
                     deleted = _aiexe_delete_chat(driver, slug, nav_fallback=False)
                 except Exception as exc:
                     print("AIEXE_CLEANUP rotated delete failed for %s: %s" % (slug, exc), flush=True)
+                # Always retire the ledger entry after one best-effort attempt.
+                # Repeated UI retries cannot distinguish an unavailable virtualized
+                # row from a thread the user has already deleted.
+                AIEXE_STALE_THREADS.discard(slug)
                 if deleted:
-                    AIEXE_STALE_THREADS.discard(slug)
                     done += 1
-                print("AIEXE_CLEANUP rotated %s -> %s" % (slug, "deleted" if deleted else "pending retry"), flush=True)
+                print("AIEXE_CLEANUP rotated %s -> %s" % (
+                    slug, "deleted" if deleted else "gone or deleted manually"), flush=True)
             _aiexe_save_chat_map()
             _aiexe_save_stale_threads()
         finally:
@@ -4814,7 +4826,9 @@ def _aiexe_internal_cleanup_loop():
             if time.time() - AIEXE_LAST_REQUEST_TS < 120:
                 continue
             result = _aiexe_cleanup_internal_batch(min_count=6)
-            _aiexe_sweep_stale_threads()   # rotated-thread ledger, same idle window
+            # _aiexe_cleanup_internal_batch owns the rotated ledger. Calling the
+            # second sweeper here retried the same missing rows immediately and
+            # caused another restore/minimize cycle.
             if result > 0:
                 gevent.sleep(240)  # cooldown between batches — hygiene, not a show
         except Exception as exc:

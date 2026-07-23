@@ -46,6 +46,9 @@ assert.match(adapter, /key\.startswith\("id:internal:"\)/);
 assert.match(adapter, /if k\.startswith\("id:internal:"\)/);
 assert.match(adapter, /stale = list\(AIEXE_STALE_THREADS\)/);
 assert.match(adapter, /AIEXE_STALE_THREADS\.discard\(slug\)/);
+assert.match(adapter, /gone or deleted manually/);
+assert.doesNotMatch(adapter, /_aiexe_sidebar_op_with_restore\(driver, lambda: _aiexe_rename_chat/);
+assert.doesNotMatch(adapter, /_aiexe_sweep_stale_threads\(\)\s+# rotated-thread ledger/);
 assert.match(aiExe, /agentAdapterUploadedAttachmentIds\.delete\(String\(chatId \|\| ''\)\)/);
 
 // Agent images upload ONCE per persistent scratch thread (dedup by chat +
