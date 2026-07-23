@@ -77,6 +77,7 @@ class ProviderCompleteRequest(BaseModel):
     temperature: float = 0.2
     chat_id: str = ""   # AI.EXE chat id — the adapter maps it to one Venice conversation
     think: str = ""     # "on" | "off" — adapter normalizes Venice's per-chat Reasoning switch
+    web_search: str = "" # "on" | "off" — adapter normalizes Venice's per-chat Web Enabled switch
     chat_name: str = "" # AI.EXE chat name — adapter renames the Venice conversation to match
     attachments: List[Dict[str, Any]] = []  # images the adapter uploads via Venice's file input
     structured_output: bool = False  # internal planner JSON; enables strict adapter bounds

@@ -1345,6 +1345,13 @@ def _aiexe_model_catalog():
 
 
 AIEXE_SETTINGS_DONE = set()   # chat keys whose Venice per-chat settings were already normalized
+
+
+def _aiexe_forget_chat_settings(chat_key):
+    prefix = "%s|" % str(chat_key or "")
+    for settings_key in list(AIEXE_SETTINGS_DONE):
+        if settings_key.startswith(prefix):
+            AIEXE_SETTINGS_DONE.discard(settings_key)
 AIEXE_SEEN_CHUNK_SHAPES = set()   # textless chunk shapes already logged (dedup)
 AIEXE_PRICED_MODELS = set()   # model names whose picker row shows Venice's coin icon (credit-metered)
 AIEXE_PRICED_CHECKED_MODELS = set()   # model rows already inspected for the coin icon
@@ -1483,10 +1490,10 @@ def _aiexe_set_switch(driver, label, want_on):
         print("AIEXE_SETTINGS %r error: %s" % (label, str(_e)[:120]), flush=True)
 
 
-def _aiexe_normalize_chat_settings(driver, keep_reasoning=False):
-    """Open Venice's per-chat Settings and turn OFF what hurts the adapter: Web Enabled
-    (agent JSON decisions were doing live web searches — '10 Citations' — pure latency),
-    URL Scraping, and Reasoning unless AI.EXE's Think mode asked for it. Fully guarded."""
+def _aiexe_normalize_chat_settings(driver, keep_reasoning=False, web_enabled=False):
+    """Apply AI.EXE's per-request Venice settings. Web Enabled follows the explicit Web
+    Search action, URL Scraping stays off, and Reasoning follows Think mode. Internal
+    structured calls never request web search, avoiding citation text inside agent JSON."""
     try:
         btn = None
         for b in driver.find_elements(By.XPATH, VC_CHAT_SETTINGS_BUTTON_XPATH):
@@ -1498,7 +1505,7 @@ def _aiexe_normalize_chat_settings(driver, keep_reasoning=False):
             return
         driver.execute_script("arguments[0].click();", btn)
         time.sleep(0.8)
-        _aiexe_set_switch(driver, "Web Enabled", False)
+        _aiexe_set_switch(driver, "Web Enabled", bool(web_enabled))
         _aiexe_set_switch(driver, "URL Scraping", False)
         _aiexe_set_switch(driver, "Reasoning", bool(keep_reasoning))
         _aiexe_dismiss_modal(driver)
@@ -3308,6 +3315,7 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
                        else 'AI.EXE chat changed')
             if not _aiexe_start_fresh_temp_chat(driver, _reason):
                 raise WebDriverException("Venice Temporary Chat could not be reset")
+            _aiexe_forget_chat_settings(_chat_key)
         AIEXE_ACTIVE_TEMP_KEY = _chat_key
         # A previous ABORTED request (client timeout/retry) can leave Venice still generating —
         # the composer is unusable until it stops.
@@ -3355,11 +3363,15 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
             # web search / URL scraping OFF, Reasoning follows AI.EXE's Think mode.
             try:
                 _think = 'on' if str(data.get('aiexe_think') or '') == 'on' else 'off'
-                _skey = "%s|%s" % (_chat_key or 'nokey', _think)
+                _web = 'on' if str(data.get('aiexe_web_search') or '') == 'on' else 'off'
+                _skey = "%s|%s|%s" % (_chat_key or 'nokey', _think, _web)
                 if _chat_key and _skey not in AIEXE_SETTINGS_DONE:
-                    _aiexe_normalize_chat_settings(driver, keep_reasoning=(_think == 'on'))
+                    _aiexe_normalize_chat_settings(
+                        driver, keep_reasoning=(_think == 'on'), web_enabled=(_web == 'on'))
                     AIEXE_SETTINGS_DONE.add(_skey)
-                    AIEXE_SETTINGS_DONE.discard("%s|%s" % (_chat_key, 'on' if _think == 'off' else 'off'))
+                    for _old_skey in list(AIEXE_SETTINGS_DONE):
+                        if _old_skey.startswith("%s|" % _chat_key) and _old_skey != _skey:
+                            AIEXE_SETTINGS_DONE.discard(_old_skey)
             except Exception:
                 pass
         finally:

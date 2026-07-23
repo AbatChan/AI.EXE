@@ -170,6 +170,7 @@
       deps.setCanvasMode(false);
       deps.setDeveloperAgentMode(false);
       deps.setThinkMode(false);
+      deps.setWebSearchMode(false);
       deps.setPendingManualContext('');
       deps.setPendingNewChatAttachments([]);
       deps.clearPendingAttachments();

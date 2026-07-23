@@ -1293,6 +1293,7 @@ const canvasBtn = document.getElementById('canvasBtn');
 const attachBtn = document.getElementById('attachBtn');
 const agentBtn = document.getElementById('agentBtn');
 const thinkBtn = document.getElementById('thinkBtn');
+const webSearchBtn = document.getElementById('webSearchBtn');
 const contextBtn = document.getElementById('contextBtn');
 const composerPlusBtn = document.getElementById('composerPlusBtn');
 const composerMenu = document.getElementById('composerMenu');
@@ -1300,6 +1301,7 @@ const menuCanvasBtn = document.getElementById('menuCanvasBtn');
 const menuAttachBtn = document.getElementById('menuAttachBtn');
 const menuAgentBtn = document.getElementById('menuAgentBtn');
 const menuThinkBtn = document.getElementById('menuThinkBtn');
+const menuWebSearchBtn = document.getElementById('menuWebSearchBtn');
 const menuContextBtn = document.getElementById('menuContextBtn');
 const micBtn = document.getElementById('micBtn');
 const dictationBar = document.getElementById('dictationBar');
@@ -1598,6 +1600,7 @@ let chatProgrammaticScrollDepth = 0;
 let canvasModeEnabled = false;
 let developerAgentEnabled = false;
 let thinkModeEnabled = false;
+let webSearchEnabled = false;
 let canvasDockOpen = false;
 let composerMenuOpen = false;
 let composerConfirmSelectedIndex = 0;
@@ -4650,7 +4653,7 @@ function closeExplorerMenus() {
 
 function syncComposerLayoutState() {
   if (!inputRow) return;
-  const buttons = [continueBtn, canvasBtn, attachBtn, agentBtn, thinkBtn, contextBtn];
+  const buttons = [continueBtn, canvasBtn, attachBtn, agentBtn, thinkBtn, webSearchBtn, contextBtn];
   const hasVisibleAction = buttons.some((btn) => btn && !btn.classList.contains('hidden'));
   inputRow.classList.toggle('has-action-row', hasVisibleAction);
 }
@@ -5188,8 +5191,15 @@ function updateInputActionChips() {
     thinkBtn.setAttribute('aria-pressed', thinkModeEnabled ? 'true' : 'false');
     thinkBtn.setAttribute('aria-label', thinkModeEnabled ? 'Think on' : 'Think');
   }
+  if (webSearchBtn) {
+    webSearchBtn.classList.toggle('hidden', !webSearchEnabled);
+    webSearchBtn.classList.toggle('active', webSearchEnabled);
+    webSearchBtn.setAttribute('aria-pressed', webSearchEnabled ? 'true' : 'false');
+    webSearchBtn.setAttribute('aria-label', webSearchEnabled ? 'Web Search on' : 'Web Search');
+  }
   // Keep plus-menu actions visually neutral; active state is shown by chips only.
   if (menuThinkBtn) menuThinkBtn.setAttribute('aria-pressed', thinkModeEnabled ? 'true' : 'false');
+  if (menuWebSearchBtn) menuWebSearchBtn.setAttribute('aria-pressed', webSearchEnabled ? 'true' : 'false');
   if (contextBtn) {
     const hasContext = Boolean(getActiveManualContext());
     contextBtn.classList.toggle('hidden', !hasContext);
@@ -5228,6 +5238,16 @@ function setThinkMode(enabled) {
   const activeChat = getActiveChat();
   if (activeChat && !inNewChatMode && Boolean(activeChat.thinkMode) !== thinkModeEnabled) {
     activeChat.thinkMode = thinkModeEnabled;
+    saveChats();
+  }
+  updateInputActionChips();
+}
+
+function setWebSearchMode(enabled) {
+  webSearchEnabled = Boolean(enabled);
+  const activeChat = getActiveChat();
+  if (activeChat && !inNewChatMode && Boolean(activeChat.webSearch) !== webSearchEnabled) {
+    activeChat.webSearch = webSearchEnabled;
     saveChats();
   }
   updateInputActionChips();
@@ -9006,6 +9026,9 @@ function setSendLoading(loading, loadingHere = loading) {
   if (thinkBtn) {
     thinkBtn.disabled = loadingHere;
   }
+  if (webSearchBtn) {
+    webSearchBtn.disabled = loadingHere;
+  }
   if (contextBtn) {
     contextBtn.disabled = loadingHere;
   }
@@ -9023,6 +9046,9 @@ function setSendLoading(loading, loadingHere = loading) {
   }
   if (menuThinkBtn) {
     menuThinkBtn.disabled = loadingHere;
+  }
+  if (menuWebSearchBtn) {
+    menuWebSearchBtn.disabled = loadingHere;
   }
   if (menuContextBtn) {
     menuContextBtn.disabled = loadingHere;
@@ -9891,6 +9917,7 @@ async function requestOllamaChatCompletion(provider, prompt, maxTokens, systemPr
         temperature: 0.2,
         chat_id: chatId,
         think: thinkActive ? 'on' : 'off',   // adapter normalizes Venice's per-chat Reasoning switch
+        web_search: extra.webSearchActive ? 'on' : 'off',
         ...(Array.isArray(extra.attachments) && extra.attachments.length ? { attachments: extra.attachments } : {}),
         ...(extra.chatName ? { chat_name: extra.chatName } : {}),
       }),
@@ -9947,6 +9974,7 @@ async function streamOllamaChatCompletion(provider, prompt, handlers = {}, optio
         temperature: 0.2,
         chat_id: chatId,
         think: options.thinkActive ? 'on' : 'off',
+        web_search: options.webSearchActive ? 'on' : 'off',
         ...(stopOnCompleteJson ? { structured_output: true } : {}),
         ...(maxOutputChars > 0 ? { max_output_chars: maxOutputChars } : {}),
         ...(Array.isArray(options.attachments) && options.attachments.length ? { attachments: options.attachments } : {}),
@@ -10404,6 +10432,7 @@ async function requestRemoteTextCompletionForCapability(capability, prompt, maxT
       ...(completionOptions.adapterChatScope ? { adapterChatScope: completionOptions.adapterChatScope } : {}),
       ...(completionOptions.adapterChatId ? { adapterChatId: completionOptions.adapterChatId } : {}),
       ...(completionOptions.stopOnCompleteJson ? { stopOnCompleteJson: true } : {}),
+      ...(completionOptions.webSearchActive && !completionOptions.stopOnCompleteJson && !completionOptions.isolatedAdapterChat ? { webSearchActive: true } : {}),
       ...(Number(completionOptions.maxOutputChars) > 0 ? { maxOutputChars: Number(completionOptions.maxOutputChars) } : {}),
     });
     if ((!result || !result.ok) && adapterAttachments.length) {
@@ -10425,6 +10454,7 @@ async function requestRemoteTextCompletionForCapability(capability, prompt, maxT
         ...(completionOptions.isolatedAdapterChat ? { isolatedAdapterChat: true } : {}),
         ...(completionOptions.adapterChatScope ? { adapterChatScope: completionOptions.adapterChatScope } : {}),
         ...(completionOptions.adapterChatId ? { adapterChatId: completionOptions.adapterChatId } : {}),
+        ...(completionOptions.webSearchActive && !completionOptions.isolatedAdapterChat ? { webSearchActive: true } : {}),
       },
     );
     if ((!result || !result.ok) && adapterAttachments.length) {
@@ -12947,6 +12977,7 @@ const chatShell = window.AIExeChatShell && typeof window.AIExeChatShell.createCh
     setCanvasMode,
     setDeveloperAgentMode,
     setThinkMode,
+    setWebSearchMode,
     setPendingManualContext: (value) => { pendingManualContext = String(value || ''); },
     setPendingNewChatAttachments: (value) => { pendingNewChatAttachments = Array.isArray(value) ? value : []; },
     clearPendingAttachments,
@@ -13185,6 +13216,7 @@ const chatRenderer = window.AIExeChatRenderer && typeof window.AIExeChatRenderer
     setCanvasMode,
     setDeveloperAgentMode,
     setThinkMode,
+    setWebSearchMode,
     setPendingManualContext: (value) => { pendingManualContext = String(value || ''); },
     setPendingAttachments: (value) => { pendingAttachments = normalizePendingAttachmentList(value); },
     setPendingNewChatAttachments: (value) => { pendingNewChatAttachments = normalizePendingAttachmentList(value); },
@@ -15444,6 +15476,7 @@ function loadStoredChats() {
         canvasMode: Boolean(chat.canvasMode),
         agentMode: Boolean(chat.agentMode),
         thinkMode: Boolean(chat.thinkMode),
+        webSearch: Boolean(chat.webSearch),
         pendingAttachments: normalizePendingAttachmentList(chat.pendingAttachments),
         manualContext: typeof chat.manualContext === 'string' ? chat.manualContext.slice(0, 4000) : '',
         pendingPreflightConfirmation: normalizeStoredPendingPreflightConfirmation(chat.pendingPreflightConfirmation),
@@ -16805,6 +16838,9 @@ function removeComposerOverflowChip(chip) {
   } else if (id === 'thinkBtn') {
     setThinkMode(false);
     syncInputAugmentState();
+  } else if (id === 'webSearchBtn') {
+    setWebSearchMode(false);
+    syncInputAugmentState();
   } else if (id === 'contextBtn') {
     setActiveManualContext('');
     updateContextButtonState();
@@ -17080,6 +17116,24 @@ if (menuThinkBtn) {
     setComposerMenuOpen(false);
   });
 }
+if (menuWebSearchBtn) {
+  menuWebSearchBtn.addEventListener('click', () => {
+    if (pendingInferenceCount > 0 && isCurrentViewInferenceChat()) return;
+    if (!isVeniceAdapterSelected()) {
+      showAppNotification({
+        title: 'Venice Web Search',
+        message: 'Choose a Venice model to use its live web search.',
+        kind: 'info',
+        durationMs: 4200,
+      });
+      setComposerMenuOpen(false);
+      return;
+    }
+    setWebSearchMode(!webSearchEnabled);
+    syncInputAugmentState();
+    setComposerMenuOpen(false);
+  });
+}
 if (menuContextBtn) {
   menuContextBtn.addEventListener('click', () => {
     if (pendingInferenceCount > 0 && isCurrentViewInferenceChat()) return;
@@ -17127,6 +17181,13 @@ if (thinkBtn) {
   thinkBtn.addEventListener('click', () => {
     if (pendingInferenceCount > 0 && isCurrentViewInferenceChat()) return;
     setThinkMode(false);
+    syncInputAugmentState();
+  });
+}
+if (webSearchBtn) {
+  webSearchBtn.addEventListener('click', () => {
+    if (pendingInferenceCount > 0 && isCurrentViewInferenceChat()) return;
+    setWebSearchMode(false);
     syncInputAugmentState();
   });
 }
@@ -17890,6 +17951,7 @@ function createChat(seedText) {
     canvasMode: Boolean(canvasModeEnabled),
     agentMode: Boolean(developerAgentEnabled),
     thinkMode: Boolean(thinkModeEnabled),
+    webSearch: Boolean(webSearchEnabled),
     pendingAttachments: normalizePendingAttachmentList(pendingAttachments),
     manualContext: String(pendingManualContext || '').trim(),
     branchLinks: [],
@@ -19868,6 +19930,7 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
     streamRaw: '',
     deltaCount: 0,
     thinkForced: Boolean(options && options.thinkForced),
+    webSearchActive: Boolean(webSearchEnabled),
     appendToLastAssistant: Boolean(options && options.appendToLastAssistant),
     latestUserOverride: String(options && options.latestUserOverride ? options.latestUserOverride : '').trim(),
     autoContinuationRemaining: Number.isFinite(Number(options && options.autoContinuationRemaining))
@@ -20406,6 +20469,7 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
         abortController: requestToken.abortController,
         maxTokens: requestToken.maxTokens,
         thinkActive: Boolean(thinkModeEnabled || requestToken.thinkForced),
+        webSearchActive: Boolean(requestToken.webSearchActive),
         attachments: requestToken.attachments,
         chatName: requestToken.chatName,
         // Pin the Venice conversation to the request owner. Falling back to the
@@ -20524,6 +20588,7 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
             abortController: requestToken.abortController,
             maxTokens: requestToken.maxTokens,
             thinkActive: Boolean(thinkModeEnabled || requestToken.thinkForced),
+            webSearchActive: Boolean(requestToken.webSearchActive),
             modelOverride: uncModel,
             adapterChatId: String(requestToken.chatId || chatId || ''),
           };

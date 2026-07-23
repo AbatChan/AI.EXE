@@ -44,7 +44,8 @@ def provider_complete(payload: ProviderCompleteRequest) -> ProviderCompleteRespo
     try:
         content = llm.complete(payload.messages, temperature=payload.temperature,
                                max_tokens=payload.max_tokens, chat_id=payload.chat_id,
-                               think=payload.think, chat_name=payload.chat_name,
+                               think=payload.think, web_search=payload.web_search,
+                               chat_name=payload.chat_name,
                                attachments=payload.attachments)
         return ProviderCompleteResponse(ok=bool(content.strip()), content=content)
     except LLMError as exc:
@@ -68,6 +69,8 @@ def provider_stream(payload: ProviderCompleteRequest) -> StreamingResponse:
         body["aiexe_chat_id"] = payload.chat_id
     if payload.think in ("on", "off"):
         body["aiexe_think"] = payload.think
+    if payload.web_search in ("on", "off"):
+        body["aiexe_web_search"] = payload.web_search
     if payload.chat_name:
         body["aiexe_chat_name"] = payload.chat_name
     if payload.attachments:

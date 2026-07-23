@@ -3189,6 +3189,7 @@
         if (typeof d.setCanvasMode === 'function') d.setCanvasMode(false);
         if (typeof d.setDeveloperAgentMode === 'function') d.setDeveloperAgentMode(false);
         if (typeof d.setThinkMode === 'function') d.setThinkMode(false);
+        if (typeof d.setWebSearchMode === 'function') d.setWebSearchMode(false);
         if (typeof d.setPendingManualContext === 'function') d.setPendingManualContext('');
         if (typeof d.setPendingAttachments === 'function') d.setPendingAttachments([]);
         if (typeof d.setPendingNewChatAttachments === 'function') d.setPendingNewChatAttachments([]);
@@ -3209,6 +3210,7 @@
         if (typeof d.setLastRenderedChatId === 'function') d.setLastRenderedChatId('');
         if (typeof d.setCanvasMode === 'function') d.setCanvasMode(false);
         if (typeof d.setThinkMode === 'function') d.setThinkMode(false);
+        if (typeof d.setWebSearchMode === 'function') d.setWebSearchMode(false);
         if (typeof d.setPendingAttachments === 'function' && typeof d.normalizePendingAttachmentList === 'function') {
           d.setPendingAttachments(d.normalizePendingAttachmentList(d.getPendingNewChatAttachments ? d.getPendingNewChatAttachments() : []));
         }
@@ -3227,6 +3229,7 @@
         if (typeof d.setCanvasMode === 'function') d.setCanvasMode(Boolean(chat && chat.canvasMode));
         if (typeof d.setDeveloperAgentMode === 'function') d.setDeveloperAgentMode(Boolean(chat && chat.agentMode));
         if (typeof d.setThinkMode === 'function') d.setThinkMode(Boolean(chat && chat.thinkMode));
+        if (typeof d.setWebSearchMode === 'function') d.setWebSearchMode(Boolean(chat && chat.webSearch));
         if (typeof d.setPendingAttachments === 'function' && typeof d.normalizePendingAttachmentList === 'function') d.setPendingAttachments(d.normalizePendingAttachmentList((chat && chat.pendingAttachments) || []));
         if (typeof d.setPendingManualContext === 'function') d.setPendingManualContext(String((chat && chat.manualContext) || ''));
         chatArea.innerHTML = d.emptyStateTemplate || '';
@@ -3244,6 +3247,7 @@
       if (typeof d.setCanvasMode === 'function') d.setCanvasMode(Boolean(chat.canvasMode));
       if (typeof d.setDeveloperAgentMode === 'function') d.setDeveloperAgentMode(Boolean(chat.agentMode));
       if (typeof d.setThinkMode === 'function') d.setThinkMode(Boolean(chat.thinkMode));
+      if (typeof d.setWebSearchMode === 'function') d.setWebSearchMode(Boolean(chat.webSearch));
       if (typeof d.setPendingAttachments === 'function' && typeof d.normalizePendingAttachmentList === 'function') d.setPendingAttachments(d.normalizePendingAttachmentList(chat.pendingAttachments || []));
       if (typeof d.setPendingManualContext === 'function') d.setPendingManualContext(String(chat.manualContext || ''));
       chatArea.innerHTML = '';
