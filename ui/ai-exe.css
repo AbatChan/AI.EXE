@@ -3172,7 +3172,10 @@ html.platform-mac .settings-sidebar {
 
 .artifact-browser {
   flex: 1;
-  width: min(calc(100% - (2 * var(--content-gutter))), var(--content-max-width));
+  /* Artifacts and Code use the same centered reading column as Chat/New Chat.
+     Below the cap this remains fluid with the shared content gutter. Finance
+     intentionally keeps the wider --content-max-width layout. */
+  width: min(calc(100% - (2 * var(--content-gutter))), var(--chat-content-max-width));
   margin: 20px auto 14px;
   border: none;
   border-radius: 10px;
