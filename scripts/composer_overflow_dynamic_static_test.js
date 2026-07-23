@@ -3,6 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const source = fs.readFileSync(path.join(__dirname, '..', 'ui', 'ai-exe.js'), 'utf8');
+const css = fs.readFileSync(path.join(__dirname, '..', 'ui', 'ai-exe.css'), 'utf8');
 const start = source.indexOf('// ---- Composer action-chip overflow (+N)');
 const end = source.indexOf('const settingsAdapterHidePrompt', start);
 assert.ok(start >= 0 && end > start, 'composer overflow section exists');
@@ -33,5 +34,9 @@ assert.match(section, /new ResizeObserver\(\(\) => scheduleComposerChipOverflow\
 assert.match(section, /composerOverflowResizeObserver\.observe\(inputControlsLeftEl\)/, 'composer width is observed');
 assert.match(section, /if \(composerModelWrap\) composerOverflowResizeObserver\.observe\(composerModelWrap\)/, 'model pill width is observed');
 assert.match(section, /id === 'webSearchBtn'[\s\S]*?setWebSearchMode\(false\)/, 'overflow removal disables Web Search through shared state');
+const actionRule = css.match(/\.iact-btn\s*\{([\s\S]*?)\}/);
+assert.ok(actionRule, 'composer action chip CSS exists');
+assert.match(actionRule[1], /flex:\s*0\s+0\s+auto/, 'action chips cannot shrink before +N calculation');
+assert.match(actionRule[1], /white-space:\s*nowrap/, 'Web Search and other labels stay on one line');
 
 console.log('PASS: composer +N overflow is dynamic and includes Web Search.');

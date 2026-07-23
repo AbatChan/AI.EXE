@@ -7778,6 +7778,7 @@ html.platform-mac .settings-sidebar {
 }
 
 .iact-btn {
+  flex: 0 0 auto;
   height: 22px;
   padding: 13px 8px;
   border-radius: 30px;
@@ -7792,6 +7793,7 @@ html.platform-mac .settings-sidebar {
   display: inline-flex;
   align-items: center;
   gap: 5px;
+  white-space: nowrap;
   transition: background 0.18s ease, opacity 0.18s ease, transform 0.15s ease;
 }
 
