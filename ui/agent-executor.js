@@ -3347,7 +3347,29 @@ export default config;
         }
         // Never save an edit that breaks a previously-sound file.
         const editBeforeIssue = getStructuralIssueForPath(path, originalContent);
-        const editAfterIssue = getStructuralIssueForPath(path, applied.output);
+        let editAfterIssue = getStructuralIssueForPath(path, applied.output);
+        let editRepairNote = '';
+        // package.json caret-versions get footnote-mangled by Venice's render/scrape
+        // (^18.3.1 → ^2^.3.1) in BOTH stream and copy, so the model can NEVER emit a
+        // clean version — every retry re-corrupts. The major digit is unrecoverable
+        // from the token, so repair from the trusted safe-versions table (same one
+        // write_file already uses) instead of rejecting into an unwinnable loop.
+        if (!editBeforeIssue && editAfterIssue
+          && /(?:^|\/)package\.json$/i.test(path)
+          && /mangled dependency versions/.test(editAfterIssue)) {
+          const repairedEdit = repairPackageJsonDependencyVersions(applied.output);
+          if (repairedEdit.repaired && !repairedEdit.remainingBad.length
+            && !getStructuralIssueForPath(path, repairedEdit.content)) {
+            applied.output = repairedEdit.content;
+            editAfterIssue = '';
+            editRepairNote = 'Repaired Venice-mangled dependency versions from the known-good table before saving.';
+            if (typeof deps.recordDebugTrace === 'function') {
+              deps.recordDebugTrace('agent_edit_package_versions_repaired', {
+                path, chars: String(repairedEdit.content.length),
+              }, { path, contentPreview: repairedEdit.content.slice(0, 1400) });
+            }
+          }
+        }
         if (!editBeforeIssue && editAfterIssue) {
           if (typeof deps.recordDebugTrace === 'function') {
             deps.recordDebugTrace('agent_edit_structural_reject', {
@@ -3417,6 +3439,7 @@ export default config;
         const appliedSummary = summarizeAppliedEditsForObservation(program);
         observation = [
           `edit_file ok: ${path} (${applied.appliedCount} edits)`,
+          editRepairNote ? `Note: ${editRepairNote}` : '',
           appliedSummary ? `Applied changes:\n${appliedSummary}` : '',
           `The saved file reflects exactly these changes — do not re-read ${path} to verify.`,
           editBeforeIssue && editAfterIssue

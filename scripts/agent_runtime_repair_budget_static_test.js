@@ -34,6 +34,9 @@ assert.match(executor, /which this build cannot reproduce/);
 
 // The package.json scaffolder never fires over an existing manifest.
 assert.match(executor, /regenerating it would drop its real dependencies/);
+// edit_file repairs Venice-mangled package.json versions instead of looping.
+assert.match(executor, /repairPackageJsonDependencyVersions\(applied\.output\)/);
+assert.match(executor, /Repaired Venice-mangled dependency versions from the known-good table/);
 // Type errors are surfaced as a full batch, not one per rebuild.
 assert.match(executor, /All current type errors/);
 // Harness-substituted saves show the real bytes instead of claiming a match.
