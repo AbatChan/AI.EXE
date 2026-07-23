@@ -34,19 +34,16 @@ assert.match(promptCore, /Do not add adjacent pages, screens, or features/);
 assert.match(cmake, /AI_EXE_APP_VERSION "\d+\.\d+\.\d+"/);
 assert.equal(pkg.version, (cmake.match(/AI_EXE_APP_VERSION "([^"]+)"/) || [])[1]);
 
-// Venice thread hygiene: internal calls REUSE one stable scratch thread per chat.
-// Temporary mode resets through the SPA and local cleanup never renames/deletes
-// Venice history or restores/minimizes Chrome.
+// Venice thread hygiene: internal calls reuse one stable AI.EXE scope, while Venice
+// itself is Temporary-only and has no saved-thread mapping/sidebar machinery.
 const adapter = fs.readFileSync(path.join(__dirname, '..', 'backend', 'app', 'venice_adapter_server.py'), 'utf8');
 assert.match(aiExe, /return `internal:chat:\$\{String\(activeChatId \|\| 'shared'\)\}`/);
 assert.doesNotMatch(aiExe, /internal:\$\{cleanScope\}:\$\{nowTs\(\)/);
-assert.match(adapter, /if k\.startswith\("id:internal:"\)/);
-assert.match(adapter, /stale = list\(AIEXE_STALE_THREADS\)/);
-assert.match(adapter, /AIEXE_STALE_THREADS\.discard\(slug\)/);
+assert.match(adapter, /def _aiexe_ensure_temporary_chat_mode/);
 assert.match(adapter, /def _aiexe_start_fresh_temp_chat/);
-assert.match(adapter, /no Venice UI/);
-assert.doesNotMatch(adapter, /_aiexe_sidebar_op_with_restore\(driver, lambda: _aiexe_rename_chat/);
-assert.doesNotMatch(adapter, /_aiexe_sweep_stale_threads\(\)\s+# rotated-thread ledger/);
+assert.doesNotMatch(adapter, /AIEXE_CHAT_URLS/);
+assert.doesNotMatch(adapter, /_aiexe_(rename|delete)_chat/);
+assert.doesNotMatch(adapter, /sidebar_debug/);
 assert.match(aiExe, /agentAdapterUploadedAttachmentIds\.delete\(String\(chatId \|\| ''\)\)/);
 
 // Agent images upload ONCE per persistent scratch thread (dedup by chat +

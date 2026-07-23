@@ -53,11 +53,10 @@ assert.match(aiExe, /classList\.add\('platform-windows'\)/);
 assert.match(css, /html\.platform-windows \*::\-webkit-scrollbar/);
 assert.match(css, /html\.platform-windows \*::\-webkit-scrollbar-button/);
 
-// Adapter: idle-time cleanup of internal one-shot Venice threads.
-assert.match(adapter, /_aiexe_internal_cleanup_loop/);
-assert.match(adapter, /id:internal:/);
-assert.match(adapter, /AIEXE_LAST_REQUEST_TS/);
-assert.match(adapter, /gevent\.spawn\(_aiexe_internal_cleanup_loop\)/);
+// Adapter: Temporary Chat is enforced; no background sidebar cleanup/window churn.
+assert.match(adapter, /_aiexe_ensure_temporary_chat_mode/);
+assert.doesNotMatch(adapter, /_aiexe_internal_cleanup_loop/);
+assert.doesNotMatch(adapter, /gevent\.spawn\(_aiexe_internal_cleanup_loop\)/);
 
 // Windows releases include and start the backend that owns /api/adapter/*.
 assert.match(win, /StartBundledBackend/);

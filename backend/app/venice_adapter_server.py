@@ -7,7 +7,6 @@ from webdriver_manager.core.os_manager import ChromeType
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.desired_capabilities import DesiredCapabilities
 from selenium.webdriver.common.keys import Keys
-from selenium.webdriver.common.action_chains import ActionChains
 from selenium.common.exceptions import ElementClickInterceptedException, TimeoutException, WebDriverException, StaleElementReferenceException, NoSuchWindowException, InvalidSessionIdException
 from flask import Flask, request, Response
 import json
@@ -75,6 +74,7 @@ VC_MODEL_SEARCH_BUTTON_XPATH = _vcfg('MODEL_SEARCH_BUTTON_XPATH', "//button[cont
 VC_MODEL_ROW_TITLE_CSS = _vcfg('MODEL_ROW_TITLE_CSS', "p[title]")
 VC_CLOSE_BUTTON_XPATH = _vcfg('CLOSE_BUTTON_XPATH', "//button[@aria-label='Close']")
 VC_NEW_CHAT_XPATH = _vcfg('NEW_CHAT_XPATH', "//button[@aria-label='New chat']")
+VC_TEMP_CHAT_MENU_XPATH = _vcfg('TEMP_CHAT_MENU_XPATH', "//button[@aria-label='Temporary chat options']")
 VC_TEMP_CHAT_OPTION_XPATH = _vcfg('TEMP_CHAT_OPTION_XPATH', "//button[@role='menuitemradio' and @value='temporary']")
 VC_CHAT_SETTINGS_BUTTON_XPATH = _vcfg('CHAT_SETTINGS_BUTTON_XPATH', "//button[@aria-label='Settings']")
 VC_STOP_GENERATING_XPATH = _vcfg('STOP_GENERATING_XPATH', "//button[translate(@aria-label,'STOP','stop')='stop' or @aria-label='Stop generating']")
@@ -87,16 +87,6 @@ VC_ATTACH_CARD_IMG_XPATH = _vcfg('ATTACH_CARD_IMG_XPATH', "//div[contains(@class
 VC_ATTACH_CARD_BY_NAME_XPATH = _vcfg('ATTACH_CARD_BY_NAME_XPATH', "//div[contains(@class,'chakra-card')][.//p[normalize-space()='{}'] or .//img[@alt='{}']]")
 VC_ATTACH_CARD_REMOVE_XPATH = _vcfg('ATTACH_CARD_REMOVE_XPATH', "//div[contains(@class,'chakra-card')]//button[@aria-label='Remove']")
 VC_ATTACH_ACTIONS_BUTTON_XPATH = _vcfg('ATTACH_ACTIONS_BUTTON_XPATH', "//button[@aria-label='Actions']")
-# Sidebar rows: rename / delete / cleanup
-VC_SIDEBAR_CHAT_ROW_XPATH = _vcfg('SIDEBAR_CHAT_ROW_XPATH', "//div[@role='group'][.//a[contains(@href,'/chat/classic/{}')]]")
-VC_SIDEBAR_CHAT_ROW_ANY_XPATH = _vcfg('SIDEBAR_CHAT_ROW_ANY_XPATH', "//a[contains(@href,'/chat/classic/')]")
-VC_CHAT_RENAME_BUTTON_XPATH = _vcfg('CHAT_RENAME_BUTTON_XPATH', ".//button[@aria-label='Rename']")
-VC_CHAT_RENAME_INPUT_XPATH = _vcfg('CHAT_RENAME_INPUT_XPATH', "//input[contains(@class,'chakra-input')]")
-VC_CHAT_RENAME_CONFIRM_XPATH = _vcfg('CHAT_RENAME_CONFIRM_XPATH', "//button[@aria-label='confirm']")
-VC_CHAT_RENAME_CANCEL_XPATH = _vcfg('CHAT_RENAME_CANCEL_XPATH', "//button[@aria-label='Cancel']")
-VC_CHAT_DELETE_BUTTON_XPATH = _vcfg('CHAT_DELETE_BUTTON_XPATH', ".//button[@aria-label='Delete']")
-VC_CHAT_DELETE_CONFIRM_XPATH = _vcfg('CHAT_DELETE_CONFIRM_XPATH', "//footer//button[normalize-space()='Confirm']")
-VC_SIDEBAR_TOGGLE_XPATH = _vcfg('SIDEBAR_TOGGLE_XPATH', "//button[@aria-label='Toggle sidebar' or @aria-label='Show Sidebar']")
 # Rendered assistant reply (DOM fallback when the worker bypasses the fetch interceptor).
 VC_ASSISTANT_MESSAGE_XPATH = _vcfg('ASSISTANT_MESSAGE_XPATH', "//div[@data-message-id]")
 VC_USER_MESSAGE_MARKER_CSS = _vcfg('USER_MESSAGE_MARKER_CSS', "[data-testid='user-message']")
@@ -998,6 +988,8 @@ def _aiexe_reopen_driver(reason):
         pass
     driver = login_to_venice()
     AIEXE_ACTIVE_TEMP_KEY = ""
+    if not _aiexe_ensure_temporary_chat_mode(driver):
+        raise RuntimeError("Venice Temporary Chat could not be enabled after browser restart")
     try:
         scraped = aiexe_scrape_models_with_restore(driver)
         if scraped:
@@ -1102,13 +1094,6 @@ AIEXE_MODELS_CACHE = []
 AIEXE_LAST_SCRAPE_SWEPT = False   # last scrape included the full a-z0-9 search sweep (or a fresh swept cache)
 AIEXE_CURRENT_MODEL = ""   # last model name observed on Venice's composer button (cache — no selenium)
 
-# --- Per-chat Venice conversation mapping -----------------------------------
-# One Venice conversation per AI.EXE chat (chat turns AND agent planner/decision/narration
-# calls share it): no more new-chat-per-request churn, no sidebar pollution, and most
-# requests need ZERO navigation. Correctness never depends on this — AI.EXE sends the full
-# context in every prompt — so every step is best-effort.
-AIEXE_CHAT_MAP_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "aiexe_chat_map.json")
-AIEXE_CHAT_URLS = {}
 AIEXE_ACTIVE_TEMP_KEY = ""      # current AI.EXE owner of Venice's unsaved temporary thread
 AIEXE_LAST_REQUEST_TS = time.time()
 # Attachment IDs already uploaded to each Venice thread (dedupe: full history re-sends every
@@ -1116,8 +1101,6 @@ AIEXE_LAST_REQUEST_TS = time.time()
 AIEXE_THREAD_ATTACHMENTS = {}
 # Set true for a request once we upload files; the reply then prefers the DOM (worker transport).
 AIEXE_LAST_TURN_HAD_UPLOAD = False
-# Last name we pushed to each Venice conversation (rename only when it actually changes).
-AIEXE_THREAD_NAMED = {}
 # Cancel requests from AI.EXE's pause/stop button. The running Selenium loop owns the driver
 # lock, so HTTP cancel routes set this flag and the loop clicks Venice's Stop button itself.
 AIEXE_CANCEL_KEYS = set()
@@ -1164,6 +1147,45 @@ def _aiexe_temporary_chat_mode(active_driver):
         return False
 
 
+def _aiexe_ensure_temporary_chat_mode(active_driver):
+    """Make Temporary Chat mandatory without reloading or touching saved history."""
+    if _aiexe_temporary_chat_mode(active_driver):
+        return True
+    try:
+        # On a cold/sign-in restore the classic composer can appear before Chakra mounts
+        # its chat-mode controls. Wait for either the option or its menu trigger.
+        WebDriverWait(active_driver, 15).until(
+            lambda d: d.find_elements(By.XPATH, VC_TEMP_CHAT_OPTION_XPATH)
+            or d.find_elements(By.XPATH, VC_TEMP_CHAT_MENU_XPATH))
+        options = active_driver.find_elements(By.XPATH, VC_TEMP_CHAT_OPTION_XPATH)
+        if not options:
+            menu = active_driver.find_element(By.XPATH, VC_TEMP_CHAT_MENU_XPATH)
+            active_driver.execute_script("arguments[0].click();", menu)
+            option = WebDriverWait(active_driver, 5).until(
+                EC.presence_of_element_located((By.XPATH, VC_TEMP_CHAT_OPTION_XPATH)))
+        else:
+            option = options[0]
+        active_driver.execute_script("arguments[0].click();", option)
+        try:
+            WebDriverWait(active_driver, 1).until(
+                lambda d: _aiexe_temporary_chat_mode(d))
+        except Exception:
+            # Some Venice builds keep the item mounted but ignore clicks while its
+            # Chakra menu is collapsed. Open the menu and retry the exact option.
+            menu = active_driver.find_element(By.XPATH, VC_TEMP_CHAT_MENU_XPATH)
+            active_driver.execute_script("arguments[0].click();", menu)
+            option = WebDriverWait(active_driver, 4).until(
+                EC.presence_of_element_located((By.XPATH, VC_TEMP_CHAT_OPTION_XPATH)))
+            active_driver.execute_script("arguments[0].click();", option)
+        WebDriverWait(active_driver, 5).until(
+            lambda d: _aiexe_temporary_chat_mode(d))
+        print("AIEXE_TEMP forced Temporary Chat", flush=True)
+        return True
+    except Exception as exc:
+        print("AIEXE_TEMP could not enable Temporary Chat: %s" % exc, flush=True)
+        return False
+
+
 def _aiexe_start_fresh_temp_chat(active_driver, reason):
     """Reset Temporary Chat through Venice's SPA button—never reload the page.
 
@@ -1187,77 +1209,6 @@ try:
     AIEXE_FIRST_CHUNK_TIMEOUT = max(10, int(os.getenv('AIEXE_FIRST_CHUNK_TIMEOUT', '45')))
 except Exception:
     AIEXE_FIRST_CHUNK_TIMEOUT = 45
-
-
-def _aiexe_stable_chat_url(url):
-    """True when a Venice URL identifies a materialized conversation.
-
-    Venice has used both /chat/classic/<slug> and newer path/query routes. Reuse
-    must not silently break whenever the SPA changes that presentation detail.
-    """
-    raw = str(url or "")
-    return "venice.ai/" in raw.lower() and bool(_aiexe_slug_from_url(raw))
-
-
-def _aiexe_same_chat_url(left, right):
-    left_slug = _aiexe_slug_from_url(left)
-    right_slug = _aiexe_slug_from_url(right)
-    return bool(left_slug and right_slug and left_slug == right_slug)
-
-
-def _aiexe_load_chat_map():
-    global AIEXE_CHAT_URLS
-    try:
-        with open(AIEXE_CHAT_MAP_PATH, "r", encoding="utf-8") as fh:
-            data = json.load(fh)
-        if isinstance(data, dict):
-            AIEXE_CHAT_URLS = {str(k): str(v) for k, v in data.items() if k and _aiexe_stable_chat_url(v)}
-    except Exception:
-        AIEXE_CHAT_URLS = {}
-
-
-def _aiexe_save_chat_map():
-    try:
-        with open(AIEXE_CHAT_MAP_PATH, "w", encoding="utf-8") as fh:
-            json.dump(AIEXE_CHAT_URLS, fh, indent=1, sort_keys=True)
-    except Exception:
-        pass
-
-
-# Slugs of OUR threads rotated away from, pending delete. Persisted so orphans
-# survive crashes; capped so the ledger can't grow unbounded.
-AIEXE_STALE_THREADS = set()
-AIEXE_STALE_MAX = 60
-AIEXE_SWEEP_BACKOFF_UNTIL = 0.0   # fruitless restore → don't pop the window again for a while
-AIEXE_STALE_PATH = AIEXE_CHAT_MAP_PATH + ".stale"
-
-
-def _aiexe_load_stale_threads():
-    global AIEXE_STALE_THREADS
-    try:
-        with open(AIEXE_STALE_PATH, "r", encoding="utf-8") as fh:
-            data = json.load(fh)
-        if isinstance(data, list):
-            AIEXE_STALE_THREADS = set(str(s) for s in data if s)
-    except Exception:
-        AIEXE_STALE_THREADS = set()
-
-
-def _aiexe_save_stale_threads():
-    try:
-        with open(AIEXE_STALE_PATH, "w", encoding="utf-8") as fh:
-            json.dump(sorted(AIEXE_STALE_THREADS)[:AIEXE_STALE_MAX], fh)
-    except Exception:
-        pass
-
-
-def _aiexe_stale_add(slug):
-    if not slug:
-        return
-    AIEXE_STALE_THREADS.add(str(slug))
-    while len(AIEXE_STALE_THREADS) > AIEXE_STALE_MAX:
-        AIEXE_STALE_THREADS.pop()
-    _aiexe_save_stale_threads()
 
 
 def _aiexe_chat_key(data):
@@ -2902,224 +2853,6 @@ def _aiexe_read_last_assistant_text(driver, include_reasoning=True):
         return ""
 
 
-# --- Sidebar: rename / delete / cleanup -------------------------------------
-def _aiexe_open_sidebar(driver):
-    try:
-        for b in driver.find_elements(By.XPATH, VC_SIDEBAR_TOGGLE_XPATH):
-            if b.is_displayed() and (b.get_attribute("aria-label") or "") == "Show Sidebar":
-                driver.execute_script("arguments[0].click();", b)
-                time.sleep(0.4)
-                return True
-    except Exception:
-        pass
-    return False
-
-
-def _aiexe_close_sidebar(driver):
-    try:
-        for b in driver.find_elements(By.XPATH, VC_SIDEBAR_TOGGLE_XPATH):
-            if b.is_displayed() and (b.get_attribute("aria-label") or "") == "Toggle sidebar":
-                driver.execute_script("arguments[0].click();", b)
-                time.sleep(0.3)
-                return True
-    except Exception:
-        pass
-    return False
-
-
-def _aiexe_sidebar_scroll_to_slug(driver, slug):
-    """The sidebar is a virtuoso list — rows below the fold don't exist in the DOM.
-    Step-scroll the container until the slug's row materializes (or the list ends)."""
-    try:
-        return bool(driver.execute_async_script("""
-            const done = arguments[arguments.length - 1];
-            const slug = arguments[0];
-            const sc = document.querySelector('[data-virtuoso-scroller="true"]');
-            if (!sc) { done(false); return; }
-            const found = () => !!document.querySelector('a[href*="/chat/classic/' + slug + '"]');
-            (async () => {
-              try {
-                sc.scrollTop = 0;
-                for (let i = 0; i < 60; i++) {
-                  await new Promise(r => setTimeout(r, 120));
-                  if (found()) { done(true); return; }
-                  const before = sc.scrollTop;
-                  sc.scrollTop = before + Math.max(120, sc.clientHeight - 40);
-                  await new Promise(r => setTimeout(r, 120));
-                  if (found()) { done(true); return; }
-                  if (sc.scrollTop <= before) break;   // bottom reached
-                }
-                done(found());
-              } catch (e) { done(false); }
-            })();
-        """, slug))
-    except Exception:
-        return False
-
-
-def _aiexe_sidebar_row(driver, slug, tries=12):
-    """Find the sidebar row for `slug`, retrying — the list is server-fetched and can lag on
-    slow internet, and a just-opened sidebar may still be rendering. Scrolls it into view."""
-    if not slug:
-        return None
-    scanned = False
-    for _i in range(max(1, tries)):
-        try:
-            row = driver.find_element(By.XPATH, VC_SIDEBAR_CHAT_ROW_XPATH.format(slug))
-            if row is not None:
-                try:
-                    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", row)
-                except Exception:
-                    pass
-                return row
-        except Exception:
-            pass
-        # Not in the rendered window — scroll-scan the virtualized list once
-        if not scanned and _i >= 1:
-            scanned = True
-            if _aiexe_sidebar_scroll_to_slug(driver, slug):
-                continue
-        time.sleep(0.5)
-    return None
-
-
-def _aiexe_slug_from_url(url):
-    raw = str(url or "")
-    for pattern in (
-            r"/chat/classic/([A-Za-z0-9_-]+)",
-            r"/chat/(?!classic(?:[/?#]|$))([A-Za-z0-9_-]+)",
-            r"[?&](?:chatId|conversationId|conversation|chat)=([A-Za-z0-9_-]+)(?:&|$)"):
-        match = re.search(pattern, raw, re.I)
-        if match:
-            return match.group(1)
-    return ""
-
-
-def _aiexe_sidebar_diag(driver, slug, label):
-    """One log line answering WHY a sidebar row lookup failed: rowless list vs
-    missing toggle vs unexpected page/window state."""
-    try:
-        anchors = len(driver.find_elements(By.XPATH, VC_SIDEBAR_CHAT_ROW_ANY_XPATH))
-        toggles = [(b.get_attribute("aria-label") or "") for b in
-                   driver.find_elements(By.XPATH, VC_SIDEBAR_TOGGLE_XPATH) if b.is_displayed()]
-        rect = driver.get_window_rect()
-        print("AIEXE_%s row-miss slug=%s url=%s rect=%s rows=%d toggles=%s" % (
-            label, slug, driver.current_url, rect, anchors, toggles), flush=True)
-        detail = driver.execute_script("""
-          return Array.from(document.querySelectorAll("a[href*='/chat/classic/']")).slice(0, 6).map(a => {
-            const chain = []; let e = a;
-            for (let i = 0; i < 5 && e; i += 1) {
-              e = e.parentElement;
-              if (e) chain.push(e.tagName + (e.getAttribute('role') ? '[role=' + e.getAttribute('role') + ']' : ''));
-            }
-            return { href: a.getAttribute('href'), chain: chain.join('>') };
-          });
-        """) or []
-        for d in detail:
-            print("AIEXE_%s row-miss anchor href=%s chain=%s" % (label, d.get('href'), d.get('chain')), flush=True)
-    except Exception as exc:
-        print("AIEXE_%s row-miss diag failed: %s" % (label, exc), flush=True)
-
-
-def _aiexe_row_action_button(driver, row, xpath):
-    """Row action buttons (Rename/Delete) are only rendered on the hovered or active
-    row; hover first, then look."""
-    try:
-        ActionChains(driver).move_to_element(row).perform()
-        time.sleep(0.3)
-    except Exception:
-        pass
-    try:
-        return row.find_element(By.XPATH, xpath)
-    except Exception:
-        return None
-
-
-def _aiexe_row_via_thread_nav(driver, slug, label, allow_hidden=False):
-    """Virtualized sidebar can omit a row entirely; opening the thread itself makes it
-    the active conversation, which Venice always renders in the list."""
-    if not slug:
-        return None
-    try:
-        if driver.execute_script("return document.hidden === true") and not allow_hidden:
-            print("AIEXE_%s thread-nav skipped (window hidden, paint throttled)" % label, flush=True)
-            return None
-    except Exception:
-        pass
-    try:
-        driver.get("%s/%s" % (VC_CHAT_URL, slug))
-        try:
-            WebDriverWait(driver, selenium_timeout).until(
-                lambda d: d.find_elements(By.XPATH, VC_SIDEBAR_TOGGLE_XPATH)
-                or d.find_elements(By.XPATH, VC_SIDEBAR_CHAT_ROW_ANY_XPATH))
-        except Exception:
-            pass
-        time.sleep(1.0)
-        _aiexe_open_sidebar(driver)
-        row = _aiexe_sidebar_row(driver, slug, tries=10)
-        print("AIEXE_%s thread-nav fallback -> %s" % (label, bool(row)), flush=True)
-        return row
-    except Exception as exc:
-        print("AIEXE_%s thread-nav fallback failed: %s" % (label, exc), flush=True)
-        return None
-
-
-def _aiexe_requested_chat_name(data):
-    if not isinstance(data, dict):
-        return ""
-    name = str(data.get("aiexe_chat_name") or data.get("chat_name") or "").strip()
-    if not name and isinstance(data.get("options"), dict):
-        name = str(data["options"].get("aiexe_chat_name") or data["options"].get("chat_name") or "").strip()
-    if not name or re.match(r"^(new chat|untitled chat|untitled)$", name, re.I):
-        return ""
-    return name[:80]
-
-
-def _aiexe_rename_chat(driver, slug, name):
-    """Rename a Venice conversation row to `name`. Best-effort, guarded, cleans up after."""
-    name = (name or "").strip()
-    if not name:
-        return False
-    opened = _aiexe_open_sidebar(driver)
-    ok = False
-    try:
-        row = _aiexe_sidebar_row(driver, slug)
-        if row is None:
-            _aiexe_sidebar_diag(driver, slug, "RENAME")
-            row = _aiexe_row_via_thread_nav(driver, slug, "RENAME")
-        if row is None:
-            return False
-        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", row)
-        btn = _aiexe_row_action_button(driver, row, VC_CHAT_RENAME_BUTTON_XPATH)
-        if btn is None and _aiexe_slug_from_url(driver.current_url) != slug:
-            # Inactive rows can stay buttonless even hovered; opening the thread
-            # makes it the active row, which always carries its action buttons.
-            row = _aiexe_row_via_thread_nav(driver, slug, "RENAME")
-            if row is not None:
-                btn = _aiexe_row_action_button(driver, row, VC_CHAT_RENAME_BUTTON_XPATH)
-        if btn is None:
-            print("AIEXE_RENAME no Rename button on row %s" % slug, flush=True)
-            return False
-        driver.execute_script("arguments[0].click();", btn)
-        inp = WebDriverWait(driver, selenium_timeout).until(
-            EC.presence_of_element_located((By.XPATH, VC_CHAT_RENAME_INPUT_XPATH)))
-        _aiexe_set_native_value(driver, inp, name, proto="HTMLInputElement")
-        driver.find_element(By.XPATH, VC_CHAT_RENAME_CONFIRM_XPATH).click()
-        time.sleep(0.3)
-        ok = True
-        print("AIEXE_RENAME %s -> %r" % (slug, name), flush=True)
-    except Exception as exc:
-        print("AIEXE_RENAME failed for %s: %s" % (slug, exc), flush=True)
-        try:
-            driver.find_element(By.XPATH, VC_CHAT_RENAME_CANCEL_XPATH).click()
-        except Exception:
-            pass
-    finally:
-        if opened:
-            _aiexe_close_sidebar(driver)
-    return ok
-
-
 def _aiexe_visible_alert_text(driver):
     """Text of a visible Venice warning/error alert banner (e.g. 'You've exceeded the
     number of Chat requests you can make today'), or ''. Venice renders refusals like
@@ -3141,139 +2874,6 @@ def _aiexe_visible_alert_text(driver):
         return str(txt or "").strip()
     except Exception:
         return ""
-
-
-def _aiexe_rename_after_stream(slug, name):
-    """Deferred-rename worker (gevent greenlet): waits for the streaming request to
-    release selenium_lock, so the final done message is never blocked behind the
-    sidebar rename dance (restore/thread-nav retries cost 20s+ worst case)."""
-    global driver
-    try:
-        with selenium_lock:
-            if not _aiexe_driver_alive(driver):
-                return
-            # Renaming is cosmetic. Never restore/flash a minimized adapter window
-            # merely to change a Venice sidebar label; try once in its current state.
-            _aiexe_rename_chat(driver, slug, name)
-    except Exception as _e:
-        print("AIEXE_RENAME background failed: %s" % _e, flush=True)
-
-
-def _aiexe_sweep_stale_threads(limit=4):
-    """Delete a few ledgered rotated-away threads. Idle-time only: non-blocking lock
-    (skip if a stream is running), one attempt per slug, then ONE restore for the
-    failures (minimized Chrome renders a rowless sidebar — the reason the old
-    single-shot delete silently leaked nearly every rotated thread). Failures stay
-    ledgered for the next idle pass; no hot retries."""
-    global driver, AIEXE_SWEEP_BACKOFF_UNTIL
-    if not AIEXE_STALE_THREADS or time.time() < AIEXE_SWEEP_BACKOFF_UNTIL:
-        return
-    if not selenium_lock.acquire(blocking=False):
-        return
-    restored = False
-    try:
-        if not _aiexe_driver_alive(driver):
-            return
-        live = set(_aiexe_slug_from_url(u) for u in AIEXE_CHAT_URLS.values())
-        done, failed = [], []
-        for slug in list(AIEXE_STALE_THREADS)[:max(1, int(limit))]:
-            if slug in live:
-                done.append(slug)   # re-mapped to an active chat — keep it
-                continue
-            (done if _aiexe_delete_chat(driver, slug, nav_fallback=False) else failed).append(slug)
-        if failed and _aiexe_park_offscreen(driver):   # invisible: parked, not shown
-            restored = True
-            time.sleep(0.8)
-            try:
-                for slug in failed:
-                    if _aiexe_delete_chat(driver, slug, nav_fallback=False):
-                        done.append(slug)
-            finally:
-                try:
-                    driver.minimize_window()
-                except Exception:
-                    pass
-        if restored and not done:   # popped the window for nothing — cool off
-            AIEXE_SWEEP_BACKOFF_UNTIL = time.time() + 1800
-        for slug in done:
-            AIEXE_STALE_THREADS.discard(slug)
-        if done:
-            _aiexe_save_stale_threads()
-        print("AIEXE_SWEEP cleaned %d, %d pending" % (len(done), len(AIEXE_STALE_THREADS)), flush=True)
-    except Exception as _e:
-        print("AIEXE_SWEEP failed: %s" % _e, flush=True)
-    finally:
-        selenium_lock.release()
-
-
-def _aiexe_sidebar_op_with_restore(driver, op, label):
-    """Run a sidebar operation; if it fails, restore the window and retry once, then
-    re-minimize. A minimized Chrome often leaves the virtualized sidebar rowless
-    (same failure mode as the model picker), so rename/delete silently no-op'd in
-    the background until the window was restored."""
-    ok = False
-    try:
-        ok = bool(op())
-    except Exception:
-        ok = False
-    if ok:
-        return True
-    print("AIEXE_%s failed while minimized — restoring window for one retry" % label, flush=True)
-    if not _aiexe_park_offscreen(driver):
-        return False
-    time.sleep(0.8)
-    try:
-        ok = bool(op())
-    except Exception:
-        ok = False
-    finally:
-        try:
-            driver.minimize_window()
-        except Exception:
-            pass
-    print("AIEXE_%s retry with restored window -> %s" % (label, ok), flush=True)
-    return ok
-
-
-def _aiexe_delete_chat(driver, slug, nav_fallback=True, allow_hidden_nav=False):
-    """Delete a Venice conversation (irreversible — only on an explicit AI.EXE chat delete).
-    nav_fallback=False = best-effort mode for background cleanup: no per-thread
-    navigation hunting. allow_hidden_nav=True lets an explicit delete try that
-    navigation while Chrome remains minimized; it must never restore the window."""
-    if not slug:
-        return False
-    opened = _aiexe_open_sidebar(driver)
-    ok = False
-    try:
-        row = _aiexe_sidebar_row(driver, slug, tries=4 if not nav_fallback else 12)
-        if row is None and nav_fallback:
-            _aiexe_sidebar_diag(driver, slug, "DELETE")
-            row = _aiexe_row_via_thread_nav(driver, slug, "DELETE", allow_hidden=allow_hidden_nav)
-        if row is None:
-            return False
-        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", row)
-        btn = _aiexe_row_action_button(driver, row, VC_CHAT_DELETE_BUTTON_XPATH)
-        if btn is None and _aiexe_slug_from_url(driver.current_url) != slug:
-            row = _aiexe_row_via_thread_nav(driver, slug, "DELETE", allow_hidden=allow_hidden_nav)
-            if row is not None:
-                btn = _aiexe_row_action_button(driver, row, VC_CHAT_DELETE_BUTTON_XPATH)
-        if btn is None:
-            print("AIEXE_DELETE no Delete button on row %s" % slug, flush=True)
-            return False
-        driver.execute_script("arguments[0].click();", btn)
-        confirm = WebDriverWait(driver, selenium_timeout).until(
-            EC.element_to_be_clickable((By.XPATH, VC_CHAT_DELETE_CONFIRM_XPATH)))
-        driver.execute_script("arguments[0].click();", confirm)
-        time.sleep(0.4)
-        ok = True
-        print("AIEXE_DELETE %s" % slug, flush=True)
-    except Exception as exc:
-        print("AIEXE_DELETE failed for %s: %s" % (slug, exc), flush=True)
-        _aiexe_dismiss_modal(driver)
-    finally:
-        if opened:
-            _aiexe_close_sidebar(driver)
-    return ok
 
 
 def aiexe_scrape_models(driver):
@@ -3681,10 +3281,15 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
     _chat_key = _aiexe_chat_key(data)
     _aiexe_clear_cancel_key(_chat_key)
     try:
-        # ONE Venice conversation per AI.EXE chat (see the chat-map block up top). Nav policy:
-        #   same chat + already on its conversation → no navigation at all (the common case);
-        #   different chat with a known conversation  → navigate to it (deleted → new + remap);
-        #   unknown chat                              → New chat (SPA), remembered after send.
+        # Venice is always kept in Temporary Chat. AI.EXE owns continuity and sends the full
+        # context, while a SPA reset isolates different AI.EXE chats without saved Venice rows.
+        _cur_url = str(driver.current_url or "")
+        if 'venice.ai/chat' not in _cur_url:
+            driver.get(VC_CHAT_URL)
+            print("AIEXE_NAV cold load -> %s" % VC_CHAT_URL, flush=True)
+        if not _aiexe_ensure_temporary_chat_mode(driver):
+            raise WebDriverException("Venice Temporary Chat is required but unavailable")
+
         # Rotate off a thread that has accumulated too many turns. Correctness is unaffected
         # because the full AI.EXE context rides in every prompt.
         _rotate_turns = bool(_chat_key and AIEXE_THREAD_MAX_TURNS
@@ -3694,61 +3299,16 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
         _rotate_slow = bool(_chat_key and _chat_key in AIEXE_THREAD_SLOW)
         if _rotate_turns or _rotate_slow:
             AIEXE_THREAD_SLOW.discard(_chat_key)
-            _old = AIEXE_CHAT_URLS.pop(_chat_key, "")
             AIEXE_THREAD_TURNS[_chat_key] = 0
-            _aiexe_save_chat_map()
-            _old_slug = _aiexe_slug_from_url(_old)
             _why = 'slow last turn' if _rotate_slow else ('%d turns' % AIEXE_THREAD_MAX_TURNS)
-            print("AIEXE_ROTATE %s (%s, old=%s)"
-                  % (_chat_key[:32], _why, _old_slug or "?"), flush=True)
-            # Do not rename or delete Venice history. In Temporary Chat mode nothing is
-            # saved; in Normal mode an old thread is simply left alone.
-        _cur_url = str(driver.current_url or "")
-        _mapped = AIEXE_CHAT_URLS.get(_chat_key, "") if _chat_key else ""
-        _temporary_mode = _aiexe_temporary_chat_mode(driver)
-        if _temporary_mode:
-            # Temporary conversations have no stable /<slug> URL. Track only the current
-            # owner in memory and reset with Venice's SPA button when the AI.EXE chat/scope
-            # changes or a thread is rotated. This avoids sidebar history and the blocking
-            # browser "Leave site?" dialog caused by driver.get()/reload.
-            _temp_changed = bool(_chat_key and AIEXE_ACTIVE_TEMP_KEY != _chat_key)
-            if _rotate_turns or _rotate_slow or _temp_changed:
-                _reason = ('slow/large thread' if (_rotate_turns or _rotate_slow)
-                           else 'AI.EXE chat changed')
-                _aiexe_start_fresh_temp_chat(driver, _reason)
-            AIEXE_ACTIVE_TEMP_KEY = _chat_key
-            if _chat_key and _mapped:
-                AIEXE_CHAT_URLS.pop(_chat_key, None)
-                _aiexe_save_chat_map()
-        else:
-            AIEXE_ACTIVE_TEMP_KEY = ""
-        if not _temporary_mode and 'venice.ai/chat' not in _cur_url:
-            driver.get(_mapped or VC_CHAT_URL)   # not on Venice at all → one real load
-            print("AIEXE_NAV cold load -> %s" % (_mapped or VC_CHAT_URL), flush=True)
-        elif not _temporary_mode and _mapped and _aiexe_same_chat_url(_cur_url, _mapped):
-            pass                                  # already on this chat's conversation
-        elif not _temporary_mode and _mapped:
-            driver.get(_mapped)
-            time.sleep(0.6)
-            landed = str(driver.current_url or "")
-            if not _aiexe_same_chat_url(landed, _mapped):
-                # Venice deleted/lost that conversation → forget it; a new one gets mapped below.
-                AIEXE_CHAT_URLS.pop(_chat_key, None)
-                AIEXE_THREAD_TURNS[_chat_key] = 0
-                _aiexe_save_chat_map()
-                print("AIEXE_NAV mapped chat GONE (%s) — will remap" % _mapped, flush=True)
-            else:
-                print("AIEXE_NAV switched to mapped chat %s" % _mapped, flush=True)
-        elif not _temporary_mode and _aiexe_stable_chat_url(_cur_url):
-            # Unknown chat while sitting on some OTHER conversation → fresh chat (SPA click).
-            try:
-                _nc = driver.find_element(By.XPATH, VC_NEW_CHAT_XPATH)
-                driver.execute_script("arguments[0].click();", _nc)
-                time.sleep(0.5)
-                print("AIEXE_NAV new chat via SPA button", flush=True)
-            except Exception:
-                driver.get(VC_CHAT_URL)
-        # else: already on a fresh composer page — just use it
+            print("AIEXE_ROTATE %s (%s)" % (_chat_key[:32], _why), flush=True)
+        _temp_changed = bool(_chat_key and AIEXE_ACTIVE_TEMP_KEY != _chat_key)
+        if _rotate_turns or _rotate_slow or _temp_changed:
+            _reason = ('slow/large thread' if (_rotate_turns or _rotate_slow)
+                       else 'AI.EXE chat changed')
+            if not _aiexe_start_fresh_temp_chat(driver, _reason):
+                raise WebDriverException("Venice Temporary Chat could not be reset")
+        AIEXE_ACTIVE_TEMP_KEY = _chat_key
         # A previous ABORTED request (client timeout/retry) can leave Venice still generating —
         # the composer is unusable until it stops.
         _aiexe_stop_generation(driver, "new request cleanup")
@@ -4261,21 +3821,6 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
                 print("AIEXE_BODY_KEYS %s" % _bk, flush=True)
         except Exception:
             pass
-        # Remember which Venice conversation this AI.EXE chat lives in (URL materializes to
-        # /chat/classic/<slug> once the first message is sent — poll briefly).
-        if _chat_key and not _temporary_mode:
-            try:
-                for _w in range(16):
-                    _u = str(driver.current_url or "")
-                    if _aiexe_stable_chat_url(_u):
-                        if AIEXE_CHAT_URLS.get(_chat_key) != _u:
-                            AIEXE_CHAT_URLS[_chat_key] = _u
-                            _aiexe_save_chat_map()
-                            print("AIEXE_CHAT_MAP %s -> %s" % (_chat_key[:32], _u), flush=True)
-                        break
-                    time.sleep(0.5)
-            except Exception:
-                pass
         if _chat_key:
             # Count this turn on the current thread (drives rotation on the next send).
             AIEXE_THREAD_TURNS[_chat_key] = AIEXE_THREAD_TURNS.get(_chat_key, 0) + 1
@@ -4312,11 +3857,9 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
             except Exception as restart_error:
                 print("AIEXE_BROWSER restart failed: %s" % restart_error, flush=True)
         try:
-            if _aiexe_temporary_chat_mode(driver):
+            if _aiexe_ensure_temporary_chat_mode(driver):
                 _aiexe_start_fresh_temp_chat(driver, "error recovery")
                 AIEXE_ACTIVE_TEMP_KEY = ""
-            else:
-                driver.get(VC_CHAT_URL)  # normal saved mode has no unsaved-page prompt
         except Exception:
             pass
 
@@ -4375,25 +3918,20 @@ def chat():
 
 @app.route('/api/aiexe/delete_chat', methods=['POST'])
 def aiexe_delete_chat():
-    """Forget AI.EXE's local Venice mapping; never rename/delete remote history or drive UI."""
+    """Compatibility endpoint: clear only AI.EXE's in-memory turn state."""
     req = parse_json_request(request) or {}
     key = _aiexe_chat_key(req)
-    slug = str(req.get('slug') or '').strip() or _aiexe_slug_from_url(AIEXE_CHAT_URLS.get(key, ''))
     if key:
-        AIEXE_CHAT_URLS.pop(key, None)
         AIEXE_THREAD_ATTACHMENTS.pop(key, None)
-        AIEXE_THREAD_NAMED.pop(key, None)
         AIEXE_THREAD_TURNS.pop(key, None)
         AIEXE_THREAD_SLOW.discard(key)
-        _aiexe_save_chat_map()
-    return Response(json.dumps({"ok": True, "slug": slug, "forgotten": bool(key)}),
+    return Response(json.dumps({"ok": True, "forgotten": bool(key)}),
                     content_type='application/json; charset=utf-8')
 
 @app.route('/api/aiexe/cleanup_internal', methods=['POST'])
 def aiexe_cleanup_internal_route():
-    """Forget internal mappings after an agent run; never touch Venice history or UI."""
-    result = _aiexe_cleanup_internal_batch(min_count=1)
-    return Response(json.dumps({"ok": result >= 0, "forgotten": max(0, result)}),
+    """Compatibility no-op: Temporary Chat leaves no remote or local mappings."""
+    return Response(json.dumps({"ok": True, "forgotten": 0}),
                     content_type='application/json; charset=utf-8')
 
 @app.route('/api/aiexe/rename_chat', methods=['POST'])
@@ -4522,51 +4060,6 @@ def aiexe_state():
         "models_refreshing": bool(AIEXE_MODEL_REFRESHING),
     }), content_type='application/json')
 
-@app.route('/api/aiexe/sidebar_debug', methods=['GET'])
-def aiexe_sidebar_debug_route():
-    """Diagnostic: what does Venice's sidebar actually contain right now? Optional ?slug=
-    navigates to that thread first (answers 'does this conversation still exist?')."""
-    global driver
-    slug = str(request.args.get('slug') or '').strip()
-    out = {}
-    with selenium_lock:
-        try:
-            _aiexe_park_offscreen(driver)
-            time.sleep(0.8)
-            if slug:
-                driver.get("%s/%s" % (VC_CHAT_URL, slug))
-                try:
-                    WebDriverWait(driver, selenium_timeout).until(
-                        lambda d: d.find_elements(By.XPATH, VC_SIDEBAR_TOGGLE_XPATH))
-                except Exception:
-                    pass
-                time.sleep(1.5)
-            _aiexe_open_sidebar(driver)
-            out['url'] = driver.current_url
-            out['timeline'] = []
-            for _ in range(10):
-                sample = driver.execute_script("""
-                  return Array.from(document.querySelectorAll("a[href*='/chat/classic/']")).map(a => ({
-                    href: a.getAttribute('href'), text: (a.textContent || '').trim().slice(0, 60) }));
-                """) or []
-                out['timeline'].append({'t': time.time(), 'count': len(sample)})
-                out['rows'] = sample
-                if len(sample) > 2:
-                    break
-                time.sleep(2.0)
-            out['toggles'] = [(b.get_attribute('aria-label') or '') for b in
-                              driver.find_elements(By.XPATH, VC_SIDEBAR_TOGGLE_XPATH) if b.is_displayed()]
-            out['bodyPreview'] = driver.execute_script("return (document.body.innerText || '').slice(0, 400);")
-        except Exception as exc:
-            out['error'] = str(exc)
-        finally:
-            try:
-                driver.minimize_window()
-            except Exception:
-                pass
-    return Response(json.dumps(out), content_type='application/json; charset=utf-8')
-
-
 def get_mock_model(name, parameter_size):
     return {
       "name": name,
@@ -4685,9 +4178,9 @@ try:
     _aiexe_signal.signal(_aiexe_signal.SIGTERM, lambda *_a: (_aiexe_close_browser(), os._exit(0)))
 except Exception:
     pass
-_aiexe_load_chat_map()
-_aiexe_load_stale_threads()
 driver = login_to_venice()
+if not _aiexe_ensure_temporary_chat_mode(driver):
+    raise RuntimeError("Venice Temporary Chat could not be enabled at startup")
 try:  # use today's complete cache; otherwise scrape once so /api/tags stays accurate
     _scraped = _aiexe_restore_fresh_model_cache()
     _model_catalog_source = "24-hour cache" if _scraped else "live scrape"
@@ -4723,47 +4216,6 @@ try:  # startup done — ONE minimize, after all window-dependent work finished
     driver.minimize_window()
 except Exception:
     pass
-def _aiexe_cleanup_internal_batch(min_count=1, respect_user_window=True, cap=60):
-    """Forget obsolete local mappings without opening, restoring, or driving Chrome."""
-    internal = [k for k in list(AIEXE_CHAT_URLS.keys())
-                if k.startswith("id:internal:")]
-    stale = list(AIEXE_STALE_THREADS)
-    if len(internal) + len(stale) < max(1, int(min_count)):
-        return 0
-    batch = internal[:cap]
-    for key in batch:
-        AIEXE_CHAT_URLS.pop(key, None)
-        AIEXE_THREAD_ATTACHMENTS.pop(key, None)
-        AIEXE_THREAD_NAMED.pop(key, None)
-        AIEXE_THREAD_TURNS.pop(key, None)
-        AIEXE_THREAD_SLOW.discard(key)
-    for slug in stale[:max(0, int(cap) - len(batch))]:
-        AIEXE_STALE_THREADS.discard(slug)
-    _aiexe_save_chat_map()
-    _aiexe_save_stale_threads()
-    print("AIEXE_CLEANUP forgot %d local mappings (no Venice UI)" %
-          (len(batch) + min(len(stale), max(0, int(cap) - len(batch)))), flush=True)
-    return len(batch)
-
-
-def _aiexe_internal_cleanup_loop():
-    """Idle backstop for local mapping cleanup; never manipulates the Venice UI."""
-    while True:
-        gevent.sleep(60)
-        try:
-            if time.time() - AIEXE_LAST_REQUEST_TS < 120:
-                continue
-            result = _aiexe_cleanup_internal_batch(min_count=6)
-            # _aiexe_cleanup_internal_batch owns the rotated ledger. Calling the
-            # second sweeper here retried the same missing rows immediately and
-            # caused another restore/minimize cycle.
-            if result > 0:
-                gevent.sleep(240)  # cooldown between batches — hygiene, not a show
-        except Exception as exc:
-            print("AIEXE_CLEANUP loop error: %s" % exc, flush=True)
-
-
 print(f"Starting server at port {args.host}:{args.port}")
-_aiexe_cleanup_greenlet = gevent.spawn(_aiexe_internal_cleanup_loop)
 http_server = WSGIServer((args.host, args.port), app)
 http_server.serve_forever()
