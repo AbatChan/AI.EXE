@@ -880,7 +880,7 @@
 
     // Build and validation are SEPARATE proof channels tracked by position, so:
     //  - a failed build is never cancelled by a later passing static validation;
-    //  - a mutation AFTER the last build makes that proof stale (unverified code);
+    //  - a mutation AFTER the last verification (build OR validate) makes it stale;
     //  - install/read/other events after a failed build don't count as a pass.
     function latestBuildOutcome(toolEvents) {
       const events = Array.isArray(toolEvents) ? toolEvents : [];
@@ -891,24 +891,27 @@
         if (tool === 'run_app') return true;
         if (tool === 'run_command') {
           const cmd = String(e.terminalCommand || e.command || '');
+          // php lint is `php -l file`; the old bare /-l\b/ also matched `ls -l`.
           return /\b(?:run build|next build|vite build|tsc|py_compile|npm test|cargo (?:build|test)|go build)\b/i.test(cmd)
-            || / build\b/i.test(cmd) || /-l\b/.test(cmd);
+            || / build\b/i.test(cmd) || /\bphp(?:\d[\d.]*)?\s+-l\s+\S/i.test(cmd);
         }
         return false;
       };
       const isValidate = (e) => String(e && e.tool || '').toLowerCase() === 'validate_files';
       let lastBuild = null; let lastBuildIdx = -1;
-      let lastValidate = null;
+      let lastValidate = null; let lastValidateIdx = -1;
       let lastMutationIdx = -1;
       events.forEach((e, i) => {
         if (isMutation(e)) lastMutationIdx = i;
         if (isBuild(e)) { lastBuild = e; lastBuildIdx = i; }
-        if (isValidate(e)) lastValidate = e;
+        if (isValidate(e)) { lastValidate = e; lastValidateIdx = i; }
       });
       const buildFailed = Boolean(lastBuild) && Number(lastBuild.runErrorCount || 0) > 0;
       const validationFailed = Boolean(lastValidate) && lastValidate.validationPassed === false;
-      const stale = Boolean(lastBuild) && lastMutationIdx > lastBuildIdx;
       const failed = buildFailed || validationFailed;
+      // A mutation after the LATEST verification (build or validate) is unverified code.
+      const lastVerifyIdx = Math.max(lastBuildIdx, lastValidateIdx);
+      const stale = lastVerifyIdx >= 0 && lastMutationIdx > lastVerifyIdx;
       let errorLine = '';
       if (buildFailed) {
         const obs = String(lastBuild.observation || '');
@@ -922,34 +925,55 @@
       return { hasBuild: Boolean(lastBuild), failed, buildFailed, validationFailed, stale, errorLine };
     }
 
-    // A LISTENING dev server is NOT proof the page rendered / React hydrated / no runtime
-    // error threw. Only a real browser proof (pageLoaded, zero uncaught/console errors)
-    // counts — that structure arrives with the browser harness; until then this is false.
-    function hasBrowserRuntimeProof(toolEvents) {
-      return (Array.isArray(toolEvents) ? toolEvents : []).some((e) => e && e.browserProof
-        && e.browserProof.pageLoaded === true
-        && Array.isArray(e.browserProof.uncaughtErrors) && e.browserProof.uncaughtErrors.length === 0
-        && Array.isArray(e.browserProof.consoleErrors) && e.browserProof.consoleErrors.length === 0);
+    // The LATEST browser proof and whether it is fresh. A listening dev server is NOT proof
+    // (the port says nothing about whether the page rendered / hydrated / threw). Only a real
+    // browser proof counts — that structure arrives with the browser harness; until then
+    // hasProof is false, so a browser-runtime error can never be "verified" off a build.
+    function latestBrowserOutcome(toolEvents) {
+      const events = Array.isArray(toolEvents) ? toolEvents : [];
+      const isMutation = (e) => e && e.ok
+        && ['write_file', 'edit_file', 'write_files', 'move', 'delete'].includes(String(e.tool || '').toLowerCase());
+      let lastMutationIdx = -1; let lastProof = null; let lastProofIdx = -1;
+      events.forEach((e, i) => {
+        if (isMutation(e)) lastMutationIdx = i;
+        if (e && e.browserProof) { lastProof = e.browserProof; lastProofIdx = i; }
+      });
+      if (!lastProof) return { hasProof: false, passed: false, stale: false };
+      const passed = lastProof.pageLoaded === true
+        && Array.isArray(lastProof.uncaughtErrors) && lastProof.uncaughtErrors.length === 0
+        && Array.isArray(lastProof.consoleErrors) && lastProof.consoleErrors.length === 0;
+      return { hasProof: true, passed, stale: lastMutationIdx > lastProofIdx };
     }
 
-    // Hard truth gate: when the latest build is RED or STALE (code changed after the last
-    // build), the model's framing is not trusted at all — the whole message is REPLACED with
-    // deterministic grounded text. No success-vocabulary guessing. Green+fresh passes through.
-    function enforceCompletionTruth(text, toolEvents, workspaceLabel) {
+    function isBrowserRuntimeErrorTask(taskText) {
+      return /\b(?:unhandled runtime error|runtime (?:type)?error|cannot read propert(?:y|ies) of|is not a function\b|hydration failed|minified react error|reactcurrentowner)\b/i.test(String(taskText || ''));
+    }
+
+    // Hard truth gate. The message is REPLACED with deterministic grounded text whenever the
+    // latest build is RED, the code is STALE (changed after the last verification), or the task
+    // is a browser-runtime error with no FRESH passing browser proof. No vocabulary guessing.
+    function enforceCompletionTruth(text, toolEvents, workspaceLabel, taskText) {
       const o = latestBuildOutcome(toolEvents);
-      if (!o.failed && !o.stale) return text;
+      const runtimeTask = isBrowserRuntimeErrorTask(taskText);
+      const browser = latestBrowserOutcome(toolEvents);
+      const browserVerified = browser.hasProof && browser.passed && !browser.stale;
+      const runtimeUnverified = runtimeTask && !browserVerified && !o.failed && !o.stale;
+      if (!o.failed && !o.stale && !runtimeUnverified) return text;
       const changed = (Array.isArray(toolEvents) ? toolEvents : [])
         .filter((e) => e && e.ok && ['write_file', 'edit_file', 'write_files'].includes(String(e.tool || '').toLowerCase()))
         .map((e) => deps.normalizeWorkspacePath(e.path || '')).filter(Boolean);
       const changedUniq = Array.from(new Set(changed)).slice(-6);
       const status = o.buildFailed ? 'The latest build is still failing.'
         : o.validationFailed ? 'The latest file check did not pass.'
-        : 'The code changed after the last successful build, so it has not been verified yet.';
-      const next = (o.stale && !o.failed)
-        ? 'The updated files need to be rebuilt and verified before this can be called complete.'
-        : 'That must be resolved and the build rerun before the task is complete.';
+        : o.stale ? 'The code changed after the last verification, so it has not been re-checked yet.'
+        : 'The build passes, but this is an in-browser runtime error that a build cannot reproduce — it is not confirmed fixed.';
+      const next = runtimeUnverified
+        ? 'Reload/rerun the app in a browser to confirm the error is gone before calling this done.'
+        : (o.stale && !o.failed)
+          ? 'The updated files need to be rebuilt and verified before this can be called complete.'
+          : 'That must be resolved and the build rerun before the task is complete.';
       recordDebugTrace('agent_completion_truth_gate_replaced', {
-        buildFailed: String(o.buildFailed), validationFailed: String(o.validationFailed), stale: String(o.stale), errorLine: o.errorLine,
+        buildFailed: String(o.buildFailed), validationFailed: String(o.validationFailed), stale: String(o.stale), runtimeUnverified: String(runtimeUnverified), errorLine: o.errorLine,
       }, { text: String(text || '').slice(0, 600), changed: changedUniq });
       return [
         changedUniq.length ? `I changed ${changedUniq.join(', ')}.` : 'I made changes to the project.',
@@ -1003,7 +1027,7 @@
       // completion from claiming the runtime error is verified gone.
       const runtimeErrorTask = /\b(?:unhandled runtime error|runtime (?:type)?error|cannot read propert(?:y|ies) of|is not a function\b|hydration failed|minified react error)\b/i.test(String(taskText || ''));
       // A listening dev server is NOT browser-runtime proof — only a real browser proof is.
-      const runtimeProofSeen = hasBrowserRuntimeProof(toolEvents);
+      const runtimeProofSeen = latestBrowserOutcome(toolEvents).passed === true && latestBrowserOutcome(toolEvents).stale === false;
       let verifiedResultsBlock = runtimeErrorTask && !runtimeProofSeen && verifiedResults
         ? `NOTE: the task reports a RUNTIME (in-browser) error. The results below are build/install outcomes only — a passing build does NOT prove the runtime error is gone. Describe the changes and the build result, tell the user to relaunch/reload the app to confirm, and do NOT claim the runtime error is verified fixed.\n\n${verifiedResults}`
         : verifiedResults;
@@ -1060,7 +1084,7 @@
       const remote = await deps.requestSelectedRemoteTextCompletion(prompt, 420);
       if (remote && remote.ok) {
         const text = stripCompletionPreamble(stripUnverifiedLocalUrls(deps.sanitizeAssistantText(remote.output || ''), toolEvents));
-        if (text && !isLikelyIncompleteCompletion(text)) return enforceCompletionTruth(text, toolEvents, workspaceLabel);
+        if (text && !isLikelyIncompleteCompletion(text)) return enforceCompletionTruth(text, toolEvents, workspaceLabel, taskText);
         recordDebugTrace('agent_completion_rejected', {
           source: 'remote',
           reason: text ? 'looked_incomplete' : 'empty_after_sanitize',
@@ -1070,14 +1094,14 @@
       const external = await requestExternalAgentPlanner(prompt, 420, 12000);
       if (external && external.ok) {
         const text = stripCompletionPreamble(stripUnverifiedLocalUrls(deps.sanitizeAssistantText(external.output || ''), toolEvents));
-        if (text && !isLikelyIncompleteCompletion(text)) return enforceCompletionTruth(text, toolEvents, workspaceLabel);
+        if (text && !isLikelyIncompleteCompletion(text)) return enforceCompletionTruth(text, toolEvents, workspaceLabel, taskText);
         recordDebugTrace('agent_completion_rejected', {
           source: 'external',
           reason: text ? 'looked_incomplete' : 'empty_after_sanitize',
           preview: String(text || '').slice(0, 500),
         }, { output: String(external.output || ''), sanitized: text });
       }
-      return enforceCompletionTruth(deterministicCompletion, toolEvents, workspaceLabel);
+      return enforceCompletionTruth(deterministicCompletion, toolEvents, workspaceLabel, taskText);
     }
 
     function buildAgentProgressMarkdown(progressEntries, startedAtMs) {

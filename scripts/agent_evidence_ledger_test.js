@@ -27,7 +27,7 @@ const build = sandbox.api.buildAgentEvidenceLedger;
 
 // The exact ReactCurrentOwner-run evidence: one deduped react, an invalid reconciler,
 // extraneous drei — plus a node -e version print.
-const npmLs = `run_command npm ls: finished.
+const npmLs = `run_command \`npm ls\`: finished.
 ├─┬ @react-three/drei@9.114.0 extraneous
 │ └── react@18.3.1 deduped
 ├─┬ @react-three/fiber@8.18.0
@@ -35,11 +35,11 @@ const npmLs = `run_command npm ls: finished.
 │ │ └── react@18.3.1 deduped
 ├── react@18.3.1
 └── react-dom@18.3.1 deduped`;
-const nodePrint = 'run_command node -e ...: finished cleanly (exit 0).\nreact 18.3.1\nreconciler 0.29.2';
+const nodePrint = 'run_command `node -e ...`: finished cleanly (exit 0).\nreact 18.3.1\nreconciler 0.29.2';
 
 const ledger = build([
-  { tool: 'run_command', ok: true, observation: npmLs },
-  { tool: 'run_command', ok: true, observation: nodePrint },
+  { tool: 'run_command', ok: true, terminalCommand: 'npm ls', observation: npmLs },
+  { tool: 'run_command', ok: true, terminalCommand: 'node -e "..."', observation: nodePrint },
 ]);
 
 assert.match(ledger, /ESTABLISHED FACTS/, 'produces an established-facts block');
@@ -47,13 +47,37 @@ assert.match(ledger, /do NOT propose a fix premised on a version differing/, 'fo
 assert.match(ledger, /react@18\.3\.1/, 'pins the proven react version');
 assert.match(ledger, /react-reconciler@0\.29\.2 — INVALID/, 'flags the invalid reconciler as the real evidence');
 assert.match(ledger, /@react-three\/drei@9\.114\.0 — installed but not in package\.json/, 'flags the extraneous package');
-// INVALID facts are surfaced first (most decision-relevant).
-assert.ok(ledger.indexOf('INVALID') < ledger.indexOf('single copy'), 'invalid facts are ranked ahead of routine ones');
-// react appears once despite many deduped lines.
+assert.ok(ledger.indexOf('INVALID') < ledger.indexOf('deduped in its branch'), 'invalid facts are ranked ahead of routine ones');
 assert.equal((ledger.match(/- react@18\.3\.1/g) || []).length, 1, 'react is de-duplicated to a single fact');
 
-// No diagnostic output → no ledger (does not pollute normal runs).
+// E#1 — MULTIPLE installed versions are PRESERVED, not collapsed (the real conflict signal).
+const dupe = build([{
+  tool: 'run_command', ok: true, terminalCommand: 'npm ls react',
+  observation: 'run_command `npm ls react`:\n├── react@18.3.1\n└─┬ some-lib@1.0.0\n  └── react@19.0.0',
+}]);
+assert.match(dupe, /react — MULTIPLE VERSIONS INSTALLED: 18\.3\.1, 19\.0\.0/, 'two react versions are surfaced, not collapsed');
+
+// E#3 — prose in a NON-diagnostic command must NOT become a fact.
+const prose = build([{
+  tool: 'run_command', ok: true, terminalCommand: 'npm run build',
+  observation: "run_command `npm run build`: failed. Try upgrading to @react-three/fiber@9.0.0 to fix it.",
+}]);
+assert.equal(prose, '', 'a suggestion in build output is not promoted to an established fact');
+
+// E#4 — facts proven BEFORE a later install/manifest change are dropped as stale.
+const stale = build([
+  { tool: 'run_command', ok: true, terminalCommand: 'npm ls react', observation: 'run_command `npm ls react`:\n└── react@18.3.1' },
+  { tool: 'run_command', ok: true, terminalCommand: 'npm install react@19', observation: 'added 1 package' },
+]);
+assert.equal(stale, '', 'a diagnostic before a later install is invalidated');
+const refreshed = build([
+  { tool: 'run_command', ok: true, terminalCommand: 'npm install react@19', observation: 'added 1 package' },
+  { tool: 'run_command', ok: true, terminalCommand: 'npm ls react', observation: 'run_command `npm ls react`:\n└── react@19.0.0' },
+]);
+assert.match(refreshed, /react@19\.0\.0/, 'a diagnostic AFTER the install is trusted');
+
+// No diagnostic output → no ledger.
 assert.equal(build([{ tool: 'edit_file', ok: true, path: '/a.ts', content: 'x' }]), '', 'no evidence → empty ledger');
 assert.equal(build([]), '', 'no events → empty ledger');
 
-console.log('PASS: diagnostic-proven versions are pinned as established facts (invalid/extraneous flagged, deduped, no false facts)');
+console.log('PASS: diagnostic-only facts, multiple versions preserved, prose ignored, stale-after-install dropped');

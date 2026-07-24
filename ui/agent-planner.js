@@ -1280,14 +1280,41 @@
     // re-theorizing against them — e.g. the ReactCurrentOwner run kept claiming a React
     // "version mismatch" after `npm ls` showed one deduped react@18.3.1. Pure/additive.
     function buildAgentEvidenceLedger(toolEvents) {
-      const facts = new Map(); // package -> { version, note } (last observation wins)
       const events = Array.isArray(toolEvents) ? toolEvents : [];
-      for (const event of events) {
+      // Dependency facts BEFORE the latest manifest/lockfile/install/node_modules change are
+      // stale (the graph moved) — only scan diagnostics that ran after it.
+      let freshFrom = 0;
+      events.forEach((e, i) => {
+        if (!e || !e.ok) return;
+        const tool = String(e.tool || '').toLowerCase();
+        const p = String(e.path || '');
+        const cmd = String(e.terminalCommand || e.command || '');
+        if ((['write_file', 'edit_file'].includes(tool) && /(?:^|\/)(?:package\.json|package-lock\.json|pnpm-lock\.yaml|yarn\.lock)$/i.test(p))
+          || (tool === 'run_command' && /\b(?:npm|pnpm|yarn)\s+(?:install|i|add|remove|uninstall)\b/i.test(cmd))
+          || (tool === 'delete' && /node_modules/i.test(p))) {
+          freshFrom = i + 1;
+        }
+      });
+      // package -> Map(version -> Set(note)); preserves MULTIPLE versions (the real conflict).
+      const facts = new Map();
+      const add = (name, version, note) => {
+        if (!facts.has(name)) facts.set(name, new Map());
+        const vmap = facts.get(name);
+        if (!vmap.has(version)) vmap.set(version, new Set());
+        if (note) vmap.get(version).add(note);
+      };
+      for (let i = freshFrom; i < events.length; i += 1) {
+        const event = events[i];
         if (!event || !event.ok) continue;
         const tool = String(event.tool || '').toLowerCase();
         if (tool !== 'run_command' && tool !== 'run_app') continue;
         const obs = String(event.observation || '');
         if (!obs) continue;
+        // Only trust REAL dependency-diagnostic commands (the command is echoed at the head of
+        // the observation) — otherwise prose like "try @react-three/fiber@9.0.0" becomes a fact.
+        const probe = `${String(event.terminalCommand || event.command || '')}\n${obs.slice(0, 200)}`;
+        const isDiag = /\b(?:npm|pnpm)\s+(?:ls|list)\b/i.test(probe) || /\byarn\s+(?:list|why)\b/i.test(probe) || /\bnode\s+-e\b/i.test(probe);
+        if (!isDiag) continue;
         // npm ls: "react@18.3.1 deduped", "@react-spring/three@9.6.1 extraneous",
         // "react-reconciler@0.29.2 invalid: "^0.27.0" from node_modules/@react-three/fiber"
         const lsRe = /(@?[a-z0-9][\w.-]*(?:\/[\w.-]+)?)@(\d+\.\d+\.\d+[\w.-]*)(?:\s+(deduped|extraneous|invalid[^\n]*))?/gi;
@@ -1297,21 +1324,29 @@
           let note = '';
           if (q.startsWith('invalid')) note = `INVALID — ${m[3].replace(/\s+from\b.*$/i, '').trim()}`;
           else if (q === 'extraneous') note = 'installed but not in package.json';
-          else if (q === 'deduped') note = 'single copy (deduped)';
-          facts.set(m[1], { version: m[2], note });
+          else if (q === 'deduped') note = 'deduped in its branch';
+          add(m[1], m[2], note);
         }
         // node -e version prints: "react 18.3.1", "reconciler 0.27.0", "next 15.5.21"
         obs.split('\n').forEach((line) => {
           const nm = line.match(/^([a-z@][\w@/.-]*)\s+(\d+\.\d+\.\d+[\w.-]*)\s*$/i);
-          if (nm) facts.set(nm[1], { version: nm[2], note: (facts.get(nm[1]) || {}).note || '' });
+          if (nm) add(nm[1], nm[2], '');
         });
       }
       if (!facts.size) return '';
-      const entries = Array.from(facts.entries());
-      const rank = (n) => (n.note.startsWith('INVALID') ? 0 : n.note ? 1 : 2);
-      entries.sort((a, b) => rank(a[1]) - rank(b[1]) || a[0].localeCompare(b[0]));
-      const lines = entries.slice(0, 12).map(([name, f]) => `- ${name}@${f.version}${f.note ? ` — ${f.note}` : ''}`);
-      return `ESTABLISHED FACTS (installed versions PROVEN by diagnostics this run — do NOT re-run checks to re-verify them, and do NOT propose a fix premised on a version differing from these):\n${lines.join('\n')}\n\n`;
+      const lines = [];
+      facts.forEach((vmap, name) => {
+        const versions = Array.from(vmap.keys());
+        if (versions.length > 1) {
+          lines.push({ rank: 0, text: `- ${name} — MULTIPLE VERSIONS INSTALLED: ${versions.sort().join(', ')} (a real duplicate/version conflict)` });
+          return;
+        }
+        const notes = Array.from(vmap.get(versions[0]));
+        const rank = notes.some((n) => n.startsWith('INVALID')) ? 0 : notes.length ? 1 : 2;
+        lines.push({ rank, text: `- ${name}@${versions[0]}${notes.length ? ` — ${notes.join('; ')}` : ''}` });
+      });
+      lines.sort((a, b) => a.rank - b.rank || a.text.localeCompare(b.text));
+      return `ESTABLISHED FACTS (installed versions PROVEN by diagnostics after the latest dependency change — do NOT re-run checks to re-verify them, and do NOT propose a fix premised on a version differing from these unless a later package/lockfile change invalidates them):\n${lines.slice(0, 12).map((l) => l.text).join('\n')}\n\n`;
     }
 
     async function buildAgentDecisionPrompt(chatId, taskText, toolEvents, stepIndex, planSpec = null) {
