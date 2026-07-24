@@ -1275,6 +1275,45 @@
       return `CURRENT_CODE_DIAGNOSTICS (content-derived; fix these before broad inspection):\n${diagnostics.slice(0, 6).map((d) => `- ${d}`).join('\n')}\n\n`;
     }
 
+    // Evidence ledger (first slice of the hypothesis ledger): pin the installed versions a
+    // diagnostic (npm ls, node -e version print) already PROVED, so a weak model can't keep
+    // re-theorizing against them — e.g. the ReactCurrentOwner run kept claiming a React
+    // "version mismatch" after `npm ls` showed one deduped react@18.3.1. Pure/additive.
+    function buildAgentEvidenceLedger(toolEvents) {
+      const facts = new Map(); // package -> { version, note } (last observation wins)
+      const events = Array.isArray(toolEvents) ? toolEvents : [];
+      for (const event of events) {
+        if (!event || !event.ok) continue;
+        const tool = String(event.tool || '').toLowerCase();
+        if (tool !== 'run_command' && tool !== 'run_app') continue;
+        const obs = String(event.observation || '');
+        if (!obs) continue;
+        // npm ls: "react@18.3.1 deduped", "@react-spring/three@9.6.1 extraneous",
+        // "react-reconciler@0.29.2 invalid: "^0.27.0" from node_modules/@react-three/fiber"
+        const lsRe = /(@?[a-z0-9][\w.-]*(?:\/[\w.-]+)?)@(\d+\.\d+\.\d+[\w.-]*)(?:\s+(deduped|extraneous|invalid[^\n]*))?/gi;
+        let m;
+        while ((m = lsRe.exec(obs))) {
+          const q = String(m[3] || '').toLowerCase();
+          let note = '';
+          if (q.startsWith('invalid')) note = `INVALID — ${m[3].replace(/\s+from\b.*$/i, '').trim()}`;
+          else if (q === 'extraneous') note = 'installed but not in package.json';
+          else if (q === 'deduped') note = 'single copy (deduped)';
+          facts.set(m[1], { version: m[2], note });
+        }
+        // node -e version prints: "react 18.3.1", "reconciler 0.27.0", "next 15.5.21"
+        obs.split('\n').forEach((line) => {
+          const nm = line.match(/^([a-z@][\w@/.-]*)\s+(\d+\.\d+\.\d+[\w.-]*)\s*$/i);
+          if (nm) facts.set(nm[1], { version: nm[2], note: (facts.get(nm[1]) || {}).note || '' });
+        });
+      }
+      if (!facts.size) return '';
+      const entries = Array.from(facts.entries());
+      const rank = (n) => (n.note.startsWith('INVALID') ? 0 : n.note ? 1 : 2);
+      entries.sort((a, b) => rank(a[1]) - rank(b[1]) || a[0].localeCompare(b[0]));
+      const lines = entries.slice(0, 12).map(([name, f]) => `- ${name}@${f.version}${f.note ? ` — ${f.note}` : ''}`);
+      return `ESTABLISHED FACTS (installed versions PROVEN by diagnostics this run — do NOT re-run checks to re-verify them, and do NOT propose a fix premised on a version differing from these):\n${lines.join('\n')}\n\n`;
+    }
+
     async function buildAgentDecisionPrompt(chatId, taskText, toolEvents, stepIndex, planSpec = null) {
       const transcript = buildAgentHistoryTranscript(chatId, 14);
       const projectMemory = await getProjectMemoryContext();
@@ -1327,6 +1366,7 @@
       });
       const relevantOlder = selectRelevantOlderEvents(olderEvents, taskText, planSpec, 3);
       const diagnosticsLog = buildAgentDiagnosticsLog(allEvents);
+      const evidenceLedger = buildAgentEvidenceLedger(allEvents);
       const expandedReadCap = Math.max(0, Number(getAgentExpandedReadChars()) || 0);
       // Expanded content is MOST needed when diagnostics exist (fixing a broken
       // file requires its content); the old !diagnosticsLog gate starved exactly
@@ -1443,7 +1483,7 @@
         recentEvents.forEach((e, i) => { if (e && e.ok && String(e.tool || '').toLowerCase() === 'run_app') idx = i; });
         return idx;
       })();
-      const toolLog = appliedDigest + diagnosticsLog + expandedReadLog + relevantOlderLog + dependencyBriefLog + inspectedNote + recentEvents.map((event, index) => {
+      const toolLog = appliedDigest + evidenceLedger + diagnosticsLog + expandedReadLog + relevantOlderLog + dependencyBriefLog + inspectedNote + recentEvents.map((event, index) => {
         const tool = String(event && event.tool ? event.tool : 'unknown');
         const obs = String(event && event.observation ? event.observation : '');
         const isTail = index >= recentEvents.length - FULL_TOOL_TAIL;
