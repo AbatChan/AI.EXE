@@ -13521,18 +13521,25 @@ async function getWorkspaceFileTreeSummary(markPaths = null) {
   return text;
 }
 
-// Read the workspace's source files (+ package.json) into a { path: content } map for the
-// read-only cross-phase contract check. Bounded: skips dependency/build/cache dirs, caps the
-// file count and per-file size so a large tree can't blow up the pass.
+// Read the workspace for the read-only cross-phase contract check. TWO sets, because
+// they answer different questions: `files` are parseable modules (contents read), and
+// `assetPaths` are every other importable file — css, images, fonts, data. Import
+// RESOLUTION needs the asset set; only the module set gets parsed. Collecting modules
+// alone made `import "./globals.css"` look unresolved. Bounded: skips dependency/build
+// dirs, caps file count and per-file size, and reports when that cap truncated the walk
+// (a truncated view can't prove a file is absent).
 async function collectWorkspaceSourceFiles(maxFiles = 200, maxBytesPerFile = 60000) {
   const ctx = typeof getWorkspaceContext === 'function' ? getWorkspaceContext() || {} : {};
-  if (!ctx.workspaceRootName && !ctx.rootLoaded) return {};
+  if (!ctx.workspaceRootName && !ctx.rootLoaded) return { files: {}, assetPaths: [], truncated: false };
   const OMIT = new Set(['node_modules', 'vendor', '.venv', 'venv', 'env', 'dist', 'build', 'out',
     'target', 'bin', 'obj', '.next', '.nuxt', '.output', 'coverage', '__pycache__', '.git',
     '.cache', '.turbo', '.idea', '.gradle', '.aiexe']);
   const SRC = /\.(?:jsx?|tsx?|mjs|cjs)$/i;
+  const ASSET = /\.(?:css|scss|sass|less|styl|json|svg|png|jpe?g|gif|webp|avif|ico|bmp|woff2?|ttf|otf|eot|mp[34]|wav|ogg|webm|mov|glb|gltf|txt|md|mdx|csv|glsl|frag|vert|wgsl|wasm|ya?ml|toml)$/i;
   const files = {};
+  const assetPaths = [];
   let count = 0;
+  let truncated = false;
   const walk = async (dirPath, depth) => {
     if (count >= maxFiles || depth > 6) return;
     let res = null;
@@ -13541,7 +13548,7 @@ async function collectWorkspaceSourceFiles(maxFiles = 200, maxBytesPerFile = 600
     let parsed = {};
     try { parsed = JSON.parse(String(res.output || '{}')); } catch (_) { return; }
     for (const entry of (Array.isArray(parsed.entries) ? parsed.entries : [])) {
-      if (count >= maxFiles) return;
+      if (count >= maxFiles) { truncated = true; return; }
       const name = String(entry && entry.name || '');
       if (!name || name.startsWith('.') && name !== '.env.example') continue;
       const full = `${dirPath === '/' ? '' : dirPath}/${name}`;
@@ -13553,11 +13560,14 @@ async function collectWorkspaceSourceFiles(maxFiles = 200, maxBytesPerFile = 600
           const read = await invokeWorkspaceAction('workspaceReadFile', { path: full });
           if (read && read.ok) { files[normalizeWorkspacePath(full)] = String(read.output || '').slice(0, maxBytesPerFile); count += 1; }
         } catch (_) { /* skip */ }
+      } else if (ASSET.test(name)) {
+        // Existence only — never read, never parsed.
+        assetPaths.push(normalizeWorkspacePath(full));
       }
     }
   };
   try { await walk('/', 0); } catch (_) { }
-  return files;
+  return { files, assetPaths, truncated };
 }
 
 function getWorkspaceContext() {
@@ -14097,6 +14107,7 @@ const {
   buildAgentDecisionPrompt,
   runCrossPhaseContractCheck,
   buildContractCheckAdvisory,
+  buildAgentModuleMap,
 } = agentPlanner || {};
 
 const agentRuntime = window.AIExeAgentRuntime && typeof window.AIExeAgentRuntime.createAgentRuntime === 'function'
@@ -14112,6 +14123,7 @@ const agentRuntime = window.AIExeAgentRuntime && typeof window.AIExeAgentRuntime
     buildAgentWriteFileContentPrompt,
     buildAgentEditFileContentPrompt,
     buildAgentRewriteExistingFilePrompt,
+    buildAgentModuleMap,
     sanitizeAgentGeneratedFileContent,
     sanitizeAgentGeneratedEditProgram,
     requestSelectedRemoteTextCompletion,
@@ -14213,6 +14225,7 @@ const agentExecutor = window.AIExeAgentExecutor && typeof window.AIExeAgentExecu
 const {
   executeDeveloperToolCall,
   describeAgentToolPhase,
+  reconcilePackageJsonWithImports,
 } = agentExecutor || {};
 
 const agentLoop = window.AIExeAgentLoop && typeof window.AIExeAgentLoop.createAgentLoop === 'function'
@@ -14273,6 +14286,7 @@ const agentLoop = window.AIExeAgentLoop && typeof window.AIExeAgentLoop.createAg
     runCrossPhaseContractCheck,
     buildContractCheckAdvisory,
     collectWorkspaceSourceFiles,
+    reconcilePackageJsonWithImports,
     requestAgentPlannerInference,
     parseAgentDecision,
     buildAgentDecisionRepairPrompt,

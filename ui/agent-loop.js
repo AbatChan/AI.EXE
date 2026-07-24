@@ -1268,7 +1268,18 @@
             && String(event.tool || '').toLowerCase() === 'read_file'
             && deps.normalizeWorkspacePath(event.path || '') === targetPath
           ));
-          if (looksLikeRawCode && isProjectCreation && isExpectedFile && !hasReadTarget) {
+          // Only a file that does not exist yet can be "created" by a raw payload. Once
+          // this run has written it, coercing an edit into a whole-file write substitutes
+          // the model's action for a different one AND walks straight into the repeat-
+          // rewrite guard — the model then narrates an edit it can never land. Guards may
+          // block; they must not swap one tool for another on an existing file.
+          const alreadyWrittenThisRun = toolEvents.some((event) => (
+            event
+            && event.ok
+            && String(event.tool || '').toLowerCase() === 'write_file'
+            && deps.normalizeWorkspacePath(event.path || '') === targetPath
+          ));
+          if (looksLikeRawCode && isProjectCreation && isExpectedFile && !hasReadTarget && !alreadyWrittenThisRun) {
             recordDebugTrace('agent_edit_file_coerced_to_write', {
               chatId: String(chatId || ''),
               step: String(step),
@@ -1856,6 +1867,15 @@
         } catch (_) { /* best-effort */ }
       };
       // Tick the active phase done in plan.md, advance; returns next index (-1 = done).
+      // A phase that imports a package nothing declares is not a runnable slice. Known
+      // packages are reconciled automatically; whatever is left is unverified (possibly a
+      // typo or hallucinated name) and must never be auto-installed — so say so plainly
+      // instead of letting "Phase N done" imply it builds.
+      const contractLimitationNote = () => {
+        if (!openUndeclaredPackages.length) return '';
+        const names = openUndeclaredPackages.slice(0, 4).join(', ');
+        return ` Note: ${names} ${openUndeclaredPackages.length === 1 ? 'is imported by this code but is not' : 'are imported by this code but are not'} in package.json, and the name${openUndeclaredPackages.length === 1 ? " isn't" : "s aren't"} on the verified list — check for a typo, or tell me to add ${openUndeclaredPackages.length === 1 ? 'it' : 'them'} and I will.`;
+      };
       const completeActivePhase = async () => {
         if (!phaseState) return null;
         const idx = phaseState.activeIndex;
@@ -2008,12 +2028,66 @@
       // Read-only cross-phase contract check runs at verification points (after a phase
       // validation, before the final build), bounded per run so a large tree can't hog time.
       let contractChecksRun = 0;
-      const maybeRunContractCheck = async () => {
+      // Packages this phase's own code imports but never declared, still open. The phase
+      // cannot honestly call itself a runnable slice while one of these is outstanding.
+      let openUndeclaredPackages = [];
+      // Add a package this run's files demonstrably import to package.json, using the
+      // executor's PINNED trusted table. Deterministic: no model-authored semver (Venice
+      // mangles carets), no install, no rewrite — so it cannot trip the rewrite guard.
+      // NOTE: `step` is the loop counter and is NOT in scope in these pre-loop helpers —
+      // it is passed in. (The old contract-check helper referenced it directly, so its
+      // debug trace threw a ReferenceError the surrounding catch swallowed.)
+      const reconcileUndeclaredPackages = async (issues, step) => {
+        const undeclared = issues.filter((issue) => issue && issue.kind === 'undeclared-package' && issue.symbol);
+        if (!undeclared.length || typeof deps.reconcilePackageJsonWithImports !== 'function') return null;
+        const missing = [];
+        const seen = new Set();
+        undeclared.forEach((issue) => {
+          const name = String(issue.symbol);
+          if (seen.has(name)) return;
+          seen.add(name);
+          missing.push({ name, importers: undeclared.filter((i) => i.symbol === name).map((i) => String(i.file || '')) });
+        });
+        let pkgRead = null;
+        try { pkgRead = await deps.invokeWorkspaceAction('workspaceReadFile', { path: '/package.json' }); } catch (_) { return null; }
+        if (!pkgRead || !pkgRead.ok) return null;
+        const reconciled = deps.reconcilePackageJsonWithImports(pkgRead.output, missing);
+        if (!reconciled || !reconciled.added.length) return reconciled || null;
+        const wrote = await deps.invokeWorkspaceAction('workspaceWriteFile', { path: '/package.json', content: reconciled.content });
+        if (!wrote || !wrote.ok) return reconciled;
+        const labels = reconciled.added.map((d) => `${d.name}@${d.version}`);
+        toolEvents.push({
+          tool: 'edit_file',
+          ok: true,
+          path: '/package.json',
+          content: reconciled.content,
+          observation: `package.json updated: added ${labels.join(', ')} (pinned from the trusted table because project files import them). Dependencies are declared only — nothing was installed.`,
+        });
+        appendAgentActivity({
+          kind: 'edit',
+          inlineMode: true,
+          title: 'Updated',
+          detail: 'package.json',
+          openPath: '/package.json',
+          openKind: 'file',
+          meta: `added ${labels.join(', ')}`,
+          status: 'done',
+        });
+        recordDebugTrace('agent_contract_deps_reconciled', {
+          chatId: String(chatId || ''), step: String(step), added: labels.join(', '),
+        }, { chatId: String(chatId || ''), step, added: reconciled.added, unknown: reconciled.unknown });
+        return reconciled;
+      };
+      const maybeRunContractCheck = async (step) => {
         if (contractChecksRun >= 3) return;
         if (typeof deps.runCrossPhaseContractCheck !== 'function' || typeof deps.collectWorkspaceSourceFiles !== 'function') return;
         contractChecksRun += 1;
         try {
-          const files = await deps.collectWorkspaceSourceFiles();
+          const collected = await deps.collectWorkspaceSourceFiles();
+          // Collector returns { files, assetPaths, truncated }; tolerate the old bare map.
+          const files = collected && collected.files ? collected.files : collected;
+          const assetPaths = (collected && Array.isArray(collected.assetPaths)) ? collected.assetPaths : [];
+          const truncated = Boolean(collected && collected.truncated);
           if (!files || !Object.keys(files).length) return;
           let dependencies = [];
           try {
@@ -2021,17 +2095,64 @@
             if (pkg) ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies']
               .forEach((k) => { if (pkg[k]) dependencies = dependencies.concat(Object.keys(pkg[k])); });
           } catch (_) { /* manifest unreadable — package check just won't run */ }
-          const result = deps.runCrossPhaseContractCheck(files, { dependencies });
-          if (result && !result.ok && result.issues.length) {
-            const advisory = deps.buildContractCheckAdvisory(result);
-            if (advisory) {
-              toolEvents.push({ tool: 'contract_check', ok: true, observation: advisory.trim() });
-              recordDebugTrace('agent_contract_check_issues', {
-                chatId: String(chatId || ''), step: String(step), count: String(result.issues.length),
-                kinds: Array.from(new Set(result.issues.map((i) => i.kind))).join(','),
-              }, { chatId: String(chatId || ''), step, issues: result.issues });
-            }
+          // Mid-build, an import of a file the plan hands to a later phase is the plan
+          // working — only the final phase has nothing left to build, so only there is a
+          // missing planned file a real defect.
+          const isFinalPhase = !phaseState || phaseState.activeIndex >= phaseState.phases.length - 1;
+          const plannedFiles = Array.isArray(planSpec && planSpec.expectedFiles) ? planSpec.expectedFiles : [];
+          const result = deps.runCrossPhaseContractCheck(files, {
+            dependencies,
+            assetPaths,
+            truncated,
+            plannedFiles,
+            deferPlannedImports: !isFinalPhase,
+          });
+          const issues = (result && Array.isArray(result.issues)) ? result.issues : [];
+          const deferredCount = (result && Array.isArray(result.deferred)) ? result.deferred.length : 0;
+          if (!result || result.ok || !issues.length) {
+            // A clean check is still a check the user watched happen.
+            appendAgentActivity({
+              kind: 'validate',
+              inlineMode: true,
+              title: 'Checked contracts',
+              detail: deferredCount
+                ? `Everything built so far lines up. ${deferredCount} import${deferredCount === 1 ? ' points' : 's point'} to files later phases will add — on track, nothing to fix.`
+                : 'Imports, exports and dependencies line up across files.',
+              hasIssues: false,
+              meta: '',
+              status: 'done',
+            });
+            openUndeclaredPackages = [];
+            return;
           }
+          // Fix what is deterministically fixable BEFORE handing the model an advisory —
+          // a known imported package is a manifest gap, not a judgement call.
+          const reconciled = await reconcileUndeclaredPackages(issues, step);
+          const addedNames = new Set((reconciled && reconciled.added || []).map((d) => d.name));
+          const remaining = issues.filter((issue) => !(issue.kind === 'undeclared-package' && addedNames.has(issue.symbol)));
+          openUndeclaredPackages = remaining
+            .filter((issue) => issue.kind === 'undeclared-package' && issue.symbol)
+            .map((issue) => String(issue.symbol));
+          const fixedNote = addedNames.size ? ` ${addedNames.size} fixed automatically.` : '';
+          appendAgentActivity({
+            kind: 'validate',
+            inlineMode: true,
+            title: 'Checked contracts',
+            detail: remaining.length
+              ? `${remaining.length} cross-file issue${remaining.length === 1 ? '' : 's'} found.${fixedNote}\n${remaining.slice(0, 8).map((issue) => `${issue.file}: ${issue.message}`).join('\n')}`
+              : `Everything lines up.${fixedNote}`,
+            hasIssues: remaining.length > 0,
+            meta: '',
+            status: 'done',
+          });
+          recordDebugTrace('agent_contract_check_issues', {
+            chatId: String(chatId || ''), step: String(step), count: String(issues.length),
+            remaining: String(remaining.length), autoFixed: String(addedNames.size),
+            kinds: Array.from(new Set(issues.map((i) => i.kind))).join(','),
+          }, { chatId: String(chatId || ''), step, issues, remaining });
+          if (!remaining.length) return;
+          const advisory = deps.buildContractCheckAdvisory({ ok: false, issues: remaining });
+          if (advisory) toolEvents.push({ tool: 'contract_check', ok: true, observation: advisory.trim() });
         } catch (_) { /* read-only advisory; never break the run */ }
       };
       // "One repair, then ship": count how many times validate_files has failed. After
@@ -2041,6 +2162,63 @@
       // reference mismatch — NOT a syntax/truncation/empty problem (those still get
       // repaired, and continuation prevents most of them now).
       let validationFailureCount = 0;
+      // Every guard block MUST leave a card. The planner narrates its intention BEFORE a
+      // guard runs ("adding it now"), so a silent `continue` orphans that sentence — the
+      // feed showed a promise, no card, and no file change, which reads as the agent
+      // babbling. Push the observation and render the outcome through one door.
+      const pushGuardBlock = (blockedDecision, event) => {
+        toolEvents.push(event);
+        try {
+          const card = deps.buildAgentActivityFromToolResult(blockedDecision, event, toolEvents);
+          if (card) appendAgentActivity(card);
+        } catch (_) { /* a missing card must never break the run */ }
+      };
+      // Guards compose. Individually each is right; stacked they can leave NO legal move:
+      // the read-back guard refuses the read, the edit gate demands one, the rewrite guard
+      // refuses the write. The model then burns steps promising an edit it cannot make.
+      // After two consecutive blocks on one path, open exactly one door: serve the real
+      // on-disk content as a genuine read so the next targeted edit is accepted.
+      const consecutiveGuardBlocksForPath = (path) => {
+        if (!path) return 0;
+        let count = 0;
+        for (let i = toolEvents.length - 1; i >= 0; i -= 1) {
+          const event = toolEvents[i];
+          if (!event) continue;
+          if (deps.normalizeWorkspacePath(event.path || '') !== path) continue;
+          if (event._guardBlock && event.ok === false) { count += 1; continue; }
+          break;
+        }
+        return count;
+      };
+      const breakGuardDeadlock = async (deadlockedDecision, path, step) => {
+        let read = null;
+        try { read = await deps.invokeWorkspaceAction('workspaceReadFile', { path }); } catch (_) { return false; }
+        if (!read || !read.ok) return false;
+        const content = String(read.output || '');
+        const event = {
+          tool: 'read_file',
+          ok: true,
+          path,
+          content,
+          _deadlockBreak: true,
+          observation: `read_file ${path} (current on-disk content — served because your last attempts to touch this file were all blocked):\n${content.slice(0, deps.agentMaxToolOutputChars - 400)}\nThis IS the ground truth. Make ONE targeted edit_file against this exact text now — do not rewrite the whole file, and do not read it again.`,
+        };
+        toolEvents.push(event);
+        appendAgentActivity({
+          kind: 'read',
+          inlineMode: true,
+          title: 'Read',
+          detail: path.split('/').filter(Boolean).pop() || path,
+          openPath: path,
+          openKind: 'file',
+          meta: 'current content · unblocking',
+          status: 'done',
+        });
+        recordDebugTrace('agent_guard_deadlock_broken', {
+          chatId: String(chatId || ''), step: String(step), path, tool: String(deadlockedDecision.tool || ''),
+        }, { chatId: String(chatId || ''), step, path, decision: deadlockedDecision });
+        return true;
+      };
       const isMinorCrossFileIssue = (issue) => {
         const s = String(issue || '').toLowerCase();
         if (/unclosed|unterminated|truncat|syntax error|incomplete|placeholder|empty|unmatched|too small|did not pass validation/.test(s)) return false;
@@ -2556,11 +2734,12 @@
         if (duplicateDecisionObservation) {
           let duplicateRepairedToFallback = false;
           const duplicateTool = String(decision.tool || '').toLowerCase();
-          toolEvents.push({
+          pushGuardBlock(decision, {
             tool: decision.tool,
             ok: false,
             _guardBlock: true,
             _guardKind: 'duplicate_no_progress',
+            _guardReason: 'no_change_since_last_run',
             _guardSignature: JSON.stringify(buildDecisionSignature(decision)),
             path: normalizeDecisionPath(decision.path || ''),
             srcPath: normalizeDecisionPath(decision.srcPath || ''),
@@ -3000,7 +3179,8 @@
               setAgentProgress('Phase complete.');
               let phaseMsg = deps.sanitizeAssistantText(decision.message || '') || '';
               const handoff = buildPhaseHandoffMessage(res.idx, res.donePhase.title, res.nextIdx, nextPhase.title, { forwardOnly: Boolean(phaseMsg) });
-              phaseMsg = phaseMsg ? `${phaseMsg}\n\n${handoff}` : handoff;
+              const limitation = contractLimitationNote();
+              phaseMsg = phaseMsg ? `${phaseMsg}${limitation}\n\n${handoff}` : `${handoff}${limitation}`;
               if (agentHasWorkspaceMutations()) {
                 await deps.refreshWorkspaceTree(true);
               }
@@ -3038,6 +3218,7 @@
           if (stillBrokenRun) {
             finalText += ' Note: the app still shows a startup error — press Continue and I\'ll keep working on it.';
           }
+          finalText += contractLimitationNote();
           // Tell the user WHERE to check the result (auto-open / Run button);
           // never auto-open an app that still crashes on startup.
           let finishRunHint = null;
@@ -3076,6 +3257,20 @@
         // so the exact-duplicate merge no longer dropped this one.
         if (decision.thought) appendAgentNarration(decision.thought);
 
+        // Deadlock escape, ahead of every other file guard: if the last two attempts to
+        // touch this path were BOTH guard-blocked, the guards have boxed the model in.
+        // Hand it the file's real content once so the edit gate is satisfied and a
+        // targeted edit becomes possible. Runs at most once per path per run.
+        if (decision.action === 'tool'
+          && ['read_file', 'write_file', 'edit_file'].includes(String(decision.tool || '').toLowerCase())) {
+          const stuckPath = deps.normalizeWorkspacePath(decision.path || '');
+          const alreadyBroken = toolEvents.some((event) => event
+            && event._deadlockBreak && deps.normalizeWorkspacePath(event.path || '') === stuckPath);
+          if (stuckPath && !alreadyBroken && consecutiveGuardBlocksForPath(stuckPath) >= 2) {
+            if (await breakGuardDeadlock(decision, stuckPath, step)) continue;
+          }
+        }
+
         // Polish-loop breakers: after a clean write, reading it back or rewriting
         // it whole is churn unless something actually failed since.
         const lastWriteWithoutFailureSince = (path) => {
@@ -3094,7 +3289,15 @@
             if (deps.normalizeWorkspacePath(event.path || '') !== path) continue;
             if (!event.ok) return false;
             const eventTool = String(event.tool || '').toLowerCase();
-            if (eventTool === 'write_file') { sawCleanWrite = true; break; }
+            if (eventTool === 'write_file') {
+              // A save that came back structurally incomplete (cut-off tail, unclosed
+              // block) is NOT a clean write. Regenerating the whole file is the
+              // documented cure for that, so the polish-loop guard must not stand in
+              // front of it — it blocked exactly that repair on a truncated component.
+              if (String(event.structuralIssue || '').trim()) return false;
+              sawCleanWrite = true;
+              break;
+            }
             if (eventTool === 'edit_file') return false;
             // successful reads/validates after the write change nothing; keep looking
           }
@@ -3124,6 +3327,7 @@
               tool: 'read_file',
               ok: false,
               _guardBlock: true,
+              _guardReason: 'just_written',
               path: readPath,
               observation: `read_file blocked for ${readPath}: you just wrote this file's complete content yourself — the saved file IS that content, nothing changed it since. Do not read it back. If something specific is wrong, change it with ONE targeted edit_file; otherwise run validate_files once and finalize.`,
             };
@@ -3164,10 +3368,11 @@
             recordDebugTrace('agent_repeat_rewrite_blocked', {
               chatId: String(chatId || ''), step: String(step), path: writePath,
             }, { chatId: String(chatId || ''), step, path: writePath });
-            toolEvents.push({
+            pushGuardBlock(decision, {
               tool: 'write_file',
               ok: false,
               _guardBlock: true,
+              _guardReason: 'rewrite_would_regenerate',
               path: writePath,
               observation: `write_file blocked for ${writePath}: you already generated this file's complete content this run and nothing failed since. Do NOT polish by rewriting the whole file — each rewrite regenerates everything and loops. If one specific rule or section is wrong, change it with ONE targeted edit_file; otherwise run validate_files once and finalize.`,
             });
@@ -3196,10 +3401,11 @@
           });
           const selected = selectVitalReadPaths(unread, 6);
           if (!selected.length) {
-            toolEvents.push({
+            pushGuardBlock(decision, {
               tool: 'read_files',
               ok: false,
               _guardBlock: true,
+              _guardReason: 'already_cached',
               pathsSig: decisionPathsSignature(decision),
               observation: 'Every requested file is already cached and unchanged. Do not repeat the batch. Use the dependency/signature brief in TOOL_RESULTS, make the planned change now, or run one targeted search for a specific unresolved symbol.',
             });
@@ -3274,10 +3480,11 @@
             recordDebugTrace('agent_read_loop_blocked', {
               chatId: String(chatId || ''), step: String(step), path: readPath, reason: blockReason,
             }, { chatId: String(chatId || ''), step, path: readPath, reason: blockReason });
-            toolEvents.push({
+            pushGuardBlock(decision, {
               tool: 'read_file',
               ok: false,
               _guardBlock: true,
+              _guardReason: 'already_read',
               path: readPath,
               observation: `You have already read the relevant parts of ${readPath} (${blockReason}) — stop re-reading; you have enough context. To find a specific selector/class/id/function, use ONE search_files query on ${readPath}. Otherwise MAKE THE EDIT now (edit_file) or finalize. Do NOT call read_file on ${readPath} again.`,
             });
@@ -3315,10 +3522,11 @@
             const checklistSteer = cl && cl.allDone
               ? ' All planned items appear addressed — finalize now.'
               : (nextItem ? ` Next planned item to handle: "${nextItem}".` : '');
-            toolEvents.push({
+            pushGuardBlock(decision, {
               tool: String(decision.tool || ''),
               ok: false,
               _guardBlock: true,
+              _guardReason: 'enough_context',
               path: deps.normalizeWorkspacePath(decision.path || ''),
               observation: `You already have ${inspections} focused inspection result${inspections === 1 ? '' : 's'} and no unresolved symbol or error was named for this request. Stop gathering broad context. Create the next missing planned file now, make the targeted edit using cached evidence, or run ONE search only if you can name the exact symbol/selector/error you still need.${checklistSteer}`,
             });
@@ -3344,10 +3552,11 @@
               }, { chatId: String(chatId || ''), step, path: editPath });
               break;
             }
-            toolEvents.push({
+            pushGuardBlock(decision, {
               tool: String(decision.tool || ''),
               ok: false,
               _guardBlock: true,
+              _guardReason: 'edits_cycling',
               path: editPath,
               observation: `Stop editing ${editPath}: your edits have cycled it back to a state it was already in this run — you are going in circles, removing the same code you just added. It is correct as-is. Do NOT edit ${editPath} again. Finalize now (or move to a different file if one genuinely still needs changes).`,
             });
@@ -3410,10 +3619,11 @@
                 chatId: String(chatId || ''), step: String(step), path: wPath,
                 afterRead: String(Boolean(touchedThisRun)),
               }, { chatId: String(chatId || ''), step, path: wPath });
-              toolEvents.push({
+              pushGuardBlock(decision, {
                 tool: 'write_file',
                 ok: false,
                 _guardBlock: true,
+                _guardReason: 'would_overwrite_existing',
                 path: wPath,
                 observation: readSuccessfullyThisRun
                   ? `${wPath} already exists and was read successfully — do NOT overwrite it from scratch. Use edit_file with a targeted find/replace edit for ONLY the requested change. ONLY if the file is genuinely broken/corrupted and targeted edits cannot fix it: send the same complete write_file again and it will be accepted as a deliberate full regeneration.`
@@ -3803,7 +4013,26 @@
           // activities (the "cut off" content) and starts a blank stream.
           setAgentProgress('Continuing...');
         }
-        const clippedObservation = String(toolResult.observation || '').slice(0, deps.agentMaxToolOutputChars);
+        let clippedObservation = String(toolResult.observation || '').slice(0, deps.agentMaxToolOutputChars);
+        // Handing the model the SAME rejection a second time just buys the same reply.
+        // (A run ended on step 28 doing exactly this: two identical "the edit removes the
+        // import but the file still uses it" rejections, then out of steps.) Name the
+        // change of SHAPE that can actually land instead of repeating the message.
+        if (!toolResult.ok && clippedObservation) {
+          const failurePath = deps.normalizeWorkspacePath(decision.path || '');
+          const failureKey = clippedObservation.slice(0, 90);
+          const sameFailureBefore = toolEvents.some((event) => event
+            && event.ok === false
+            && String(event.tool || '').toLowerCase() === String(decision.tool || '').toLowerCase()
+            && deps.normalizeWorkspacePath(event.path || '') === failurePath
+            && String(event.observation || '').slice(0, 90) === failureKey);
+          if (sameFailureBefore) {
+            clippedObservation += `\n\nThis is the SECOND time this exact rejection came back for ${failurePath || 'this target'}. Sending the same shape of change again will fail the same way. Change the shape: make ONE edit that covers every place this change touches (the import AND each usage of the renamed symbol), or replace the whole file in a single write_file with the corrected complete content. If neither is right, leave this file as it is and move to the next item.`;
+            recordDebugTrace('agent_repeated_failure_escalated', {
+              chatId: String(chatId || ''), step: String(step), tool: String(decision.tool || ''), path: failurePath,
+            }, { chatId: String(chatId || ''), step, observation: String(toolResult.observation || '') });
+          }
+        }
         toolEvents.push({
           tool: decision.tool,
           ok: Boolean(toolResult.ok),
@@ -4044,7 +4273,7 @@
         {
           const justTool = String(decision.tool || '').toLowerCase();
           if (toolResult && toolResult.ok && (justTool === 'validate_files' || justTool === 'run_app')) {
-            await maybeRunContractCheck();
+            await maybeRunContractCheck(step);
           }
         }
         // Backstop: bound the run at the phase's mutation budget so it can't time out.
@@ -4075,7 +4304,7 @@
             const res = await completeActivePhase();
             const nextPhase = phaseState.phases[res.nextIdx] || {};
             setAgentProgress('Phase complete.');
-            const phaseMsg = buildPhaseHandoffMessage(res.idx, res.donePhase.title, res.nextIdx, nextPhase.title);
+            const phaseMsg = `${buildPhaseHandoffMessage(res.idx, res.donePhase.title, res.nextIdx, nextPhase.title)}${contractLimitationNote()}`;
             deps.commitAssistantMessage(chatId, phaseMsg, phaseMsg, {
               agentActivities,
               agentMeta: agentMetaWithRevert({ startedAt, completedAt: Date.now(), collapsed: true }),

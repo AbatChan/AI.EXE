@@ -545,10 +545,18 @@
         const observation = String(event && event.observation ? event.observation : '').slice(0, 1200);
         return `ToolResult ${index + 1}: ${String(event && event.tool ? event.tool : 'unknown')}\n${observation}`;
       }).join('\n\n');
+      // Without this the batch had NO project context — every batch invented its own path
+      // for the shared store/types, which is where a phase's unresolved imports come from.
+      const moduleMap = typeof deps.buildAgentModuleMap === 'function'
+        ? String(deps.buildAgentModuleMap(toolEvents, {
+          plannedFiles: Array.isArray(planSpec && planSpec.expectedFiles) ? planSpec.expectedFiles : [],
+        }) || '')
+        : '';
       const prompt = [
         `Write the complete final contents for ${expected.length} project files in ONE response.`,
         `TASK:\n${String(taskText || '').trim()}`,
         contract ? `\nPROJECT CONTRACT:\n${contract}` : '',
+        moduleMap ? `\n${moduleMap}` : '',
         recentTools ? `\nRECENT_TOOL_RESULTS:\n${recentTools}` : '',
         `\nProduce EVERY one of these files, each COMPLETE and final — no placeholders, no TODOs, no truncation. These are SMALL focused files; keep each one lean and coherent with its siblings:`,
         expected.map((p) => `- ${p}`).join('\n'),
@@ -952,6 +960,40 @@
     // Hard truth gate. The message is REPLACED with deterministic grounded text whenever the
     // latest build is RED, the code is STALE (changed after the last verification), or the task
     // is a browser-runtime error with no FRESH passing browser proof. No vocabulary guessing.
+    // Does the message already do the gate's job — no success claim, and an explicit
+    // statement that the work is not verified? Deliberately narrow: a claim wins over a
+    // disclosure, so anything ambiguous still gets replaced.
+    function completionAlreadyDisclosesRisk(text) {
+      const body = String(text || '');
+      if (!body.trim()) return false;
+      // "…before it is done" is a condition and "not confirmed working" is a denial —
+      // neither is a claim. Drop conditional and negated clauses so the claim test reads
+      // only what the message actually asserts. Disclosure is still read from the full text.
+      const asserted = body.replace(
+        /\b(?:before|until|once|unless|when|after|not|never|no longer|isn'?t|aren'?t|wasn'?t|hasn'?t|haven'?t|won'?t|can'?t|don'?t|doesn'?t)\b[^.!?\n]*/gi,
+        ' ',
+      );
+      const claimsSuccess = /\b(?:it (?:now )?works|working now|is (?:now )?(?:done|complete|fixed|resolved|ready|working)|all (?:done|set|working)|task (?:is )?complete|fully (?:working|functional)|confirmed working|builds? (?:cleanly|successfully)|passes the build|verified working|good to ship|ready to ship)\b/i.test(asserted);
+      if (claimsSuccess) return false;
+      return /\bnot (?:yet )?(?:been )?(?:verified|confirmed|tested|checked|re-?checked|run|built)\b|\b(?:hasn'?t|haven'?t) been (?:verified|confirmed|checked|tested|run|built)\b|\bunverified\b|\bstill needs? (?:to be )?(?:built|verified|checked|run)\b|\bneeds? (?:to be )?(?:rebuilt|re-?verified|built and verified)\b|\bbefore (?:this|it) can be called complete\b/i.test(body);
+    }
+
+    // The harness's own open findings, so a replaced message still names something the
+    // user can act on instead of a generic "it changed".
+    function openContractIssueLines(toolEvents, max = 2) {
+      const events = Array.isArray(toolEvents) ? toolEvents : [];
+      for (let i = events.length - 1; i >= 0; i -= 1) {
+        const event = events[i];
+        if (!event || String(event.tool || '').toLowerCase() !== 'contract_check') continue;
+        const lines = String(event.observation || '').split('\n')
+          .filter((line) => /^-\s*\[/.test(line.trim()))
+          .map((line) => line.trim().replace(/^-\s*\[[^\]]*\]\s*/, ''))
+          .filter(Boolean);
+        return lines.slice(0, max);
+      }
+      return [];
+    }
+
     function enforceCompletionTruth(text, toolEvents, workspaceLabel, taskText) {
       const o = latestBuildOutcome(toolEvents);
       const runtimeTask = isBrowserRuntimeErrorTask(taskText);
@@ -959,6 +1001,16 @@
       const browserVerified = browser.hasProof && browser.passed && !browser.stale;
       const runtimeUnverified = runtimeTask && !browserVerified && !o.failed && !o.stale;
       if (!o.failed && !o.stale && !runtimeUnverified) return text;
+      // A message that already states it is unverified has nothing left to correct.
+      // Replacing it anyway threw away the better text — the model's version named the
+      // exact broken import and the next command; the deterministic one could not.
+      // Guards correct what is wrong; they do not overwrite what is already right.
+      if (completionAlreadyDisclosesRisk(text)) {
+        recordDebugTrace('agent_completion_truth_gate_kept', {
+          buildFailed: String(o.buildFailed), stale: String(o.stale), runtimeUnverified: String(runtimeUnverified),
+        }, { text: String(text || '').slice(0, 600) });
+        return text;
+      }
       const changed = (Array.isArray(toolEvents) ? toolEvents : [])
         .filter((e) => e && e.ok && ['write_file', 'edit_file', 'write_files'].includes(String(e.tool || '').toLowerCase()))
         .map((e) => deps.normalizeWorkspacePath(e.path || '')).filter(Boolean);
@@ -973,13 +1025,15 @@
         : (o.stale && !o.failed)
           ? 'The updated files need to be rebuilt and verified before this can be called complete.'
           : 'That must be resolved and the build rerun before the task is complete.';
+      const openIssues = openContractIssueLines(toolEvents);
       recordDebugTrace('agent_completion_truth_gate_replaced', {
         buildFailed: String(o.buildFailed), validationFailed: String(o.validationFailed), stale: String(o.stale), runtimeUnverified: String(runtimeUnverified), errorLine: o.errorLine,
-      }, { text: String(text || '').slice(0, 600), changed: changedUniq });
+      }, { text: String(text || '').slice(0, 600), changed: changedUniq, openIssues });
       return [
         changedUniq.length ? `I changed ${changedUniq.join(', ')}.` : 'I made changes to the project.',
         status,
         o.errorLine ? `Latest error: ${o.errorLine}.` : '',
+        openIssues.length ? `Still open: ${openIssues.join('; ')}.` : '',
         next,
       ].filter(Boolean).join(' ');
     }

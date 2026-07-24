@@ -4464,6 +4464,7 @@ export default config;
       validateWebProjectConsistency,
       buildSearchNeedles,
       lineMatchesNeedle,
+      reconcilePackageJsonWithImports,
     };
   }
 

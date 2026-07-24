@@ -842,19 +842,37 @@
       if (!ok && !(toolResult && toolResult.permissionRequired)) {
         const notFound = /file not found/i.test(observation);
         const guardSkip = /\bblocked\b/i.test(observation) && !notFound;
+        const isMutation = tool === 'write_file' || tool === 'write_files' || tool === 'edit_file';
         const failKind = (tool === 'read_file' || tool === 'read_files' || tool === 'search_files') ? 'read'
-          : ((tool === 'write_file' || tool === 'write_files' || tool === 'edit_file') ? 'edit' : 'scan');
+          : (isMutation ? 'edit' : 'scan');
         const failedPath = normalizeWorkspacePath(targetInfo || (decision && decision.path) || '');
+        // A refused CHANGE is not a skipped look-up: "Skipped — already covered" over a
+        // prevented rewrite hid the reason the model was stuck. Name what was stopped,
+        // from the guard's OWN declared reason rather than guessing from the tool name.
+        const guardStoppedWrite = guardSkip && isMutation;
+        const guardReasonLabels = {
+          no_change_since_last_run: 'nothing changed since the last run',
+          rewrite_would_regenerate: 'full rewrite prevented — targeted edit required',
+          would_overwrite_existing: 'file already exists — targeted edit required',
+          edits_cycling: 'edits were going in circles',
+          just_written: 'just written this run',
+          already_cached: 'already cached',
+          already_read: 'already read',
+          enough_context: 'enough context gathered',
+        };
+        const guardReason = guardReasonLabels[String((toolResult && toolResult._guardReason) || '')] || '';
         return buildInlineAgentActivityBase({
           // A guard skip is a neutral outcome, not another read/edit step. Keeping it
           // out of those phases prevents summaries such as "Read 3 files" counting a
           // file that was deliberately not read again.
           kind: guardSkip ? 'skip' : failKind,
-          title: notFound ? 'Not found' : (guardSkip ? 'Skipped' : 'Failed'),
+          title: notFound ? 'Not found' : (guardStoppedWrite ? 'Blocked' : (guardSkip ? 'Skipped' : 'Failed')),
           detail: formatAgentActivityPathLabel(failedPath) || 'this step',
           openPath: guardSkip ? failedPath : '',
           openKind: 'file',
-          meta: guardSkip ? 'already covered' : '',
+          meta: guardReason || (guardStoppedWrite
+            ? (tool === 'edit_file' ? 'edit not applied' : 'full rewrite prevented — targeted edit required')
+            : (guardSkip ? 'already covered' : '')),
           status: guardSkip ? 'done' : 'error',
         });
       }
@@ -2193,6 +2211,7 @@
           const parts = [];
           if (has('Checked syntax')) parts.push('syntax');
           if (has('Checked files')) parts.push('files');
+          if (has('Checked contracts')) parts.push('contracts');
           if (has('Ran the app')) parts.push('app run');
           if (has('Ran command')) parts.push('command run');
           const what = parts.length ? parts.join(' + ') : 'files';

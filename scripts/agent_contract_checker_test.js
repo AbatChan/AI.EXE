@@ -110,4 +110,63 @@ const twoDomains = check({
 }, { dependencies: ['zustand'] });
 assert.equal(twoDomains.issues.filter((i) => i.kind === 'duplicate-store').length, 0, 'disjoint domain stores are not flagged as duplicates');
 
-console.log('PASS: broken phased project flags all six contract classes; valid unrelated project is clean; no false positives on type-only/wildcard/disjoint-store');
+// ---- Asset imports: a CSS/image import is not a module, but it IS a real file ----
+// Regression: only JS/TS were collected, so `import "./globals.css"` read as missing.
+const withAssets = {
+  '/src/app/layout.tsx': `import './globals.css';\nimport logo from '../assets/logo.svg';\nexport default function L() { return null; }`,
+};
+const assetPaths = ['/src/app/globals.css', '/src/assets/logo.svg'];
+const rAssets = check(withAssets, { dependencies: [], assetPaths });
+assert.equal(rAssets.issues.filter((i) => i.kind === 'unresolved-import').length, 0,
+  `existing css/svg imports are resolved, not flagged (got: ${JSON.stringify(rAssets.issues)})`);
+// A genuinely absent asset is still reported.
+const rMissingAsset = check(withAssets, { dependencies: [], assetPaths: ['/src/assets/logo.svg'] });
+assert.ok(rMissingAsset.issues.some((i) => i.kind === 'unresolved-import' && /globals\.css/.test(i.target || i.message)),
+  'an asset that really is missing is still flagged');
+// Bundler query suffixes are not part of the path.
+const rQuery = check({ '/src/a.ts': `import u from './pic.png?url';\nexport const x = 1;` },
+  { dependencies: [], assetPaths: ['/src/pic.png'] });
+assert.equal(rQuery.issues.length, 0, '?url suffix resolves to the real asset');
+
+// ---- Truncated walk: a partial view must never claim a file is missing ----
+const rTruncated = check(withAssets, { dependencies: [], assetPaths: [], truncated: true });
+assert.equal(rTruncated.issues.filter((i) => i.kind === 'unresolved-import').length, 0,
+  'a capped workspace walk cannot prove absence, so it claims none');
+// Truncation must NOT silence the checks that need no directory listing.
+const rTruncatedPkg = check({
+  '/package.json': JSON.stringify({ dependencies: { react: '^18' } }),
+  '/src/a.tsx': `import { motion } from 'framer-motion';\nexport const A = () => null;`,
+}, { dependencies: ['react'], truncated: true });
+assert.ok(rTruncatedPkg.issues.some((i) => i.kind === 'undeclared-package' && i.symbol === 'framer-motion'),
+  'undeclared packages are still reported when the walk was truncated');
+
+// ---- Phase awareness: a planned file a later phase writes is scheduled, not broken ----
+// Regression: Phase 1 wrote page.tsx importing components Phase 2/3 own, and the check
+// reported 5 red "no matching file exists" issues on a phase that was going exactly to plan.
+const phase1 = {
+  '/package.json': JSON.stringify({ dependencies: { react: '^18' } }),
+  '/src/app/page.tsx': `import { ControlDock } from '@/components/ControlDock';
+import { useSwarmStore } from '@/store/useSwarmStore';
+import { Ghost } from '@/components/NotInThePlan';
+export default function Page() { return null; }`,
+};
+const planned = ['/src/components/ControlDock.tsx', '/src/store/useSwarmStore.ts', '/src/app/page.tsx'];
+const rMidBuild = check(phase1, { dependencies: ['react'], plannedFiles: planned, deferPlannedImports: true });
+assert.equal(rMidBuild.issues.filter((i) => i.kind === 'unresolved-import' && /ControlDock|useSwarmStore/.test(i.target || '')).length, 0,
+  'planned-but-unbuilt imports are not issues mid-build');
+assert.equal(rMidBuild.deferred.length, 2, 'they are reported separately as scheduled work');
+assert.ok(rMidBuild.deferred.every((d) => d.kind === 'planned-import'), 'deferred entries are typed');
+// An import NOT in the plan is still a real defect, even mid-build.
+assert.ok(rMidBuild.issues.some((i) => i.kind === 'unresolved-import' && /NotInThePlan/.test(i.target || '')),
+  'an unplanned missing import is still flagged mid-build');
+
+// In the FINAL phase nothing is left to build, so the same imports ARE defects.
+const rFinal = check(phase1, { dependencies: ['react'], plannedFiles: planned, deferPlannedImports: false });
+assert.equal(rFinal.issues.filter((i) => i.kind === 'unresolved-import').length, 3,
+  'the final phase reports every missing file, planned or not');
+assert.equal(rFinal.deferred.length, 0, 'nothing is deferred once there are no later phases');
+// Deferral needs a plan: without one, nothing is silently excused.
+const rNoPlan = check(phase1, { dependencies: ['react'], deferPlannedImports: true });
+assert.equal(rNoPlan.issues.filter((i) => i.kind === 'unresolved-import').length, 3, 'no plan means no deferral');
+
+console.log('PASS: broken phased project flags all six contract classes; valid unrelated project is clean; no false positives on type-only/wildcard/disjoint-store/asset-imports/truncated-walk; planned later-phase imports defer mid-build and surface in the final phase');

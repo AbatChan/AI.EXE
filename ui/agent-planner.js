@@ -704,6 +704,85 @@
       return '';
     }
 
+    // Every module this run has already written or read, with the names it really exports.
+    // Sibling CONTENT is budget-driven and the store/types modules sit at the end of the
+    // queue, so they get starved by big engine files — and the batch generator carried no
+    // project context at all. Both made each new file invent its own module path
+    // (@/store/showStore, ../store/swarmStore, @/formations/types). This map is a few
+    // hundred bytes, so it is ALWAYS included, ahead of any content budget.
+    function buildAgentModuleMap(toolEvents = [], options = {}) {
+      const SRC_MODULE = /\.(?:jsx?|tsx?|mjs|cjs)$/i;
+      const maxModules = Math.max(1, Number(options.maxModules) || 40);
+      const exclude = normalizeWorkspacePath(options.excludePath || '');
+      const byPath = new Map();
+      const remember = (rawPath, content) => {
+        const path = normalizeWorkspacePath(rawPath || '');
+        if (!path || !SRC_MODULE.test(path)) return;
+        if (typeof content !== 'string' || !content.trim()) return;
+        byPath.set(path, content);
+      };
+      (Array.isArray(toolEvents) ? toolEvents : []).forEach((event) => {
+        if (!event || event.ok === false) return;
+        remember(event.path || event.writtenPath, event.content);
+        if (Array.isArray(event.autoWrittenFiles)) {
+          event.autoWrittenFiles.forEach((file) => { if (file) remember(file.path, file.content); });
+        }
+      });
+      if (!byPath.size) return '';
+      const exportedNames = (text) => {
+        const names = new Set();
+        const source = String(text).replace(/\/\*[\s\S]*?\*\//g, ' ');
+        let match;
+        const declRe = /\bexport\s+(?:async\s+)?(?:const|let|var|function\*?|class|abstract\s+class|interface|type|enum)\s+([A-Za-z_$][\w$]*)/g;
+        while ((match = declRe.exec(source))) names.add(match[1]);
+        const groupRe = /\bexport\s*\{([^}]*)\}/g;
+        while ((match = groupRe.exec(source))) {
+          match[1].split(',').forEach((part) => {
+            const name = (part.split(/\bas\b/).pop() || '').trim().replace(/^type\s+/, '');
+            if (/^[A-Za-z_$][\w$]*$/.test(name) && name !== 'default') names.add(name);
+          });
+        }
+        if (/\bexport\s+default\b/.test(source)) names.add('default');
+        return Array.from(names);
+      };
+      const rows = [];
+      // The alias is stated only when the project really has one — from a file that uses
+      // it, or from the tsconfig paths entry that defines it (which exists before the
+      // first file imports through it).
+      let usesSrcAlias = (Array.isArray(toolEvents) ? toolEvents : []).some((event) => event
+        && event.ok !== false
+        && /(?:^|\/)tsconfig[^/]*\.json$/i.test(String(event.path || ''))
+        && /"@\/\*"/.test(String(event.content || '')));
+      byPath.forEach((content, path) => {
+        if (/from\s*['"]@\//.test(content)) usesSrcAlias = true;
+        if (path === exclude || rows.length >= maxModules) return;
+        const names = exportedNames(content);
+        if (!names.length) return;
+        const shown = names.slice(0, 12).join(', ');
+        rows.push(`- ${path} → ${shown}${names.length > 12 ? ` (+${names.length - 12} more)` : ''}`);
+      });
+      // Modules the plan owns that nothing has written yet. A phase that builds UI before
+      // the store exists has no module to point at, so it invents one (@/lib/store) and
+      // every later phase inherits the wrong path. Naming the canonical location up front
+      // is the only thing that can prevent that.
+      const plannedRows = [];
+      (options.plannedFiles || []).forEach((rawPath) => {
+        const path = normalizeWorkspacePath(rawPath || '');
+        if (!path || !SRC_MODULE.test(path)) return;
+        if (byPath.has(path) || path === exclude || plannedRows.length >= 20) return;
+        plannedRows.push(`- ${path}`);
+      });
+      if (!rows.length && !plannedRows.length) return '';
+      const aliasNote = usesSrcAlias ? '\nThe "@/" alias resolves to "/src/", so /src/store/x.ts is imported as "@/store/x".' : '';
+      const existingBlock = rows.length
+        ? `MODULE MAP — these files ALREADY EXIST with exactly these exports. Import from these EXACT paths and these EXACT names. Do NOT invent a different path, a different file name, or a symbol that is not listed here; if what you need is missing, use what IS listed instead of imagining a new module:\n${rows.join('\n')}`
+        : '';
+      const plannedBlock = plannedRows.length
+        ? `PLANNED MODULES — not written yet, but the project contract fixes their location. If this file needs one of them, import it from THIS EXACT path; never invent a different one (an invented path stays broken for every later phase):\n${plannedRows.join('\n')}`
+        : '';
+      return [existingBlock, plannedBlock].filter(Boolean).join('\n\n') + aliasNote;
+    }
+
     function buildAgentProjectStateContext(toolEvents = [], planSpec = null, excludePath = '') {
       const expectedFiles = Array.isArray(planSpec && planSpec.expectedFiles)
         ? planSpec.expectedFiles.map((path) => normalizeWorkspacePath(path || '')).filter(Boolean)
@@ -733,6 +812,10 @@
       const today = new Date();
       sections.push(`Current date: ${today.toISOString().slice(0, 10)} (year ${today.getFullYear()}). Use ${today.getFullYear()} for any generated dates, sample data, or copyright years.`);
       if (expectedFiles.length) sections.push(`Expected files: ${expectedFiles.join(', ')}`);
+      // Ahead of the content budget: a starved sibling section must never leave the model
+      // guessing where the store or the shared types live.
+      const moduleMap = buildAgentModuleMap(toolEvents, { excludePath: normalizedExclude, plannedFiles: expectedFiles });
+      if (moduleMap) sections.push(moduleMap);
       // Sibling context, window-driven: full content when it fits (chat-grade
       // coherence), the file's head + signals when it doesn't, signals only as
       // the last resort on tiny budgets.
@@ -1361,8 +1444,19 @@
       const aliases = options.aliases || { '@/': '/src/' };
       const declaredPackages = new Set(options.dependencies || []);
       const fileMap = files && typeof files === 'object' ? files : {};
+      // Non-module files that exist but are never parsed (css, images, fonts, data).
+      // They must count for import RESOLUTION or every `import "./x.css"` looks broken.
+      const assetPaths = new Set((options.assetPaths || []).map((p) => `/${String(p || '').replace(/^\/+/, '')}`));
+      // A capped/partial walk cannot prove a file is absent — skip "missing" claims then.
+      const workspaceTruncated = Boolean(options.truncated);
+      // Files the plan says a LATER phase will create. Mid-build, an import pointing at
+      // one of these is the plan working as intended, not a defect — it only becomes an
+      // issue once nothing is left to build (the final phase).
+      const plannedFiles = new Set((options.plannedFiles || []).map((p) => `/${String(p || '').replace(/^\/+/, '')}`));
+      const deferPlannedImports = Boolean(options.deferPlannedImports) && plannedFiles.size > 0;
       const paths = Object.keys(fileMap).filter((p) => SRC_RE.test(p));
       const issues = [];
+      const deferred = [];
       const add = (kind, file, message, extra) => issues.push(Object.assign({ kind, file, message }, extra || {}));
 
       const norm = (p) => `/${String(p || '').replace(/^\/+/, '').replace(/\/+/g, '/')}`;
@@ -1377,11 +1471,17 @@
         return `/${out.join('/')}`;
       };
       const EXTS = ['', '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs'];
-      const has = (p) => Object.prototype.hasOwnProperty.call(fileMap, p);
+      const ASSET_SPEC_RE = /\.(?:css|scss|sass|less|styl|json|svg|png|jpe?g|gif|webp|avif|ico|bmp|woff2?|ttf|otf|eot|mp[34]|wav|ogg|webm|mov|glb|gltf|txt|md|mdx|csv|glsl|frag|vert|wgsl|wasm|ya?ml|toml)(?:\?.*)?$/i;
+      const has = (p) => Object.prototype.hasOwnProperty.call(fileMap, p) || assetPaths.has(p);
       const resolveModule = (base) => {
         for (const ext of EXTS) if (has(base + ext)) return base + ext;
         for (const ext of EXTS.slice(1)) if (has(`${base}/index${ext}`)) return `${base}/index${ext}`;
         return null;
+      };
+      const isPlannedForLater = (base) => {
+        for (const ext of EXTS) if (plannedFiles.has(base + ext)) return true;
+        for (const ext of EXTS.slice(1)) if (plannedFiles.has(`${base}/index${ext}`)) return true;
+        return false;
       };
       const aliasTarget = (spec) => {
         for (const pre of Object.keys(aliases)) {
@@ -1508,14 +1608,30 @@
           const spec = imp.specifier;
           const isLocal = spec.startsWith('.') || spec.startsWith('/') || aliasTarget(spec);
           if (isLocal) {
-            const base = spec.startsWith('.') ? resolveRel(dir, spec)
-              : spec.startsWith('/') ? norm(spec)
-              : aliasTarget(spec);
+            // Bundler suffixes (?url, ?raw, ?inline) are not part of the path.
+            const cleanSpec = spec.replace(/[?#].*$/, '');
+            const base = cleanSpec.startsWith('.') ? resolveRel(dir, cleanSpec)
+              : cleanSpec.startsWith('/') ? norm(cleanSpec)
+              : aliasTarget(cleanSpec);
             const resolved = resolveModule(base);
             if (!resolved) {
+              // Never claim a file is missing from a partial view of the workspace.
+              if (workspaceTruncated) return;
+              // Scheduled, not broken: the plan owns this file, a later phase writes it.
+              if (deferPlannedImports && isPlannedForLater(base)) {
+                deferred.push({
+                  kind: 'planned-import',
+                  file: mod.path,
+                  message: `imports "${spec}", which a later phase is scheduled to create`,
+                  target: spec,
+                });
+                return;
+              }
               add('unresolved-import', mod.path, `imports "${spec}" but no matching file exists in the workspace`, { target: spec });
               return;
             }
+            // An asset import has no module contract to check — existence is the whole test.
+            if (ASSET_SPEC_RE.test(cleanSpec) || assetPaths.has(resolved)) return;
             if (storeModulePaths.has(resolved)) consumedStores.add(resolved);
             // missing named exports (skip type-only and wildcard-re-export targets)
             if (!imp.isType && !imp.isNamespace) {
@@ -1564,7 +1680,7 @@
         });
       });
 
-      return { ok: issues.length === 0, issues };
+      return { ok: issues.length === 0, issues, deferred };
     }
 
     // Format contract issues into ONE batched advisory (read-only; never blocks/creates/installs).
@@ -1941,6 +2057,7 @@
       selectRelevantOlderEvents,
       buildAgentDiagnosticsLog,
       buildAgentProjectStateContext,
+      buildAgentModuleMap,
       runCrossPhaseContractCheck,
       buildContractCheckAdvisory,
     };
