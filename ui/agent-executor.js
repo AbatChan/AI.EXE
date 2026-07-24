@@ -431,6 +431,40 @@
       return bad;
     }
 
+    // A build fails on the FIRST missing bare import ("Cannot find module 'framer-motion'"),
+    // so serial rebuilds discover deps one-at-a-time. Scan every file written this run for
+    // bare specifiers absent from package.json → one batched install instead of N rebuilds.
+    function collectMissingAppDependencies(toolEvents, packageJsonContent) {
+      const declared = new Set();
+      try {
+        const pkg = JSON.parse(String(packageJsonContent || '{}'));
+        ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies'].forEach((k) => {
+          if (pkg[k] && typeof pkg[k] === 'object') Object.keys(pkg[k]).forEach((n) => declared.add(n));
+        });
+      } catch (_) { return []; }
+      const NODE_BUILTINS = /^(?:fs|path|os|http|https|crypto|stream|util|events|url|zlib|buffer|child_process|process|assert|net|tls|dns|readline|worker_threads|perf_hooks)$/;
+      const specToPackage = (spec) => {
+        const s = String(spec || '').trim();
+        if (!s || s.startsWith('.') || s.startsWith('/') || s.startsWith('@/') || s.startsWith('~')) return '';
+        if (s.startsWith('node:') || NODE_BUILTINS.test(s)) return '';
+        if (s.startsWith('@')) { const p = s.split('/'); return p.length >= 2 ? `${p[0]}/${p[1]}` : ''; }
+        return s.split('/')[0];
+      };
+      const importRe = /(?:import[^'"]*?from\s*|import\s*|require\s*\(\s*|import\s*\(\s*)['"]([^'"]+)['"]/g;
+      const missing = new Set();
+      (Array.isArray(toolEvents) ? toolEvents : []).forEach((e) => {
+        if (!e || !e.ok || !['write_file', 'edit_file'].includes(String(e.tool || '').toLowerCase())) return;
+        if (!/\.(?:tsx?|jsx?|mjs|cjs)$/i.test(String(e.path || ''))) return;
+        const text = String(e.content || '');
+        let m;
+        while ((m = importRe.exec(text))) {
+          const name = specToPackage(m[1]);
+          if (name && !declared.has(name)) missing.add(name);
+        }
+      });
+      return Array.from(missing).sort();
+    }
+
     function repairPackageJsonDependencyVersions(content) {
       let parsed = null;
       try {
@@ -3626,13 +3660,26 @@ export default config;
               }
             } catch (err) { /* advisory only */ }
           }
+          // Missing app dependencies surface one-per-build. When one appears, scan ALL
+          // written files and list every bare import absent from package.json so the model
+          // installs them in ONE approval/command instead of a rebuild per package.
+          let missingDepsAdvisory = '';
+          if (/Cannot find module ['"][^'".]/.test(String(tail || ''))) {
+            try {
+              const pkgRead = await deps.invokeWorkspaceAction('workspaceReadFile', { path: '/package.json' });
+              const missing = collectMissingAppDependencies(toolEvents, pkgRead && pkgRead.ok ? pkgRead.output : '');
+              if (missing.length) {
+                missingDepsAdvisory = `\nThese packages are imported by files in this project but are NOT in package.json — install them ALL at once with a single command instead of one per rebuild:\nnpm install ${missing.join(' ')}`;
+              }
+            } catch (err) { /* advisory only */ }
+          }
           return {
             ok: true,
             mutated,
             runErrorCount: 1,
             terminalCommand: proofCommand,
             terminalProof,
-            observation: `run_app ${stackInfo.failLabel || 'proof failed'} (${proofCommand} exited ${status.exitCode}). Read these real errors, fix the root cause in the referenced files, then run_app again.\nOutput:\n${tail || '(no output)'}${allTypeErrors}`,
+            observation: `run_app ${stackInfo.failLabel || 'proof failed'} (${proofCommand} exited ${status.exitCode}). Read these real errors, fix the root cause in the referenced files, then run_app again.\nOutput:\n${tail || '(no output)'}${allTypeErrors}${missingDepsAdvisory}`,
           };
         }
 

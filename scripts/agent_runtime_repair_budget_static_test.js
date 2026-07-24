@@ -40,6 +40,10 @@ assert.match(executor, /Repaired Venice-mangled dependency versions from the kno
 // Runtime-error tasks hand back after a clean build instead of churning blindly.
 assert.match(loop, /runtime-error-build-settled-handback/);
 assert.match(loop, /hasCleanRuntimeProofSinceLatestMutation\(\)/);
+// Missing app deps are batched into one install instead of one-per-rebuild.
+assert.match(executor, /function collectMissingAppDependencies/);
+assert.match(executor, /install them ALL at once with a single command/);
+assert.match(executor, /s\.startsWith\('node:'\) \|\| NODE_BUILTINS\.test\(s\)/);
 // Progress notes are capped to one sentence in BOTH synced copies.
 const decisionMd = fs.readFileSync(path.join(root, 'ui', 'prompts', 'developer_agent_decision.md'), 'utf8');
 const promptCore = fs.readFileSync(path.join(root, 'ui', 'prompt-core.js'), 'utf8');
