@@ -1,7 +1,7 @@
 # AI.EXE — project rules (always apply)
 
 ## Version bumping — ODOMETER scheme (NOT semver). READ THIS BEFORE EVERY BUMP.
-Single source of truth: `CMakeLists.txt` (`AI_EXE_APP_VERSION`, `AI_EXE_BUILD_TAG`, `AI_EXE_BUILD_LABEL`).
+Single source of truth: `CMakeLists.txt`. A release edits ONLY two lines: `AI_EXE_APP_VERSION` and `AI_EXE_BUILD_TAG`. Everything else derives automatically at CMake configure — the label **date** is stamped (`string(TIMESTAMP)`), `ui/ui-config.js` + `src/ui_constants.h` are generated via `configure_file`, and the dev-tooling `package.json` "version" is auto-synced. Do NOT hand-edit those (build once so the sync runs, then commit the updated `package.json`).
 
 - Bump the version on **every** change shipped to a build (it's the "did my reload take?" signal).
 - Segments are **single digits that roll over at 9** — **NEVER write a two-digit segment** (no `4.2.10`).

@@ -24,9 +24,27 @@ option(AI_EXE_UI_REMEMBER_LAYOUT "Remember panel layout in local storage" ON)
 option(AI_EXE_ENABLE_REMOTE_PROVIDERS "Enable hosted/API inference providers in the UI" ON)
 option(AI_EXE_ENABLE_DEV_PLANNER "Enable localhost development planner endpoint in the UI" OFF)
 set(AI_EXE_WEBVIEW2_DIR "" CACHE PATH "Microsoft.Web.WebView2 NuGet package root (provides WebView2.h + WebView2Loader.dll for the Windows GUI). Without it the GUI builds in a non-rendering fallback mode.")
-set(AI_EXE_APP_VERSION "9.6.8" CACHE STRING "AI.EXE app and UI version" FORCE)
-set(AI_EXE_BUILD_TAG "completion-truth-gate" CACHE STRING "Human-readable AI.EXE build tag" FORCE)
-set(AI_EXE_BUILD_LABEL "v${AI_EXE_APP_VERSION} (${AI_EXE_BUILD_TAG} 2026-07-24)")
+# SINGLE SOURCE OF TRUTH for the app version. Everything else derives from it:
+#   - ui/ui-config.js + src/ui_constants.h via configure_file (@AI_EXE_APP_VERSION@)
+#   - the build-label date is stamped automatically (below)
+#   - the dev-tooling package.json "version" is auto-synced (below)
+# A release = bump AI_EXE_APP_VERSION + set a fresh AI_EXE_BUILD_TAG. Nothing else.
+set(AI_EXE_APP_VERSION "9.6.9" CACHE STRING "AI.EXE app and UI version" FORCE)
+set(AI_EXE_BUILD_TAG "single-source-version" CACHE STRING "Human-readable AI.EXE build tag" FORCE)
+string(TIMESTAMP AI_EXE_BUILD_DATE "%Y-%m-%d")
+set(AI_EXE_BUILD_LABEL "v${AI_EXE_APP_VERSION} (${AI_EXE_BUILD_TAG} ${AI_EXE_BUILD_DATE})")
+
+# Keep the dev-tooling package.json version pinned to the single source of truth so the
+# two can never drift (only the top-level "version" line is touched; deps are untouched).
+set(_aiexe_pkg_json "${CMAKE_SOURCE_DIR}/package.json")
+if(EXISTS "${_aiexe_pkg_json}")
+  file(READ "${_aiexe_pkg_json}" _aiexe_pkg_content)
+  string(REGEX REPLACE "\"version\"[ ]*:[ ]*\"[^\"]*\"" "\"version\": \"${AI_EXE_APP_VERSION}\"" _aiexe_pkg_synced "${_aiexe_pkg_content}")
+  if(NOT "${_aiexe_pkg_synced}" STREQUAL "${_aiexe_pkg_content}")
+    file(WRITE "${_aiexe_pkg_json}" "${_aiexe_pkg_synced}")
+    message(STATUS "AI.EXE: synced package.json version to ${AI_EXE_APP_VERSION}")
+  endif()
+endif()
 
 if(AI_EXE_UI_ANIMATIONS_DEFAULT)
   set(AI_EXE_UI_ANIMATIONS_DEFAULT_CPP "true")
