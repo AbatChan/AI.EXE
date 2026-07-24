@@ -14,56 +14,83 @@ function sliceBetween(source, startMarker, endMarker) {
   return source.slice(start, end);
 }
 
-// The gate is wired into every completion return path and the prompt directive.
+// The gate is wired into every completion return path, the prompt directive, and the
+// runtime-proof check no longer trusts a listening dev server.
 assert.match(runtime, /return enforceCompletionTruth\(text, toolEvents, workspaceLabel\)/, 'remote/external returns go through the gate');
 assert.match(runtime, /return enforceCompletionTruth\(deterministicCompletion, toolEvents, workspaceLabel\)/, 'deterministic fallback goes through the gate');
-assert.match(runtime, /VERIFIED OUTCOME — the latest build is currently FAILING/, 'prompt carries the hard build-failed directive');
+assert.match(runtime, /VERIFIED OUTCOME/, 'prompt carries the hard verified-outcome directive');
+assert.match(runtime, /const runtimeProofSeen = hasBrowserRuntimeProof\(toolEvents\)/, 'dev-server readiness is not runtime proof');
 
 // Execute the real gate helpers (closure-scoped, not exported).
 const block = sliceBetween(runtime, 'function latestBuildOutcome(', 'async function generateAgentCompletionText(');
 const sandbox = { console, deps: { normalizeWorkspacePath: (p) => p }, recordDebugTrace: () => {} };
 vm.createContext(sandbox);
-vm.runInContext(`${block}\nthis.api = { latestBuildOutcome, completionAssertsSuccess, enforceCompletionTruth };`, sandbox);
+vm.runInContext(`${block}\nthis.api = { latestBuildOutcome, hasBrowserRuntimeProof, enforceCompletionTruth };`, sandbox);
 const api = sandbox.api;
 
-// A RED build after the last edit.
+const err = "run_app Node build failed (npm run build exited 1).\nCannot find module 'framer-motion'";
 const redBuild = [
   { tool: 'edit_file', ok: true, path: '/src/app/page.tsx' },
-  { tool: 'run_app', ok: true, runErrorCount: 1, observation: "run_app Node build failed (npm run build exited 1).\n./src/components/ColorPanel.tsx:3\nCannot find module 'framer-motion'" },
+  { tool: 'run_app', ok: true, runErrorCount: 1, observation: err },
 ];
 const green = [
   { tool: 'edit_file', ok: true, path: '/src/app/page.tsx' },
   { tool: 'run_app', ok: true, runErrorCount: 0, observation: 'run_app Node build passed (npm run build exited 0).' },
 ];
-const installAfterFail = [
-  { tool: 'run_app', ok: true, runErrorCount: 1, observation: "Cannot find module 'framer-motion'" },
-  { tool: 'run_command', ok: true, runErrorCount: 0, terminalCommand: 'npm install framer-motion', observation: 'finished cleanly (exit 0).' },
-];
 
-assert.equal(api.latestBuildOutcome(redBuild).failed, true, 'red build is detected as failing');
+// Baseline: red vs green.
+assert.equal(api.latestBuildOutcome(redBuild).failed, true, 'red build is failing');
 assert.equal(api.latestBuildOutcome(green).failed, false, 'green build is not failing');
-// An install after a failed build must NOT be read as a passing build.
-assert.equal(api.latestBuildOutcome(installAfterFail).failed, true, 'install after failure keeps the build red');
+assert.equal(api.latestBuildOutcome(green).stale, false, 'green with no later edit is fresh');
 
-// A false "fixed" claim on a red build is REPLACED — the success language cannot ship.
-const lie = 'Fixed the ReactCurrentOwner crash! 🔥 The build passes and the scene works now.';
-const gatedLie = api.enforceCompletionTruth(lie, redBuild, 'drone light show');
-assert.doesNotMatch(gatedLie, /works now|Fixed the/i, 'the success claim is stripped');
-assert.match(gatedLie, /build is not passing yet/i, 'the honest status replaces it');
-assert.match(gatedLie, /framer-motion/, 'the real error is surfaced');
+// HOLE 1 — a mutation AFTER a green build makes the proof stale (unverified code).
+const greenThenEdit = [
+  { tool: 'run_app', ok: true, runErrorCount: 0 },
+  { tool: 'edit_file', ok: true, path: '/src/app/page.tsx' },
+];
+assert.equal(api.latestBuildOutcome(greenThenEdit).stale, true, 'a mutation after proof invalidates the proof');
+assert.equal(api.latestBuildOutcome(greenThenEdit).failed, false, 'stale is distinct from failed');
 
-// An honest message on a red build keeps its content but gets an authoritative footer.
-const honest = "I updated page.tsx, but the build is still failing on a missing dependency.";
-const gatedHonest = api.enforceCompletionTruth(honest, redBuild, 'drone light show');
-assert.match(gatedHonest, /updated page\.tsx/, 'honest content is preserved');
-assert.match(gatedHonest, /build is not passing yet/i, 'authoritative footer is appended');
+// HOLE 2 — a passing static validation must NOT cancel a failed build.
+const redBuildThenGreenValidate = [
+  { tool: 'run_app', ok: true, runErrorCount: 1, observation: err },
+  { tool: 'validate_files', ok: true, validationPassed: true },
+];
+assert.equal(api.latestBuildOutcome(redBuildThenGreenValidate).failed, true, 'static validation must not overwrite a failed build');
+// An install after a failed build also keeps it red.
+assert.equal(api.latestBuildOutcome([
+  { tool: 'run_app', ok: true, runErrorCount: 1, observation: err },
+  { tool: 'run_command', ok: true, runErrorCount: 0, terminalCommand: 'npm install framer-motion' },
+]).failed, true, 'install after failure keeps the build red');
 
-// A green build passes the claim through untouched.
-const success = 'Done — added the dark theme and the build passes clean. ✨';
-assert.equal(api.enforceCompletionTruth(success, green, 'proj'), success, 'green build leaves the message unchanged');
+// HOLE 3 — a listening dev server is NOT browser-runtime proof.
+assert.equal(api.hasBrowserRuntimeProof([{ tool: 'run_app', ok: true, runErrorCount: 0, devServer: { ready: true } }]), false, 'server readiness is not browser runtime proof');
+assert.equal(api.hasBrowserRuntimeProof([{ tool: 'run_app', ok: true, browserProof: { pageLoaded: true, uncaughtErrors: [], consoleErrors: [] } }]), true, 'a real browser proof counts');
 
-// Negated success language on a red build is not mistaken for a claim (footer path only).
-assert.equal(api.completionAssertsSuccess('This is not fixed yet and still fails.'), false, 'negated claim is not a success assertion');
-assert.equal(api.completionAssertsSuccess('Fixed it — everything works now.'), true, 'plain claim is a success assertion');
+// HOLE 4 — success phrases NOT in any blacklist are still neutralized (always-replace).
+[
+  'Fixed the ReactCurrentOwner crash! 🔥 The scene works now.',
+  'Everything is working perfectly and the crash is gone.',
+  'All checks are green — shipped successfully. 🚀',
+].forEach((claim) => {
+  const gated = api.enforceCompletionTruth(claim, redBuild, 'proj');
+  assert.doesNotMatch(gated, /works now|working perfectly|crash is gone|checks are green|shipped successfully|Fixed the/i, `success framing neutralized: ${claim}`);
+  assert.match(gated, /build is still failing/i, 'honest status replaces it');
+  assert.match(gated, /framer-motion/, 'the real error is surfaced');
+});
 
-console.log('PASS: no completion can assert success while the latest build is red; green/honest messages pass through');
+// Stale (green-then-edit) also gets replaced with an honest, non-success message.
+const gatedStale = api.enforceCompletionTruth('Done — it all works now. ✨', greenThenEdit, 'proj');
+assert.doesNotMatch(gatedStale, /it all works now/i, 'stale success claim neutralized');
+assert.match(gatedStale, /changed after the last successful build|not been verified/i, 'stale status surfaced');
+
+// Green + fresh passes through untouched.
+const ok = 'Added the dark theme and the build passes clean. ✨';
+assert.equal(api.enforceCompletionTruth(ok, green, 'proj'), ok, 'green+fresh build leaves the message unchanged');
+
+// A no-build task (docs/create with no build proof) is not gated.
+const docOnly = [{ tool: 'write_file', ok: true, path: '/README.md' }];
+const docMsg = 'Wrote the README with setup steps.';
+assert.equal(api.enforceCompletionTruth(docMsg, docOnly, 'proj'), docMsg, 'no-build task passes through');
+
+console.log('PASS: stale proofs, failed-build-over-validation, missed success phrases, and dev-server-only runtime are all handled');
