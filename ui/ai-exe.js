@@ -13521,6 +13521,45 @@ async function getWorkspaceFileTreeSummary(markPaths = null) {
   return text;
 }
 
+// Read the workspace's source files (+ package.json) into a { path: content } map for the
+// read-only cross-phase contract check. Bounded: skips dependency/build/cache dirs, caps the
+// file count and per-file size so a large tree can't blow up the pass.
+async function collectWorkspaceSourceFiles(maxFiles = 200, maxBytesPerFile = 60000) {
+  const ctx = typeof getWorkspaceContext === 'function' ? getWorkspaceContext() || {} : {};
+  if (!ctx.workspaceRootName && !ctx.rootLoaded) return {};
+  const OMIT = new Set(['node_modules', 'vendor', '.venv', 'venv', 'env', 'dist', 'build', 'out',
+    'target', 'bin', 'obj', '.next', '.nuxt', '.output', 'coverage', '__pycache__', '.git',
+    '.cache', '.turbo', '.idea', '.gradle', '.aiexe']);
+  const SRC = /\.(?:jsx?|tsx?|mjs|cjs)$/i;
+  const files = {};
+  let count = 0;
+  const walk = async (dirPath, depth) => {
+    if (count >= maxFiles || depth > 6) return;
+    let res = null;
+    try { res = await invokeWorkspaceAction('workspaceList', { path: dirPath }); } catch (_) { return; }
+    if (!res || !res.ok) return;
+    let parsed = {};
+    try { parsed = JSON.parse(String(res.output || '{}')); } catch (_) { return; }
+    for (const entry of (Array.isArray(parsed.entries) ? parsed.entries : [])) {
+      if (count >= maxFiles) return;
+      const name = String(entry && entry.name || '');
+      if (!name || name.startsWith('.') && name !== '.env.example') continue;
+      const full = `${dirPath === '/' ? '' : dirPath}/${name}`;
+      if (entry.kind === 'folder') {
+        if (OMIT.has(name.toLowerCase())) continue;
+        await walk(full, depth + 1);
+      } else if (SRC.test(name) || /^package\.json$/i.test(name)) {
+        try {
+          const read = await invokeWorkspaceAction('workspaceReadFile', { path: full });
+          if (read && read.ok) { files[normalizeWorkspacePath(full)] = String(read.output || '').slice(0, maxBytesPerFile); count += 1; }
+        } catch (_) { /* skip */ }
+      }
+    }
+  };
+  try { await walk('/', 0); } catch (_) { }
+  return files;
+}
+
 function getWorkspaceContext() {
   const rootNode = workspaceTreeState.get('/') || null;
   const rootEntries = rootNode && Array.isArray(rootNode.children)
@@ -14056,6 +14095,8 @@ const {
   buildAgentPlanPrompt,
   buildAgentPlanSpec,
   buildAgentDecisionPrompt,
+  runCrossPhaseContractCheck,
+  buildContractCheckAdvisory,
 } = agentPlanner || {};
 
 const agentRuntime = window.AIExeAgentRuntime && typeof window.AIExeAgentRuntime.createAgentRuntime === 'function'
@@ -14229,6 +14270,9 @@ const agentLoop = window.AIExeAgentLoop && typeof window.AIExeAgentLoop.createAg
       setThinkingStatus(text);
     },
     buildAgentDecisionPrompt,
+    runCrossPhaseContractCheck,
+    buildContractCheckAdvisory,
+    collectWorkspaceSourceFiles,
     requestAgentPlannerInference,
     parseAgentDecision,
     buildAgentDecisionRepairPrompt,

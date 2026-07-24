@@ -966,7 +966,8 @@
       const status = o.buildFailed ? 'The latest build is still failing.'
         : o.validationFailed ? 'The latest file check did not pass.'
         : o.stale ? 'The code changed after the last verification, so it has not been re-checked yet.'
-        : 'The build passes, but this is an in-browser runtime error that a build cannot reproduce — it is not confirmed fixed.';
+        : o.hasBuild ? 'The build passes, but this is an in-browser runtime error that a build cannot reproduce — it is not confirmed fixed.'
+        : 'No in-browser check ran, and this is a runtime error a build cannot reproduce — it is not confirmed fixed.';
       const next = runtimeUnverified
         ? 'Reload/rerun the app in a browser to confirm the error is gone before calling this done.'
         : (o.stale && !o.failed)

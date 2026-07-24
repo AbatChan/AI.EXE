@@ -2005,6 +2005,35 @@
       const runtimeRepairGraceMax = 3;
       let runtimeRepairGraceCount = 0;
       let lastRepairErrorSignature = '';
+      // Read-only cross-phase contract check runs at verification points (after a phase
+      // validation, before the final build), bounded per run so a large tree can't hog time.
+      let contractChecksRun = 0;
+      const maybeRunContractCheck = async () => {
+        if (contractChecksRun >= 3) return;
+        if (typeof deps.runCrossPhaseContractCheck !== 'function' || typeof deps.collectWorkspaceSourceFiles !== 'function') return;
+        contractChecksRun += 1;
+        try {
+          const files = await deps.collectWorkspaceSourceFiles();
+          if (!files || !Object.keys(files).length) return;
+          let dependencies = [];
+          try {
+            const pkg = files['/package.json'] ? JSON.parse(files['/package.json']) : null;
+            if (pkg) ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies']
+              .forEach((k) => { if (pkg[k]) dependencies = dependencies.concat(Object.keys(pkg[k])); });
+          } catch (_) { /* manifest unreadable — package check just won't run */ }
+          const result = deps.runCrossPhaseContractCheck(files, { dependencies });
+          if (result && !result.ok && result.issues.length) {
+            const advisory = deps.buildContractCheckAdvisory(result);
+            if (advisory) {
+              toolEvents.push({ tool: 'contract_check', ok: true, observation: advisory.trim() });
+              recordDebugTrace('agent_contract_check_issues', {
+                chatId: String(chatId || ''), step: String(step), count: String(result.issues.length),
+                kinds: Array.from(new Set(result.issues.map((i) => i.kind))).join(','),
+              }, { chatId: String(chatId || ''), step, issues: result.issues });
+            }
+          }
+        } catch (_) { /* read-only advisory; never break the run */ }
+      };
       // "One repair, then ship": count how many times validate_files has failed. After
       // the first repair attempt (2nd failure), if only MINOR cross-file naming gaps
       // remain, the project finishes successfully with an advisory note instead of
@@ -4008,6 +4037,15 @@
             step: String(step),
             newLimit: String(executionStepLimit),
           }, { chatId: String(chatId || ''), step, executionStepLimit, toolEvents });
+        }
+        // Read-only cross-phase contract check at verification points: after a phase
+        // validation passes, and just after a build ran (final-build coverage). Batched
+        // issues are surfaced as an advisory; it never blocks, creates files, or installs.
+        {
+          const justTool = String(decision.tool || '').toLowerCase();
+          if (toolResult && toolResult.ok && (justTool === 'validate_files' || justTool === 'run_app')) {
+            await maybeRunContractCheck();
+          }
         }
         // Backstop: bound the run at the phase's mutation budget so it can't time out.
         if (phaseState && toolResult && toolResult.ok && toolResult.mutated

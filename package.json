@@ -8,6 +8,7 @@
     "test:agent-dependency-safety": "node scripts/agent_dependency_safety_test.js",
     "test:agent-completion-truth-gate": "node scripts/agent_completion_truth_gate_test.js",
     "test:agent-evidence-ledger": "node scripts/agent_evidence_ledger_test.js",
+    "test:agent-contract-checker": "node scripts/agent_contract_checker_test.js",
     "test:preflight-router": "node scripts/preflight_router_test.js",
     "test:chat-prompt-mode": "node scripts/chat_prompt_mode_test.js",
     "test:mode-priority": "node scripts/mode_priority_test.js",
@@ -80,7 +81,7 @@
     "markdown-it-texmath": "^1.0.0",
     "rollup": "^4.59.0"
   },
-  "version": "9.7.1",
+  "version": "9.7.2",
   "devDependencies": {
     "eslint-linter-browserify": "^10.7.0"
   }

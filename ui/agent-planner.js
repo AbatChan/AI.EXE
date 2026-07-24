@@ -1349,6 +1349,238 @@
       return `ESTABLISHED FACTS (installed versions PROVEN by diagnostics after the latest dependency change — do NOT re-run checks to re-verify them, and do NOT propose a fix premised on a version differing from these unless a later package/lockfile change invalidates them):\n${lines.slice(0, 12).map((l) => l.text).join('\n')}\n\n`;
     }
 
+    // Generic, deterministic, READ-ONLY cross-phase contract checker. A language-agnostic core
+    // over an abstract module graph, with a JS/TS adapter and a state-store plugin (Zustand/
+    // Redux-style factories matched by CALL NAME, never by filename/package). Batches every
+    // issue into one result; never creates files or installs anything. Nothing here is app-
+    // specific — SWARM is only a regression fixture. `files` = { '/path': content }.
+    function runCrossPhaseContractCheck(files, options = {}) {
+      const SRC_RE = /\.(?:jsx?|tsx?|mjs|cjs)$/i;
+      const NODE_BUILTINS = new Set(['assert', 'buffer', 'child_process', 'cluster', 'console', 'crypto', 'dns', 'events', 'fs', 'http', 'http2', 'https', 'net', 'os', 'path', 'perf_hooks', 'process', 'querystring', 'readline', 'stream', 'string_decoder', 'timers', 'tls', 'tty', 'url', 'util', 'v8', 'vm', 'worker_threads', 'zlib']);
+      const stateFactories = new Set(options.stateFactories || ['create', 'createStore', 'createWithEqualityFn', 'configureStore']);
+      const aliases = options.aliases || { '@/': '/src/' };
+      const declaredPackages = new Set(options.dependencies || []);
+      const fileMap = files && typeof files === 'object' ? files : {};
+      const paths = Object.keys(fileMap).filter((p) => SRC_RE.test(p));
+      const issues = [];
+      const add = (kind, file, message, extra) => issues.push(Object.assign({ kind, file, message }, extra || {}));
+
+      const norm = (p) => `/${String(p || '').replace(/^\/+/, '').replace(/\/+/g, '/')}`;
+      const dirOf = (p) => { const n = norm(p); const i = n.lastIndexOf('/'); return i <= 0 ? '' : n.slice(0, i); };
+      const resolveRel = (dir, rel) => {
+        const out = [];
+        `${dir}/${rel}`.split('/').forEach((seg) => {
+          if (!seg || seg === '.') return;
+          if (seg === '..') out.pop();
+          else out.push(seg);
+        });
+        return `/${out.join('/')}`;
+      };
+      const EXTS = ['', '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs'];
+      const has = (p) => Object.prototype.hasOwnProperty.call(fileMap, p);
+      const resolveModule = (base) => {
+        for (const ext of EXTS) if (has(base + ext)) return base + ext;
+        for (const ext of EXTS.slice(1)) if (has(`${base}/index${ext}`)) return `${base}/index${ext}`;
+        return null;
+      };
+      const aliasTarget = (spec) => {
+        for (const pre of Object.keys(aliases)) {
+          const base = `/${aliases[pre].replace(/^\/+|\/+$/g, '')}`;
+          if (spec === pre.replace(/\/$/, '')) return base;
+          if (spec.startsWith(pre)) return `${base}/${spec.slice(pre.length)}`.replace(/\/+/g, '/');
+        }
+        return null;
+      };
+      const packageOf = (spec) => {
+        if (!spec || spec.startsWith('.') || spec.startsWith('/') || spec.startsWith('node:')) return '';
+        const parts = spec.split('/');
+        const name = spec.startsWith('@') ? parts.slice(0, 2).join('/') : parts[0];
+        return NODE_BUILTINS.has(name) ? '' : name;
+      };
+      const strip = (t) => String(t || '')
+        .replace(/\/\*[\s\S]*?\*\//g, ' ')
+        .replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+      const topLevelKeys = (body) => {
+        const keys = new Set();
+        let depth = 0;
+        const clean = String(body).replace(/'(?:\\.|[^'])*'|"(?:\\.|[^"])*"|`(?:\\.|[^`])*`/g, '""');
+        for (let i = 0; i < clean.length; i += 1) {
+          const c = clean[i];
+          if (c === '{' || c === '(' || c === '[') { depth += 1; continue; }
+          if (c === '}' || c === ')' || c === ']') { depth -= 1; continue; }
+          if (depth !== 0 || !/[A-Za-z_$]/.test(c)) continue;
+          let j = i; let id = '';
+          while (j < clean.length && /[\w$]/.test(clean[j])) { id += clean[j]; j += 1; }
+          let k = j; while (k < clean.length && /\s/.test(clean[k])) k += 1;
+          if (clean[k] === ':' || clean[k] === '(') keys.add(id);
+          i = j - 1;
+        }
+        return keys;
+      };
+      const balancedObject = (text, from) => {
+        const open = text.indexOf('{', from);
+        if (open === -1) return '';
+        let depth = 0;
+        for (let i = open; i < text.length; i += 1) {
+          if (text[i] === '{') depth += 1;
+          else if (text[i] === '}') { depth -= 1; if (depth === 0) return text.slice(open + 1, i); }
+        }
+        return '';
+      };
+
+      // --- JS/TS adapter: parse a module into the abstract shape ---
+      function parseModule(path, rawContent) {
+        const text = strip(rawContent);
+        const exportsNamed = new Set();
+        let hasWildcardReexport = false;
+        let m;
+        const declRe = /\bexport\s+(?:async\s+)?(?:const|let|var|function\*?|class|abstract\s+class|interface|type|enum)\s+([A-Za-z_$][\w$]*)/g;
+        while ((m = declRe.exec(text))) exportsNamed.add(m[1]);
+        const groupRe = /\bexport\s*\{([^}]*)\}/g;
+        while ((m = groupRe.exec(text))) {
+          m[1].split(',').forEach((part) => {
+            const seg = part.split(/\bas\b/);
+            const name = (seg[1] || seg[0]).trim().replace(/^type\s+/, '');
+            if (/^[A-Za-z_$][\w$]*$/.test(name) && name !== 'default') exportsNamed.add(name);
+          });
+        }
+        if (/\bexport\s*\*\s*from/.test(text)) hasWildcardReexport = true;
+
+        const imports = [];
+        const impRe = /\bimport\s+(type\s+)?([^;'"]*?)\s*from\s*['"]([^'"]+)['"]/g;
+        while ((m = impRe.exec(text))) {
+          const clause = m[2].trim();
+          const named = [];
+          const brace = clause.match(/\{([^}]*)\}/);
+          if (brace) {
+            brace[1].split(',').forEach((part) => {
+              const orig = part.trim().replace(/^type\s+/, '').split(/\bas\b/)[0].trim();
+              if (/^[A-Za-z_$][\w$]*$/.test(orig)) named.push(orig);
+            });
+          }
+          const isNamespace = /\*\s+as\s+[A-Za-z_$]/.test(clause);
+          imports.push({ specifier: m[3], named, isNamespace, isType: Boolean(m[1]) });
+        }
+        const sideRe = /\bimport\s+['"]([^'"]+)['"]/g;
+        while ((m = sideRe.exec(text))) imports.push({ specifier: m[1], named: [], isNamespace: false, isType: false });
+
+        // state-store plugin: `const HOOK = <factory>(...)` → the store's state keys.
+        const stores = [];
+        const storeRe = /\b(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*([A-Za-z_$][\w$]*)\s*(?:<[^;]*?>)?\s*\(/g;
+        while ((m = storeRe.exec(text))) {
+          if (!stateFactories.has(m[2])) continue;
+          const keys = new Set();
+          const arrow = text.indexOf('=>', m.index);
+          const objFrom = arrow !== -1 && arrow < m.index + 400 ? arrow : m.index;
+          topLevelKeys(balancedObject(text, objFrom)).forEach((k) => keys.add(k));
+          // also union a typed state interface: create<StateShape>(...)
+          const typed = text.slice(m.index, m.index + 200).match(/<\s*([A-Za-z_$][\w$]*)\s*[,>]/);
+          if (typed) {
+            const shapeRe = new RegExp(`\\b(?:interface|type)\\s+${typed[1]}\\b[^{]*\\{`);
+            const sm = text.match(shapeRe);
+            if (sm) topLevelKeys(balancedObject(text, sm.index)).forEach((k) => keys.add(k));
+          }
+          stores.push({ hook: m[1], keys });
+        }
+
+        // selectors: HOOK((s) => s.PROP...) — validate the first-level property.
+        const selectors = [];
+        const selRe = /\b([A-Za-z_$][\w$]*)\s*\(\s*\(\s*([A-Za-z_$][\w$]*)\s*(?::[^)]*)?\)\s*=>\s*\2\s*(?:\.\s*|\?\.\s*)([A-Za-z_$][\w$]*)/g;
+        while ((m = selRe.exec(text))) selectors.push({ hook: m[1], prop: m[3] });
+
+        return { path, exportsNamed, hasWildcardReexport, imports, stores, selectors };
+      }
+
+      const modules = paths.map((p) => parseModule(p, fileMap[p]));
+      const byPath = new Map(modules.map((mod) => [mod.path, mod]));
+      const storesByHook = new Map(); // hook name -> { path, keys }
+      const storeModulePaths = new Set();
+      modules.forEach((mod) => mod.stores.forEach((st) => {
+        storesByHook.set(st.hook, { path: mod.path, keys: st.keys });
+        storeModulePaths.add(mod.path);
+      }));
+
+      // Resolve each import to a target module (or flag it), collecting the local graph.
+      const consumedStores = new Set();
+      modules.forEach((mod) => {
+        const dir = dirOf(mod.path);
+        mod.imports.forEach((imp) => {
+          const spec = imp.specifier;
+          const isLocal = spec.startsWith('.') || spec.startsWith('/') || aliasTarget(spec);
+          if (isLocal) {
+            const base = spec.startsWith('.') ? resolveRel(dir, spec)
+              : spec.startsWith('/') ? norm(spec)
+              : aliasTarget(spec);
+            const resolved = resolveModule(base);
+            if (!resolved) {
+              add('unresolved-import', mod.path, `imports "${spec}" but no matching file exists in the workspace`, { target: spec });
+              return;
+            }
+            if (storeModulePaths.has(resolved)) consumedStores.add(resolved);
+            // missing named exports (skip type-only and wildcard-re-export targets)
+            if (!imp.isType && !imp.isNamespace) {
+              const target = byPath.get(resolved);
+              if (target && !target.hasWildcardReexport && target.exportsNamed.size) {
+                imp.named.forEach((name) => {
+                  if (!target.exportsNamed.has(name)) {
+                    add('missing-export', mod.path, `imports { ${name} } from "${spec}" but ${resolved} does not export it`, { symbol: name, target: resolved });
+                  }
+                });
+              }
+            }
+          } else {
+            const pkg = packageOf(spec);
+            if (pkg && declaredPackages.size && !declaredPackages.has(pkg)) {
+              add('undeclared-package', mod.path, `imports "${pkg}" which is not in package.json`, { symbol: pkg });
+            }
+          }
+        });
+      });
+
+      // Duplicate ownership: two consumed store modules whose state keys OVERLAP (>=2 shared
+      // keys) are the same responsibility split in two — the divergent-store bug. Disjoint
+      // domain stores don't overlap, so they aren't flagged.
+      const consumed = Array.from(consumedStores);
+      for (let i = 0; i < consumed.length; i += 1) {
+        for (let j = i + 1; j < consumed.length; j += 1) {
+          const a = byPath.get(consumed[i]); const b = byPath.get(consumed[j]);
+          const ka = new Set(); a.stores.forEach((s) => s.keys.forEach((k) => ka.add(k)));
+          const shared = [];
+          b.stores.forEach((s) => s.keys.forEach((k) => { if (ka.has(k)) shared.push(k); }));
+          if (new Set(shared).size >= 2) {
+            add('duplicate-store', consumed[i], `two state stores own the same responsibility (shared keys: ${Array.from(new Set(shared)).slice(0, 5).join(', ')}) — ${consumed[i]} and ${consumed[j]}; consolidate to one so consumers don't see divergent state`, { target: consumed[j] });
+          }
+        }
+      }
+
+      // Incompatible consumers: a selector reads a property the store does not declare.
+      modules.forEach((mod) => {
+        mod.selectors.forEach((sel) => {
+          const store = storesByHook.get(sel.hook);
+          if (!store || store.keys.size < 2) return; // only when the shape was confidently captured
+          if (!store.keys.has(sel.prop)) {
+            add('unknown-store-property', mod.path, `selects "${sel.prop}" from ${sel.hook}, but that store defines no such property (has: ${Array.from(store.keys).slice(0, 6).join(', ')})`, { symbol: sel.prop, target: store.path });
+          }
+        });
+      });
+
+      return { ok: issues.length === 0, issues };
+    }
+
+    // Format contract issues into ONE batched advisory (read-only; never blocks/creates/installs).
+    function buildContractCheckAdvisory(result) {
+      if (!result || result.ok || !Array.isArray(result.issues) || !result.issues.length) return '';
+      const label = {
+        'unresolved-import': 'Unresolved local import',
+        'undeclared-package': 'Undeclared package',
+        'missing-export': 'Missing export',
+        'duplicate-store': 'Duplicate state ownership',
+        'unknown-store-property': 'Consumer/store mismatch',
+      };
+      const lines = result.issues.slice(0, 20).map((it) => `- [${label[it.kind] || it.kind}] ${it.file}: ${it.message}`);
+      return `CROSS-PHASE CONTRACT ISSUES (${result.issues.length}; static/read-only — fix these before the final build; do NOT auto-create adapter stores or install unknown packages, ask before adding any dependency):\n${lines.join('\n')}\n\n`;
+    }
+
     async function buildAgentDecisionPrompt(chatId, taskText, toolEvents, stepIndex, planSpec = null) {
       const transcript = buildAgentHistoryTranscript(chatId, 14);
       const projectMemory = await getProjectMemoryContext();
@@ -1709,6 +1941,8 @@
       selectRelevantOlderEvents,
       buildAgentDiagnosticsLog,
       buildAgentProjectStateContext,
+      runCrossPhaseContractCheck,
+      buildContractCheckAdvisory,
     };
   }
 
