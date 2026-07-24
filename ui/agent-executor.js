@@ -410,17 +410,23 @@
       zustand: '^4.5.5',
     };
 
+    function hasOwn(obj, key) {
+      return Object.prototype.hasOwnProperty.call(obj, key);
+    }
+
+    // Detect ONLY Venice's observed corruption (^18.3.1 → ^2^.3.1, leading-dot .27.0).
+    // Valid non-numeric specs (workspace:*, file:, git URLs, npm: aliases, dist-tags like
+    // latest/beta) are NOT corruption and must not be flagged.
     function isMangledPackageVersion(value) {
       const v = String(value || '').trim();
-      return /^\./.test(v)
-        || /\d\^|\^\.|\^\^/.test(v)
-        || (!/\d/.test(v) && !/^(\*|x|latest|next)$/i.test(v));
+      if (!v) return false;
+      return /^\.\d/.test(v) || /\d\^(?=\.|\d|$)/.test(v) || /\^\./.test(v) || /\^\^/.test(v);
     }
 
     function collectMangledPackageVersions(parsed) {
       const bad = [];
       if (!parsed || typeof parsed !== 'object') return bad;
-      ['dependencies', 'devDependencies', 'peerDependencies'].forEach((key) => {
+      ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies'].forEach((key) => {
         const section = parsed[key];
         if (!section || typeof section !== 'object') return;
         Object.keys(section).forEach((name) => {
@@ -431,9 +437,41 @@
       return bad;
     }
 
-    // A build fails on the FIRST missing bare import ("Cannot find module 'framer-motion'"),
-    // so serial rebuilds discover deps one-at-a-time. Scan every file written this run for
-    // bare specifiers absent from package.json → one batched install instead of N rebuilds.
+    // Static builtins set — module.builtinModules isn't guaranteed in the UI runtime.
+    const NODE_BUILTIN_MODULES = new Set([
+      'assert', 'assert/strict', 'async_hooks', 'buffer', 'child_process', 'cluster', 'console',
+      'constants', 'crypto', 'dgram', 'diagnostics_channel', 'dns', 'dns/promises', 'domain', 'events',
+      'fs', 'fs/promises', 'http', 'http2', 'https', 'inspector', 'module', 'net', 'os', 'path',
+      'path/posix', 'path/win32', 'perf_hooks', 'process', 'punycode', 'querystring', 'readline',
+      'readline/promises', 'repl', 'stream', 'stream/consumers', 'stream/promises', 'stream/web',
+      'string_decoder', 'sys', 'timers', 'timers/promises', 'tls', 'trace_events', 'tty', 'url',
+      'util', 'util/types', 'v8', 'vm', 'wasi', 'worker_threads', 'zlib',
+    ]);
+
+    function isValidNpmPackageName(name) {
+      const v = String(name || '').trim();
+      if (!v || v.length > 214) return false;
+      if (v !== v.toLowerCase()) return false;
+      if (v.startsWith('.') || v.startsWith('_') || v.includes('..')) return false;
+      return /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/.test(v);
+    }
+
+    // Bare import specifier → npm package name; '' for relative/alias/builtin/invalid.
+    function packageNameFromSpecifier(specifier) {
+      const s = String(specifier || '').trim();
+      if (!s) return '';
+      if (s.startsWith('.') || s.startsWith('/') || s.startsWith('@/') || s.startsWith('~/') || s.startsWith('#')) return '';
+      if (/^(?:https?:|data:|file:)/i.test(s)) return '';
+      if (s.startsWith('node:')) return '';
+      if (NODE_BUILTIN_MODULES.has(s)) return '';
+      let name = '';
+      if (s.startsWith('@')) { const p = s.split('/'); name = p.length >= 2 ? `${p[0]}/${p[1]}` : ''; }
+      else name = s.split('/')[0];
+      return isValidNpmPackageName(name) ? name : '';
+    }
+
+    // Bare imports (in files written this run) absent from package.json, WITH the files that
+    // imported them — so unknown/typo packages can be shown, never silently installed.
     function collectMissingAppDependencies(toolEvents, packageJsonContent) {
       const declared = new Set();
       try {
@@ -442,81 +480,76 @@
           if (pkg[k] && typeof pkg[k] === 'object') Object.keys(pkg[k]).forEach((n) => declared.add(n));
         });
       } catch (_) { return []; }
-      const NODE_BUILTINS = /^(?:fs|path|os|http|https|crypto|stream|util|events|url|zlib|buffer|child_process|process|assert|net|tls|dns|readline|worker_threads|perf_hooks)$/;
-      const specToPackage = (spec) => {
-        const s = String(spec || '').trim();
-        if (!s || s.startsWith('.') || s.startsWith('/') || s.startsWith('@/') || s.startsWith('~')) return '';
-        if (s.startsWith('node:') || NODE_BUILTINS.test(s)) return '';
-        if (s.startsWith('@')) { const p = s.split('/'); return p.length >= 2 ? `${p[0]}/${p[1]}` : ''; }
-        return s.split('/')[0];
-      };
       const importRe = /(?:import[^'"]*?from\s*|import\s*|require\s*\(\s*|import\s*\(\s*)['"]([^'"]+)['"]/g;
-      const missing = new Set();
+      const byPackage = new Map();
       (Array.isArray(toolEvents) ? toolEvents : []).forEach((e) => {
         if (!e || !e.ok || !['write_file', 'edit_file'].includes(String(e.tool || '').toLowerCase())) return;
-        if (!/\.(?:tsx?|jsx?|mjs|cjs)$/i.test(String(e.path || ''))) return;
+        const path = String(e.path || '');
+        if (!/\.(?:tsx?|jsx?|mjs|cjs)$/i.test(path)) return;
         const text = String(e.content || '');
+        importRe.lastIndex = 0;
         let m;
         while ((m = importRe.exec(text))) {
-          const name = specToPackage(m[1]);
-          if (name && !declared.has(name)) missing.add(name);
+          const name = packageNameFromSpecifier(m[1]);
+          if (!name || declared.has(name)) continue;
+          if (!byPackage.has(name)) byPackage.set(name, new Set());
+          byPackage.get(name).add(path);
         }
       });
-      return Array.from(missing).sort();
+      return Array.from(byPackage.entries())
+        .map(([name, importers]) => ({ name, importers: Array.from(importers).sort() }))
+        .sort((a, b) => a.name.localeCompare(b.name));
     }
 
-    // Additively add imported-but-missing deps to package.json with known-good versions
-    // (or "latest"). Never removes or downgrades anything already declared. Returns the
-    // updated JSON text + the names added, or {added:[]} when nothing changed / unparseable.
-    function reconcilePackageJsonWithImports(packageJsonContent, missingNames) {
-      if (!Array.isArray(missingNames) || !missingNames.length) return { content: String(packageJsonContent || ''), added: [] };
+    // Add ONLY known-table packages (pinned) to package.json. Unknown names are returned for
+    // review and NEVER written — a hallucinated/typo import can't become an install.
+    function reconcilePackageJsonWithImports(packageJsonContent, missingDependencies) {
+      const original = String(packageJsonContent || '');
+      const empty = { content: original, added: [], unknown: [] };
+      if (!Array.isArray(missingDependencies) || !missingDependencies.length) return empty;
       let pkg;
-      try { pkg = JSON.parse(String(packageJsonContent || '')); } catch (_) { return { content: String(packageJsonContent || ''), added: [] }; }
-      if (!pkg || typeof pkg !== 'object') return { content: String(packageJsonContent || ''), added: [] };
+      try { pkg = JSON.parse(original); } catch (_) { return empty; }
+      if (!pkg || typeof pkg !== 'object') return empty;
       if (!pkg.dependencies || typeof pkg.dependencies !== 'object') pkg.dependencies = {};
       const declared = new Set();
       ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies'].forEach((k) => {
         if (pkg[k] && typeof pkg[k] === 'object') Object.keys(pkg[k]).forEach((n) => declared.add(n));
       });
       const added = [];
-      missingNames.forEach((name) => {
-        if (declared.has(name)) return;
-        pkg.dependencies[name] = packageJsonSafeVersions[name] || 'latest';
-        added.push(name);
+      const unknown = [];
+      missingDependencies.forEach((dep) => {
+        const name = String(typeof dep === 'string' ? dep : (dep && dep.name) || '').trim();
+        const importers = Array.isArray(dep && dep.importers) ? dep.importers.map(String).filter(Boolean) : [];
+        if (!name || declared.has(name)) return;
+        if (!hasOwn(packageJsonSafeVersions, name)) { unknown.push({ name, importers }); return; }
+        pkg.dependencies[name] = packageJsonSafeVersions[name];
+        declared.add(name);
+        added.push({ name, version: packageJsonSafeVersions[name], importers });
       });
-      if (!added.length) return { content: String(packageJsonContent || ''), added: [] };
-      return { content: `${JSON.stringify(pkg, null, 2)}\n`, added };
+      return { content: added.length ? `${JSON.stringify(pkg, null, 2)}\n` : original, added, unknown };
     }
 
     function repairPackageJsonDependencyVersions(content) {
+      const original = String(content || '');
       let parsed = null;
-      try {
-        parsed = JSON.parse(String(content || ''));
-      } catch (_) {
-        return { content: String(content || ''), repaired: false, remainingBad: [] };
-      }
-      if (!parsed || typeof parsed !== 'object') {
-        return { content: String(content || ''), repaired: false, remainingBad: [] };
-      }
+      try { parsed = JSON.parse(original); } catch (_) { return { content: original, repaired: false, remainingBad: [] }; }
+      if (!parsed || typeof parsed !== 'object') return { content: original, repaired: false, remainingBad: [] };
       let repaired = false;
-      ['dependencies', 'devDependencies', 'peerDependencies'].forEach((key) => {
+      const unresolved = [];
+      ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies'].forEach((key) => {
         const section = parsed[key];
         if (!section || typeof section !== 'object') return;
         Object.keys(section).forEach((name) => {
           if (!isMangledPackageVersion(section[name])) return;
-          // Known dep → correct pin. Unknown dep → "latest" (valid + installable): the
-          // corruption loses digits so the real version is unrecoverable, and a single
-          // unlisted dep must NOT abort the whole repair and hard-reject into a retry loop.
-          section[name] = packageJsonSafeVersions[name] || 'latest';
+          // Known dep → correct pin. Unknown mangled → leave + report (NOT "latest": a
+          // typo'd/hallucinated name must never become an unpinned install).
+          if (!hasOwn(packageJsonSafeVersions, name)) { unresolved.push(`${name}: "${String(section[name])}"`); return; }
+          section[name] = packageJsonSafeVersions[name];
           repaired = true;
         });
       });
-      const remainingBad = collectMangledPackageVersions(parsed);
-      return {
-        content: repaired ? `${JSON.stringify(parsed, null, 2)}\n` : String(content || ''),
-        repaired,
-        remainingBad,
-      };
+      const remainingBad = Array.from(new Set([...unresolved, ...collectMangledPackageVersions(parsed)]));
+      return { content: repaired ? `${JSON.stringify(parsed, null, 2)}\n` : original, repaired, remainingBad };
     }
 
     // tsconfig noUnusedLocals/noUnusedParameters:true fails the build on any unused
@@ -3559,18 +3592,30 @@ export default config;
               if (pkgRead && pkgRead.ok) {
                 const missing = collectMissingAppDependencies(toolEvents, pkgRead.output);
                 const reconciled = reconcilePackageJsonWithImports(pkgRead.output, missing);
+                const notes = [];
                 if (reconciled.added.length) {
                   const wrote = await deps.invokeWorkspaceAction('workspaceWriteFile', { path: '/package.json', content: reconciled.content });
                   if (wrote && wrote.ok) {
                     mutated = true;
-                    depReconcileNote = `\nAdded imported-but-unlisted dependencies to package.json before building: ${reconciled.added.join(', ')}. Run \`npm install\` to fetch them.`;
+                    const labels = reconciled.added.map((d) => `${d.name}@${d.version}`);
+                    notes.push(`Added trusted imported dependencies to package.json: ${labels.join(', ')}. Run \`npm install\` to fetch them.`);
                     if (typeof deps.recordDebugTrace === 'function') {
                       deps.recordDebugTrace('agent_package_json_deps_reconciled', {
-                        added: reconciled.added.join(', '),
+                        added: labels.join(', '),
                       }, { added: reconciled.added, content: reconciled.content.slice(0, 1400) });
                     }
                   }
                 }
+                if (reconciled.unknown.length) {
+                  const labels = reconciled.unknown.map((d) => `${d.name} (imported by ${d.importers.length ? d.importers.join(', ') : 'unknown source'})`);
+                  notes.push(`Skipped unverified imported packages; they were NOT added automatically: ${labels.join('; ')}. Check these names for typos/hallucinations, then request explicit install approval if they are real.`);
+                  if (typeof deps.recordDebugTrace === 'function') {
+                    deps.recordDebugTrace('agent_unknown_imported_dependencies_blocked', {
+                      packages: reconciled.unknown.map((d) => d.name).join(', '),
+                    }, { unknown: reconciled.unknown });
+                  }
+                }
+                if (notes.length) depReconcileNote = `\n${notes.join('\n')}`;
               }
             } catch (err) { /* best effort */ }
           }
@@ -3717,9 +3762,21 @@ export default config;
             try {
               const pkgRead = await deps.invokeWorkspaceAction('workspaceReadFile', { path: '/package.json' });
               const missing = collectMissingAppDependencies(toolEvents, pkgRead && pkgRead.ok ? pkgRead.output : '');
-              if (missing.length) {
-                missingDepsAdvisory = `\nThese packages are imported by files in this project but are NOT in package.json — install them ALL at once with a single command instead of one per rebuild:\nnpm install ${missing.join(' ')}`;
+              const trusted = missing.filter((d) => hasOwn(packageJsonSafeVersions, d.name));
+              const unknown = missing.filter((d) => !hasOwn(packageJsonSafeVersions, d.name));
+              const lines = [];
+              if (trusted.length) {
+                const targets = trusted.map((d) => `${d.name}@${packageJsonSafeVersions[d.name]}`);
+                lines.push(`Trusted imported packages missing from package.json — install them all at once:\nnpm install ${targets.join(' ')}`);
               }
+              if (unknown.length) {
+                lines.push([
+                  'Unverified imported packages were NOT added or auto-installed:',
+                  ...unknown.map((d) => `- ${d.name} — imported by ${d.importers.length ? d.importers.join(', ') : 'unknown source'}`),
+                  'Inspect these names for typos/hallucinations before installing anything.',
+                ].join('\n'));
+              }
+              if (lines.length) missingDepsAdvisory = `\n${lines.join('\n')}`;
             } catch (err) { /* advisory only */ }
           }
           return {
