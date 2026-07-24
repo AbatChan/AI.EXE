@@ -70,6 +70,16 @@ assert.equal(unknownRepair.repaired, false, 'unknown corrupted dep is not silent
 assert.equal(JSON.parse(unknownRepair.content).dependencies['framer-motoin'], '^1^.5.4', 'unknown corrupted version left untouched');
 assert.ok(unknownRepair.remainingBad.some((e) => e.includes('framer-motoin')), 'unknown corruption is reported');
 
+// The deterministic scaffolder must never emit "latest" either — every curated
+// dependency it can add is pinned in the trusted table.
+const scaffolder = sliceBetween(executor, 'function buildDeterministicPackageJson(', 'function buildDeterministicTailwindConfig(');
+assert.doesNotMatch(scaffolder, /packageJsonSafeVersions\[name\]\s*\|\|\s*['"]latest['"]/, 'scaffolder must not fall back to "latest"');
+assert.doesNotMatch(scaffolder, /['"]latest['"]/, 'scaffolder must contain no bare "latest" version');
+assert.match(scaffolder, /packageJsonSafeVersions\[name\]\) \{/, 'scaffolder only adds curated deps present in the trusted table');
+['recharts', 'dexie', "'@radix-ui/react-slot'", "'tailwindcss-animate'"].forEach((pkg) => {
+  assert.ok(safeVersionsBlock.includes(pkg), `${pkg} must be pinned in the trusted table`);
+});
+
 // Valid non-numeric specs must NOT be mistaken for corruption.
 ['workspace:*', 'file:../shared', 'link:../shared', 'npm:react@18.3.1', 'git+https://github.com/x/y.git', 'beta', 'canary', 'latest', '^18.3.1', '~5.0.0', '*']
   .forEach((v) => assert.equal(api.isMangledPackageVersion(v), false, `${v} must be treated as valid`));
@@ -79,6 +89,6 @@ assert.ok(unknownRepair.remainingBad.some((e) => e.includes('framer-motoin')), '
 // Version sources stay synchronized.
 const cmakeVersion = (cmake.match(/set\(AI_EXE_APP_VERSION "([^"]+)"/) || [])[1];
 assert.equal(packageJson.version, cmakeVersion, 'package.json version must match CMake AI_EXE_APP_VERSION');
-assert.equal(packageJson.version, '9.6.6', 'this patch ships as v9.6.6');
+assert.equal(packageJson.version, '9.6.7', 'this patch ships as v9.6.7');
 
 console.log('PASS: known deps pinned, unknown/typo imports blocked (never "latest"), valid specs preserved, versions synced');

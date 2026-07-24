@@ -380,8 +380,10 @@
     }
 
     const packageJsonSafeVersions = {
+      '@radix-ui/react-slot': '^1.3.1',
       '@react-three/drei': '^9.114.0',
       '@react-three/fiber': '^8.17.10',
+      '@types/node': '^22.0.0',
       '@types/three': '^0.169.0',
       '@types/react': '^18.3.3',
       '@types/react-dom': '^18.3.0',
@@ -392,6 +394,7 @@
       clsx: '^2.1.1',
       'class-variance-authority': '^0.7.0',
       'date-fns': '^3.6.0',
+      dexie: '^4.4.4',
       eslint: '^9.9.0',
       'eslint-plugin-react-hooks': '^5.1.0',
       'eslint-plugin-react-refresh': '^0.4.9',
@@ -402,7 +405,9 @@
       react: '^18.3.1',
       'react-dom': '^18.3.1',
       'react-router-dom': '^6.26.2',
+      recharts: '^3.10.0',
       tailwindcss: '^3.4.10',
+      'tailwindcss-animate': '^1.0.7',
       'tailwind-merge': '^2.5.2',
       three: '^0.169.0',
       typescript: '^5.5.4',
@@ -583,7 +588,7 @@
         .replace(/^-+|-+$/g, '') || 'app';
       if (hasNext) {
         const dependencies = {
-          next: /\bnext(?:\.js)?\s*15\b/i.test(task) ? packageJsonSafeVersions.next : 'latest',
+          next: packageJsonSafeVersions.next,
           react: packageJsonSafeVersions.react,
           'react-dom': packageJsonSafeVersions['react-dom'],
         };
@@ -599,7 +604,10 @@
           '@radix-ui/react-slot': '@radix-ui/react-slot',
         };
         Object.entries(requestedDependencies).forEach(([needle, name]) => {
-          if (task.toLowerCase().includes(needle)) dependencies[name] = packageJsonSafeVersions[name] || 'latest';
+          // Only add a curated dep that is pinned in the trusted table — no unpinned fallback.
+          if (task.toLowerCase().includes(needle) && packageJsonSafeVersions[name]) {
+            dependencies[name] = packageJsonSafeVersions[name];
+          }
         });
         const wantsReactThreeFiber = /\breact\s+three\s+fiber\b|@react-three\/fiber/i.test(task);
         const wantsThree = wantsReactThreeFiber || /\bthree\.?js\b/i.test(task);
@@ -608,7 +616,7 @@
         if (wantsReactThreeFiber) dependencies['@react-three/fiber'] = packageJsonSafeVersions['@react-three/fiber'];
         if (wantsDrei) dependencies['@react-three/drei'] = packageJsonSafeVersions['@react-three/drei'];
         const devDependencies = {
-          '@types/node': 'latest',
+          '@types/node': packageJsonSafeVersions['@types/node'],
           '@types/react': packageJsonSafeVersions['@types/react'],
           '@types/react-dom': packageJsonSafeVersions['@types/react-dom'],
           typescript: packageJsonSafeVersions.typescript,
