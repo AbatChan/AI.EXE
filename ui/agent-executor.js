@@ -465,6 +465,29 @@
       return Array.from(missing).sort();
     }
 
+    // Additively add imported-but-missing deps to package.json with known-good versions
+    // (or "latest"). Never removes or downgrades anything already declared. Returns the
+    // updated JSON text + the names added, or {added:[]} when nothing changed / unparseable.
+    function reconcilePackageJsonWithImports(packageJsonContent, missingNames) {
+      if (!Array.isArray(missingNames) || !missingNames.length) return { content: String(packageJsonContent || ''), added: [] };
+      let pkg;
+      try { pkg = JSON.parse(String(packageJsonContent || '')); } catch (_) { return { content: String(packageJsonContent || ''), added: [] }; }
+      if (!pkg || typeof pkg !== 'object') return { content: String(packageJsonContent || ''), added: [] };
+      if (!pkg.dependencies || typeof pkg.dependencies !== 'object') pkg.dependencies = {};
+      const declared = new Set();
+      ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies'].forEach((k) => {
+        if (pkg[k] && typeof pkg[k] === 'object') Object.keys(pkg[k]).forEach((n) => declared.add(n));
+      });
+      const added = [];
+      missingNames.forEach((name) => {
+        if (declared.has(name)) return;
+        pkg.dependencies[name] = packageJsonSafeVersions[name] || 'latest';
+        added.push(name);
+      });
+      if (!added.length) return { content: String(packageJsonContent || ''), added: [] };
+      return { content: `${JSON.stringify(pkg, null, 2)}\n`, added };
+    }
+
     function repairPackageJsonDependencyVersions(content) {
       let parsed = null;
       try {
@@ -3525,6 +3548,32 @@ export default config;
             }
           }
 
+          // Phased builds write package.json in phase 1, then later phases import deps it
+          // never listed (framer-motion, tailwindcss-animate…) — so the build cascades
+          // through "Cannot find module" one per rebuild. Complete the manifest BEFORE the
+          // build so a single install grabs everything. Additive + grounded in real imports.
+          let depReconcileNote = '';
+          if (/npm run build|next build|vite build|tsc\b/.test(proofCommand)) {
+            try {
+              const pkgRead = await deps.invokeWorkspaceAction('workspaceReadFile', { path: '/package.json' });
+              if (pkgRead && pkgRead.ok) {
+                const missing = collectMissingAppDependencies(toolEvents, pkgRead.output);
+                const reconciled = reconcilePackageJsonWithImports(pkgRead.output, missing);
+                if (reconciled.added.length) {
+                  const wrote = await deps.invokeWorkspaceAction('workspaceWriteFile', { path: '/package.json', content: reconciled.content });
+                  if (wrote && wrote.ok) {
+                    mutated = true;
+                    depReconcileNote = `\nAdded imported-but-unlisted dependencies to package.json before building: ${reconciled.added.join(', ')}. Run \`npm install\` to fetch them.`;
+                    if (typeof deps.recordDebugTrace === 'function') {
+                      deps.recordDebugTrace('agent_package_json_deps_reconciled', {
+                        added: reconciled.added.join(', '),
+                      }, { added: reconciled.added, content: reconciled.content.slice(0, 1400) });
+                    }
+                  }
+                }
+              }
+            } catch (err) { /* best effort */ }
+          }
           deps.setActiveAgentStreamStatus(chatId, `Running terminal proof: ${proofCommand}`);
           const res = await deps.invokeWorkspaceAction('runCommand', {
             program: classification.program,
@@ -3565,7 +3614,7 @@ export default config;
               runErrorCount: 0,
               terminalCommand: proofCommand,
               terminalProof,
-              observation: `run_app ${stackInfo.passLabel || 'proof passed'} (${proofCommand} exited 0).${runtimeAdvisory}${tail ? `\nOutput:\n${tail}` : ''}`,
+              observation: `run_app ${stackInfo.passLabel || 'proof passed'} (${proofCommand} exited 0).${runtimeAdvisory}${depReconcileNote}${tail ? `\nOutput:\n${tail}` : ''}`,
             };
           }
 
@@ -3679,7 +3728,7 @@ export default config;
             runErrorCount: 1,
             terminalCommand: proofCommand,
             terminalProof,
-            observation: `run_app ${stackInfo.failLabel || 'proof failed'} (${proofCommand} exited ${status.exitCode}). Read these real errors, fix the root cause in the referenced files, then run_app again.\nOutput:\n${tail || '(no output)'}${allTypeErrors}${missingDepsAdvisory}`,
+            observation: `run_app ${stackInfo.failLabel || 'proof failed'} (${proofCommand} exited ${status.exitCode}). Read these real errors, fix the root cause in the referenced files, then run_app again.\nOutput:\n${tail || '(no output)'}${allTypeErrors}${missingDepsAdvisory}${depReconcileNote}`,
           };
         }
 

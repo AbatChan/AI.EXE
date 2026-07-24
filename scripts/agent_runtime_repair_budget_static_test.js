@@ -44,6 +44,9 @@ assert.match(loop, /hasCleanRuntimeProofSinceLatestMutation\(\)/);
 assert.match(executor, /function collectMissingAppDependencies/);
 assert.match(executor, /install them ALL at once with a single command/);
 assert.match(executor, /s\.startsWith\('node:'\) \|\| NODE_BUILTINS\.test\(s\)/);
+// package.json is reconciled with imported deps BEFORE the build runs.
+assert.match(executor, /function reconcilePackageJsonWithImports/);
+assert.match(executor, /Added imported-but-unlisted dependencies to package\.json before building/);
 // Progress notes are capped to one sentence in BOTH synced copies.
 const decisionMd = fs.readFileSync(path.join(root, 'ui', 'prompts', 'developer_agent_decision.md'), 'utf8');
 const promptCore = fs.readFileSync(path.join(root, 'ui', 'prompt-core.js'), 'utf8');
