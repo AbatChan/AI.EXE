@@ -878,6 +878,74 @@
       }).filter((line) => line !== null).join('\n').replace(/\n{3,}/g, '\n\n');
     }
 
+    // The last build/verify proof of the run and whether it is currently RED. run_app
+    // (the stack proof) reports ok:true + runErrorCount>0 on a failed build, and install
+    // commands after it must NOT be mistaken for a passing build.
+    function latestBuildOutcome(toolEvents) {
+      const events = Array.isArray(toolEvents) ? toolEvents : [];
+      const isBuildProof = (e) => {
+        const tool = String(e && e.tool || '').toLowerCase();
+        if (tool === 'run_app' || tool === 'validate_files') return true;
+        if (tool === 'run_command') {
+          const cmd = String(e.terminalCommand || e.command || '');
+          return /\b(?:run build|next build|vite build|tsc|py_compile|-l\b|npm test|cargo (?:build|test)|go build)\b/i.test(cmd)
+            || / build\b/i.test(cmd);
+        }
+        return false;
+      };
+      let last = null;
+      for (const e of events) { if (isBuildProof(e)) last = e; }
+      if (!last) return { hasProof: false, failed: false, errorLine: '' };
+      const failed = Number(last.runErrorCount || 0) > 0
+        || (String(last.tool || '').toLowerCase() === 'validate_files' && last.validationPassed === false);
+      let errorLine = '';
+      if (failed) {
+        const obs = String(last.observation || '');
+        // Prefer a specific compiler error over the generic "exited N" headline.
+        const m = obs.match(/(?:Cannot find module|Failed to compile|Type error:|error TS\d+:|SyntaxError:|ReferenceError:|Module not found)[^\n]*/i)
+          || obs.match(/exited [1-9][^\n]*/i);
+        errorLine = m ? m[0].trim().slice(0, 200) : '';
+      }
+      return { hasProof: true, failed, errorLine };
+    }
+
+    // Non-negated claim that the task/error is done/fixed/working.
+    function completionAssertsSuccess(text) {
+      const claim = /\b(fixed|resolved|sorted(?: out)?|works? now|now working|is (?:now )?working|up and running|good to go|all set|ready to (?:use|go|ship)|is (?:now )?(?:done|complete)|successfully)\b/gi;
+      const s = String(text || '');
+      let m;
+      while ((m = claim.exec(s))) {
+        const before = s.slice(Math.max(0, m.index - 14), m.index).toLowerCase();
+        if (/\b(?:not|n't|isn|aren|wasn|weren|won|can't|cannot|still|yet|before)\b|not\s$/.test(before)) continue;
+        return true;
+      }
+      return false;
+    }
+
+    // Hard truth gate: a message may NOT assert success while the latest build is RED.
+    // A false success claim is replaced with a grounded honest summary; an already-honest
+    // message gets an authoritative build-failed footer. Green/no-proof runs pass through.
+    function enforceCompletionTruth(text, toolEvents, workspaceLabel) {
+      const outcome = latestBuildOutcome(toolEvents);
+      if (!outcome.failed) return text;
+      const changed = (Array.isArray(toolEvents) ? toolEvents : [])
+        .filter((e) => e && e.ok && ['write_file', 'edit_file'].includes(String(e.tool || '').toLowerCase()))
+        .map((e) => deps.normalizeWorkspacePath(e.path || '')).filter(Boolean);
+      const changedUniq = Array.from(new Set(changed)).slice(-6);
+      const errorPart = outcome.errorLine ? ` The latest error: ${outcome.errorLine}.` : '';
+      if (completionAssertsSuccess(text)) {
+        const filePart = changedUniq.length ? ` I changed ${changedUniq.join(', ')}, but the` : ' The';
+        recordDebugTrace('agent_completion_truth_gate_replaced', {
+          errorLine: outcome.errorLine,
+        }, { text: String(text || '').slice(0, 600), changed: changedUniq });
+        return `${filePart} build is not passing yet, so this isn't done.${errorPart} That needs to be resolved before it works — reload/rerun only makes sense once the build is green.`;
+      }
+      recordDebugTrace('agent_completion_truth_gate_footer', {
+        errorLine: outcome.errorLine,
+      }, { text: String(text || '').slice(0, 600) });
+      return `${String(text || '').trim()}\n\n⚠️ The build is not passing yet — this isn't complete until that's fixed.${errorPart}`;
+    }
+
     async function generateAgentCompletionText(taskText, toolEvents, workspaceLabel, planSpec = null) {
       const rows = Array.isArray(toolEvents) ? toolEvents.filter((item) => item && item.ok) : [];
       const writtenPaths = rows
@@ -923,9 +991,15 @@
       const runtimeErrorTask = /\b(?:unhandled runtime error|runtime (?:type)?error|cannot read propert(?:y|ies) of|is not a function\b|hydration failed|minified react error)\b/i.test(String(taskText || ''));
       const runtimeProofSeen = rows.some((item) => (item.devServer && item.devServer.ready)
         || /dev server is READY at http/i.test(String(item.observation || '')));
-      const verifiedResultsBlock = runtimeErrorTask && !runtimeProofSeen && verifiedResults
+      let verifiedResultsBlock = runtimeErrorTask && !runtimeProofSeen && verifiedResults
         ? `NOTE: the task reports a RUNTIME (in-browser) error. The results below are build/install outcomes only — a passing build does NOT prove the runtime error is gone. Describe the changes and the build result, tell the user to relaunch/reload the app to confirm, and do NOT claim the runtime error is verified fixed.\n\n${verifiedResults}`
         : verifiedResults;
+      // Hard truth directive: when the latest build is RED, forbid any success framing.
+      // Folded into VERIFIED_RESULTS so both the template and the fallback prompt carry it.
+      const buildOutcome = latestBuildOutcome(toolEvents);
+      if (buildOutcome.failed) {
+        verifiedResultsBlock = `VERIFIED OUTCOME — the latest build is currently FAILING${buildOutcome.errorLine ? ` (${buildOutcome.errorLine})` : ''}. You MUST NOT say the task is fixed, done, working, resolved, ready, or complete. State plainly what you changed, that the build still fails, and the exact next step to fix it.\n\n${verifiedResultsBlock}`;
+      }
       let prompt = [
         'Write a natural completion message for the user.',
         'Output ONLY the message itself. Do NOT preface it with a label or lead-in like "Here\'s a completion message:" and do not wrap it in quotes — start with the first word of the actual message.',
@@ -970,7 +1044,7 @@
       const remote = await deps.requestSelectedRemoteTextCompletion(prompt, 420);
       if (remote && remote.ok) {
         const text = stripCompletionPreamble(stripUnverifiedLocalUrls(deps.sanitizeAssistantText(remote.output || ''), toolEvents));
-        if (text && !isLikelyIncompleteCompletion(text)) return text;
+        if (text && !isLikelyIncompleteCompletion(text)) return enforceCompletionTruth(text, toolEvents, workspaceLabel);
         recordDebugTrace('agent_completion_rejected', {
           source: 'remote',
           reason: text ? 'looked_incomplete' : 'empty_after_sanitize',
@@ -980,14 +1054,14 @@
       const external = await requestExternalAgentPlanner(prompt, 420, 12000);
       if (external && external.ok) {
         const text = stripCompletionPreamble(stripUnverifiedLocalUrls(deps.sanitizeAssistantText(external.output || ''), toolEvents));
-        if (text && !isLikelyIncompleteCompletion(text)) return text;
+        if (text && !isLikelyIncompleteCompletion(text)) return enforceCompletionTruth(text, toolEvents, workspaceLabel);
         recordDebugTrace('agent_completion_rejected', {
           source: 'external',
           reason: text ? 'looked_incomplete' : 'empty_after_sanitize',
           preview: String(text || '').slice(0, 500),
         }, { output: String(external.output || ''), sanitized: text });
       }
-      return deterministicCompletion;
+      return enforceCompletionTruth(deterministicCompletion, toolEvents, workspaceLabel);
     }
 
     function buildAgentProgressMarkdown(progressEntries, startedAtMs) {

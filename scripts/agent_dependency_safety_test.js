@@ -88,7 +88,7 @@ assert.match(scaffolder, /packageJsonSafeVersions\[name\]\) \{/, 'scaffolder onl
 
 // Version sources stay synchronized.
 const cmakeVersion = (cmake.match(/set\(AI_EXE_APP_VERSION "([^"]+)"/) || [])[1];
-assert.equal(packageJson.version, cmakeVersion, 'package.json version must match CMake AI_EXE_APP_VERSION');
-assert.equal(packageJson.version, '9.6.7', 'this patch ships as v9.6.7');
+assert.ok(cmakeVersion, 'CMakeLists.txt must declare AI_EXE_APP_VERSION');
+assert.equal(packageJson.version, cmakeVersion, 'package.json version must stay synced to CMake AI_EXE_APP_VERSION');
 
 console.log('PASS: known deps pinned, unknown/typo imports blocked (never "latest"), valid specs preserved, versions synced');
