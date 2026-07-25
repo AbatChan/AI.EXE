@@ -30,6 +30,8 @@
   const MODEL_INTENTS = [
     'casual_chat', 'general_answer', 'workspace_question',
     'create_or_build_deliverable', 'modify_existing_workspace', 'debug_existing_workspace',
+    // "bet" / "go" / "next" while a phased build waits — an agreement to continue, not chatter.
+    'resume_paused_build',
   ];
   function normalizeModelRouteDecision(raw) {
     if (!raw || typeof raw !== 'object') return null;
@@ -55,7 +57,7 @@
     const route = m.route || (
       m.intent === 'casual_chat' || m.intent === 'general_answer' ? 'chat'
         : m.intent === 'workspace_question' ? 'inspect'
-        : m.intent === 'create_or_build_deliverable' || m.intent === 'modify_existing_workspace' || m.intent === 'debug_existing_workspace' ? 'agent'
+        : m.intent === 'create_or_build_deliverable' || m.intent === 'modify_existing_workspace' || m.intent === 'debug_existing_workspace' || m.intent === 'resume_paused_build' ? 'agent'
         : 'chat'
     );
     features.pureGreeting = false;

@@ -360,6 +360,15 @@
     const clean = (t) => String(t || '').replace(/^(?:\s*phase\s*\d+\s*[—–·:.\-]*\s*)+/i, '').trim();
     const doneName = `Phase ${doneIdx + 1}`;
     const nextName = `Phase ${nextIdx + 1}${clean(nextTitle) ? ` — ${clean(nextTitle)}` : ''}`;
+    // Files still missing? Then the phase isn't finished — don't say it is.
+    const carried = Array.isArray(options && options.carriedForward) ? options.carriedForward.filter(Boolean) : [];
+    if (carried.length) {
+      const names = carried.slice(0, 3).join(', ');
+      const more = carried.length > 3 ? ` (+${carried.length - 3} more)` : '';
+      return nextIdx === doneIdx
+        ? `${doneName} still owes ${names}${more} — nothing was written for ${carried.length === 1 ? 'it' : 'them'}. Press Continue and I'll do that next.`
+        : `${doneName} is done except ${names}${more}, which never got written — I've moved ${carried.length === 1 ? 'it' : 'them'} into ${nextName}. Press Continue to carry on.`;
+    }
     // When appended under the model's own "Phase N complete — ..." line, don't
     // restate completion; just give the forward cue.
     const variants = options && options.forwardOnly
@@ -545,8 +554,7 @@
       let runDevServer = null;
       const devServerHotReloads = (command) => /\b(?:vite|next dev|nuxt|astro|webpack serve|react-scripts|(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?dev|nodemon|--reload|--watch|http\.server|flask)\b/i.test(String(command || ''));
       const startedAt = Date.now();
-      // Wall-clock deadline, extended by any time the MACHINE was suspended: a 12-minute
-      // sleep must not consume the run's budget and kill it seconds after waking.
+      // Deadline extends by suspended time, so sleep doesn't eat the run budget.
       const runSuspendedMsAtStart = typeof deps.getMachineSuspendedMs === 'function'
         ? Number(deps.getMachineSuspendedMs()) || 0
         : 0;
@@ -877,6 +885,8 @@
       const agentHasWorkspaceMutations = () => toolEvents.some((event) => (
         event
         && event.ok
+        // The resume's synthetic new_project is a context marker, not work.
+        && !event._syntheticResumeContext
         && ['new_project', 'write_file', 'edit_file', 'mkdir', 'move', 'delete', 'remember_project', 'forget_project_memory'].includes(String(event.tool || '').toLowerCase())
       ));
 
@@ -1884,8 +1894,34 @@
         const idx = phaseState.activeIndex;
         const donePhase = phaseState.phases[idx] || { tasks: [] };
         const doneTasks = Array.isArray(donePhase.tasks) ? donePhase.tasks : [];
-        doneTasks.forEach((t) => { if (t) t.done = true; });
+        // Tick only files that exist; a blind tick dropped README.md from the plan.
+        const unmet = getKnownActivePhaseFileTaskGaps();
+        const unmetTexts = new Set(unmet.map((gap) => String(gap.text || '').trim()).filter(Boolean));
+        doneTasks.forEach((t) => {
+          if (!t) return;
+          if (unmetTexts.has(String(t.text || t || '').trim())) return;
+          t.done = true;
+        });
         if (!doneTasks.length) donePhase.done = true;
+        // Unwritten files follow the plan forward; the last phase keeps them unchecked.
+        if (unmet.length) {
+          const carryTo = phaseState.phases[idx + 1];
+          if (carryTo) {
+            if (!Array.isArray(carryTo.tasks)) carryTo.tasks = [];
+            unmet.forEach((gap) => {
+              const text = String(gap.text || '').trim();
+              if (!text) return;
+              const already = carryTo.tasks.some((task) => String((task && task.text) || task || '').trim() === text);
+              if (!already) carryTo.tasks.push({ text, done: false });
+            });
+          }
+          recordDebugTrace('agent_phase_unmet_deliverables_carried', {
+            chatId: String(chatId || ''),
+            phase: String(idx + 1),
+            carriedTo: String(carryTo ? idx + 2 : 0),
+            missing: unmet.map((gap) => String(gap.path || gap.text || '')).join(' | '),
+          }, { chatId: String(chatId || ''), phase: idx + 1, unmet, phaseState });
+        }
         planSpec.phases = phaseState.phases;
         await persistAgentPlanFile();
         const nextIdx = deps.firstUnfinishedPhaseIndex(phaseState.phases);
@@ -1899,7 +1935,12 @@
           });
         }
         if (nextIdx < 0) keepPhaseTrackerPinned = false;
-        return { idx, donePhase, nextIdx };
+        return {
+          idx,
+          donePhase,
+          nextIdx,
+          carriedForward: unmet.map((gap) => String(gap.path || gap.text || '')).filter(Boolean),
+        };
       };
       const refreshPhaseLiveProgress = async (rawPath) => {
         if (!phaseState || typeof deps.setAgentPhaseTracker !== 'function') return 0;
@@ -2019,6 +2060,9 @@
       // that sleeps every minute.
       const sleepRetryLimit = 2;
       let sleepInterruptions = 0;
+      // Push-backs when a phase tries to finish owing files.
+      const phaseDeliverableNudgeLimit = 2;
+      let phaseDeliverableNudges = 0;
       // Most runs keep the normal ceiling. If the final verification reaches that
       // ceiling after real edits and exposes a new compiler/runtime error, grant one
       // bounded repair window instead of stopping exactly when the next actionable
@@ -2321,8 +2365,7 @@
           // other transient blips bail after a couple of quick retries.
           const maxInferenceRetries = 4;
           for (let attempt = 0; attempt <= maxInferenceRetries; attempt += 1) {
-            // Suspended time during THIS attempt: a step timeout that only fired because
-            // the machine slept is not the model being slow.
+            // Sleep during this attempt isn't the model being slow.
             const suspendedBeforeStep = suspendedDuringRunMs();
             const suspendedDuringStep = () => Math.max(0, suspendedDuringRunMs() - suspendedBeforeStep);
             // Capture + swallow so an inference abandoned by the timeout (and later
@@ -2344,9 +2387,7 @@
             }
             if (!deps.isInferenceActive(requestToken)) return true;
             if (res && res.ok) break;
-            // A step timeout is normally non-retriable (the model is too slow). But a
-            // sleeping machine trips the same timer the moment it wakes, and that is not
-            // the model's fault — the connection just died. Retry those, bounded.
+            // A slept-through step tripped the timer on wake — retry it, bounded.
             const sleptDuringStepMs = suspendedDuringStep();
             const timedOutBySleep = Boolean(res && res.timedOut && sleptDuringStepMs >= 30000);
             if (timedOutBySleep && sleepInterruptions < sleepRetryLimit) {
@@ -3204,7 +3245,10 @@
               const nextPhase = phaseState.phases[res.nextIdx] || {};
               setAgentProgress('Phase complete.');
               let phaseMsg = deps.sanitizeAssistantText(decision.message || '') || '';
-              const handoff = buildPhaseHandoffMessage(res.idx, res.donePhase.title, res.nextIdx, nextPhase.title, { forwardOnly: Boolean(phaseMsg) });
+              const handoff = buildPhaseHandoffMessage(res.idx, res.donePhase.title, res.nextIdx, nextPhase.title, {
+                forwardOnly: Boolean(phaseMsg),
+                carriedForward: res.carriedForward,
+              });
               const limitation = contractLimitationNote();
               phaseMsg = phaseMsg ? `${phaseMsg}${limitation}\n\n${handoff}` : `${handoff}${limitation}`;
               if (agentHasWorkspaceMutations()) {
@@ -3707,10 +3751,7 @@
           const toolStartedAt = Date.now();
           const watchdog = new Promise((resolve) => {
             const tickMs = 4000;
-            // Suspended time must never count against the tool. A sleeping machine
-            // freezes these ticks, so a tick arriving far later than tickMs IS the
-            // suspend signal (the native power event is the precise one; this is the
-            // fallback that also covers a throttled/occluded window).
+            // A tick arriving far late means the machine was suspended, not slow.
             const suspendedAtStart = typeof deps.getMachineSuspendedMs === 'function'
               ? Number(deps.getMachineSuspendedMs()) || 0
               : 0;
@@ -3741,8 +3782,7 @@
               const suspendedNow = typeof deps.getMachineSuspendedMs === 'function'
                 ? Number(deps.getMachineSuspendedMs()) || 0
                 : 0;
-              // Either signal counts, never both (the power event also records the gap
-              // this tick just measured), so take the larger rather than the sum.
+              // Power event and clock jump measure the same gap — take the larger.
               const suspendedMs = Math.max(Math.max(0, suspendedNow - suspendedAtStart), clockJumpMs);
               const lastProgress = typeof deps.getLastAgentToolProgressAt === 'function'
                 ? Number(deps.getLastAgentToolProgressAt()) || toolStartedAt
@@ -3751,8 +3791,7 @@
               const totalMs = Math.max(0, (now - toolStartedAt) - suspendedMs);
               if (idleMs >= idleLimitMs || totalMs >= hardCapMs) {
                 clearInterval(iv);
-                // A suspend kills the connection, so the tool cannot be waited out —
-                // but it is NOT the model being slow, and the run should retry it.
+                // Suspend killed the connection — retry, don't blame the model.
                 if (suspendedMs >= 30000) {
                   resolve({
                     ok: false,
@@ -4359,7 +4398,7 @@
             const res = await completeActivePhase();
             const nextPhase = phaseState.phases[res.nextIdx] || {};
             setAgentProgress('Phase complete.');
-            const phaseMsg = `${buildPhaseHandoffMessage(res.idx, res.donePhase.title, res.nextIdx, nextPhase.title)}${contractLimitationNote()}`;
+            const phaseMsg = `${buildPhaseHandoffMessage(res.idx, res.donePhase.title, res.nextIdx, nextPhase.title, { carriedForward: res.carriedForward })}${contractLimitationNote()}`;
             deps.commitAssistantMessage(chatId, phaseMsg, phaseMsg, {
               agentActivities,
               agentMeta: agentMetaWithRevert({ startedAt, completedAt: Date.now(), collapsed: true }),
@@ -4383,11 +4422,7 @@
           }, { chatId: String(chatId || ''), step, phaseState, toolEvents });
           return true;
         }
-        // Interrupted by the machine sleeping — a different thing from a slow model.
-        // The connection is dead either way, but nothing was generated and nothing was
-        // saved, so the honest move is to redo THAT step rather than end the run. Only
-        // stop if it keeps happening (sleepRetryLimit) so a machine that sleeps every
-        // 60s can't loop forever.
+        // Machine slept mid-tool: redo that step instead of ending the run.
         if (toolResult && toolResult._toolInterruptedBySleep) {
           if (typeof deps.abortInFlightInference === 'function') {
             deps.abortInFlightInference('machine_sleep');
@@ -4411,9 +4446,7 @@
               suspendedMs: String(Math.round(Number(toolResult._suspendedMs || 0))),
               attempt: String(sleepInterruptions),
             }, { chatId: String(chatId || ''), step, decision, toolEvents });
-            // The failed event is already in toolEvents (recorded for every result
-            // above), and its observation says the file still needs writing — so the
-            // deterministic planner re-picks it on the next step.
+            // The failure is already recorded; the planner re-picks the file.
             continue;
           }
           const stoppedText = `The computer kept going to sleep while I was writing ${sleptPath} (${sleepInterruptions} times), so I stopped instead of restarting that file again. Turn on "Keep the computer awake while building" in Settings, or plug in, then press Continue.`;
@@ -4462,9 +4495,7 @@
             : String(decision.tool || '')) || 'the step';
           const timedOutToolSentence = timedOutToolLabel.charAt(0).toUpperCase() + timedOutToolLabel.slice(1);
           const stoppedText = `${timedOutToolSentence} for ${timedOutPath} took too long, so I stopped instead of retrying for several minutes.${keptSummary} Tell me the exact change you want for ${timedOutPath} and I'll continue from here.`;
-          // Teardown FIRST, card second. Painting "Stopped" before the workspace refresh
-          // and revert-diff work made the composer look hung for a minute-plus after the
-          // run had visibly given up.
+          // Teardown first, card second — else the composer looks hung.
           setAgentProgress('Stopping...');
           deps.consumeLiveAssistantText();
           if (agentHasWorkspaceMutations()) {
@@ -4694,6 +4725,27 @@
               deps.normalizeWorkspacePath,
             );
             if (runtimeProofRequired) continue;
+            // No finishing while the phase owes a file. Bounded, so a stuck file still ends the run.
+            if (phaseState && phaseDeliverableNudges < phaseDeliverableNudgeLimit) {
+              const owed = getKnownActivePhaseFileTaskGaps();
+              if (owed.length) {
+                phaseDeliverableNudges += 1;
+                const names = owed.map((gap) => String(gap.path || gap.text || '')).filter(Boolean);
+                toolEvents.push({
+                  tool: 'final_check',
+                  ok: true,
+                  observation: `Do NOT finish yet: this phase still owes ${names.join(', ')} and ${names.length === 1 ? 'it has' : 'they have'} not been written. Write ${names.length === 1 ? 'it' : 'them'} now with write_file (or write_files), then finish. If ${names.length === 1 ? 'it' : 'a file'} genuinely should not exist, say so plainly instead of finishing silently.`,
+                });
+                recordDebugTrace('agent_autofinal_blocked_phase_deliverable', {
+                  chatId: String(chatId || ''), step: String(step),
+                  phase: String(phaseState.activeIndex + 1),
+                  owed: names.join(' | '),
+                  attempt: String(phaseDeliverableNudges),
+                }, { chatId: String(chatId || ''), step, owed, phaseState, toolEvents });
+                setAgentProgress(`Still owed: ${names[0]} — writing it...`);
+                continue;
+              }
+            }
             // Never finish on a red build. Once per run, so unfixable errors still end.
             if (!redBuildContinuationUsed && latestBuildIsFailing() && (executionStepLimit - step) >= 3) {
               redBuildContinuationUsed = true;

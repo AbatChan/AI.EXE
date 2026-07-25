@@ -1,9 +1,6 @@
 // v9.9.3 — a sleeping machine must never read as a slow model.
-//
-// Root cause found live (2026-07-25): macOS idle-sleep suspended a run 1 second after a
-// write_file started. JS timers are frozen while suspended, so the 191s watchdog could
-// not fire; it fired 5s after wake, 12 minutes later, and abandoned the file reporting
-// "ran past 191s" — with outputChars: 0. The model never got a chance.
+// Live: idle sleep froze the watchdog 1s into a write; it fired 12 min later blaming a
+// 191s timeout, with outputChars 0.
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');

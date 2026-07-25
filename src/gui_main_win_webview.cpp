@@ -66,14 +66,9 @@ constexpr UINT kMsgPostWebResponse = WM_APP + 2;
 constexpr LONG kMinWindowWidth = static_cast<LONG>(kUiMinWindowWidth);
 constexpr LONG kMinWindowHeight = static_cast<LONG>(kUiMinWindowHeight);
 
-// --- Idle-sleep suppression during an agent run ---------------------------------
-// An agent run takes minutes. Idle sleep suspended one mid-file-write on macOS (12
-// minutes, zero bytes generated) and the same applies here. ES_SYSTEM_REQUIRED keeps
-// the SYSTEM awake; ES_DISPLAY_REQUIRED is deliberately NOT set, so the screen still
-// turns off. Lid-close and explicit Sleep are not blockable — the UI's suspend-aware
-// tool budget handles those.
-// SetThreadExecutionState is per-thread state, so every call must run on the same
-// thread; all bridge calls arrive on the UI thread.
+// --- Idle-sleep suppression during a run ---
+// System awake only, screen still sleeps. Lid-close isn't blockable.
+// SetThreadExecutionState is per-thread: always call it on the UI thread.
 bool g_prevent_idle_sleep = false;
 
 bool SetPreventIdleSleepOnWindows(bool prevent, const std::string &why,
@@ -2105,8 +2100,7 @@ private:
       }
       return DefWindowProcW(hwnd, msg, wparam, lparam);
     case WM_POWERBROADCAST:
-      // PBT_APMSUSPEND fires just before the machine suspends; RESUMEAUTOMATIC always
-      // fires on resume (RESUMESUSPEND only when the user is present).
+      // RESUMEAUTOMATIC always fires on resume; RESUMESUSPEND only if the user is present.
       if (wparam == PBT_APMSUSPEND) {
         self->PostPowerEventAsync("willSleep");
       } else if (wparam == PBT_APMRESUMEAUTOMATIC ||
@@ -2794,8 +2788,7 @@ private:
     PostMessageW(hwnd_, kMsgPostWebResponse, 0, reinterpret_cast<LPARAM>(msg));
   }
 
-  // Suspend/resume is pushed to the UI (no id — nothing is waiting on it) so the web
-  // layer can subtract suspended time from a tool budget instead of blaming the model.
+  // Push suspend/resume to the UI (no id — nothing awaits it).
   void PostPowerEventAsync(const char *phase) {
     std::string json("{\"type\":\"powerEvent\",\"phase\":\"");
     json += phase;

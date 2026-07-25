@@ -50,8 +50,7 @@ CREATE TABLE IF NOT EXISTS chat_backups (
 """
 
 
-# A deleted chat leaves the sidebar at once but stays recoverable for a month — a
-# misclick should not be as final as a bug was. Nothing else prunes this table.
+# Deleted chats stay recoverable for a month; nothing else prunes this table.
 DELETED_RETENTION_DAYS = 30
 DELETED_RETENTION_MS = DELETED_RETENTION_DAYS * 24 * 60 * 60 * 1000
 
@@ -126,12 +125,7 @@ class ChatStore:
         return total
 
     def upsert_many(self, scope: str, chats: List[Dict]) -> Dict[str, int]:
-        """Insert or update chats. Never deletes anything that is not in the payload —
-        a partial save from a client that trimmed its own list must not erase history.
-
-        Also refuses to blank a stored conversation: a payload with NO messages over a row
-        that has them is a cache placeholder, not an edit. That exact write destroyed the
-        history of 14 chats once the client started stubbing over-budget chats."""
+        """Upsert. Never deletes absent rows, and refuses to blank stored history."""
         written = 0
         protected = 0
         with self._lock, self._connect() as conn:
@@ -153,8 +147,7 @@ class ChatStore:
                         protected += 1
                         continue
                     if incoming_msgs < stored_msgs:
-                        # A legitimate shrink (e.g. dropping a synthetic resume line) still
-                        # goes through, but the previous version stays recoverable.
+                        # Legit shrinks go through, but stay recoverable.
                         conn.execute(
                             "INSERT INTO chat_backups (user_scope, reason, payload, created_at)"
                             " VALUES (?, ?, ?, ?)",
@@ -178,10 +171,7 @@ class ChatStore:
         return {"written": written, "protected": protected}
 
     def delete_chat(self, scope: str, chat_id: str) -> bool:
-        """Explicit user deletion only. Nothing in this module deletes to reclaim space.
-
-        The conversation is snapshotted first and kept for DELETED_RETENTION_DAYS, so a
-        misclick is recoverable for a month. It leaves the sidebar immediately either way."""
+        """Explicit user deletion only. Snapshotted first, kept for DELETED_RETENTION_DAYS."""
         cid = str(chat_id)
         with self._lock, self._connect() as conn:
             row = conn.execute(
@@ -197,8 +187,7 @@ class ChatStore:
                 "DELETE FROM chats WHERE user_scope = ? AND id = ?", (scope, cid)
             )
             conn.execute("DELETE FROM chat_activity WHERE chat_id = ?", (cid,))
-            # Retention is enforced here rather than on a timer: deletes are the only
-            # thing that grows this table on a normal day.
+            # Deletes are the only thing that grows this table, so prune here.
             conn.execute(
                 "DELETE FROM chat_backups WHERE created_at < ?",
                 (_now_ms() - DELETED_RETENTION_MS,),
@@ -207,7 +196,7 @@ class ChatStore:
             return cur.rowcount > 0
 
     def list_deleted(self, scope: str) -> List[Dict]:
-        """Recoverable deletions, newest first. A backup nobody can find is not a backup."""
+        """Recoverable deletions, newest first."""
         with self._lock, self._connect() as conn:
             rows = conn.execute(
                 "SELECT reason, payload, created_at FROM chat_backups"
@@ -236,8 +225,7 @@ class ChatStore:
         return out
 
     def restore_deleted(self, scope: str, chat_id: str) -> Optional[Dict]:
-        """Put a deleted conversation back. Returns the restored chat, or None if it is
-        past retention (or was never deleted through this store)."""
+        """Restore a deleted chat; None if past retention or never deleted here."""
         cid = str(chat_id)
         with self._lock, self._connect() as conn:
             row = conn.execute(

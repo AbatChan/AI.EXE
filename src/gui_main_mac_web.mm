@@ -1703,9 +1703,7 @@ std::string BuildStreamEvent(const std::string &id, bool done,
 }
 @end
 
-// Idle-sleep assertion. An agent run takes minutes; macOS idle-sleep suspended one
-// mid-file-write (12 min, zero bytes generated) and the write was abandoned on wake.
-// DISPLAY sleep is deliberately still allowed — the screen may go dark, the run continues.
+// Idle-sleep assertion for long runs. System sleep only — the screen may still sleep.
 static IOPMAssertionID g_idle_sleep_assertion = kIOPMNullAssertionID;
 static std::mutex g_idle_sleep_assertion_mutex;
 
@@ -2588,9 +2586,7 @@ static bool IsPreventingIdleSleepOnMac() {
   [_webView evaluateJavaScript:script completionHandler:nil];
 }
 
-// Sleep/wake are pushed to the UI, not polled: a suspended machine freezes JS timers,
-// so the web layer cannot tell "the model is slow" from "the machine was asleep" on its
-// own. The UI subtracts suspended time from tool budgets instead of blaming the model.
+// Push sleep/wake to the UI; frozen timers can't tell slow from suspended.
 - (void)postPowerEventToWeb:(NSString *)phase {
   if (!_webView || !phase) {
     return;

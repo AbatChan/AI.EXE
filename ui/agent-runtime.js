@@ -960,7 +960,29 @@
     // latest build is RED, the code is STALE (changed after the last verification), or the task
     // is a browser-runtime error with no FRESH passing browser proof. No vocabulary guessing.
     // Already does the gate's job? Narrow on purpose: ambiguity still gets replaced.
-    function completionAlreadyDisclosesRisk(text) {
+    // The model states its own verdict in a fixed token, so the gate never has to read
+    // prose. Works in any language and any phrasing; the heuristics below are the fallback
+    // for when the token is missing.
+    const COMPLETION_STATUS_TOKENS = {
+      verified: '[[AIEXE_STATUS:VERIFIED]]',
+      unverified: '[[AIEXE_STATUS:UNVERIFIED]]',
+    };
+    const COMPLETION_STATUS_RE = /\[\[\s*AIEXE_STATUS\s*:\s*(VERIFIED|UNVERIFIED)\s*\]\]/i;
+
+    function readCompletionStatusToken(text) {
+      const m = COMPLETION_STATUS_RE.exec(String(text || ''));
+      return m ? m[1].toUpperCase() : '';
+    }
+
+    function stripCompletionStatusToken(text) {
+      return String(text || '')
+        .replace(new RegExp(COMPLETION_STATUS_RE.source, 'gi'), '')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim();
+    }
+
+    // Keyed to the held outcome, not a phrase list — "not passing yet" counts too.
+    function completionAlreadyDisclosesRisk(text, outcome = null) {
       const body = String(text || '');
       if (!body.trim()) return false;
       // Naming the current failure is the truth, whatever a sub-part claim says.
@@ -972,7 +994,20 @@
       );
       const claimsSuccess = /\b(?:it (?:now )?works|working now|is (?:now )?(?:done|complete|fixed|resolved|ready|working)|all (?:done|set|working)|task (?:is )?complete|fully (?:working|functional)|confirmed working|builds? (?:cleanly|successfully)|passes the build|verified working|good to ship|ready to ship)\b/i.test(asserted);
       if (claimsSuccess) return false;
-      return /\bnot (?:yet )?(?:been )?(?:verified|confirmed|tested|checked|re-?checked|run|built)\b|\b(?:hasn'?t|haven'?t) been (?:verified|confirmed|checked|tested|run|built)\b|\bunverified\b|\bstill needs? (?:to be )?(?:built|verified|checked|run)\b|\bneeds? (?:to be )?(?:rebuilt|re-?verified|built and verified)\b|\bbefore (?:this|it) can be called complete\b/i.test(body);
+      if (/\bnot (?:yet )?(?:been )?(?:verified|confirmed|tested|checked|re-?checked|run|built)\b|\b(?:hasn'?t|haven'?t) been (?:verified|confirmed|checked|tested|run|built)\b|\bunverified\b|\bstill needs? (?:to be )?(?:built|verified|checked|run)\b|\bneeds? (?:to be )?(?:rebuilt|re-?verified|built and verified)\b|\bbefore (?:this|it) can be called complete\b/i.test(body)) {
+        return true;
+      }
+      // Fallback: does it reference the failure the outcome names?
+      const o = outcome && typeof outcome === 'object' ? outcome : null;
+      const subjects = [];
+      if (!o || o.buildFailed) subjects.push('build', 'compile', 'compiling');
+      if (!o || o.validationFailed) subjects.push('check', 'validation', 'validator');
+      if (o && o.stale) subjects.push('verified', 'verify', 'rebuild', 're-?check');
+      const subject = new RegExp(`\\b(?:${subjects.join('|')})\\w*\\b`, 'i');
+      if (!subjects.length || !subject.test(body)) return false;
+      // …negatively. Broad on purpose; a success claim is caught above.
+      const negative = /\b(?:fail(?:s|ed|ing|ure)?|error|errors|broken|blocker|blocked|not passing|isn'?t passing|does ?n'?t pass|do ?n'?t ship|before .{0,40}(?:complete|done|ship)|red|type errors?)\b/i;
+      return negative.test(body);
     }
 
     // Open findings, so a replaced message still names something actionable.
@@ -1010,15 +1045,24 @@
       return [];
     }
 
-    function enforceCompletionTruth(text, toolEvents, workspaceLabel, taskText) {
+    function enforceCompletionTruth(rawText, toolEvents, workspaceLabel, taskText) {
+      const declared = readCompletionStatusToken(rawText);
+      const text = stripCompletionStatusToken(rawText);
       const o = latestBuildOutcome(toolEvents);
       const runtimeTask = isBrowserRuntimeErrorTask(taskText);
       const browser = latestBrowserOutcome(toolEvents);
       const browserVerified = browser.hasProof && browser.passed && !browser.stale;
       const runtimeUnverified = runtimeTask && !browserVerified && !o.failed && !o.stale;
       if (!o.failed && !o.stale && !runtimeUnverified) return text;
+      // The model declared it unverified — that IS the disclosure, whatever language it wrote in.
+      if (declared === 'UNVERIFIED') {
+        recordDebugTrace('agent_completion_truth_gate_kept', {
+          via: 'status_token', buildFailed: String(o.buildFailed), stale: String(o.stale),
+        }, { text: String(text || '').slice(0, 600) });
+        return text;
+      }
       // Already unverified-by-its-own-words: nothing left to correct.
-      if (completionAlreadyDisclosesRisk(text)) {
+      if (!declared && completionAlreadyDisclosesRisk(text, o)) {
         recordDebugTrace('agent_completion_truth_gate_kept', {
           buildFailed: String(o.buildFailed), stale: String(o.stale), runtimeUnverified: String(runtimeUnverified),
         }, { text: String(text || '').slice(0, 600) });
@@ -1124,6 +1168,9 @@
           : 'files changed AFTER the last successful build, so the current code is NOT verified';
         verifiedResultsBlock = `VERIFIED OUTCOME — ${situation}. You MUST NOT say the task is fixed, done, working, resolved, ready, or complete. State plainly what you changed, that it is not verified/passing yet, and the exact next step.\n\n${verifiedResultsBlock}`;
       }
+      // Status token: the gate reads THIS, not the prose, so honesty survives any language
+      // or phrasing. Stripped before display.
+      const statusLineRule = `Write the message in the user's language, then end with one final line, exactly one of: ${COMPLETION_STATUS_TOKENS.unverified} or ${COMPLETION_STATUS_TOKENS.verified}. Use ${COMPLETION_STATUS_TOKENS.unverified} whenever anything is unbuilt, failing, or unchecked. This line is machine-read and removed before the user sees it.`;
       let prompt = [
         'Write a natural completion message for the user.',
         'Output ONLY the message itself. Do NOT preface it with a label or lead-in like "Here\'s a completion message:" and do not wrap it in quotes — start with the first word of the actual message.',
@@ -1133,6 +1180,7 @@
         'Mention changed files when they help the user understand what happened.',
         'For multi-file app work, short bullets are allowed.',
         'Keep it concise and specific to the actual work. Prefer under 120 words.',
+        statusLineRule,
         'Never mention internal tool names (write_file, edit_file, validate_files, run_app, run_command, read_file) — say it plainly: "edited", "checked the files", "ran the app".',
         'Never invent a localhost URL or say the app was opened/running in a browser. Mention a local URL only when it appears verbatim in the tool results.',
         'CHANGES below lists the only real modifications made this run. Describe an outcome ONLY if those diffs actually implement it; if part of the request has no supporting change there, say plainly that it was not changed.',
@@ -1162,6 +1210,7 @@
             CHANGES: changeSummaries || '(none — nothing was changed)',
             READ_RESULTS: readResults || '(none)',
             VERIFIED_RESULTS: verifiedResultsBlock || '(none)',
+            STATUS_LINE_RULE: statusLineRule,
           });
         }
       }

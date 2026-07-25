@@ -20,11 +20,10 @@ def list_chats(scope: str) -> Dict:
     return {"scope": _scope(scope), "chats": chat_store.list_chats(_scope(scope))}
 
 
-# MUST stay above /chats/{scope}/{chat_id} — FastAPI matches in declaration order, and
-# the literal path would otherwise be swallowed as a chat id called "deleted".
+# Must precede /chats/{scope}/{chat_id} — FastAPI matches in declaration order.
 @router.get("/chats/{scope}/deleted")
 def list_deleted(scope: str) -> Dict:
-    """Deletions still inside the 30-day retention window."""
+    """Deletions still inside the retention window."""
     return {"scope": _scope(scope), "deleted": chat_store.list_deleted(_scope(scope))}
 
 
@@ -38,7 +37,7 @@ def restore_deleted(scope: str, chat_id: str) -> Dict:
 
 @router.get("/chats/{scope}/{chat_id}")
 def get_chat(scope: str, chat_id: str) -> Dict:
-    """One conversation — used to fill a cache placeholder on demand."""
+    """One conversation, for filling a cache stub."""
     chat = chat_store.get_chat(_scope(scope), chat_id)
     if chat is None:
         raise HTTPException(status_code=404, detail="chat not found")

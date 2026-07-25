@@ -47,10 +47,7 @@ const nativeBridge = (() => {
     if (!msg || typeof msg !== 'object') {
       return;
     }
-    // Sleep/wake are PUSHED by the native layer (no id, nothing waiting on them):
-    // a suspended machine freezes JS timers, so the web layer cannot tell a slow
-    // model from a sleeping laptop by itself. Windows arrives through this channel;
-    // macOS calls __aiExeOnPowerEvent directly.
+    // Native-pushed sleep/wake: no id, nothing waiting on it.
     if (String(msg.type || '') === 'powerEvent') {
       if (typeof window.__aiExeOnPowerEvent === 'function') {
         try { window.__aiExeOnPowerEvent(msg); } catch (_) { /* never break the bridge */ }
@@ -7806,7 +7803,7 @@ function buildAgentUserGuidance(chatId = '') {
     lines.push(`Per-chat Context (apply to planning, decisions, deliverables, progress notes, and the final response):\n${manual}`);
   }
   if (profile) {
-    lines.push(`Personalization profile (use for user-facing tone and relevant preferences; never copy profile details, slang, or emojis into project source/content unless the user explicitly asks):\n${profile}`);
+    lines.push(`Personalization profile (use for user-facing tone and relevant preferences; never copy profile details, slang, or emojis into project source/content unless the user explicitly asks. Talk to the user in their language, but keep code, identifiers, comments, and in-app copy in the project's language — English unless they ask otherwise):\n${profile}`);
   }
   return lines.length ? `AGENT USER GUIDANCE:\n${lines.join('\n\n')}` : '';
 }
@@ -9408,14 +9405,10 @@ function commitInterruptedAgentRun(chatId, reason = 'Agent was interrupted befor
   return true;
 }
 
-// ---- Sleep / suspend handling -------------------------------------------------
-// A build takes minutes. macOS idle-sleep suspended a run 1 second after a file-write
-// started: 12 minutes later the machine woke, the generation had produced ZERO bytes,
-// and the watchdog abandoned the file blaming a 191s timeout the model never caused.
-// Three parts: hold off idle sleep while a run is active (settings-gated), notice a
-// suspend when it happens anyway, and never charge suspended time to a tool budget.
+// ---- Sleep / suspend handling ----
+// Hold off idle sleep during a run, notice a suspend anyway, never bill it to a tool.
 
-// Absolute ceiling on the assertion so a wedged run can't pin the machine awake.
+// Ceiling, so a wedged run can't pin the machine awake.
 const KEEP_AWAKE_MAX_MS = 30 * 60 * 1000;
 let keepAwakeHeld = false;
 let keepAwakeCapTimer = 0;
@@ -9433,8 +9426,7 @@ async function acquireRunKeepAwake(reason = 'AI.EXE is building your project') {
   keepAwakeHeld = true;
   if (keepAwakeCapTimer) clearTimeout(keepAwakeCapTimer);
   keepAwakeCapTimer = setTimeout(() => { void releaseRunKeepAwake('max_duration'); }, KEEP_AWAKE_MAX_MS);
-  // Persisted, not in-memory: diagnosing a sleep-interrupted run means reading the log
-  // file afterwards (that is how the 12-minute suspend was found).
+  // Persisted: this class of bug is diagnosed from the log file afterwards.
   recordDebugTrace('keep_awake_held', { reason: String(reason || '') });
   return true;
 }
@@ -9450,8 +9442,7 @@ async function releaseRunKeepAwake(reason = 'run_end') {
   return true;
 }
 
-// Suspended wall-clock, accumulated per run. The agent loop subtracts this from a
-// tool's idle/total elapsed so a sleep can never read as a slow model.
+// Suspended wall-clock per run; the loop subtracts it from tool budgets.
 const machineSuspendState = {
   suspendedMs: 0,
   lastSleepAt: 0,
@@ -9465,8 +9456,7 @@ function resetMachineSuspendTracking() {
 }
 
 function getMachineSuspendedMs() {
-  // A pending sleep (willSleep with no didWake yet) counts from when it started, so a
-  // watchdog tick during a dark wake already discounts the gap.
+  // A pending sleep counts from when it started (dark wake discounts it).
   const pending = machineSuspendState.lastSleepAt
     ? Math.max(0, Date.now() - machineSuspendState.lastSleepAt)
     : 0;
@@ -9485,9 +9475,7 @@ function noteMachineSuspendGap(gapMs, source = 'clock_jump') {
   });
 }
 
-// Pushed by the native layer (mac: NSWorkspace notifications, Windows:
-// WM_POWERBROADCAST). JS timers are frozen while suspended, so this is the only
-// precise signal; the loop's clock-jump check is the fallback.
+// Pushed by the native layer; timers freeze while suspended, so this is the precise signal.
 window.__aiExeOnPowerEvent = (event) => {
   const phase = String((event && event.phase) || '').trim();
   if (phase === 'willSleep') {
@@ -10849,6 +10837,26 @@ async function requestWorkspaceTurnModeDecision(chatId, latestUserMessage) {
   return 'inspect';
 }
 
+// Paused-build facts for the router: "bet" only means continue if work is pending.
+function describePausedBuildForRouting(chatId) {
+  const chat = findChatById(chatId);
+  if (!chat) return '';
+  const tracker = chat.phaseTracker;
+  const phases = tracker && Array.isArray(tracker.phases) ? tracker.phases : [];
+  const unfinished = phases.filter((phase) => !phaseIsDone(phase));
+  const pendingResume = Boolean(chat.needsContinue || (chat.pendingAgentResume && chat.pendingAgentResume.task));
+  if (phases.length > 1 && unfinished.length) {
+    const done = phases.length - unfinished.length;
+    const next = unfinished[0] || {};
+    const nextTitle = String(next.title || '').trim();
+    return `phase ${done + 1} of ${phases.length} is next${nextTitle ? ` ("${nextTitle}")` : ''}, ${done} done. The user is waiting for it to be built.`;
+  }
+  if (pendingResume) {
+    return 'the last build stopped before finishing and is waiting to be continued.';
+  }
+  return '';
+}
+
 // Model-decided preflight route. The model classifies the user's intent; the
 // regex feature scoring in preflight-router.js is only a fallback for when this
 // call fails. Returns the parsed structured decision or null.
@@ -10862,7 +10870,7 @@ async function requestPreflightRouteModelDecision(chatId, latestUserMessage, con
     'Return exactly one JSON object. No prose. No markdown.',
     'Keys: route, intent, needs_workspace, needs_file_mutation, confidence, reason',
     'route: "chat" | "inspect" | "agent"',
-    'intent: "casual_chat" | "general_answer" | "workspace_question" | "create_or_build_deliverable" | "modify_existing_workspace" | "debug_existing_workspace"',
+    'intent: "casual_chat" | "general_answer" | "workspace_question" | "create_or_build_deliverable" | "modify_existing_workspace" | "debug_existing_workspace" | "resume_paused_build"',
     'needs_workspace: "yes" | "no"',
     'needs_file_mutation: "yes" | "no"',
     'confidence: number from 0 to 1',
@@ -10878,6 +10886,12 @@ async function requestPreflightRouteModelDecision(chatId, latestUserMessage, con
     '- Workspace being open means workspace questions can use route="inspect". It does NOT mean every message is about the workspace.',
     '- If the user wants something fixed, improved, restyled, redesigned, polished, or made to look/work better in the open project, that is route="agent" (modify) EVEN IF they also say "check", "look at", or describe the symptoms first. "check and fix it" = agent, not inspect. Use route="inspect" only when the user asks purely to understand/explain/diagnose with no change requested.',
     '- "build on your previous answer", "fix your explanation", "design it as a table" are route="chat" (they are about the conversation, not files).',
+    '- PAUSED BUILD: the "Paused build" line below states whether work is half-finished and waiting. When it says yes, the question is what the latest message DOES about that pending work:',
+    '    * gives the go-ahead, accepts, urges you on, or asks for the remainder => route="agent", intent="resume_paused_build".',
+    '    * declines, defers, says wait/later/stop, or changes the plan => do NOT resume. Route it as whatever it actually is (usually route="chat"); never carry on work the user just waved off.',
+    '    * asks a question, raises a new topic, or reports a problem => ignore the pause and route that message on its own terms.',
+    '  Read what the sentence MEANS; do not pattern-match vocabulary. Replies here are usually very short, and a short reply can mean either yes or no, so the words themselves carry little signal.',
+    '- When "Paused build" says no, nothing is waiting, so a bare acknowledgement is just conversation => route="chat".',
     '',
     'Examples:',
     'User: "hello" => {"route":"chat","intent":"casual_chat","needs_workspace":"no","needs_file_mutation":"no","confidence":0.99,"reason":"Greeting."}',
@@ -10890,10 +10904,18 @@ async function requestPreflightRouteModelDecision(chatId, latestUserMessage, con
     'User: "script.js:11 Uncaught ReferenceError: SimulationGrid is not defined" => {"route":"agent","intent":"debug_existing_workspace","needs_workspace":"yes","needs_file_mutation":"yes","confidence":0.9,"reason":"A runtime error in the open app is a request to fix it."}',
     'User: "why is the app broken? nothing happens when I click play" => {"route":"agent","intent":"debug_existing_workspace","needs_workspace":"yes","needs_file_mutation":"yes","confidence":0.88,"reason":"Reporting broken behavior — fix it, then explain."}',
     'User: "explain what this error means, do not change anything" => {"route":"inspect","intent":"workspace_question","needs_workspace":"yes","needs_file_mutation":"no","confidence":0.9,"reason":"Explicitly wants explanation only, no change."}',
+    // Same two-word message on both sides of the boundary, so the lesson is the intent,
+    // not the word. A third shows the deferral direction, which a word list always missed.
+    'User: "bet" (Paused build: yes) => {"route":"agent","intent":"resume_paused_build","needs_workspace":"yes","needs_file_mutation":"yes","confidence":0.9,"reason":"Accepts the pending work, so continue building it."}',
+    'User: "bet" (Paused build: no) => {"route":"chat","intent":"casual_chat","needs_workspace":"no","needs_file_mutation":"no","confidence":0.9,"reason":"Nothing is waiting, so this is just conversation."}',
+    'User: "not now" (Paused build: yes) => {"route":"chat","intent":"casual_chat","needs_workspace":"no","needs_file_mutation":"no","confidence":0.9,"reason":"Declines the pending work — acknowledge, do not resume."}',
     '',
     `Agent mode: ${context.agentEnabled ? 'ON' : 'OFF'}`,
     `Workspace open: ${context.workspaceOpen ? 'yes' : 'no'}${context.workspaceRootName ? ` (root: ${context.workspaceRootName})` : ''}`,
     `This chat created/owns the open workspace: ${context.chatOwnsWorkspace ? 'yes' : 'no'}`,
+    // Without this the router cannot tell "bet" (= continue the build) from "bet" (= chatter).
+    // It classified exactly that as casual_chat at 0.90 while Phase 2 of 3 sat unbuilt.
+    `Paused build: ${context.pausedBuild ? `yes — ${context.pausedBuildSummary}` : 'no'}`,
     `Recent chat:\n${recentMessages || '(none)'}`,
     '',
     `Latest user message:\n${text}`,
@@ -10958,12 +10980,15 @@ async function requestPreflightRouteDecision(chatId, latestUserMessage, options 
   // call), so skip it and let the deterministic router handle local routing. Remote
   // gets the model's judgment; local gets speed.
   const useModelRouting = getSelectedInferenceProvider() !== 'local';
+  const pausedBuild = describePausedBuildForRouting(chatId);
   const modelDecision = useModelRouting
     ? await requestPreflightRouteModelDecision(chatId, latestUserMessage, {
       agentEnabled,
       workspaceOpen,
       workspaceRootName: workspace.workspaceRootName || '',
       chatOwnsWorkspace,
+      pausedBuild: Boolean(pausedBuild),
+      pausedBuildSummary: pausedBuild || '',
     })
     : null;
   const advisoryDecision = normalizePreflightRouteDecision({
@@ -11764,13 +11789,15 @@ function lastAssistantLooksIncompleteAgentRun(chat) {
 // When the user just says "retry"/"continue" after an interrupted agent build,
 // re-run the ORIGINAL task (recovered from history) instead of the resume word —
 // otherwise the planner sees a contentless "retry" and finalizes as a no-op.
-function resolveAgentResumeTaskText(chatId, promptText) {
+function resolveAgentResumeTaskText(chatId, promptText, options = {}) {
   const raw = String(promptText || '');
-  if (!isBareAgentResumeRequest(raw)) return raw;
+  // isResume: the router read it as carry-on.
+  if (!isBareAgentResumeRequest(raw) && !(options && options.isResume)) return raw;
   const chat = findChatById(chatId);
   // Prefer the deterministic marker (the real task), so it survives intermediate messages.
   if (chat && chat.pendingAgentResume && chat.pendingAgentResume.task) return chat.pendingAgentResume.task;
-  if (!chat || !Array.isArray(chat.messages) || !lastAssistantLooksIncompleteAgentRun(chat)) return raw;
+  if (!chat || !Array.isArray(chat.messages)) return raw;
+  if (!(options && options.isResume) && !lastAssistantLooksIncompleteAgentRun(chat)) return raw;
   for (let i = chat.messages.length - 1; i >= 0; i -= 1) {
     const msg = chat.messages[i];
     if (!msg || msg.role !== 'user') continue;
@@ -14702,8 +14729,12 @@ async function requestSelectedDeveloperAgentReply(requestToken, chatId, rawPromp
   // Mark Continue/Retry/resume so a phased build resumes from plan.md even if the
   // re-planner drops phases this turn. Natural phrasing like "finish phase 1 then
   // ..." also resumes, but only when this chat already has an unfinished build.
-  if (requestToken) requestToken.isAgentResume = shouldTreatAsAgentResumeRequest(chatId, rawPromptText);
-  const promptText = resolveAgentResumeTaskText(chatId, rawPromptText);
+  // Phrase test is the fast path; the router's verdict counts equally.
+  const routerSaidResume = Boolean(requestToken && requestToken.routedResume);
+  if (requestToken) {
+    requestToken.isAgentResume = routerSaidResume || shouldTreatAsAgentResumeRequest(chatId, rawPromptText);
+  }
+  const promptText = resolveAgentResumeTaskText(chatId, rawPromptText, { isResume: routerSaidResume });
   // A phased chat owns the project it created. The global explorer root can be
   // cleared by a relaunch/native-state sync, so restore the chat's root before
   // planning a Continue; otherwise deterministic project setup creates "(1)".
@@ -14758,8 +14789,7 @@ async function requestSelectedDeveloperAgentReply(requestToken, chatId, rawPromp
   // Keep a live elapsed counter below the input for the whole agent run, and make
   // sure it is always torn down when the run ends (success, stop, or throw).
   startAgentElapsedTimer(0, chatId);
-  // Idle sleep suspended a run mid-file-write once (12 min, zero bytes). Hold it off for
-  // the duration, and start this run's suspend ledger from zero.
+  // Hold off idle sleep for the run; reset the suspend ledger.
   resetMachineSuspendTracking();
   void acquireRunKeepAwake('AI.EXE is building your project');
   try {
@@ -15512,11 +15542,8 @@ function stripChatStorageHeavyFields(chat) {
 }
 
 
-// The cache must never fill the origin quota again. Chats live in the DB now, so
-// localStorage only needs enough to paint the sidebar and recent conversations offline.
-// Beyond the budget, older chats become title-only stubs — still listed, content loaded
-// from the DB on demand. Without this the chats key alone was 4.38 MB of a 5 MB quota,
-// so EVERY other write (API keys, password, artifacts, workspace) silently failed too.
+// Bounded cache: chats live in the DB, so over-budget ones become title-only stubs.
+// Unbounded, the chats key ate 4.38 MB of the 5 MB quota and every other write failed.
 const CHAT_CACHE_BUDGET_CHARS = 600000;
 
 function boundChatCacheToBudget(payload, budget = CHAT_CACHE_BUDGET_CHARS) {
@@ -15750,9 +15777,7 @@ function durableChatScope() {
   return parts.length > 1 ? parts[parts.length - 1].trim().toLowerCase() : '';
 }
 
-// A user deletion has to outlive a backend that is down or slow: without a tombstone the
-// DB keeps the row and the next boot hydrates the deleted chat straight back into the
-// sidebar. Tombstones are ids only (tiny), retried on every boot until the DB confirms.
+// Tombstones (ids only) outlive a down backend, so a delete can't come back on boot.
 function loadChatTombstones() {
   const key = scopedStorageKey(chatTombstonesStoragePrefix);
   if (!key) return [];
@@ -15804,15 +15829,12 @@ async function flushChatTombstones() {
   return pending;
 }
 
-// A cache stub carries no history, so it must never be written over the DB row that
-// still has it. Stubs are replaced by the real chat as soon as hydration lands.
+// A stub has no history — never write it over the DB row that does.
 function isChatCacheStub(chat) {
   return Boolean(chat && chat._cacheStub);
 }
 
-// Opening a stub before boot hydration landed must show the real conversation, not an
-// empty thread. Fills it from the DB on demand; on failure the stub flag stays so the
-// empty placeholder can still never be persisted over the stored history.
+// Fill a stub from the DB on demand; on failure the flag stays so it can't overwrite.
 async function ensureChatContentLoaded(chatId) {
   const chat = findChatById(chatId);
   if (!chat || !isChatCacheStub(chat)) return false;
@@ -16024,8 +16046,7 @@ function loadStoredChats() {
       const isNaming = Boolean(chat.isNaming) && !shouldResetNaming;
       return {
         id: chat.id,
-        // Keep the placeholder flag: dropping it made a stub look like a real empty chat,
-        // which then overwrote the DB row that still held the history.
+        // Keep the flag; without it a stub looked real and overwrote stored history.
         _cacheStub: Boolean(chat._cacheStub),
         name: normalizeChatName(
           chat.customName
@@ -20026,6 +20047,11 @@ function sanitizeAssistantText(text) {
   clean = clean.replace(/<[^A-Za-z0-9\s]{1,3}\s*tool[▁_\s-]*calls?[▁_\s-]*(?:begin|end)[\s\S]*$/i, '');
   // Strip hallucinated <*_file> rewrite directives chat models emit as raw text.
   clean = clean.replace(/<\s*(?:rewrite|write|edit|create|update|new|replace)_file\b[\s\S]*$/i, '');
+  // Belt-and-braces: the completion status token must never reach the bubble.
+  clean = clean.replace(/\[\[\s*AIEXE_STATUS\s*:\s*\w+\s*\]\]/gi, '').trim();
+  // Invented status tags (not ours) rendered literally. Named exactly, so prose survives.
+  clean = clean.replace(/<\s*\/?\s*(?:agent_status|tool_status|task_status)\s*>[^<]{0,40}?<\s*\/\s*(?:agent_status|tool_status|task_status)\s*>/gi, '');
+  clean = clean.replace(/^[ \t]*<\s*\/?\s*(?:agent_status|tool_status|task_status)\s*>[^\n]*$/gim, '');
   // Humanize internal tool names the model parrots into narration ("The
   // run_app blocker..."). Display-only; observations/prompts keep real names.
   clean = clean
@@ -20998,7 +21024,21 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
             });
           } else {
           requestToken.operationKind = 'agent';
-          setThinkingStatus('Planning changes...');
+          // Router read it as carry-on: resume with the original task, not the word.
+          const routedResume = String((preflightDecision && preflightDecision.intent)
+            || (preflightDebug && preflightDebug.modelIntent) || '').toLowerCase() === 'resume_paused_build';
+          if (routedResume) {
+            const resumeChat = findChatById(chatId);
+            if (resumeChat) resumeChat.needsContinue = false;
+            requestToken.routedResume = true;
+            setThinkingStatus('Continuing changes...');
+            recordDebugTrace('preflight_routed_resume', {
+              chatId: requestToken.chatId,
+              latestUserPreview: debugPreview(promptText, 80),
+            }, { chatId: requestToken.chatId, latestUserInput: String(promptText || '') });
+          } else {
+            setThinkingStatus('Planning changes...');
+          }
           const handledByAgent = await requestSelectedDeveloperAgentReply(requestToken, chatId, promptText);
           if (!isInferenceActive(requestToken)) {
             return;

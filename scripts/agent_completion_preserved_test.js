@@ -17,13 +17,13 @@ const runtime = fs.readFileSync(path.join(root, 'ui', 'agent-runtime.js'), 'utf8
 const loop = fs.readFileSync(path.join(root, 'ui', 'agent-loop.js'), 'utf8');
 
 // ---- Wiring ----
-assert.match(runtime, /function completionAlreadyDisclosesRisk\(text\)/, 'the gate can recognize a compliant message');
+assert.match(runtime, /function completionAlreadyDisclosesRisk\(text, outcome = null\)/, 'the gate can recognize a compliant message');
 assert.match(runtime, /function openContractIssueLines\(toolEvents, max = 2\)/, 'a replaced message can still name real findings');
 assert.match(runtime, /agent_completion_truth_gate_kept/, 'keeping a message is traced, not silent');
 assert.match(runtime, /Still open: \$\{openIssues\.join\('; '\)\}/, 'the replacement carries the open findings');
 
 // ---- Behaviour: run the real predicate ----
-const start = runtime.indexOf('function completionAlreadyDisclosesRisk(text)');
+const start = runtime.indexOf('function completionAlreadyDisclosesRisk(text, outcome = null)');
 const end = runtime.indexOf('function openContractIssueLines(');
 const sandbox = { console };
 vm.createContext(sandbox);
@@ -146,3 +146,36 @@ assert.match(core, /EXACT version with no range prefix/, 'exact pins are require
 assert.match(core, /corrupted in transit/, 'the reason is stated so it is not "cleaned up" later');
 
 console.log('PASS: package.json generation asks for exact pins, removing the character the channel corrupts');
+
+// ---- v9.9.8: the verdict is a token, not prose ----
+// Prose matching is English-only; the verdict now rides a fixed token instead.
+assert.match(runtime, /COMPLETION_STATUS_TOKENS = \{/, 'the status token exists');
+assert.match(runtime, /statusLineRule/, 'the completion prompt asks for it');
+assert.match(runtime, /if \(declared === 'UNVERIFIED'\)/, 'a declared-unverified message is kept');
+assert.ok(runtime.indexOf("if (declared === 'UNVERIFIED')") < runtime.indexOf('completionAlreadyDisclosesRisk(text, o)'),
+  'the token is read BEFORE any prose matching');
+assert.match(runtime, /!declared && completionAlreadyDisclosesRisk/, 'prose heuristics are the fallback only');
+const aiExeSrc = fs.readFileSync(path.join(root, 'ui', 'ai-exe.js'), 'utf8');
+assert.match(aiExeSrc, /AIEXE_STATUS/, 'the renderer strips the token as a backstop');
+
+const tokenStart = runtime.indexOf('const COMPLETION_STATUS_TOKENS');
+const tokenEnd = runtime.indexOf('// Keyed to the held outcome');
+const tokenSandbox = { console };
+vm.createContext(tokenSandbox);
+vm.runInContext(`${runtime.slice(tokenStart, tokenEnd)}\nthis.api = { readCompletionStatusToken, stripCompletionStatusToken };`, tokenSandbox);
+const { readCompletionStatusToken: readTok, stripCompletionStatusToken: stripTok } = tokenSandbox.api;
+const UNV = '[[AIEXE_STATUS:UNVERIFIED]]';
+[
+  ['english', `Wrote the store. Build still red.\n${UNV}`],
+  ['pidgin', `I don write the files but e never build finish o.\n${UNV}`],
+  ['yoruba', `Mo ti kọ àwọn fáìlì náà, ṣùgbọ́n kò tíì ṣiṣẹ́.\n${UNV}`],
+  ['french', `J'ai écrit les fichiers, mais la compilation échoue encore.\n${UNV}`],
+  ['chinese', `已写入文件，但构建仍然失败。\n${UNV}`],
+].forEach(([lang, text]) => {
+  assert.equal(readTok(text), 'UNVERIFIED', `${lang} verdict is read without parsing prose`);
+  assert.doesNotMatch(stripTok(text), /AIEXE_STATUS/, `${lang} token never reaches the user`);
+});
+assert.equal(readTok('All done, it works!\n[[AIEXE_STATUS:VERIFIED]]'), 'VERIFIED', 'a success claim still declares VERIFIED');
+assert.equal(readTok('Wrote the store.'), '', 'no token falls back to the prose heuristics');
+
+console.log('PASS: the completion verdict is read from a fixed token, so an honest message survives in any language');
