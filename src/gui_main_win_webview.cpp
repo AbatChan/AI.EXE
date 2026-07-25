@@ -66,6 +66,34 @@ constexpr UINT kMsgPostWebResponse = WM_APP + 2;
 constexpr LONG kMinWindowWidth = static_cast<LONG>(kUiMinWindowWidth);
 constexpr LONG kMinWindowHeight = static_cast<LONG>(kUiMinWindowHeight);
 
+// --- Idle-sleep suppression during an agent run ---------------------------------
+// An agent run takes minutes. Idle sleep suspended one mid-file-write on macOS (12
+// minutes, zero bytes generated) and the same applies here. ES_SYSTEM_REQUIRED keeps
+// the SYSTEM awake; ES_DISPLAY_REQUIRED is deliberately NOT set, so the screen still
+// turns off. Lid-close and explicit Sleep are not blockable — the UI's suspend-aware
+// tool budget handles those.
+// SetThreadExecutionState is per-thread state, so every call must run on the same
+// thread; all bridge calls arrive on the UI thread.
+bool g_prevent_idle_sleep = false;
+
+bool SetPreventIdleSleepOnWindows(bool prevent, const std::string &why,
+                                  std::string *err) {
+  (void)why;
+  if (prevent == g_prevent_idle_sleep) {
+    return true;
+  }
+  const EXECUTION_STATE requested =
+      prevent ? (ES_CONTINUOUS | ES_SYSTEM_REQUIRED) : ES_CONTINUOUS;
+  if (SetThreadExecutionState(requested) == 0) {
+    if (err) *err = "Windows refused the sleep request.";
+    return false;
+  }
+  g_prevent_idle_sleep = prevent;
+  return true;
+}
+
+bool IsPreventingIdleSleepOnWindows() { return g_prevent_idle_sleep; }
+
 // --- High-DPI support (resolved at runtime; no manifest / SDK-version dependency) ---
 // Without process DPI awareness Windows bitmap-stretches the whole window on a
 // high-DPI display, which is why the UI looked blurry. 96 dpi = 100% scale.
@@ -2076,8 +2104,20 @@ private:
         return 0;
       }
       return DefWindowProcW(hwnd, msg, wparam, lparam);
+    case WM_POWERBROADCAST:
+      // PBT_APMSUSPEND fires just before the machine suspends; RESUMEAUTOMATIC always
+      // fires on resume (RESUMESUSPEND only when the user is present).
+      if (wparam == PBT_APMSUSPEND) {
+        self->PostPowerEventAsync("willSleep");
+      } else if (wparam == PBT_APMRESUMEAUTOMATIC ||
+                 wparam == PBT_APMRESUMESUSPEND) {
+        self->PostPowerEventAsync("didWake");
+      }
+      return TRUE;
     case WM_DESTROY:
       KillTimer(hwnd, kBackendWatchTimerId);
+      // Never leave the machine pinned awake after the window is gone.
+      SetPreventIdleSleepOnWindows(false, "", nullptr);
       DevServerManager::Instance().StopAll();
       if (self->backend_job_) {
         TerminateJobObject(self->backend_job_, 0);
@@ -2306,6 +2346,21 @@ private:
 #endif
     } else if (action == "dictationLevel") {
       output = "0";   // level comes from the WebView's WebAudio meter on Windows
+    } else if (action == "powerKeepAwake") {
+      // content = "1" to hold the request for a run, "0" to release it.
+      const bool prevent =
+          (workspace_content == "1" || workspace_content == "true");
+      if (!SetPreventIdleSleepOnWindows(prevent, prompt, &op_err)) {
+        ok = false;
+        message =
+            op_err.empty() ? "Could not change the sleep request." : op_err;
+      } else {
+        output = IsPreventingIdleSleepOnWindows() ? "1" : "0";
+        message =
+            prevent ? "Idle sleep held off." : "Idle sleep allowed again.";
+      }
+    } else if (action == "powerKeepAwakeState") {
+      output = IsPreventingIdleSleepOnWindows() ? "1" : "0";
     } else if (action == "workspaceList") {
       if (!BuildWorkspaceListOutput(runtime_, workspace_path, &output,
                                     &op_err)) {
@@ -2737,6 +2792,15 @@ private:
   void PostWebResponseAsync(const std::string &response_json) {
     auto *msg = new std::wstring(Utf8ToWide(response_json));
     PostMessageW(hwnd_, kMsgPostWebResponse, 0, reinterpret_cast<LPARAM>(msg));
+  }
+
+  // Suspend/resume is pushed to the UI (no id — nothing is waiting on it) so the web
+  // layer can subtract suspended time from a tool budget instead of blaming the model.
+  void PostPowerEventAsync(const char *phase) {
+    std::string json("{\"type\":\"powerEvent\",\"phase\":\"");
+    json += phase;
+    json += "\"}";
+    PostWebResponseAsync(json);
   }
 
 #if AI_EXE_HAVE_WEBVIEW2_HEADER

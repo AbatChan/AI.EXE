@@ -545,7 +545,16 @@
       let runDevServer = null;
       const devServerHotReloads = (command) => /\b(?:vite|next dev|nuxt|astro|webpack serve|react-scripts|(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?dev|nodemon|--reload|--watch|http\.server|flask)\b/i.test(String(command || ''));
       const startedAt = Date.now();
-      const deadlineAt = startedAt + deps.agentTotalTimeoutMs;
+      // Wall-clock deadline, extended by any time the MACHINE was suspended: a 12-minute
+      // sleep must not consume the run's budget and kill it seconds after waking.
+      const runSuspendedMsAtStart = typeof deps.getMachineSuspendedMs === 'function'
+        ? Number(deps.getMachineSuspendedMs()) || 0
+        : 0;
+      const suspendedDuringRunMs = () => (typeof deps.getMachineSuspendedMs === 'function'
+        ? Math.max(0, (Number(deps.getMachineSuspendedMs()) || 0) - runSuspendedMsAtStart)
+        : 0);
+      const baseDeadlineAt = startedAt + deps.agentTotalTimeoutMs;
+      const deadlineNow = () => baseDeadlineAt + suspendedDuringRunMs();
       let planSpec = null;
       // Total-deadline hit: the wrap-up must not make more slow model calls.
       let totalTimedOut = false;
@@ -2006,6 +2015,10 @@
 
       const sameFailureLimit = 3;
       const failureStreak = { key: '', count: 0 };
+      // Machine sleep mid-tool: redo that step, but don't restart forever on a laptop
+      // that sleeps every minute.
+      const sleepRetryLimit = 2;
+      let sleepInterruptions = 0;
       // Most runs keep the normal ceiling. If the final verification reaches that
       // ceiling after real edits and exposes a new compiler/runtime error, grant one
       // bounded repair window instead of stopping exactly when the next actionable
@@ -2224,7 +2237,7 @@
         if (planSpec) planSpec._executionStepLimit = executionStepLimit;
         if (!deps.isInferenceActive(requestToken)) return true;
         await ensureAgentPlanFile();
-        if (Date.now() >= deadlineAt) {
+        if (Date.now() >= deadlineNow()) {
           recordDebugTrace('agent_timeout', {
             chatId: String(chatId || ''),
             stage: 'total',
@@ -2308,6 +2321,10 @@
           // other transient blips bail after a couple of quick retries.
           const maxInferenceRetries = 4;
           for (let attempt = 0; attempt <= maxInferenceRetries; attempt += 1) {
+            // Suspended time during THIS attempt: a step timeout that only fired because
+            // the machine slept is not the model being slow.
+            const suspendedBeforeStep = suspendedDuringRunMs();
+            const suspendedDuringStep = () => Math.max(0, suspendedDuringRunMs() - suspendedBeforeStep);
             // Capture + swallow so an inference abandoned by the timeout (and later
             // aborted) cannot surface as an unhandledRejection.
             const inferPromise = deps.requestAgentPlannerInference(agentPrompt, deps.agentDecisionMaxTokens, deps.agentDecisionGrammar, decisionSystemPrompt);
@@ -2327,6 +2344,21 @@
             }
             if (!deps.isInferenceActive(requestToken)) return true;
             if (res && res.ok) break;
+            // A step timeout is normally non-retriable (the model is too slow). But a
+            // sleeping machine trips the same timer the moment it wakes, and that is not
+            // the model's fault — the connection just died. Retry those, bounded.
+            const sleptDuringStepMs = suspendedDuringStep();
+            const timedOutBySleep = Boolean(res && res.timedOut && sleptDuringStepMs >= 30000);
+            if (timedOutBySleep && sleepInterruptions < sleepRetryLimit) {
+              sleepInterruptions += 1;
+              recordDebugTrace('agent_decision_sleep_retry', {
+                chatId: String(chatId || ''), step: String(step),
+                suspendedMs: String(Math.round(sleptDuringStepMs)),
+                attempt: String(sleepInterruptions),
+              }, { chatId: String(chatId || ''), step, suspendedMs: sleptDuringStepMs });
+              setAgentProgress('Resuming after sleep...');
+              continue;
+            }
             const retriable = Boolean(res && !res.ok && !res.timedOut && !res.hardFail && !res.nonRetriable);
             if (!retriable) break;
             // A 429 means the provider is throttling, not broken — it clears on its
@@ -3647,7 +3679,7 @@
         const idleLimitMs = Number(deps.agentToolIdleTimeoutMs) || toolTimeoutMs;
         const hardCapMs = Math.max(
           idleLimitMs,
-          Math.min(Number(deps.agentToolHardCapMs) || (toolTimeoutMs * 3), Math.max(60000, deadlineAt - Date.now() - 5000)),
+          Math.min(Number(deps.agentToolHardCapMs) || (toolTimeoutMs * 3), Math.max(60000, deadlineNow() - Date.now() - 5000)),
         );
         let toolResult;
         try {
@@ -3674,7 +3706,28 @@
           toolPromise.then(() => { toolSettled = true; }, () => { toolSettled = true; });
           const toolStartedAt = Date.now();
           const watchdog = new Promise((resolve) => {
+            const tickMs = 4000;
+            // Suspended time must never count against the tool. A sleeping machine
+            // freezes these ticks, so a tick arriving far later than tickMs IS the
+            // suspend signal (the native power event is the precise one; this is the
+            // fallback that also covers a throttled/occluded window).
+            const suspendedAtStart = typeof deps.getMachineSuspendedMs === 'function'
+              ? Number(deps.getMachineSuspendedMs()) || 0
+              : 0;
+            let lastTickAt = Date.now();
+            let clockJumpMs = 0;
             const iv = setInterval(() => {
+              const now = Date.now();
+              const sinceTick = now - lastTickAt;
+              lastTickAt = now;
+              // 3 missed ticks = the machine or the page was not running, not slow.
+              if (sinceTick > tickMs * 3) {
+                const gap = sinceTick - tickMs;
+                clockJumpMs += gap;
+                if (typeof deps.noteMachineSuspendGap === 'function') {
+                  deps.noteMachineSuspendGap(gap, 'watchdog_clock_jump');
+                }
+              }
               if (toolSettled) { clearInterval(iv); resolve(null); return; }
               if (!deps.isInferenceActive(requestToken)) {
                 clearInterval(iv);
@@ -3685,13 +3738,30 @@
                 });
                 return;
               }
+              const suspendedNow = typeof deps.getMachineSuspendedMs === 'function'
+                ? Number(deps.getMachineSuspendedMs()) || 0
+                : 0;
+              // Either signal counts, never both (the power event also records the gap
+              // this tick just measured), so take the larger rather than the sum.
+              const suspendedMs = Math.max(Math.max(0, suspendedNow - suspendedAtStart), clockJumpMs);
               const lastProgress = typeof deps.getLastAgentToolProgressAt === 'function'
                 ? Number(deps.getLastAgentToolProgressAt()) || toolStartedAt
                 : toolStartedAt;
-              const idleMs = Date.now() - lastProgress;
-              const totalMs = Date.now() - toolStartedAt;
+              const idleMs = Math.max(0, (now - lastProgress) - suspendedMs);
+              const totalMs = Math.max(0, (now - toolStartedAt) - suspendedMs);
               if (idleMs >= idleLimitMs || totalMs >= hardCapMs) {
                 clearInterval(iv);
+                // A suspend kills the connection, so the tool cannot be waited out —
+                // but it is NOT the model being slow, and the run should retry it.
+                if (suspendedMs >= 30000) {
+                  resolve({
+                    ok: false,
+                    _toolInterruptedBySleep: true,
+                    _suspendedMs: suspendedMs,
+                    observation: `${decision.tool} for ${deps.normalizeWorkspacePath(decision.path || decision.srcPath || '/')} was interrupted: the computer slept for ${Math.round(suspendedMs / 1000)}s mid-write, which killed the connection. Nothing was saved for that file — write it again.`,
+                  });
+                  return;
+                }
                 const why = totalMs >= hardCapMs ? `ran past ${Math.round(hardCapMs / 1000)}s` : `made no progress for ${Math.round(idleMs / 1000)}s`;
                 resolve({
                   ok: false,
@@ -3699,7 +3769,7 @@
                   observation: `${decision.tool} for ${deps.normalizeWorkspacePath(decision.path || decision.srcPath || '/')} ${why} and was abandoned.`,
                 });
               }
-            }, 4000);
+            }, tickMs);
           });
           toolResult = await Promise.race([toolPromise, watchdog]);
         } catch (toolErr) {
@@ -4233,7 +4303,7 @@
           && toolResult && toolResult.ok
           && Number(toolResult.runErrorCount || 0) > 0
           && countRunMutations() > 0
-          && Date.now() < deadlineAt
+          && Date.now() < deadlineNow()
           && (runtimeRepairGraceCount === 0
             || (repairErrorSignature && repairErrorSignature !== lastRepairErrorSignature))) {
           runtimeRepairGraceCount += 1;
@@ -4313,6 +4383,65 @@
           }, { chatId: String(chatId || ''), step, phaseState, toolEvents });
           return true;
         }
+        // Interrupted by the machine sleeping — a different thing from a slow model.
+        // The connection is dead either way, but nothing was generated and nothing was
+        // saved, so the honest move is to redo THAT step rather than end the run. Only
+        // stop if it keeps happening (sleepRetryLimit) so a machine that sleeps every
+        // 60s can't loop forever.
+        if (toolResult && toolResult._toolInterruptedBySleep) {
+          if (typeof deps.abortInFlightInference === 'function') {
+            deps.abortInFlightInference('machine_sleep');
+          }
+          const sleptPath = deps.normalizeWorkspacePath(decision.path || decision.srcPath || '/');
+          const sleptSeconds = Math.round(Number(toolResult._suspendedMs || 0) / 1000);
+          sleepInterruptions += 1;
+          if (sleepInterruptions <= sleepRetryLimit) {
+            appendAgentActivity({
+              kind: 'note',
+              title: 'Resumed after sleep',
+              detail: `The computer slept ${sleptSeconds}s during ${sleptPath} — writing it again`,
+              status: 'done',
+              openPath: sleptPath.startsWith('/') ? sleptPath : '',
+              openKind: 'file',
+            });
+            setAgentProgress('Resuming after sleep...');
+            recordDebugTrace('agent_tool_sleep_retry', {
+              chatId: String(chatId || ''), step: String(step),
+              tool: String(decision.tool || ''), path: sleptPath,
+              suspendedMs: String(Math.round(Number(toolResult._suspendedMs || 0))),
+              attempt: String(sleepInterruptions),
+            }, { chatId: String(chatId || ''), step, decision, toolEvents });
+            // The failed event is already in toolEvents (recorded for every result
+            // above), and its observation says the file still needs writing — so the
+            // deterministic planner re-picks it on the next step.
+            continue;
+          }
+          const stoppedText = `The computer kept going to sleep while I was writing ${sleptPath} (${sleepInterruptions} times), so I stopped instead of restarting that file again. Turn on "Keep the computer awake while building" in Settings, or plug in, then press Continue.`;
+          appendAgentActivity({
+            kind: 'error',
+            title: 'Stopped (computer kept sleeping)',
+            detail: `${sleptPath} was interrupted by sleep ${sleepInterruptions}×`,
+            status: 'error',
+            openPath: sleptPath.startsWith('/') ? sleptPath : '',
+            openKind: 'file',
+          });
+          setAgentProgress('Stopped.');
+          deps.consumeLiveAssistantText();
+          if (agentHasWorkspaceMutations()) {
+            await deps.refreshWorkspaceTree(true);
+          }
+          deps.commitAssistantMessage(chatId, stoppedText, stoppedText, {
+            agentActivities,
+            agentMeta: agentMetaWithRevert({ startedAt, completedAt: Date.now(), collapsed: true }),
+            forceNeedsContinue: true,
+          });
+          recordDebugTrace('agent_stopped_after_sleep_interruptions', {
+            chatId: String(chatId || ''), step: String(step),
+            tool: String(decision.tool || ''), path: sleptPath,
+            attempts: String(sleepInterruptions),
+          }, { chatId: String(chatId || ''), step, decision, toolEvents });
+          return true;
+        }
         // A tool that hit the execution timeout will NOT recover on retry — the local
         // model is simply too slow for this operation. Abandon immediately with a clean
         // message instead of burning multiple 150s timeouts (that was the 11-minute hang).
@@ -4333,6 +4462,14 @@
             : String(decision.tool || '')) || 'the step';
           const timedOutToolSentence = timedOutToolLabel.charAt(0).toUpperCase() + timedOutToolLabel.slice(1);
           const stoppedText = `${timedOutToolSentence} for ${timedOutPath} took too long, so I stopped instead of retrying for several minutes.${keptSummary} Tell me the exact change you want for ${timedOutPath} and I'll continue from here.`;
+          // Teardown FIRST, card second. Painting "Stopped" before the workspace refresh
+          // and revert-diff work made the composer look hung for a minute-plus after the
+          // run had visibly given up.
+          setAgentProgress('Stopping...');
+          deps.consumeLiveAssistantText();
+          if (agentHasWorkspaceMutations()) {
+            await deps.refreshWorkspaceTree(true);
+          }
           appendAgentActivity({
             kind: 'error',
             title: 'Stopped (timed out)',
@@ -4342,10 +4479,6 @@
             openKind: 'file',
           });
           setAgentProgress('Stopped.');
-          deps.consumeLiveAssistantText();
-          if (agentHasWorkspaceMutations()) {
-            await deps.refreshWorkspaceTree(true);
-          }
           deps.commitAssistantMessage(chatId, stoppedText, stoppedText, {
             agentActivities,
             agentMeta: agentMetaWithRevert({ startedAt, completedAt: Date.now(), collapsed: true }),

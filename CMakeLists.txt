@@ -29,8 +29,8 @@ set(AI_EXE_WEBVIEW2_DIR "" CACHE PATH "Microsoft.Web.WebView2 NuGet package root
 #   - the build-label date is stamped automatically (below)
 #   - the dev-tooling package.json "version" is auto-synced (below)
 # A release = bump AI_EXE_APP_VERSION + set a fresh AI_EXE_BUILD_TAG. Nothing else.
-set(AI_EXE_APP_VERSION "9.9.2" CACHE STRING "AI.EXE app and UI version" FORCE)
-set(AI_EXE_BUILD_TAG "delete-sticks-stub-never-saves" CACHE STRING "Human-readable AI.EXE build tag" FORCE)
+set(AI_EXE_APP_VERSION "9.9.3" CACHE STRING "AI.EXE app and UI version" FORCE)
+set(AI_EXE_BUILD_TAG "sleep-aware-runs" CACHE STRING "Human-readable AI.EXE build tag" FORCE)
 string(TIMESTAMP AI_EXE_BUILD_DATE "%Y-%m-%d")
 set(AI_EXE_BUILD_LABEL "v${AI_EXE_APP_VERSION} (${AI_EXE_BUILD_TAG} ${AI_EXE_BUILD_DATE})")
 
@@ -320,11 +320,14 @@ if(APPLE)
   find_library(WEBKIT_FRAMEWORK WebKit REQUIRED)
   find_library(AVFOUNDATION_FRAMEWORK AVFoundation REQUIRED)
   find_library(SPEECH_FRAMEWORK Speech REQUIRED)
+  # IOKit: idle-sleep assertion so a long agent run isn't suspended mid-write.
+  find_library(IOKIT_FRAMEWORK IOKit REQUIRED)
   target_link_libraries(ai_exe_gui_mac PRIVATE
     ${COCOA_FRAMEWORK}
     ${WEBKIT_FRAMEWORK}
     ${AVFOUNDATION_FRAMEWORK}
     ${SPEECH_FRAMEWORK}
+    ${IOKIT_FRAMEWORK}
   )
   add_custom_command(TARGET ai_exe_gui_mac POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E rm -f "$<TARGET_BUNDLE_CONTENT_DIR:ai_exe_gui_mac>/Resources/prompts/chat_namer.md"

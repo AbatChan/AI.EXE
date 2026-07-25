@@ -2,6 +2,7 @@
 
 #import <AVFoundation/AVFoundation.h>
 #import <Cocoa/Cocoa.h>
+#import <IOKit/pwr_mgt/IOPMLib.h>
 #import <Speech/Speech.h>
 #import <WebKit/WebKit.h>
 
@@ -1702,6 +1703,45 @@ std::string BuildStreamEvent(const std::string &id, bool done,
 }
 @end
 
+// Idle-sleep assertion. An agent run takes minutes; macOS idle-sleep suspended one
+// mid-file-write (12 min, zero bytes generated) and the write was abandoned on wake.
+// DISPLAY sleep is deliberately still allowed — the screen may go dark, the run continues.
+static IOPMAssertionID g_idle_sleep_assertion = kIOPMNullAssertionID;
+static std::mutex g_idle_sleep_assertion_mutex;
+
+static bool SetPreventIdleSleepOnMac(bool prevent, const std::string &why,
+                                     std::string *err) {
+  std::lock_guard<std::mutex> lock(g_idle_sleep_assertion_mutex);
+  if (prevent) {
+    if (g_idle_sleep_assertion != kIOPMNullAssertionID) {
+      return true;  // already held
+    }
+    NSString *reason = [NSString
+        stringWithUTF8String:(why.empty() ? "AI.EXE is building your project"
+                                          : why.c_str())];
+    IOPMAssertionID assertion = kIOPMNullAssertionID;
+    const IOReturn rc = IOPMAssertionCreateWithName(
+        kIOPMAssertionTypePreventUserIdleSystemSleep, kIOPMAssertionLevelOn,
+        (__bridge CFStringRef)(reason ?: @"AI.EXE agent run"), &assertion);
+    if (rc != kIOReturnSuccess) {
+      if (err) *err = "Could not hold the sleep assertion.";
+      return false;
+    }
+    g_idle_sleep_assertion = assertion;
+    return true;
+  }
+  if (g_idle_sleep_assertion != kIOPMNullAssertionID) {
+    IOPMAssertionRelease(g_idle_sleep_assertion);
+    g_idle_sleep_assertion = kIOPMNullAssertionID;
+  }
+  return true;
+}
+
+static bool IsPreventingIdleSleepOnMac() {
+  std::lock_guard<std::mutex> lock(g_idle_sleep_assertion_mutex);
+  return g_idle_sleep_assertion != kIOPMNullAssertionID;
+}
+
 @interface AppDelegate : NSObject <NSApplicationDelegate, NSWindowDelegate,
                                    WKScriptMessageHandler, WKUIDelegate>
 @end
@@ -1778,6 +1818,9 @@ std::string BuildStreamEvent(const std::string &id, bool done,
 
 - (void)applicationWillTerminate:(NSNotification *)notification {
   (void)notification;
+  // Never leave the machine pinned awake after the app is gone.
+  SetPreventIdleSleepOnMac(false, "", nullptr);
+  [[[NSWorkspace sharedWorkspace] notificationCenter] removeObserver:self];
   DevServerManager::Instance().StopAll();
   if (_backendTask && [_backendTask isRunning]) {
     [_backendTask terminate];
@@ -2113,6 +2156,18 @@ std::string BuildStreamEvent(const std::string &id, bool done,
     message = "Dictation session cancelled.";
   } else if (action == "dictationLevel") {
     output = std::to_string(GetOfflineDictationLevelOnMac());
+  } else if (action == "powerKeepAwake") {
+    // content = "1" to hold the assertion for a run, "0" to release it.
+    const bool prevent = (workspace_content == "1" || workspace_content == "true");
+    if (!SetPreventIdleSleepOnMac(prevent, prompt, &op_err)) {
+      ok = false;
+      message = op_err.empty() ? "Could not change the sleep assertion." : op_err;
+    } else {
+      output = IsPreventingIdleSleepOnMac() ? "1" : "0";
+      message = prevent ? "Idle sleep held off." : "Idle sleep allowed again.";
+    }
+  } else if (action == "powerKeepAwakeState") {
+    output = IsPreventingIdleSleepOnMac() ? "1" : "0";
   } else if (action == "workspaceList") {
     if (!BuildWorkspaceListOutput(_runtime, workspace_path, &output, &op_err)) {
       ok = false;
@@ -2533,6 +2588,42 @@ std::string BuildStreamEvent(const std::string &id, bool done,
   [_webView evaluateJavaScript:script completionHandler:nil];
 }
 
+// Sleep/wake are pushed to the UI, not polled: a suspended machine freezes JS timers,
+// so the web layer cannot tell "the model is slow" from "the machine was asleep" on its
+// own. The UI subtracts suspended time from tool budgets instead of blaming the model.
+- (void)postPowerEventToWeb:(NSString *)phase {
+  if (!_webView || !phase) {
+    return;
+  }
+  NSString *script = [NSString
+      stringWithFormat:@"window.__aiExeOnPowerEvent && "
+                       @"window.__aiExeOnPowerEvent({phase:'%@',at:Date.now()});",
+                       phase];
+  [_webView evaluateJavaScript:script completionHandler:nil];
+}
+
+- (void)systemWillSleep:(NSNotification *)note {
+  (void)note;
+  [self postPowerEventToWeb:@"willSleep"];
+}
+
+- (void)systemDidWake:(NSNotification *)note {
+  (void)note;
+  [self postPowerEventToWeb:@"didWake"];
+}
+
+- (void)registerPowerNotifications {
+  NSNotificationCenter *center = [[NSWorkspace sharedWorkspace] notificationCenter];
+  [center addObserver:self
+             selector:@selector(systemWillSleep:)
+                 name:NSWorkspaceWillSleepNotification
+               object:nil];
+  [center addObserver:self
+             selector:@selector(systemDidWake:)
+                 name:NSWorkspaceDidWakeNotification
+               object:nil];
+}
+
 - (void)userContentController:(WKUserContentController *)userContentController
       didReceiveScriptMessage:(WKScriptMessage *)message {
   (void)userContentController;
@@ -2659,6 +2750,7 @@ std::string BuildStreamEvent(const std::string &id, bool done,
   (void)notification;
 
   [self installMainMenu];
+  [self registerPowerNotifications];
 
   NSRect frame =
       NSMakeRect(0, 0, kUiDefaultWindowWidth, kUiDefaultWindowHeight);

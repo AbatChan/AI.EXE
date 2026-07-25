@@ -44,7 +44,20 @@ const nativeBridge = (() => {
         return;
       }
     }
-    if (!msg || typeof msg !== 'object' || !msg.id) {
+    if (!msg || typeof msg !== 'object') {
+      return;
+    }
+    // Sleep/wake are PUSHED by the native layer (no id, nothing waiting on them):
+    // a suspended machine freezes JS timers, so the web layer cannot tell a slow
+    // model from a sleeping laptop by itself. Windows arrives through this channel;
+    // macOS calls __aiExeOnPowerEvent directly.
+    if (String(msg.type || '') === 'powerEvent') {
+      if (typeof window.__aiExeOnPowerEvent === 'function') {
+        try { window.__aiExeOnPowerEvent(msg); } catch (_) { /* never break the bridge */ }
+      }
+      return;
+    }
+    if (!msg.id) {
       return;
     }
 
@@ -1405,6 +1418,7 @@ const settingsProviderHelp = document.getElementById('settingsProviderHelp');
 const settingsModelUrlWrap = document.getElementById('settingsModelUrlWrap');
 const settingsModelUrlInput = document.getElementById('settingsModelUrlInput');
 const settingsKeepModelChk = document.getElementById('settingsKeepModelChk');
+const settingsKeepAwakeChk = document.getElementById('settingsKeepAwakeChk');
 const settingsDebugTraceChk = document.getElementById('settingsDebugTraceChk');
 const settingsImportBtn = document.getElementById('settingsImportBtn');
 const settingsDebugDumpBtn = document.getElementById('settingsDebugDumpBtn');
@@ -1706,6 +1720,7 @@ let appSettings = {
   veniceModel: 'venice-uncensored-1-2',
   modelUrl: '',
   keepModelOnUpdate: true,
+  keepAwakeDuringRun: true,
   debugTraceEnabled: false,
   userProfile: '',
 };
@@ -7578,6 +7593,7 @@ function loadAppSettings() {
     workMode: 'coding',
     modelUrl: '',
     keepModelOnUpdate: true,
+    keepAwakeDuringRun: true,
     debugTraceEnabled: false,
     userProfile: '',
   };
@@ -7634,6 +7650,7 @@ function loadAppSettings() {
     if (typeof parsed.veniceAdapterPassword === 'string') appSettings.veniceAdapterPassword = parsed.veniceAdapterPassword;
     if (typeof parsed.modelUrl === 'string') appSettings.modelUrl = parsed.modelUrl.trim();
     if (typeof parsed.keepModelOnUpdate === 'boolean') appSettings.keepModelOnUpdate = parsed.keepModelOnUpdate;
+    if (typeof parsed.keepAwakeDuringRun === 'boolean') appSettings.keepAwakeDuringRun = parsed.keepAwakeDuringRun;
     if (typeof parsed.debugTraceEnabled === 'boolean') appSettings.debugTraceEnabled = parsed.debugTraceEnabled;
     if (typeof parsed.userProfile === 'string') appSettings.userProfile = parsed.userProfile.slice(0, 2000);
   } catch (_) { }
@@ -9018,6 +9035,7 @@ function saveSettingsFromUi(options = {}) {
   if (typeof renderComposerModelPill === 'function') renderComposerModelPill();
   appSettings.modelUrl = settingsModelUrlInput ? settingsModelUrlInput.value.trim() : '';
   appSettings.keepModelOnUpdate = Boolean(settingsKeepModelChk && settingsKeepModelChk.checked);
+  appSettings.keepAwakeDuringRun = Boolean(settingsKeepAwakeChk && settingsKeepAwakeChk.checked);
   appSettings.debugTraceEnabled = Boolean(settingsDebugTraceChk && settingsDebugTraceChk.checked);
   const profileInput = document.getElementById('settingsUserProfile');
   if (profileInput) appSettings.userProfile = String(profileInput.value || '').trim().slice(0, 2000);
@@ -9389,6 +9407,103 @@ function commitInterruptedAgentRun(chatId, reason = 'Agent was interrupted befor
   });
   return true;
 }
+
+// ---- Sleep / suspend handling -------------------------------------------------
+// A build takes minutes. macOS idle-sleep suspended a run 1 second after a file-write
+// started: 12 minutes later the machine woke, the generation had produced ZERO bytes,
+// and the watchdog abandoned the file blaming a 191s timeout the model never caused.
+// Three parts: hold off idle sleep while a run is active (settings-gated), notice a
+// suspend when it happens anyway, and never charge suspended time to a tool budget.
+
+// Absolute ceiling on the assertion so a wedged run can't pin the machine awake.
+const KEEP_AWAKE_MAX_MS = 30 * 60 * 1000;
+let keepAwakeHeld = false;
+let keepAwakeCapTimer = 0;
+
+async function acquireRunKeepAwake(reason = 'AI.EXE is building your project') {
+  if (keepAwakeHeld) return true;
+  if (appSettings.keepAwakeDuringRun === false) return false;
+  if (!nativeBridge.available()) return false;
+  let ok = false;
+  try {
+    const res = await nativeBridge.invoke('powerKeepAwake', { content: '1', prompt: String(reason || ''), timeoutMs: 8000 });
+    ok = Boolean(res && res.ok);
+  } catch (_) { ok = false; }
+  if (!ok) return false;
+  keepAwakeHeld = true;
+  if (keepAwakeCapTimer) clearTimeout(keepAwakeCapTimer);
+  keepAwakeCapTimer = setTimeout(() => { void releaseRunKeepAwake('max_duration'); }, KEEP_AWAKE_MAX_MS);
+  // Persisted, not in-memory: diagnosing a sleep-interrupted run means reading the log
+  // file afterwards (that is how the 12-minute suspend was found).
+  recordDebugTrace('keep_awake_held', { reason: String(reason || '') });
+  return true;
+}
+
+async function releaseRunKeepAwake(reason = 'run_end') {
+  if (keepAwakeCapTimer) { clearTimeout(keepAwakeCapTimer); keepAwakeCapTimer = 0; }
+  if (!keepAwakeHeld) return false;
+  keepAwakeHeld = false;
+  try {
+    await nativeBridge.invoke('powerKeepAwake', { content: '0', timeoutMs: 8000 });
+  } catch (_) { /* best-effort; the native side also releases on quit */ }
+  recordDebugTrace('keep_awake_released', { reason: String(reason || '') });
+  return true;
+}
+
+// Suspended wall-clock, accumulated per run. The agent loop subtracts this from a
+// tool's idle/total elapsed so a sleep can never read as a slow model.
+const machineSuspendState = {
+  suspendedMs: 0,
+  lastSleepAt: 0,
+  events: 0,
+};
+
+function resetMachineSuspendTracking() {
+  machineSuspendState.suspendedMs = 0;
+  machineSuspendState.lastSleepAt = 0;
+  machineSuspendState.events = 0;
+}
+
+function getMachineSuspendedMs() {
+  // A pending sleep (willSleep with no didWake yet) counts from when it started, so a
+  // watchdog tick during a dark wake already discounts the gap.
+  const pending = machineSuspendState.lastSleepAt
+    ? Math.max(0, Date.now() - machineSuspendState.lastSleepAt)
+    : 0;
+  return machineSuspendState.suspendedMs + pending;
+}
+
+function noteMachineSuspendGap(gapMs, source = 'clock_jump') {
+  const gap = Math.max(0, Number(gapMs) || 0);
+  if (gap <= 0) return;
+  machineSuspendState.suspendedMs += gap;
+  machineSuspendState.events += 1;
+  recordDebugTrace('machine_suspend_detected', {
+    source: String(source),
+    gapMs: String(Math.round(gap)),
+    totalSuspendedMs: String(Math.round(machineSuspendState.suspendedMs)),
+  });
+}
+
+// Pushed by the native layer (mac: NSWorkspace notifications, Windows:
+// WM_POWERBROADCAST). JS timers are frozen while suspended, so this is the only
+// precise signal; the loop's clock-jump check is the fallback.
+window.__aiExeOnPowerEvent = (event) => {
+  const phase = String((event && event.phase) || '').trim();
+  if (phase === 'willSleep') {
+    machineSuspendState.lastSleepAt = Date.now();
+    recordDebugTrace('machine_will_sleep', { runActive: String(Boolean(activeInferenceRequest)) });
+    return;
+  }
+  if (phase !== 'didWake') return;
+  const sleptAt = machineSuspendState.lastSleepAt;
+  machineSuspendState.lastSleepAt = 0;
+  if (sleptAt) noteMachineSuspendGap(Date.now() - sleptAt, 'power_event');
+  recordDebugTrace('machine_did_wake', {
+    sleptMs: String(sleptAt ? Math.round(Date.now() - sleptAt) : 0),
+    runActive: String(Boolean(activeInferenceRequest)),
+  });
+};
 
 // Stop the in-flight generation (stream + fetch) without the full cancel teardown —
 // for when the loop abandons an await on timeout but the inference keeps running.
@@ -12114,6 +12229,7 @@ async function openSettingsModal() {
     if (settingsProviderSelect) settingsProviderSelect.value = getSelectedInferenceProvider();
     if (settingsModelUrlInput) settingsModelUrlInput.value = appSettings.modelUrl;
     if (settingsKeepModelChk) settingsKeepModelChk.checked = appSettings.keepModelOnUpdate;
+    if (settingsKeepAwakeChk) settingsKeepAwakeChk.checked = appSettings.keepAwakeDuringRun !== false;
     if (settingsDebugTraceChk) settingsDebugTraceChk.checked = appSettings.debugTraceEnabled;
     const profileInput = document.getElementById('settingsUserProfile');
     if (profileInput) profileInput.value = String(appSettings.userProfile || '');
@@ -14264,6 +14380,10 @@ const agentLoop = window.AIExeAgentLoop && typeof window.AIExeAgentLoop.createAg
     get agentToolHardCapMs() { return currentAgentToolHardCapMs(); },
     markAgentToolProgress,
     getLastAgentToolProgressAt,
+    // Suspended wall-clock is subtracted from tool budgets, so a sleeping machine
+    // never reads as a slow model.
+    getMachineSuspendedMs,
+    noteMachineSuspendGap,
     agentMaxSteps,
     agentDecisionMaxTokens,
     agentDecisionGrammar,
@@ -14638,6 +14758,10 @@ async function requestSelectedDeveloperAgentReply(requestToken, chatId, rawPromp
   // Keep a live elapsed counter below the input for the whole agent run, and make
   // sure it is always torn down when the run ends (success, stop, or throw).
   startAgentElapsedTimer(0, chatId);
+  // Idle sleep suspended a run mid-file-write once (12 min, zero bytes). Hold it off for
+  // the duration, and start this run's suspend ledger from zero.
+  resetMachineSuspendTracking();
+  void acquireRunKeepAwake('AI.EXE is building your project');
   try {
     if (shouldUseExperimentalAgentLoop(promptText)) {
       recordDebugTrace('experimental_agent_route', {
@@ -14655,6 +14779,7 @@ async function requestSelectedDeveloperAgentReply(requestToken, chatId, rawPromp
     return await requestDeveloperAgentReply(requestToken, chatId, devTaskText);
   } finally {
     stopAgentElapsedTimer();
+    void releaseRunKeepAwake('run_end');
     // Forget the agent's scratch mapping at session end. Temporary Venice chats are
     // unsaved, and this route never opens a sidebar, renames, deletes, or restores Chrome.
     if (isVeniceAdapterSelected()) {
@@ -16733,6 +16858,13 @@ if (settingsModelUrlInput) {
     // Longer debounce: it's free-form prose, don't toast on every keystroke pause.
     settingsUserProfileInput.addEventListener('input', () => scheduleSettingsAutosave(900, 'About you'));
   }
+}
+if (settingsKeepAwakeChk) {
+  settingsKeepAwakeChk.addEventListener('change', () => {
+    saveSettingsFromUi({ toastChange: settingsKeepAwakeChk.checked ? 'Keep awake while building: on' : 'Keep awake while building: off' });
+    // Turning it off mid-run must take effect immediately.
+    if (!settingsKeepAwakeChk.checked) void releaseRunKeepAwake('setting_off');
+  });
 }
 if (settingsKeepModelChk) {
   settingsKeepModelChk.addEventListener('change', () => saveSettingsFromUi({ toastChange: settingsKeepModelChk.checked ? 'Keep model on update: on' : 'Keep model on update: off' }));
