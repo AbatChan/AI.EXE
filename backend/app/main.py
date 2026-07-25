@@ -18,10 +18,11 @@ except Exception:
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from .config import settings
-from .routers import (adapter, finance, generate, health, modules, package, pdf, projects, run,
-                      status, usage, workshop)
+from .routers import (adapter, chats, finance, generate, health, modules, package, pdf, projects,
+                      run, status, usage, workshop)
 from .services import adapter_manager
 
 
@@ -100,9 +101,30 @@ app = FastAPI(
     description="Frontend -> Backend API -> AI.EXE core / Python runner / packagers.",
 )
 
+_ALLOWED_ORIGINS = {o.strip() for o in settings.allowed_origins if o.strip() and o.strip() != "*"}
+
+
+@app.middleware("http")
+async def block_foreign_origins(request, call_next):
+    """Reject browser requests from any page that is not our own UI.
+
+    This backend runs on 127.0.0.1 and exposes /api/run-python plus project file
+    read/write/delete. With CORS wildcarding every origin, any website the user visited
+    could drive it and read the responses. The desktop WebView sends no Origin (or
+    "null"); a real site always sends its own, so this blocks pages without blocking us.
+    """
+    origin = (request.headers.get("origin") or "").strip()
+    if origin and origin != "null" and origin not in _ALLOWED_ORIGINS:
+        return JSONResponse(
+            {"detail": "Cross-origin request blocked: this API is local-only."},
+            status_code=403,
+        )
+    return await call_next(request)
+
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.allowed_origins,
+    allow_origins=sorted(_ALLOWED_ORIGINS) or ["null"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -121,6 +143,7 @@ app.include_router(modules.router, prefix="/api")
 app.include_router(finance.router, prefix="/api")
 app.include_router(pdf.router, prefix="/api")
 app.include_router(adapter.router, prefix="/api")
+app.include_router(chats.router, prefix="/api")
 
 
 app.include_router(workshop.router)

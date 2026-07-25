@@ -137,3 +137,10 @@ assert.equal(countBlocks('/package.json', [blocked('/other.ts'), blocked('/other
   'blocks on a different path do not count');
 
 console.log('PASS: every guard block cards; blocked changes read as blocked; stacked guards always leave one legal move; contract checks are visible, act deterministically, and disclose what they could not fix');
+
+// ---- v9.8.4: a guard skip must be recognised by its FLAG, not its prose ----
+// Live: the batch-reread guard's text has no "blocked" in it, so it rendered as a red
+// "Failed 2 files · already cached" — a guard skip reading as a real error.
+assert.match(renderer, /const guardSkip = !notFound && \(Boolean\(toolResult && \(toolResult\._guardBlock \|\| toolResult\._guardReason\)\)/,
+  'guard skips are detected from the structured flag');
+assert.match(renderer, /\|\| \/\\bblocked\\b\/i\.test\(observation\)\)/, 'the prose test remains as a fallback');

@@ -841,7 +841,11 @@
       // ("Checking the sidebar..." then silence). Permission holds keep their card.
       if (!ok && !(toolResult && toolResult.permissionRequired)) {
         const notFound = /file not found/i.test(observation);
-        const guardSkip = /\bblocked\b/i.test(observation) && !notFound;
+        // Key off the guard's own flag, not its prose — a guard whose message happens not
+        // to contain "blocked" was rendering as a red Failed ("Failed 2 files · already
+        // cached"), which reads as a real error the user must act on.
+        const guardSkip = !notFound && (Boolean(toolResult && (toolResult._guardBlock || toolResult._guardReason))
+          || /\bblocked\b/i.test(observation));
         const isMutation = tool === 'write_file' || tool === 'write_files' || tool === 'edit_file';
         const failKind = (tool === 'read_file' || tool === 'read_files' || tool === 'search_files') ? 'read'
           : (isMutation ? 'edit' : 'scan');

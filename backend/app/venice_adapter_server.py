@@ -3892,17 +3892,27 @@ def generate_selenium_streamed_response(data, driver, response_format=ResponseFo
         # Raw-text upgrade: the DOM scrape is RENDERED markdown (lossy — stripped
         # headings, mangled fences). The message's Copy carries the model's true
         # text; swap it in at stream end when it plausibly matches. Best-effort.
-        if not _structured_limit and eval_count and response_format != ResponseFormat.COMPLETION_AS_STRING:
+        # Structured replies used to skip this entirely, so every planner decision kept
+        # the DOM scrape — the channel that footnote-renumbers caret semver. Consult Copy
+        # only when the scrape shows those artifacts; a clean scrape is unchanged.
+        _scrape_has_ordinals = bool(re.search(r"\^\d+\^", str(
+            streamed_content if response_format == ResponseFormat.CHAT_NON_STREAMED else _prev) or ""))
+        if ((not _structured_limit or _scrape_has_ordinals)
+                and eval_count and response_format != ResponseFormat.COMPLETION_AS_STRING):
             _scraped_full = streamed_content if response_format == ResponseFormat.CHAT_NON_STREAMED else _prev
             if _scraped_full and len(_scraped_full) >= 40:
                 try:
                     _raw = _aiexe_raw_reply_via_copy(driver)
                 except Exception:
                     _raw = None
+                # A structured turn is bounded.
+                if _raw and _structured_limit and len(_raw) > _structured_limit:
+                    _raw = _raw[:_structured_limit]
                 if (_raw and _raw.strip() and len(_raw) >= int(0.5 * len(_scraped_full))
                         and _raw.strip() != _scraped_full.strip()
                         and _aiexe_raw_copy_is_safe_upgrade(_scraped_full, _raw)):
-                    print("AIEXE_RAWCOPY upgraded reply: %d -> %d chars" % (len(_scraped_full), len(_raw)), flush=True)
+                    print("AIEXE_RAWCOPY upgraded reply: %d -> %d chars (structured=%s, ordinals=%s)"
+                          % (len(_scraped_full), len(_raw), bool(_structured_limit), _scrape_has_ordinals), flush=True)
                     if response_format == ResponseFormat.CHAT_NON_STREAMED:
                         streamed_content = _raw
                     else:

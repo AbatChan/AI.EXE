@@ -1268,11 +1268,8 @@
             && String(event.tool || '').toLowerCase() === 'read_file'
             && deps.normalizeWorkspacePath(event.path || '') === targetPath
           ));
-          // Only a file that does not exist yet can be "created" by a raw payload. Once
-          // this run has written it, coercing an edit into a whole-file write substitutes
-          // the model's action for a different one AND walks straight into the repeat-
-          // rewrite guard — the model then narrates an edit it can never land. Guards may
-          // block; they must not swap one tool for another on an existing file.
+          // Only a not-yet-existing file can be "created" by a raw payload. Guards may
+          // block; they must not swap one tool for another on a file that exists.
           const alreadyWrittenThisRun = toolEvents.some((event) => (
             event
             && event.ok
@@ -1867,10 +1864,7 @@
         } catch (_) { /* best-effort */ }
       };
       // Tick the active phase done in plan.md, advance; returns next index (-1 = done).
-      // A phase that imports a package nothing declares is not a runnable slice. Known
-      // packages are reconciled automatically; whatever is left is unverified (possibly a
-      // typo or hallucinated name) and must never be auto-installed — so say so plainly
-      // instead of letting "Phase N done" imply it builds.
+      // Whatever is left is unverified (typo/hallucinated) and never auto-installed.
       const contractLimitationNote = () => {
         if (!openUndeclaredPackages.length) return '';
         const names = openUndeclaredPackages.slice(0, 4).join(', ');
@@ -2028,15 +2022,11 @@
       // Read-only cross-phase contract check runs at verification points (after a phase
       // validation, before the final build), bounded per run so a large tree can't hog time.
       let contractChecksRun = 0;
-      // Packages this phase's own code imports but never declared, still open. The phase
-      // cannot honestly call itself a runnable slice while one of these is outstanding.
+      // Undeclared packages this phase's own code imports.
       let openUndeclaredPackages = [];
-      // Add a package this run's files demonstrably import to package.json, using the
-      // executor's PINNED trusted table. Deterministic: no model-authored semver (Venice
-      // mangles carets), no install, no rewrite — so it cannot trip the rewrite guard.
-      // NOTE: `step` is the loop counter and is NOT in scope in these pre-loop helpers —
-      // it is passed in. (The old contract-check helper referenced it directly, so its
-      // debug trace threw a ReferenceError the surrounding catch swallowed.)
+      // Declare a demonstrably-imported package from the pinned table. No model semver,
+      // no install, no rewrite.
+      // `step` is the loop counter — NOT in scope here, so it is passed in.
       const reconcileUndeclaredPackages = async (issues, step) => {
         const undeclared = issues.filter((issue) => issue && issue.kind === 'undeclared-package' && issue.symbol);
         if (!undeclared.length || typeof deps.reconcilePackageJsonWithImports !== 'function') return null;
@@ -2095,9 +2085,7 @@
             if (pkg) ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies']
               .forEach((k) => { if (pkg[k]) dependencies = dependencies.concat(Object.keys(pkg[k])); });
           } catch (_) { /* manifest unreadable — package check just won't run */ }
-          // Mid-build, an import of a file the plan hands to a later phase is the plan
-          // working — only the final phase has nothing left to build, so only there is a
-          // missing planned file a real defect.
+          // Only the final phase has nothing left to build.
           const isFinalPhase = !phaseState || phaseState.activeIndex >= phaseState.phases.length - 1;
           const plannedFiles = Array.isArray(planSpec && planSpec.expectedFiles) ? planSpec.expectedFiles : [];
           const result = deps.runCrossPhaseContractCheck(files, {
@@ -2125,8 +2113,7 @@
             openUndeclaredPackages = [];
             return;
           }
-          // Fix what is deterministically fixable BEFORE handing the model an advisory —
-          // a known imported package is a manifest gap, not a judgement call.
+          // A known imported package is a manifest gap, not a judgement call.
           const reconciled = await reconcileUndeclaredPackages(issues, step);
           const addedNames = new Set((reconciled && reconciled.added || []).map((d) => d.name));
           const remaining = issues.filter((issue) => !(issue.kind === 'undeclared-package' && addedNames.has(issue.symbol)));
@@ -2162,10 +2149,20 @@
       // reference mismatch — NOT a syntax/truncation/empty problem (those still get
       // repaired, and continuation prevents most of them now).
       let validationFailureCount = 0;
-      // Every guard block MUST leave a card. The planner narrates its intention BEFORE a
-      // guard runs ("adding it now"), so a silent `continue` orphans that sentence — the
-      // feed showed a promise, no card, and no file change, which reads as the agent
-      // babbling. Push the observation and render the outcome through one door.
+      let redBuildContinuationUsed = false;
+      // Latest build/run proof, regardless of later edits.
+      const latestBuildIsFailing = () => {
+        for (let i = toolEvents.length - 1; i >= 0; i -= 1) {
+          const event = toolEvents[i];
+          if (!event) continue;
+          const tool = String(event.tool || '').toLowerCase();
+          if (tool !== 'run_app' && tool !== 'run_command') continue;
+          return event.ok === false || Number(event.runErrorCount || 0) > 0;
+        }
+        return false;
+      };
+      // Narration is shown BEFORE a guard runs, so a silent `continue` orphans it.
+      // Every block pushes its observation AND cards, through one door.
       const pushGuardBlock = (blockedDecision, event) => {
         toolEvents.push(event);
         try {
@@ -2173,11 +2170,8 @@
           if (card) appendAgentActivity(card);
         } catch (_) { /* a missing card must never break the run */ }
       };
-      // Guards compose. Individually each is right; stacked they can leave NO legal move:
-      // the read-back guard refuses the read, the edit gate demands one, the rewrite guard
-      // refuses the write. The model then burns steps promising an edit it cannot make.
-      // After two consecutive blocks on one path, open exactly one door: serve the real
-      // on-disk content as a genuine read so the next targeted edit is accepted.
+      // Guards compose into no-legal-move: read-back refuses the read, the edit gate
+      // demands one, the rewrite guard refuses the write. After 2 blocks, open one door.
       const consecutiveGuardBlocksForPath = (path) => {
         if (!path) return 0;
         let count = 0;
@@ -3257,10 +3251,7 @@
         // so the exact-duplicate merge no longer dropped this one.
         if (decision.thought) appendAgentNarration(decision.thought);
 
-        // Deadlock escape, ahead of every other file guard: if the last two attempts to
-        // touch this path were BOTH guard-blocked, the guards have boxed the model in.
-        // Hand it the file's real content once so the edit gate is satisfied and a
-        // targeted edit becomes possible. Runs at most once per path per run.
+        // Deadlock escape, ahead of every other file guard. Once per path.
         if (decision.action === 'tool'
           && ['read_file', 'write_file', 'edit_file'].includes(String(decision.tool || '').toLowerCase())) {
           const stuckPath = deps.normalizeWorkspacePath(decision.path || '');
@@ -3290,10 +3281,7 @@
             if (!event.ok) return false;
             const eventTool = String(event.tool || '').toLowerCase();
             if (eventTool === 'write_file') {
-              // A save that came back structurally incomplete (cut-off tail, unclosed
-              // block) is NOT a clean write. Regenerating the whole file is the
-              // documented cure for that, so the polish-loop guard must not stand in
-              // front of it — it blocked exactly that repair on a truncated component.
+              // An incomplete save is not a clean write; whole-file regen is its cure.
               if (String(event.structuralIssue || '').trim()) return false;
               sawCleanWrite = true;
               break;
@@ -4014,10 +4002,7 @@
           setAgentProgress('Continuing...');
         }
         let clippedObservation = String(toolResult.observation || '').slice(0, deps.agentMaxToolOutputChars);
-        // Handing the model the SAME rejection a second time just buys the same reply.
-        // (A run ended on step 28 doing exactly this: two identical "the edit removes the
-        // import but the file still uses it" rejections, then out of steps.) Name the
-        // change of SHAPE that can actually land instead of repeating the message.
+        // The same rejection twice buys the same reply — name a shape that can land.
         if (!toolResult.ok && clippedObservation) {
           const failurePath = deps.normalizeWorkspacePath(decision.path || '');
           const failureKey = clippedObservation.slice(0, 90);
@@ -4576,6 +4561,20 @@
               deps.normalizeWorkspacePath,
             );
             if (runtimeProofRequired) continue;
+            // Never finish on a red build. Once per run, so unfixable errors still end.
+            if (!redBuildContinuationUsed && latestBuildIsFailing() && (executionStepLimit - step) >= 3) {
+              redBuildContinuationUsed = true;
+              toolEvents.push({
+                tool: 'final_check',
+                ok: true,
+                observation: 'The requested files are written, but the most recent build FAILED and nothing has fixed it since. Do not finish yet: fix the errors that build reported, then run it again. If they cannot be fixed, say so plainly instead of finishing quietly.',
+              });
+              recordDebugTrace('agent_autofinal_blocked_red_build', {
+                chatId: String(chatId || ''), step: String(step),
+              }, { chatId: String(chatId || ''), step, toolEvents });
+              setAgentProgress('Build still failing — continuing...');
+              continue;
+            }
             // Whole-project criteria are broader than one phase. The phase's file
             // contract and validation govern phased completion; auditing every final
             // criterion here made a docs phase reread unrelated source files.

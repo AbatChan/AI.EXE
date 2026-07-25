@@ -10,7 +10,7 @@ class Settings:
     host = os.environ.get("AIEXE_BACKEND_HOST", "127.0.0.1")
     port = int(os.environ.get("AIEXE_BACKEND_PORT", "8765"))
     # CORS: the existing desktop UI + any future separate frontend.
-    allowed_origins = os.environ.get("AIEXE_BACKEND_ORIGINS", "*").split(",")
+    allowed_origins = os.environ.get("AIEXE_BACKEND_ORIGINS", "null").split(",")
     started_at = time.time()
 
     # Local persisted state (usage counters, API key). Gitignored.

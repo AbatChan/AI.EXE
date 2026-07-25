@@ -545,8 +545,7 @@
         const observation = String(event && event.observation ? event.observation : '').slice(0, 1200);
         return `ToolResult ${index + 1}: ${String(event && event.tool ? event.tool : 'unknown')}\n${observation}`;
       }).join('\n\n');
-      // Without this the batch had NO project context — every batch invented its own path
-      // for the shared store/types, which is where a phase's unresolved imports come from.
+      // The batch had NO project context, so each one invented its own store path.
       const moduleMap = typeof deps.buildAgentModuleMap === 'function'
         ? String(deps.buildAgentModuleMap(toolEvents, {
           plannedFiles: Array.isArray(planSpec && planSpec.expectedFiles) ? planSpec.expectedFiles : [],
@@ -960,15 +959,13 @@
     // Hard truth gate. The message is REPLACED with deterministic grounded text whenever the
     // latest build is RED, the code is STALE (changed after the last verification), or the task
     // is a browser-runtime error with no FRESH passing browser proof. No vocabulary guessing.
-    // Does the message already do the gate's job — no success claim, and an explicit
-    // statement that the work is not verified? Deliberately narrow: a claim wins over a
-    // disclosure, so anything ambiguous still gets replaced.
+    // Already does the gate's job? Narrow on purpose: ambiguity still gets replaced.
     function completionAlreadyDisclosesRisk(text) {
       const body = String(text || '');
       if (!body.trim()) return false;
-      // "…before it is done" is a condition and "not confirmed working" is a denial —
-      // neither is a claim. Drop conditional and negated clauses so the claim test reads
-      // only what the message actually asserts. Disclosure is still read from the full text.
+      // Naming the current failure is the truth, whatever a sub-part claim says.
+      if (/\bstill (?:failing|broken|fails|erroring|not (?:building|compiling|passing|working))\b|\b(?:build|it) is still\b|\bremains? broken\b|\bstill (?:does not|doesn'?t) (?:build|compile|pass|work)\b/i.test(body)) return true;
+      // Drop conditional/negated clauses — "before it is done" is not a claim.
       const asserted = body.replace(
         /\b(?:before|until|once|unless|when|after|not|never|no longer|isn'?t|aren'?t|wasn'?t|hasn'?t|haven'?t|won'?t|can'?t|don'?t|doesn'?t)\b[^.!?\n]*/gi,
         ' ',
@@ -978,17 +975,36 @@
       return /\bnot (?:yet )?(?:been )?(?:verified|confirmed|tested|checked|re-?checked|run|built)\b|\b(?:hasn'?t|haven'?t) been (?:verified|confirmed|checked|tested|run|built)\b|\bunverified\b|\bstill needs? (?:to be )?(?:built|verified|checked|run)\b|\bneeds? (?:to be )?(?:rebuilt|re-?verified|built and verified)\b|\bbefore (?:this|it) can be called complete\b/i.test(body);
     }
 
-    // The harness's own open findings, so a replaced message still names something the
-    // user can act on instead of a generic "it changed".
+    // Open findings, so a replaced message still names something actionable.
     function openContractIssueLines(toolEvents, max = 2) {
       const events = Array.isArray(toolEvents) ? toolEvents : [];
       for (let i = events.length - 1; i >= 0; i -= 1) {
         const event = events[i];
         if (!event || String(event.tool || '').toLowerCase() !== 'contract_check') continue;
+        // Still open only if untouched since the check — never quote a repaired finding.
+        const touchedSince = new Set();
+        events.slice(i + 1).forEach((later) => {
+          if (!later || !later.ok) return;
+          if (!['write_file', 'edit_file', 'write_files', 'move', 'delete'].includes(String(later.tool || '').toLowerCase())) return;
+          [later.path, later.writtenPath, later.dstPath, later.srcPath].forEach((p) => {
+            const norm = deps.normalizeWorkspacePath(p || '');
+            if (norm && norm !== '/') touchedSince.add(norm);
+          });
+          if (Array.isArray(later.autoWrittenFiles)) {
+            later.autoWrittenFiles.forEach((file) => {
+              const norm = deps.normalizeWorkspacePath((file && file.path) || '');
+              if (norm && norm !== '/') touchedSince.add(norm);
+            });
+          }
+        });
         const lines = String(event.observation || '').split('\n')
           .filter((line) => /^-\s*\[/.test(line.trim()))
           .map((line) => line.trim().replace(/^-\s*\[[^\]]*\]\s*/, ''))
-          .filter(Boolean);
+          .filter(Boolean)
+          .filter((line) => {
+            const owner = (line.match(/^(\/\S+?):/) || [])[1];
+            return !owner || !touchedSince.has(deps.normalizeWorkspacePath(owner));
+          });
         return lines.slice(0, max);
       }
       return [];
@@ -1001,10 +1017,7 @@
       const browserVerified = browser.hasProof && browser.passed && !browser.stale;
       const runtimeUnverified = runtimeTask && !browserVerified && !o.failed && !o.stale;
       if (!o.failed && !o.stale && !runtimeUnverified) return text;
-      // A message that already states it is unverified has nothing left to correct.
-      // Replacing it anyway threw away the better text — the model's version named the
-      // exact broken import and the next command; the deterministic one could not.
-      // Guards correct what is wrong; they do not overwrite what is already right.
+      // Already unverified-by-its-own-words: nothing left to correct.
       if (completionAlreadyDisclosesRisk(text)) {
         recordDebugTrace('agent_completion_truth_gate_kept', {
           buildFailed: String(o.buildFailed), stale: String(o.stale), runtimeUnverified: String(runtimeUnverified),
@@ -1026,16 +1039,32 @@
           ? 'The updated files need to be rebuilt and verified before this can be called complete.'
           : 'That must be resolved and the build rerun before the task is complete.';
       const openIssues = openContractIssueLines(toolEvents);
+      // Only the VERDICT is wrong — drop claim lines, keep the analysis.
+      const survivingDetail = String(text || '').split('\n')
+        .filter((line) => {
+          const trimmed = line.trim();
+          if (!trimmed) return true;
+          const asserted = trimmed.replace(
+            /\b(?:before|until|once|unless|when|after|not|never|isn'?t|hasn'?t|won'?t|doesn'?t)\b[^.!?\n]*/gi,
+            ' ',
+          );
+          return !/\b(?:fixed|resolved|solved|done|complete|works now|now works|is working|passes|verified)\b/i.test(asserted);
+        })
+        .join('\n')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim();
       recordDebugTrace('agent_completion_truth_gate_replaced', {
         buildFailed: String(o.buildFailed), validationFailed: String(o.validationFailed), stale: String(o.stale), runtimeUnverified: String(runtimeUnverified), errorLine: o.errorLine,
       }, { text: String(text || '').slice(0, 600), changed: changedUniq, openIssues });
-      return [
+      const corrected = [
         changedUniq.length ? `I changed ${changedUniq.join(', ')}.` : 'I made changes to the project.',
         status,
         o.errorLine ? `Latest error: ${o.errorLine}.` : '',
         openIssues.length ? `Still open: ${openIssues.join('; ')}.` : '',
         next,
       ].filter(Boolean).join(' ');
+      // Correction leads; surviving detail follows.
+      return survivingDetail.length >= 80 ? `${corrected}\n\n${survivingDetail}` : corrected;
     }
 
     async function generateAgentCompletionText(taskText, toolEvents, workspaceLabel, planSpec = null) {

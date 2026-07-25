@@ -534,6 +534,30 @@
       return { content: added.length ? `${JSON.stringify(pkg, null, 2)}\n` : original, added, unknown };
     }
 
+    // Caret semver footnote-mangles in the render channel ("^8.17.10" -> "^1^.17.10"),
+    // and the model's own mangled output is echoed back to it. Restate caret-free.
+    function buildCaretFreeDependencyNote(path, content) {
+      if (!/(?:^|\/)package\.json$/i.test(String(path || ''))) return '';
+      let parsed = null;
+      try { parsed = JSON.parse(String(content || '')); } catch (_) { return ''; }
+      if (!parsed || typeof parsed !== 'object') return '';
+      const rows = [];
+      ['dependencies', 'devDependencies'].forEach((key) => {
+        const section = parsed[key];
+        if (!section || typeof section !== 'object') return;
+        Object.keys(section).forEach((name) => {
+          if (rows.length >= 40) return;
+          const raw = String(section[name] || '');
+          const bare = raw.replace(/^[\^~]/, '');
+          const prefix = raw.startsWith('^') ? 'caret ' : (raw.startsWith('~') ? 'tilde ' : '');
+          rows.push(`${name} = ${prefix}${bare}`);
+        });
+      });
+      if (!rows.length) return '';
+      // This note must itself be caret-free, or it is corrupted the same way.
+      return `\n\nDEPENDENCY VERSIONS ON DISK (authoritative). The range prefix is spelled out because that character is corrupted in transit: "caret 8.17.10" means the file literally contains the caret prefix followed by 8.17.10. If the JSON above appears to show a stray digit inside a version prefix, that is a display artifact, NOT the file — the manifest is valid and does NOT need repairing. Trust these values over the JSON text above.\n${rows.join('\n')}`;
+    }
+
     function repairPackageJsonDependencyVersions(content) {
       const original = String(content || '');
       let parsed = null;
@@ -2694,7 +2718,7 @@ export default config;
           : (chunk + continuationHint);
         deps.syncFileTabFromWorkspaceWrite(path, body, deps.workspaceBaseName(path));
         observation = `read_file ${path}${rangeNote}\n${clipped || '(empty file)'}`;
-        return { ok: true, mutated, observation, readPath: path, readContent: body };
+        return { ok: true, mutated, observation: observation + buildCaretFreeDependencyNote(path, body), readPath: path, readContent: body };
       }
 
       // Single-pass project generation: one model call emits all files (like chat),

@@ -172,6 +172,12 @@
       const localOffline = options && typeof options.localOffline === 'boolean'
         ? Boolean(options.localOffline)
         : Boolean(isLocalInferenceProvider());
+      // Caret/tilde ranges get renumbered in transit ("^15.0.0" -> "^1^.0.0", sequential
+      // by first appearance) and arrive corrupted whatever the model wrote. Exact pins
+      // carry no range character, so there is nothing to corrupt.
+      if (/(?:^|\/)package\.json$/i.test(normalized)) {
+        hints.push('Write every dependency version as an EXACT version with no range prefix — "react": "18.3.1", never "^18.3.1" or "~18.3.1". A leading ^ or ~ is corrupted in transit and npm install then rejects the manifest.');
+      }
       if (normalized === '/README.md') {
         hints.push('Describe what the project does.');
         hints.push('Include setup and run instructions.');

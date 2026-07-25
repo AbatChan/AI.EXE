@@ -82,6 +82,29 @@ const excluded = buildMap(events, { excludePath: '/src/types/index.ts' });
 assert.doesNotMatch(excluded, /\/src\/types\/index\.ts/, 'the target file is not listed as an existing module');
 assert.match(excluded, /useSwarmStore/, 'its siblings still are');
 
+// ---- A store's SHAPE, not just its name ----
+// Regression: components selected s.baseColor / s.droneCount / s.speed against a store
+// that nests them under settings/timeline/music — ~50 type errors and a 38-step repair.
+const storeSource = `import { create } from 'zustand';
+export const useSwarmStore = create<SwarmStore>((set) => ({
+  drones: [],
+  settings: { droneCount: 150, maxSpeed: 2, baseColor: '#22d3ee' },
+  timeline: { keyframes: [], currentTime: 0 },
+  currentFormation: 'sphere',
+  setFormation: (n) => set({ currentFormation: n }),
+}));`;
+const withStore = buildMap([{ tool: 'write_file', ok: true, path: '/src/store/useSwarmStore.ts', content: storeSource }]);
+assert.match(withStore, /its state is EXACTLY these top-level keys/, 'the store shape is stated');
+['drones', 'settings', 'timeline', 'currentFormation', 'setFormation'].forEach((key) => {
+  assert.match(withStore, new RegExp(`\\b${key}\\b`), `top-level key ${key} is listed`);
+});
+// NESTED keys must not be advertised as top-level — that is the exact wrong guess.
+assert.doesNotMatch(withStore, /keys[^\n]*\bdroneCount\b/, 'a nested key is not listed as top-level');
+assert.doesNotMatch(withStore, /keys[^\n]*\bbaseColor\b/, 'a nested key is not listed as top-level');
+// A plain module gets no shape line.
+const plainModule = buildMap([{ tool: 'write_file', ok: true, path: '/src/lib/util.ts', content: `export function add(a, b) { return a + b; }` }]);
+assert.doesNotMatch(plainModule, /its state is EXACTLY/, 'non-store modules get no state line');
+
 // ---- Planned-but-unwritten modules get a canonical path BEFORE anyone invents one ----
 // Regression: Phase 2 built the UI before the store existed, invented "@/lib/store", and
 // every later phase inherited that broken path (51 contract issues by Phase 4).

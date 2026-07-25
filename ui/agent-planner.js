@@ -704,12 +704,8 @@
       return '';
     }
 
-    // Every module this run has already written or read, with the names it really exports.
-    // Sibling CONTENT is budget-driven and the store/types modules sit at the end of the
-    // queue, so they get starved by big engine files — and the batch generator carried no
-    // project context at all. Both made each new file invent its own module path
-    // (@/store/showStore, ../store/swarmStore, @/formations/types). This map is a few
-    // hundred bytes, so it is ALWAYS included, ahead of any content budget.
+    // Real paths + exports of existing modules. Cheap, so it always ships — sibling
+    // CONTENT is budget-driven and gets starved, which is how batches invent store paths.
     function buildAgentModuleMap(toolEvents = [], options = {}) {
       const SRC_MODULE = /\.(?:jsx?|tsx?|mjs|cjs)$/i;
       const maxModules = Math.max(1, Number(options.maxModules) || 40);
@@ -745,6 +741,37 @@
         if (/\bexport\s+default\b/.test(source)) names.add('default');
         return Array.from(names);
       };
+      // Export name isn't enough — consumers guess the state shape too.
+      const storeStateKeys = (text) => {
+        const call = /\b(?:export\s+)?(?:const|let|var)\s+[A-Za-z_$][\w$]*\s*=\s*(?:create|createStore|createWithEqualityFn|configureStore)\s*(?:<[\s\S]*?>)?\s*\(/.exec(text);
+        if (!call) return [];
+        const open = text.indexOf('{', call.index + call[0].length);
+        if (open === -1) return [];
+        let depth = 0;
+        let body = '';
+        for (let i = open; i < text.length; i += 1) {
+          if (text[i] === '{') depth += 1;
+          else if (text[i] === '}') { depth -= 1; if (depth === 0) { body = text.slice(open + 1, i); break; } }
+        }
+        if (!body) return [];
+        const clean = body.replace(/'(?:\\.|[^'])*'|"(?:\\.|[^"])*"|`(?:\\.|[^`])*`/g, '""');
+        const keys = [];
+        let level = 0;
+        for (let i = 0; i < clean.length; i += 1) {
+          const ch = clean[i];
+          if (ch === '{' || ch === '(' || ch === '[') { level += 1; continue; }
+          if (ch === '}' || ch === ')' || ch === ']') { level -= 1; continue; }
+          if (level !== 0 || !/[A-Za-z_$]/.test(ch)) continue;
+          let j = i;
+          let id = '';
+          while (j < clean.length && /[\w$]/.test(clean[j])) { id += clean[j]; j += 1; }
+          let k = j;
+          while (k < clean.length && /\s/.test(clean[k])) k += 1;
+          if (clean[k] === ':' && keys.indexOf(id) === -1) keys.push(id);
+          i = j - 1;
+        }
+        return keys;
+      };
       const rows = [];
       // The alias is stated only when the project really has one — from a file that uses
       // it, or from the tsconfig paths entry that defines it (which exists before the
@@ -759,12 +786,14 @@
         const names = exportedNames(content);
         if (!names.length) return;
         const shown = names.slice(0, 12).join(', ');
-        rows.push(`- ${path} → ${shown}${names.length > 12 ? ` (+${names.length - 12} more)` : ''}`);
+        const stateKeys = storeStateKeys(content);
+        const shape = stateKeys.length
+          ? `\n  its state is EXACTLY these top-level keys — select only these, at this nesting: ${stateKeys.slice(0, 24).join(', ')}`
+          : '';
+        rows.push(`- ${path} → ${shown}${names.length > 12 ? ` (+${names.length - 12} more)` : ''}${shape}`);
       });
-      // Modules the plan owns that nothing has written yet. A phase that builds UI before
-      // the store exists has no module to point at, so it invents one (@/lib/store) and
-      // every later phase inherits the wrong path. Naming the canonical location up front
-      // is the only thing that can prevent that.
+      // Planned-but-unwritten: an early phase with no module to point at invents one,
+      // and every later phase inherits that path.
       const plannedRows = [];
       (options.plannedFiles || []).forEach((rawPath) => {
         const path = normalizeWorkspacePath(rawPath || '');
@@ -812,8 +841,7 @@
       const today = new Date();
       sections.push(`Current date: ${today.toISOString().slice(0, 10)} (year ${today.getFullYear()}). Use ${today.getFullYear()} for any generated dates, sample data, or copyright years.`);
       if (expectedFiles.length) sections.push(`Expected files: ${expectedFiles.join(', ')}`);
-      // Ahead of the content budget: a starved sibling section must never leave the model
-      // guessing where the store or the shared types live.
+      // Ahead of the content budget so it can't be starved out.
       const moduleMap = buildAgentModuleMap(toolEvents, { excludePath: normalizedExclude, plannedFiles: expectedFiles });
       if (moduleMap) sections.push(moduleMap);
       // Sibling context, window-driven: full content when it fits (chat-grade
@@ -1444,14 +1472,11 @@
       const aliases = options.aliases || { '@/': '/src/' };
       const declaredPackages = new Set(options.dependencies || []);
       const fileMap = files && typeof files === 'object' ? files : {};
-      // Non-module files that exist but are never parsed (css, images, fonts, data).
-      // They must count for import RESOLUTION or every `import "./x.css"` looks broken.
+      // Assets exist but are never parsed; they still count for import resolution.
       const assetPaths = new Set((options.assetPaths || []).map((p) => `/${String(p || '').replace(/^\/+/, '')}`));
       // A capped/partial walk cannot prove a file is absent — skip "missing" claims then.
       const workspaceTruncated = Boolean(options.truncated);
-      // Files the plan says a LATER phase will create. Mid-build, an import pointing at
-      // one of these is the plan working as intended, not a defect — it only becomes an
-      // issue once nothing is left to build (the final phase).
+      // Planned for a later phase: on-plan mid-build, a defect only in the final phase.
       const plannedFiles = new Set((options.plannedFiles || []).map((p) => `/${String(p || '').replace(/^\/+/, '')}`));
       const deferPlannedImports = Boolean(options.deferPlannedImports) && plannedFiles.size > 0;
       const paths = Object.keys(fileMap).filter((p) => SRC_RE.test(p));
@@ -1617,7 +1642,7 @@
             if (!resolved) {
               // Never claim a file is missing from a partial view of the workspace.
               if (workspaceTruncated) return;
-              // Scheduled, not broken: the plan owns this file, a later phase writes it.
+              // Scheduled, not broken.
               if (deferPlannedImports && isPlannedForLater(base)) {
                 deferred.push({
                   kind: 'planned-import',

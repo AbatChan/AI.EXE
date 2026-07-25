@@ -1,0 +1,165 @@
+"""Durable chat storage.
+
+Chats used to live only in the WebView's localStorage, which WebKit caps at 5 MB per
+origin. One heavy agent project fills that, every later write fails, and `saveChats`
+starts dropping whole conversations to fit. A user lost 10 chats that way.
+
+Storage and prompt budget are different problems: the prompt must be trimmed to control
+tokens, storage has no reason to delete anything. This module is the durable side —
+nothing here ever deletes a chat to save space. Agent activity is stored per-chat so a
+heavy run can be shed on its own without touching the conversation.
+
+Lives in the backend data dir (%LOCALAPPDATA%\\AI_EXE\\backend on Windows, the app's
+Application Support dir on macOS), so it survives an app update.
+"""
+from __future__ import annotations
+
+import json
+import os
+import sqlite3
+import threading
+import time
+from typing import Dict, List, Optional
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS chats (
+    id           TEXT PRIMARY KEY,
+    user_scope   TEXT NOT NULL,
+    name         TEXT,
+    payload      TEXT NOT NULL,
+    created_at   INTEGER NOT NULL,
+    updated_at   INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_chats_scope_updated ON chats (user_scope, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS chat_activity (
+    chat_id      TEXT NOT NULL,
+    seq          INTEGER NOT NULL,
+    payload      TEXT NOT NULL,
+    created_at   INTEGER NOT NULL,
+    PRIMARY KEY (chat_id, seq)
+);
+
+CREATE TABLE IF NOT EXISTS chat_backups (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_scope   TEXT NOT NULL,
+    reason       TEXT NOT NULL,
+    payload      TEXT NOT NULL,
+    created_at   INTEGER NOT NULL
+);
+"""
+
+
+def _now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+class ChatStore:
+    def __init__(self, data_dir: str) -> None:
+        os.makedirs(data_dir, exist_ok=True)
+        self._path = os.path.join(data_dir, "chats.sqlite3")
+        self._lock = threading.Lock()
+        with self._connect() as conn:
+            conn.executescript(SCHEMA)
+        try:
+            os.chmod(self._path, 0o600)
+        except OSError:
+            pass
+
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self._path, timeout=10)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        return conn
+
+    # ---- reads -------------------------------------------------------------
+    def list_chats(self, scope: str) -> List[Dict]:
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(
+                "SELECT payload FROM chats WHERE user_scope = ? ORDER BY updated_at DESC",
+                (scope,),
+            ).fetchall()
+        out: List[Dict] = []
+        for row in rows:
+            try:
+                out.append(json.loads(row["payload"]))
+            except (ValueError, TypeError):
+                continue
+        return out
+
+    def count(self, scope: str) -> int:
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS n FROM chats WHERE user_scope = ?", (scope,)
+            ).fetchone()
+        return int(row["n"] if row else 0)
+
+    # ---- writes ------------------------------------------------------------
+    def upsert_many(self, scope: str, chats: List[Dict]) -> int:
+        """Insert or update chats. Never deletes anything that is not in the payload —
+        a partial save from a client that trimmed its own list must not erase history."""
+        written = 0
+        with self._lock, self._connect() as conn:
+            for chat in chats or []:
+                chat_id = str((chat or {}).get("id") or "").strip()
+                if not chat_id:
+                    continue
+                blob = json.dumps(chat, ensure_ascii=False)
+                created = int(chat.get("createdAt") or _now_ms())
+                updated = int(chat.get("updatedAt") or chat.get("createdAt") or _now_ms())
+                conn.execute(
+                    """INSERT INTO chats (id, user_scope, name, payload, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(id) DO UPDATE SET
+                         user_scope = excluded.user_scope,
+                         name       = excluded.name,
+                         payload    = excluded.payload,
+                         updated_at = excluded.updated_at""",
+                    (chat_id, scope, str(chat.get("name") or ""), blob, created, updated),
+                )
+                written += 1
+            conn.commit()
+        return written
+
+    def delete_chat(self, scope: str, chat_id: str) -> bool:
+        """Explicit user deletion only. Nothing in this module deletes to reclaim space."""
+        with self._lock, self._connect() as conn:
+            cur = conn.execute(
+                "DELETE FROM chats WHERE user_scope = ? AND id = ?", (scope, str(chat_id))
+            )
+            conn.execute("DELETE FROM chat_activity WHERE chat_id = ?", (str(chat_id),))
+            conn.commit()
+            return cur.rowcount > 0
+
+    def snapshot(self, scope: str, reason: str) -> int:
+        """Keep a restorable copy before a risky operation (import, migration)."""
+        chats = self.list_chats(scope)
+        if not chats:
+            return 0
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                "INSERT INTO chat_backups (user_scope, reason, payload, created_at) VALUES (?, ?, ?, ?)",
+                (scope, str(reason or "manual"), json.dumps(chats, ensure_ascii=False), _now_ms()),
+            )
+            conn.commit()
+        return len(chats)
+
+    def import_chats(self, scope: str, chats: List[Dict], reason: str = "import") -> Dict:
+        """Additive restore: existing chats win, missing ones are added back."""
+        self.snapshot(scope, reason)
+        existing = {str(c.get("id")) for c in self.list_chats(scope)}
+        fresh = [c for c in (chats or []) if str((c or {}).get("id") or "") not in existing]
+        added = self.upsert_many(scope, fresh)
+        return {"added": added, "skipped": len(chats or []) - added, "total": self.count(scope)}
+
+    def stats(self) -> Dict:
+        with self._lock, self._connect() as conn:
+            scopes = conn.execute(
+                "SELECT user_scope, COUNT(*) AS n FROM chats GROUP BY user_scope"
+            ).fetchall()
+        size = os.path.getsize(self._path) if os.path.exists(self._path) else 0
+        return {
+            "path": self._path,
+            "sizeBytes": size,
+            "scopes": {row["user_scope"]: int(row["n"]) for row in scopes},
+        }

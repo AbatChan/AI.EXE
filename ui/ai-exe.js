@@ -10005,9 +10005,16 @@ function stopVeniceAdapterGeneration(chatId = '') {
 // (one {message:{content}} line per Venice chunk) so chat text, <thinking> and the agent's
 // live file-generation view all update as the model writes — no more one-delta-at-the-end.
 // Falls back to the one-shot passthrough if the stream endpoint fails.
+// One in-flight adapter request per chat (see the supersede logic below).
+const adapterInFlightByChat = new Map();
+
 async function streamOllamaChatCompletion(provider, prompt, handlers = {}, options = {}) {
   const model = getProviderModel(provider);
   if (!model) return null;
+  // The adapter types ONLY the last user message into Venice (venice_adapter_server.py
+  // ~3486) and drops system/assistant roles. So the full prompt MUST stay in that one
+  // user message — splitting it into roles silently sent the model no system prompt.
+  // The leak defence lives on the reply side (cutLeakedPromptEcho), not here.
   const messages = options.systemPrompt
     ? [{ role: 'system', content: String(options.systemPrompt) }, { role: 'user', content: String(prompt || '') }]
     : [{ role: 'user', content: String(prompt || '') }];
@@ -10022,11 +10029,29 @@ async function streamOllamaChatCompletion(provider, prompt, handlers = {}, optio
   const maxOutputChars = Math.max(0, Number(options.maxOutputChars) || 0);
   const stopOnCompleteJson = Boolean(options.stopOnCompleteJson);
   let structuredStreamError = '';
+  // The adapter drives ONE browser behind a single lock. A timeout that abandons the wait
+  // without closing the socket leaves the request queued, so the next attempt stacks
+  // behind it — a live run reached 24 queued connections and every step then waited ~5
+  // minutes and fell back. One in-flight request per chat: superseding aborts the old one,
+  // which closes the socket so the adapter stops working for a listener that is gone.
+  const streamController = options.abortController instanceof AbortController
+    ? options.abortController
+    : (typeof AbortController === 'function' ? new AbortController() : null);
+  const inFlightKey = String(chatId || 'default');
+  const previousInFlight = adapterInFlightByChat.get(inFlightKey);
+  if (previousInFlight && previousInFlight.controller && previousInFlight.controller !== streamController) {
+    try { previousInFlight.controller.abort(); } catch (_) { /* already gone */ }
+    pushDebugTrace('adapter_request_superseded', {
+      chatId: inFlightKey,
+      ageMs: String(Math.max(0, Date.now() - Number(previousInFlight.startedAt || 0))),
+    });
+  }
+  if (streamController) adapterInFlightByChat.set(inFlightKey, { controller: streamController, startedAt: Date.now() });
   try {
     const response = await fetch(getAIExeBackendUrl() + '/api/provider/stream', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      signal: options.abortController ? options.abortController.signal : undefined,
+      signal: streamController ? streamController.signal : undefined,
       body: JSON.stringify({
         messages,
         max_tokens: Math.max(1, Number(options.maxTokens) || 4096),
@@ -10158,6 +10183,9 @@ async function streamOllamaChatCompletion(provider, prompt, handlers = {}, optio
   } catch (err) {
     if (err && err.name === 'AbortError') return { ok: false, cancelled: true, message: 'Cancelled by user.' };
     // fall through to the one-shot fallback
+  } finally {
+    const stillMine = adapterInFlightByChat.get(inFlightKey);
+    if (stillMine && stillMine.controller === streamController) adapterInFlightByChat.delete(inFlightKey);
   }
   // Structured planner calls must stay bounded. Falling back to the adapter's
   // unbounded one-shot path would recreate the exact runaway-output timeout this
@@ -12160,6 +12188,7 @@ function refreshWorkspaceForCurrentUser() {
   if (fileViewer) fileViewer.classList.add('hidden');
 
   loadStoredChats();
+  void hydrateChatsFromDurableStore();
   loadStoredArtifacts();
   loadStoredWorkspace();
   renderHistory();
@@ -13521,13 +13550,9 @@ async function getWorkspaceFileTreeSummary(markPaths = null) {
   return text;
 }
 
-// Read the workspace for the read-only cross-phase contract check. TWO sets, because
-// they answer different questions: `files` are parseable modules (contents read), and
-// `assetPaths` are every other importable file — css, images, fonts, data. Import
-// RESOLUTION needs the asset set; only the module set gets parsed. Collecting modules
-// alone made `import "./globals.css"` look unresolved. Bounded: skips dependency/build
-// dirs, caps file count and per-file size, and reports when that cap truncated the walk
-// (a truncated view can't prove a file is absent).
+// Workspace read for the contract check. TWO sets: `files` are parseable modules,
+// `assetPaths` is every other importable file (resolution needs them, parsing doesn't).
+// Bounded; reports truncation, since a partial view can't prove a file is absent.
 async function collectWorkspaceSourceFiles(maxFiles = 200, maxBytesPerFile = 60000) {
   const ctx = typeof getWorkspaceContext === 'function' ? getWorkspaceContext() || {} : {};
   if (!ctx.workspaceRootName && !ctx.rootLoaded) return { files: {}, assetPaths: [], truncated: false };
@@ -15501,15 +15526,17 @@ function saveChats() {
     () => stripAttachmentPreviews(basePayload),
     () => shedAgentWeight(removeMirroredActiveMessages(stripAttachmentPreviews(basePayload))),
     () => shedAgentWeight(removeMirroredActiveMessages(stripAttachmentPreviews(basePayload)), 4),
-    () => shedAgentWeight(removeMirroredActiveMessages(stripAttachmentPreviews(basePayload)), 1).slice(0, 30),
-    () => shedAgentWeight(removeMirroredActiveMessages(stripAttachmentPreviews(basePayload)), 1).slice(0, 12),
+    // These used to slice the LIST (30 -> 12 -> 4 chats), which permanently deleted
+    // conversations to fit a 5 MB cache. Shed CONTENT instead: every chat stays, so the
+    // sidebar is complete even from cache alone, and the DB holds the full history.
     () => keepRecentThreadMessages(
-      shedAgentWeight(removeMirroredActiveMessages(stripAttachmentPreviews(basePayload)), 1).slice(0, 12),
-      24,
+      shedAgentWeight(removeMirroredActiveMessages(stripAttachmentPreviews(basePayload)), 1), 24,
     ),
     () => keepRecentThreadMessages(
-      shedAgentWeight(removeMirroredActiveMessages(stripAttachmentPreviews(basePayload)), 0).slice(0, 4),
-      8,
+      shedAgentWeight(removeMirroredActiveMessages(stripAttachmentPreviews(basePayload)), 0), 8,
+    ),
+    () => keepRecentThreadMessages(
+      shedAgentWeight(removeMirroredActiveMessages(stripAttachmentPreviews(basePayload)), 0), 2,
     ),
   ];
   let saved = false;
@@ -15520,6 +15547,10 @@ function saveChats() {
       break;
     } catch (_) { /* over quota — escalate to a lighter payload */ }
   }
+  // The DB is the source of truth: it gets the FULL list regardless of what the cache
+  // could hold, so a full localStorage can no longer cost the user a conversation.
+  // Defensive: a durability helper must never be able to break the save path itself.
+  try { if (typeof persistChatsDurable === 'function') void persistChatsDurable(chats); } catch (_) { }
   if (!saved && typeof recordDebugTrace === 'function') {
     try {
       recordDebugTrace('save_chats_quota_exhausted', { chatCount: String(chats.length) }, { chatCount: chats.length });
@@ -15543,6 +15574,58 @@ function normalizeStoredPendingPreflightConfirmation(value) {
     workspaceOpen,
     createdAt,
   };
+}
+
+
+// Chats live in the backend SQLite store (see backend/app/chatstore.py). localStorage is
+// only a cache: WebKit caps it at 5 MB per origin, and once a heavy agent project fills
+// it every save fails and the old ladder started dropping whole conversations. The DB has
+// no such cap and never deletes to reclaim space.
+function durableChatScope() {
+  const key = scopedStorageKey(chatsStoragePrefix);
+  if (!key) return '';
+  const parts = String(key).split('::');
+  return parts.length > 1 ? parts[parts.length - 1].trim().toLowerCase() : '';
+}
+
+function persistChatsDurable(list) {
+  const scope = durableChatScope();
+  if (!scope || !Array.isArray(list) || !list.length) return Promise.resolve();
+  return fetch(`${getAIExeBackendUrl()}/api/chats/${encodeURIComponent(scope)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ chats: list }),
+  }).catch(() => { });
+}
+
+// Anything the DB has that the cache lost comes back on boot. Retries briefly because
+// the backend is still starting when the UI boots.
+async function hydrateChatsFromDurableStore(attempt = 0) {
+  const scope = durableChatScope();
+  if (!scope) return 0;
+  let stored = null;
+  try {
+    const res = await fetch(`${getAIExeBackendUrl()}/api/chats/${encodeURIComponent(scope)}`);
+    if (res.ok) {
+      const body = await res.json();
+      stored = Array.isArray(body && body.chats) ? body.chats : [];
+    }
+  } catch (_) { stored = null; }
+  if (stored === null) {
+    if (attempt >= 5) return 0;
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    return hydrateChatsFromDurableStore(attempt + 1);
+  }
+  const have = new Set(chats.map((chat) => chat && chat.id).filter(Boolean));
+  const restored = stored.filter((chat) => chat && typeof chat.id === 'string' && !have.has(chat.id));
+  if (!restored.length) return 0;
+  chats = chats.concat(restored);
+  sortChatsInPlace();
+  // Hydration finishes AFTER boot has already painted, so repaint here or the restored
+  // chats sit in memory and never reach the sidebar.
+  try { renderHistory(); } catch (_) { }
+  try { renderSidebarCounts(); } catch (_) { }
+  return restored.length;
 }
 
 function loadStoredChats() {
@@ -19555,10 +19638,23 @@ function stripProviderUiChrome(text) {
   }).join('\n');
 }
 
+// A reply that starts echoing the prompt is over: everything from that point on is our
+// own system text (identity rules, routing token, user profile), never an answer. Cut it
+// off rather than deleting the marker and leaving the body on screen.
+function cutLeakedPromptEcho(text) {
+  const src = String(text || '');
+  let cut = src.length;
+  [/<\|im_start\|>/i, /\[\s*Internal context[^\]]*\]/i, /^#{0,6}\s*Retrieved Memories\b/im, /^\s*You are AI\.EXE, a software-engineering assistant\./im]
+    .forEach((re) => {
+      const m = src.match(re);
+      if (m && m.index >= 0 && m.index < cut) cut = m.index;
+    });
+  return cut < src.length ? src.slice(0, cut).trimEnd() : src;
+}
+
 function sanitizeAssistantDelta(text) {
   return stripProviderUiChrome(stripThinkingBlocksAndFragments(
-    String(text || '')
-      .replace(/<\|im_start\|>/gi, '')
+    cutLeakedPromptEcho(text)
       .replace(/<\|im_end\|>/gi, '')
       .replace(/^\s*\[\s*Prompt:[^\]]*\]\s*$/gim, '')
       .replace(/^\s*llama_memory_breakdown_print:.*$/gim, '')

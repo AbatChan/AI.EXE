@@ -3,6 +3,7 @@ import os
 
 from .adapter import AdapterManager
 from .config import settings
+from .chatstore import ChatStore
 from .finance import FinanceStore
 from .modules import ModuleStore
 from .projects import ProjectStore
@@ -27,5 +28,8 @@ project_store = ProjectStore(base_dir=os.path.join(settings.data_dir, "projects"
 module_store = ModuleStore(base_dir=os.path.join(settings.workshop_dir, "modules"))
 
 finance_store = FinanceStore(data_dir=settings.data_dir)
+
+# Durable chat storage — see chatstore.py. Never trimmed to reclaim space.
+chat_store = ChatStore(data_dir=settings.data_dir)
 
 adapter_manager = AdapterManager(settings.data_dir)
