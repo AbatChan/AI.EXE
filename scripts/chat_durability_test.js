@@ -41,7 +41,13 @@ assert.match(hydrate, /attempt >= 5/, 'it retries while the backend is still sta
 // ---- The store itself never deletes to reclaim space ----
 assert.match(store, /def delete_chat/, 'explicit deletion exists');
 assert.match(store, /Explicit user deletion only/, 'and it is documented as user-driven only');
-assert.doesNotMatch(store, /LIMIT \d+|\[:\s*\d+\]/, 'no silent truncation anywhere in the store');
+// No silent truncation on the LIVE chat path — that is what dropped conversations. Scoped
+// to the live read/write region: the deleted-copy helpers legitimately use LIMIT 1 to pick
+// the newest backup for ONE chat, which is not list truncation.
+const liveRegion = store.slice(store.indexOf('def list_chats'), store.indexOf('def delete_chat'));
+assert.doesNotMatch(liveRegion, /LIMIT \d+|\[:\s*\d+\]/, 'no silent truncation on the live chat path');
+assert.match(store, /SELECT payload FROM chats WHERE user_scope = \? ORDER BY updated_at DESC",/,
+  'listing chats reads every row — no LIMIT crept into it');
 assert.match(store, /def import_chats/, 'additive restore exists');
 assert.match(store, /self\.snapshot\(scope, reason\)/, 'an import snapshots first so it is reversible');
 
@@ -93,5 +99,24 @@ assert.match(aiExe, /async function flushChatTombstones\(\)/, 'and retried later
 assert.match(hydrate, /if \(deleted\.has\(chat\.id\)\) continue;/, 'a deleted chat is never hydrated back');
 assert.match(router, /@router\.get\("\/chats\/\{scope\}\/\{chat_id\}"\)/, 'per-chat read exists for stub fills');
 assert.match(router, /@router\.delete\("\/chats\/\{scope\}\/\{chat_id\}"\)/, 'the delete endpoint exists');
+
+// ---- v9.9.4: a delete is recoverable for 30 days, then it is really gone ----
+// A misclick should not be as final as the v9.9.1 bug was; the chat still leaves the
+// sidebar instantly, the copy just lives in chat_backups until retention expires.
+assert.match(store, /DELETED_RETENTION_DAYS = 30/, 'retention is 30 days');
+const deleteFn = store.slice(store.indexOf('def delete_chat'), store.indexOf('def list_deleted'));
+assert.match(deleteFn, /INSERT INTO chat_backups/, 'the conversation is snapshotted before removal');
+assert.ok(deleteFn.indexOf('INSERT INTO chat_backups') < deleteFn.indexOf('DELETE FROM chats'),
+  'snapshot FIRST — a crash mid-delete must not lose the only copy');
+assert.match(deleteFn, /DELETE FROM chat_backups WHERE created_at < \?/, 'expired copies are pruned');
+assert.match(store, /def list_deleted/, 'recoverable deletions can be listed');
+assert.match(store, /def restore_deleted/, 'and restored');
+assert.match(store, /if not chat_id or chat_id in live or chat_id in seen:/,
+  'an already-restored chat is not offered as recoverable');
+// Route order is a real trap: /{chat_id} would swallow the literal "deleted" path.
+assert.ok(router.indexOf('"/chats/{scope}/deleted"') < router.indexOf('"/chats/{scope}/{chat_id}"'),
+  'the literal /deleted route is declared before /{chat_id} or it is unreachable');
+assert.match(router, /@router\.post\("\/chats\/\{scope\}\/deleted\/\{chat_id\}\/restore"\)/,
+  'the restore endpoint exists');
 
 console.log('PASS: chats are never deleted to save space, every save reaches the DB, a cache stub can never blank stored history, deleted chats stay deleted, boot restores what the cache lost, and the local API refuses foreign origins');

@@ -50,6 +50,12 @@ CREATE TABLE IF NOT EXISTS chat_backups (
 """
 
 
+# A deleted chat leaves the sidebar at once but stays recoverable for a month — a
+# misclick should not be as final as a bug was. Nothing else prunes this table.
+DELETED_RETENTION_DAYS = 30
+DELETED_RETENTION_MS = DELETED_RETENTION_DAYS * 24 * 60 * 60 * 1000
+
+
 def _now_ms() -> int:
     return int(time.time() * 1000)
 
@@ -172,14 +178,83 @@ class ChatStore:
         return {"written": written, "protected": protected}
 
     def delete_chat(self, scope: str, chat_id: str) -> bool:
-        """Explicit user deletion only. Nothing in this module deletes to reclaim space."""
+        """Explicit user deletion only. Nothing in this module deletes to reclaim space.
+
+        The conversation is snapshotted first and kept for DELETED_RETENTION_DAYS, so a
+        misclick is recoverable for a month. It leaves the sidebar immediately either way."""
+        cid = str(chat_id)
         with self._lock, self._connect() as conn:
+            row = conn.execute(
+                "SELECT payload FROM chats WHERE user_scope = ? AND id = ?", (scope, cid)
+            ).fetchone()
+            if row:
+                conn.execute(
+                    "INSERT INTO chat_backups (user_scope, reason, payload, created_at)"
+                    " VALUES (?, ?, ?, ?)",
+                    (scope, f"deleted-{cid}", row["payload"], _now_ms()),
+                )
             cur = conn.execute(
-                "DELETE FROM chats WHERE user_scope = ? AND id = ?", (scope, str(chat_id))
+                "DELETE FROM chats WHERE user_scope = ? AND id = ?", (scope, cid)
             )
-            conn.execute("DELETE FROM chat_activity WHERE chat_id = ?", (str(chat_id),))
+            conn.execute("DELETE FROM chat_activity WHERE chat_id = ?", (cid,))
+            # Retention is enforced here rather than on a timer: deletes are the only
+            # thing that grows this table on a normal day.
+            conn.execute(
+                "DELETE FROM chat_backups WHERE created_at < ?",
+                (_now_ms() - DELETED_RETENTION_MS,),
+            )
             conn.commit()
             return cur.rowcount > 0
+
+    def list_deleted(self, scope: str) -> List[Dict]:
+        """Recoverable deletions, newest first. A backup nobody can find is not a backup."""
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(
+                "SELECT reason, payload, created_at FROM chat_backups"
+                " WHERE user_scope = ? AND reason LIKE 'deleted-%' ORDER BY created_at DESC",
+                (scope,),
+            ).fetchall()
+            live = {r["id"] for r in conn.execute("SELECT id FROM chats WHERE user_scope = ?", (scope,))}
+        out: List[Dict] = []
+        seen = set()
+        for row in rows:
+            chat_id = str(row["reason"])[len("deleted-"):]
+            if not chat_id or chat_id in live or chat_id in seen:
+                continue
+            try:
+                chat = json.loads(row["payload"])
+            except (ValueError, TypeError):
+                continue
+            seen.add(chat_id)
+            out.append({
+                "id": chat_id,
+                "name": str((chat or {}).get("name") or ""),
+                "deletedAt": int(row["created_at"]),
+                "messageCount": self._message_total(chat),
+                "expiresAt": int(row["created_at"]) + DELETED_RETENTION_MS,
+            })
+        return out
+
+    def restore_deleted(self, scope: str, chat_id: str) -> Optional[Dict]:
+        """Put a deleted conversation back. Returns the restored chat, or None if it is
+        past retention (or was never deleted through this store)."""
+        cid = str(chat_id)
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                "SELECT payload FROM chat_backups WHERE user_scope = ? AND reason = ?"
+                " ORDER BY created_at DESC LIMIT 1",
+                (scope, f"deleted-{cid}"),
+            ).fetchone()
+        if not row:
+            return None
+        try:
+            chat = json.loads(row["payload"])
+        except (ValueError, TypeError):
+            return None
+        if not isinstance(chat, dict) or not chat.get("id"):
+            return None
+        self.upsert_many(scope, [chat])
+        return chat
 
     def snapshot(self, scope: str, reason: str) -> int:
         """Keep a restorable copy before a risky operation (import, migration)."""
