@@ -151,6 +151,10 @@
       const chat = deps.findChatById(chatId);
       if (!chat) return;
       deps.ensureChatThreadState(chat);
+      // A cache stub has a title but no history until the DB fills it.
+      if (typeof deps.ensureChatContentLoaded === 'function') {
+        void deps.ensureChatContentLoaded(chatId);
+      }
       deps.enterChatView();
       deps.setActiveChatId(chatId);
       deps.setInNewChatMode(false);

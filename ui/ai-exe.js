@@ -8,6 +8,7 @@ const plusButton = document.querySelector('.btn-plus');
 const rootStyle = document.documentElement.style;
 const layoutStorageKey = 'ai_exe_layout_v1';
 const chatsStoragePrefix = 'ai_exe_chats_v3';
+const chatTombstonesStoragePrefix = 'ai_exe_deleted_chats_v1';
 const activeChatStoragePrefix = 'ai_exe_active_chat_v2';
 const pendingAttachmentsStoragePrefix = 'ai_exe_pending_attachments_v2';
 const attachmentMediaDbName = 'ai_exe_attachment_media_v1';
@@ -13058,6 +13059,7 @@ const chatShell = window.AIExeChatShell && typeof window.AIExeChatShell.createCh
     openChatActionModal,
     findChatById,
     ensureChatThreadState,
+    ensureChatContentLoaded,
     enterChatView,
     persistActiveChatId,
     renderActiveChat,
@@ -15384,6 +15386,41 @@ function stripChatStorageHeavyFields(chat) {
   return next;
 }
 
+
+// The cache must never fill the origin quota again. Chats live in the DB now, so
+// localStorage only needs enough to paint the sidebar and recent conversations offline.
+// Beyond the budget, older chats become title-only stubs — still listed, content loaded
+// from the DB on demand. Without this the chats key alone was 4.38 MB of a 5 MB quota,
+// so EVERY other write (API keys, password, artifacts, workspace) silently failed too.
+const CHAT_CACHE_BUDGET_CHARS = 600000;
+
+function boundChatCacheToBudget(payload, budget = CHAT_CACHE_BUDGET_CHARS) {
+  const list = Array.isArray(payload) ? payload : [];
+  const out = [];
+  let used = 0;
+  for (const chat of list) {
+    if (!chat || typeof chat !== 'object') continue;
+    const full = JSON.stringify(chat);
+    // The newest chat is the one on screen — never stub it, however big it is. The
+    // content-shedding rungs below handle a single oversized conversation.
+    if (!out.length || used + full.length <= budget) {
+      out.push(chat);
+      used += full.length;
+      continue;
+    }
+    out.push({
+      id: chat.id,
+      name: chat.name,
+      customName: chat.customName,
+      createdAt: chat.createdAt,
+      updatedAt: chat.updatedAt,
+      messages: [],
+      _cacheStub: true,
+    });
+  }
+  return out;
+}
+
 function saveChats() {
   const key = scopedStorageKey(chatsStoragePrefix);
   if (!key) return;
@@ -15522,8 +15559,8 @@ function saveChats() {
   // Escalating attempts, lightest last. Never swallow into a total no-op: keeping the
   // newest conversation matters more than keeping the full agent transcript/revert data.
   const attempts = [
-    () => basePayload,
-    () => stripAttachmentPreviews(basePayload),
+    () => boundChatCacheToBudget(basePayload),
+    () => boundChatCacheToBudget(stripAttachmentPreviews(basePayload)),
     () => shedAgentWeight(removeMirroredActiveMessages(stripAttachmentPreviews(basePayload))),
     () => shedAgentWeight(removeMirroredActiveMessages(stripAttachmentPreviews(basePayload)), 4),
     // These used to slice the LIST (30 -> 12 -> 4 chats), which permanently deleted
@@ -15588,13 +15625,102 @@ function durableChatScope() {
   return parts.length > 1 ? parts[parts.length - 1].trim().toLowerCase() : '';
 }
 
+// A user deletion has to outlive a backend that is down or slow: without a tombstone the
+// DB keeps the row and the next boot hydrates the deleted chat straight back into the
+// sidebar. Tombstones are ids only (tiny), retried on every boot until the DB confirms.
+function loadChatTombstones() {
+  const key = scopedStorageKey(chatTombstonesStoragePrefix);
+  if (!key) return [];
+  try {
+    const parsed = JSON.parse(localStorage.getItem(key) || '[]');
+    return Array.isArray(parsed) ? parsed.map((id) => String(id || '')).filter(Boolean) : [];
+  } catch (_) { return []; }
+}
+
+function saveChatTombstones(ids) {
+  const key = scopedStorageKey(chatTombstonesStoragePrefix);
+  if (!key) return;
+  try { localStorage.setItem(key, JSON.stringify(Array.from(new Set(ids)).slice(-200))); } catch (_) { }
+}
+
+// Resolves true only when the DB no longer holds the chat (404 counts: already gone).
+async function deleteChatFromDurableStore(chatId) {
+  const scope = durableChatScope();
+  const id = String(chatId || '');
+  if (!scope || !id) return false;
+  try {
+    const res = await fetch(
+      `${getAIExeBackendUrl()}/api/chats/${encodeURIComponent(scope)}/${encodeURIComponent(id)}`,
+      { method: 'DELETE' },
+    );
+    return res.ok || res.status === 404;
+  } catch (_) { return false; }
+}
+
+function recordChatDeletion(chatId) {
+  const id = String(chatId || '');
+  if (!id) return;
+  const pending = loadChatTombstones();
+  if (!pending.includes(id)) saveChatTombstones(pending.concat(id));
+  void deleteChatFromDurableStore(id).then((done) => {
+    if (done) saveChatTombstones(loadChatTombstones().filter((entry) => entry !== id));
+  });
+}
+
+async function flushChatTombstones() {
+  const pending = loadChatTombstones();
+  if (!pending.length) return pending;
+  const stillPending = [];
+  for (const id of pending) {
+    // eslint-disable-next-line no-await-in-loop
+    if (!(await deleteChatFromDurableStore(id))) stillPending.push(id);
+  }
+  saveChatTombstones(stillPending);
+  return pending;
+}
+
+// A cache stub carries no history, so it must never be written over the DB row that
+// still has it. Stubs are replaced by the real chat as soon as hydration lands.
+function isChatCacheStub(chat) {
+  return Boolean(chat && chat._cacheStub);
+}
+
+// Opening a stub before boot hydration landed must show the real conversation, not an
+// empty thread. Fills it from the DB on demand; on failure the stub flag stays so the
+// empty placeholder can still never be persisted over the stored history.
+async function ensureChatContentLoaded(chatId) {
+  const chat = findChatById(chatId);
+  if (!chat || !isChatCacheStub(chat)) return false;
+  const scope = durableChatScope();
+  if (!scope) return false;
+  try {
+    const res = await fetch(
+      `${getAIExeBackendUrl()}/api/chats/${encodeURIComponent(scope)}/${encodeURIComponent(chat.id)}`,
+    );
+    if (!res.ok) return false;
+    const body = await res.json();
+    const stored = body && body.chat;
+    if (!stored || typeof stored !== 'object') return false;
+    const idx = chats.findIndex((entry) => entry && entry.id === chat.id);
+    if (idx < 0) return false;
+    chats[idx] = stored;
+    ensureChatThreadState(chats[idx]);
+    try { renderHistory(); } catch (_) { }
+    if (String(activeChatId || '') === String(chat.id)) {
+      try { renderActiveChat(); } catch (_) { }
+    }
+    return true;
+  } catch (_) { return false; }
+}
+
 function persistChatsDurable(list) {
   const scope = durableChatScope();
-  if (!scope || !Array.isArray(list) || !list.length) return Promise.resolve();
+  const payload = (Array.isArray(list) ? list : []).filter((chat) => chat && !isChatCacheStub(chat));
+  if (!scope || !payload.length) return Promise.resolve();
   return fetch(`${getAIExeBackendUrl()}/api/chats/${encodeURIComponent(scope)}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ chats: list }),
+    body: JSON.stringify({ chats: payload }),
   }).catch(() => { });
 }
 
@@ -15616,16 +15742,46 @@ async function hydrateChatsFromDurableStore(attempt = 0) {
     await new Promise((resolve) => setTimeout(resolve, 1500));
     return hydrateChatsFromDurableStore(attempt + 1);
   }
-  const have = new Set(chats.map((chat) => chat && chat.id).filter(Boolean));
-  const restored = stored.filter((chat) => chat && typeof chat.id === 'string' && !have.has(chat.id));
-  if (!restored.length) return 0;
-  chats = chats.concat(restored);
+  // Retry deletions the DB never saw, and never hydrate a chat the user deleted.
+  const deleted = new Set(await flushChatTombstones());
+  const byId = new Map();
+  chats.forEach((chat) => { if (chat && chat.id) byId.set(String(chat.id), chat); });
+  let changed = 0;
+  const restored = [];
+  for (const chat of stored) {
+    if (!chat || typeof chat.id !== 'string') continue;
+    if (deleted.has(chat.id)) continue;
+    const local = byId.get(chat.id);
+    if (!local) {
+      restored.push(chat);
+      changed += 1;
+      continue;
+    }
+    // The id being present locally is not the same as its history being present: a cache
+    // stub is a title-only placeholder. Fill it from the DB instead of skipping it.
+    if (isChatCacheStub(local)) {
+      const idx = chats.indexOf(local);
+      if (idx >= 0) {
+        chats[idx] = chat;
+        changed += 1;
+      }
+    }
+  }
+  // Locally-deleted chats that the cache no longer lists must not linger in memory either.
+  if (deleted.size) {
+    const before = chats.length;
+    chats = chats.filter((chat) => !(chat && deleted.has(String(chat.id))));
+    changed += before - chats.length;
+  }
+  if (restored.length) chats = chats.concat(restored);
+  if (!changed) return 0;
   sortChatsInPlace();
   // Hydration finishes AFTER boot has already painted, so repaint here or the restored
   // chats sit in memory and never reach the sidebar.
   try { renderHistory(); } catch (_) { }
   try { renderSidebarCounts(); } catch (_) { }
-  return restored.length;
+  try { renderActiveChat(); } catch (_) { }
+  return changed;
 }
 
 function loadStoredChats() {
@@ -15743,6 +15899,9 @@ function loadStoredChats() {
       const isNaming = Boolean(chat.isNaming) && !shouldResetNaming;
       return {
         id: chat.id,
+        // Keep the placeholder flag: dropping it made a stub look like a real empty chat,
+        // which then overwrote the DB row that still held the history.
+        _cacheStub: Boolean(chat._cacheStub),
         name: normalizeChatName(
           chat.customName
             ? (chat.name || messages.find((m) => m.role === 'user')?.text || 'New Chat')
@@ -15873,6 +16032,9 @@ function deleteChatFromModal() {
     setThinkingStatus('');
   }
   thinkingStartedByChatId.delete(deletedChatId);
+  // Chats live in the DB now: removing it from memory/cache alone left the row in SQLite,
+  // so the next boot hydrated the deleted chat right back into the sidebar.
+  recordChatDeletion(deletedChatId);
   chats = chats.filter((chat) => chat.id !== modalChatId);
   artifacts = artifacts.filter((item) => String(item && item.chatId ? item.chatId : '') !== String(modalChatId));
   debugTraceEntries = debugTraceEntries.filter(

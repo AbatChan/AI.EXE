@@ -11,6 +11,7 @@ const root = path.join(__dirname, '..');
 const aiExe = fs.readFileSync(path.join(root, 'ui', 'ai-exe.js'), 'utf8');
 const store = fs.readFileSync(path.join(root, 'backend', 'app', 'chatstore.py'), 'utf8');
 const main = fs.readFileSync(path.join(root, 'backend', 'app', 'main.py'), 'utf8');
+const router = fs.readFileSync(path.join(root, 'backend', 'app', 'routers', 'chats.py'), 'utf8');
 
 const saveStart = aiExe.indexOf('function saveChats()');
 const saveFn = aiExe.slice(saveStart, aiExe.indexOf('function normalizeStoredPendingPreflightConfirmation'));
@@ -33,7 +34,6 @@ assert.match(aiExe, /method: 'PUT'/, 'it writes to the backend');
 assert.match(aiExe, /async function hydrateChatsFromDurableStore\(attempt = 0\)/, 'boot hydration exists');
 assert.match(aiExe, /loadStoredChats\(\);\n {2}void hydrateChatsFromDurableStore\(\);/, 'it runs right after the cache load');
 const hydrate = aiExe.slice(aiExe.indexOf('async function hydrateChatsFromDurableStore'), aiExe.indexOf('function loadStoredChats'));
-assert.match(hydrate, /!have\.has\(chat\.id\)/, 'only chats missing locally are restored — no clobbering');
 // Hydration lands after boot has painted, so it must repaint or the restore is invisible.
 assert.match(hydrate, /renderHistory\(\)/, 'the sidebar is repainted after a restore');
 assert.match(hydrate, /attempt >= 5/, 'it retries while the backend is still starting');
@@ -50,4 +50,48 @@ assert.match(main, /async def block_foreign_origins/, 'the origin guard exists')
 assert.match(main, /status_code=403/, 'foreign origins are refused');
 assert.doesNotMatch(main, /allow_origins=settings\.allowed_origins/, 'the wildcard CORS default is gone');
 
-console.log('PASS: chats are never deleted to save space, every save reaches the DB, boot restores what the cache lost, and the local API refuses foreign origins');
+// ---- The cache must not starve settings / API keys / artifacts of the same quota ----
+// Live: chats held 4.38 MB of a 5 MB origin quota, so every OTHER localStorage write
+// (API keys, password change, artifacts) failed silently too.
+assert.match(aiExe, /const CHAT_CACHE_BUDGET_CHARS = \d+;/, 'the cache has an explicit budget');
+assert.match(saveFn, /boundChatCacheToBudget\(basePayload\)/, 'the very first attempt is already bounded');
+const bound = aiExe.slice(aiExe.indexOf('function boundChatCacheToBudget'), aiExe.indexOf('function saveChats()'));
+assert.match(bound, /_cacheStub: true/, 'over-budget chats become stubs, not deletions');
+assert.match(bound, /id: chat\.id/, 'a stub keeps its identity so the sidebar stays complete');
+// The chat on screen must survive the cache bound whatever its size.
+assert.match(bound, /if \(!out\.length \|\| used \+ full\.length <= budget\)/,
+  'the newest chat is never stubbed');
+
+// ---- v9.9.2: a stub is a placeholder, never a save ----
+// Live damage: the stub lost its flag in loadStoredChats, so the next save wrote an
+// EMPTY chat over the DB row that still held the history. 14 chats went title-only.
+assert.match(aiExe, /function isChatCacheStub\(chat\)/, 'stubs are identifiable at runtime');
+const persist = aiExe.slice(aiExe.indexOf('function persistChatsDurable'), aiExe.indexOf('async function hydrateChatsFromDurableStore'));
+assert.match(persist, /filter\(\(chat\) => chat && !isChatCacheStub\(chat\)\)/,
+  'a stub is never PUT over the stored conversation');
+const load = aiExe.slice(aiExe.indexOf('function loadStoredChats'), aiExe.indexOf('function openChatActionModal'));
+assert.match(load, /_cacheStub: Boolean\(chat\._cacheStub\)/,
+  'the stub flag survives the cache load — losing it is what caused the loss');
+assert.match(hydrate, /isChatCacheStub\(local\)/, 'boot fills stubs from the DB instead of skipping them');
+assert.match(aiExe, /async function ensureChatContentLoaded\(chatId\)/, 'opening a stub loads it on demand');
+// Server-side backstop: even a buggy client cannot blank stored history.
+assert.match(store, /def _message_total/, 'the store counts stored messages');
+assert.match(store, /if incoming_msgs == 0 and stored_msgs > 0:/, 'a blank write over history is refused');
+assert.match(store, /protected \+= 1/, 'and reported rather than applied');
+assert.match(store, /f"shrink-\{chat_id\}"/, 'any other shrink stays recoverable');
+
+// ---- A deleted chat must stay deleted across a relaunch ----
+// Live: delete only cleared memory + cache; the DB row survived and boot hydrated it back.
+const delStart = aiExe.indexOf('function deleteChatFromModal');
+const del = aiExe.slice(delStart, aiExe.indexOf('\nfunction ', delStart + 1));
+assert.match(del, /recordChatDeletion\(deletedChatId\)/, 'deleting a chat reaches the DB');
+assert.match(aiExe, /async function deleteChatFromDurableStore\(chatId\)/, 'the DELETE call exists');
+assert.match(aiExe, /res\.ok \|\| res\.status === 404/, 'already-gone counts as deleted');
+// A tombstone covers a backend that is down at delete time.
+assert.match(aiExe, /const chatTombstonesStoragePrefix = /, 'deletions are remembered locally');
+assert.match(aiExe, /async function flushChatTombstones\(\)/, 'and retried later');
+assert.match(hydrate, /if \(deleted\.has\(chat\.id\)\) continue;/, 'a deleted chat is never hydrated back');
+assert.match(router, /@router\.get\("\/chats\/\{scope\}\/\{chat_id\}"\)/, 'per-chat read exists for stub fills');
+assert.match(router, /@router\.delete\("\/chats\/\{scope\}\/\{chat_id\}"\)/, 'the delete endpoint exists');
+
+console.log('PASS: chats are never deleted to save space, every save reaches the DB, a cache stub can never blank stored history, deleted chats stay deleted, boot restores what the cache lost, and the local API refuses foreign origins');

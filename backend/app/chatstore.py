@@ -87,6 +87,19 @@ class ChatStore:
                 continue
         return out
 
+    def get_chat(self, scope: str, chat_id: str) -> Optional[Dict]:
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                "SELECT payload FROM chats WHERE user_scope = ? AND id = ?",
+                (scope, str(chat_id)),
+            ).fetchone()
+        if not row:
+            return None
+        try:
+            return json.loads(row["payload"])
+        except (ValueError, TypeError):
+            return None
+
     def count(self, scope: str) -> int:
         with self._lock, self._connect() as conn:
             row = conn.execute(
@@ -95,15 +108,52 @@ class ChatStore:
         return int(row["n"] if row else 0)
 
     # ---- writes ------------------------------------------------------------
-    def upsert_many(self, scope: str, chats: List[Dict]) -> int:
+    @staticmethod
+    def _message_total(chat: Optional[Dict]) -> int:
+        """Every stored message, top-level plus per-thread."""
+        if not isinstance(chat, dict):
+            return 0
+        total = len(chat.get("messages") or [])
+        for thread in chat.get("threads") or []:
+            if isinstance(thread, dict):
+                total += len(thread.get("messages") or [])
+        return total
+
+    def upsert_many(self, scope: str, chats: List[Dict]) -> Dict[str, int]:
         """Insert or update chats. Never deletes anything that is not in the payload —
-        a partial save from a client that trimmed its own list must not erase history."""
+        a partial save from a client that trimmed its own list must not erase history.
+
+        Also refuses to blank a stored conversation: a payload with NO messages over a row
+        that has them is a cache placeholder, not an edit. That exact write destroyed the
+        history of 14 chats once the client started stubbing over-budget chats."""
         written = 0
+        protected = 0
         with self._lock, self._connect() as conn:
             for chat in chats or []:
                 chat_id = str((chat or {}).get("id") or "").strip()
                 if not chat_id:
                     continue
+                row = conn.execute(
+                    "SELECT payload FROM chats WHERE id = ?", (chat_id,)
+                ).fetchone()
+                if row:
+                    try:
+                        stored = json.loads(row["payload"])
+                    except (ValueError, TypeError):
+                        stored = None
+                    incoming_msgs = self._message_total(chat)
+                    stored_msgs = self._message_total(stored)
+                    if incoming_msgs == 0 and stored_msgs > 0:
+                        protected += 1
+                        continue
+                    if incoming_msgs < stored_msgs:
+                        # A legitimate shrink (e.g. dropping a synthetic resume line) still
+                        # goes through, but the previous version stays recoverable.
+                        conn.execute(
+                            "INSERT INTO chat_backups (user_scope, reason, payload, created_at)"
+                            " VALUES (?, ?, ?, ?)",
+                            (scope, f"shrink-{chat_id}", row["payload"], _now_ms()),
+                        )
                 blob = json.dumps(chat, ensure_ascii=False)
                 created = int(chat.get("createdAt") or _now_ms())
                 updated = int(chat.get("updatedAt") or chat.get("createdAt") or _now_ms())
@@ -119,7 +169,7 @@ class ChatStore:
                 )
                 written += 1
             conn.commit()
-        return written
+        return {"written": written, "protected": protected}
 
     def delete_chat(self, scope: str, chat_id: str) -> bool:
         """Explicit user deletion only. Nothing in this module deletes to reclaim space."""
@@ -149,7 +199,7 @@ class ChatStore:
         self.snapshot(scope, reason)
         existing = {str(c.get("id")) for c in self.list_chats(scope)}
         fresh = [c for c in (chats or []) if str((c or {}).get("id") or "") not in existing]
-        added = self.upsert_many(scope, fresh)
+        added = int(self.upsert_many(scope, fresh).get("written") or 0)
         return {"added": added, "skipped": len(chats or []) - added, "total": self.count(scope)}
 
     def stats(self) -> Dict:
