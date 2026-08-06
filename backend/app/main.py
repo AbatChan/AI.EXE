@@ -21,7 +21,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from .config import settings
-from .routers import (adapter, chats, finance, generate, health, modules, package, pdf, projects,
+from .routers import (adapter, broker, chats, finance, generate, health, modules, package, pdf, projects,
                       run, status, usage, workshop)
 from .services import adapter_manager
 
@@ -141,6 +141,7 @@ app.include_router(projects.router, prefix="/api")
 app.include_router(package.router, prefix="/api")
 app.include_router(modules.router, prefix="/api")
 app.include_router(finance.router, prefix="/api")
+app.include_router(broker.router, prefix="/api")
 app.include_router(pdf.router, prefix="/api")
 app.include_router(adapter.router, prefix="/api")
 app.include_router(chats.router, prefix="/api")

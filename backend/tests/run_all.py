@@ -19,6 +19,8 @@ TESTS = [
     "smoke_provider_usage",  # §8 real provider balance
     "smoke_codeparse",  # code extraction + tolerant fallbacks
     "smoke_adapter",    # Venice Pro adapter process manager
+    "smoke_finance",    # local finance foundation (was never registered)
+    "smoke_broker",     # paper-mode broker adapter + confirmation gate
 ]
 
 

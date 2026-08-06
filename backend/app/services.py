@@ -2,6 +2,7 @@
 import os
 
 from .adapter import AdapterManager
+from .broker import PaperBroker
 from .config import settings
 from .chatstore import ChatStore
 from .finance import FinanceStore
@@ -28,6 +29,9 @@ project_store = ProjectStore(base_dir=os.path.join(settings.data_dir, "projects"
 module_store = ModuleStore(base_dir=os.path.join(settings.workshop_dir, "modules"))
 
 finance_store = FinanceStore(data_dir=settings.data_dir)
+
+# Paper-mode only; see broker.py. No live venue, no network.
+paper_broker = PaperBroker(data_dir=settings.data_dir)
 
 # Durable chat storage — see chatstore.py. Never trimmed to reclaim space.
 chat_store = ChatStore(data_dir=settings.data_dir)

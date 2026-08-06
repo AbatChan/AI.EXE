@@ -3047,13 +3047,14 @@ def aiexe_scrape_models(driver):
 
 
 def _aiexe_park_offscreen(driver):
-    """Un-minimize WITHOUT showing anything: normal-size window parked below the
-    visible desktop. Minimized breaks LAYOUT (0x0 at -32000 → virtuoso renders no
-    rows); off-screen keeps real geometry and the launch flags disable occlusion
-    throttling, so the sidebar renders while the user sees nothing."""
+    """Hide the window, keep it rendering. Windows minimize = 0x0 at -32000
+    (no rows), so park below the desktop; macOS minimize keeps layout."""
     try:
         dims = driver.execute_script("return [screen.availWidth || screen.width || 1440, screen.availHeight || screen.height || 900];") or [1440, 900]
-        driver.set_window_rect(x=20, y=int(dims[1]) * 2 + 400, width=670, height=570)
+        if sys.platform == "darwin":
+            driver.minimize_window()   # off-screen always leaves a sliver on mac
+        else:
+            driver.set_window_rect(x=20, y=int(dims[1]) * 2 + 400, width=670, height=570)
         return True
     except Exception:
         return _aiexe_restore_unobtrusive(driver)

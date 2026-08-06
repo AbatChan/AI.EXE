@@ -57,7 +57,9 @@ _PATCHED_LOGIN = '''def login_to_venice_with_username(username, password):
         driver.get("https://venice.ai/chat/classic")
         try:
             rect = driver.get_window_rect() or {}
-            driver.set_window_rect(x=int(rect.get("x", 20)), y=int(rect.get("y", 20)),
+            # A parked window sits off-screen; this one must be visible to verify.
+            x, y = int(rect.get("x", 20)), int(rect.get("y", 20))
+            driver.set_window_rect(x=x if x > 0 else 20, y=y if y > 0 else 20,
                                    width=670, height=570)
         except Exception:
             try:
