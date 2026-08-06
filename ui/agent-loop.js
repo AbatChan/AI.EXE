@@ -100,11 +100,108 @@
       if (!e || !e.ok) continue;
       const tool = String(e.tool || '').toLowerCase();
       if (tool === 'write_file' || tool === 'edit_file' || tool === 'new_project') break;
+      // A terminal command is progress too: it changes the environment and prints
+      // NEW errors naming NEW files. Counting only writes starved every diagnostic
+      // run — npm install + build + probe left the budget at its cap, so the file
+      // the build had just named could never be read. hasWorkspaceMutationSince
+      // already treats run_command as a change; these two now agree.
+      if (tool === 'run_command' || tool === 'run_app') break;
+      // Reads the harness itself served to break a deadlock must not count toward
+      // the budget that caused it — otherwise every door opened raises the wall.
+      if (e._guardBlock || e._deadlockBreak) continue;
       if (tool === 'read_files') inspections += 1;
       else if (tool === 'read_file' && !e._fromBatchRead) inspections += 1;
       else if (tool === 'search_files') inspections += 1;
     }
     return inspections;
+  }
+
+  // A cached read becomes stale only when that SAME file changes. Treating any
+  // workspace edit as relevant made an edit to main.py invalidate a cached
+  // requirements.txt read, which sent the model back through read/duplicate guards.
+  // Commands stay global because installs/generators can change files implicitly.
+  function hasRelevantWorkspaceMutationSince(
+    toolEvents,
+    index,
+    targetPath,
+    normalizeWorkspacePath,
+    isMutationTool,
+  ) {
+    const events = Array.isArray(toolEvents) ? toolEvents : [];
+    const norm = typeof normalizeWorkspacePath === 'function'
+      ? normalizeWorkspacePath
+      : (value) => String(value || '');
+    const isMutation = typeof isMutationTool === 'function'
+      ? isMutationTool
+      : (tool) => ['write_file', 'write_files', 'edit_file', 'move', 'delete', 'new_project'].includes(String(tool || '').toLowerCase());
+    const target = norm(targetPath || '');
+    const start = Math.max(-1, Number(index));
+    for (let i = start + 1; i < events.length; i += 1) {
+      const event = events[i];
+      if (!event || !event.ok) continue;
+      const tool = String(event.tool || '').toLowerCase();
+      if (tool === 'run_command') return true;
+      if (!isMutation(tool)) continue;
+      if (!target || tool === 'new_project') return true;
+      const touched = [
+        event.path,
+        event.writtenPath,
+        event.srcPath,
+        event.dstPath,
+        ...(Array.isArray(event.paths) ? event.paths : []),
+        ...(Array.isArray(event.writtenPaths) ? event.writtenPaths : []),
+      ].map((value) => norm(value || '')).filter(Boolean);
+      if (touched.includes(target)) return true;
+    }
+    return false;
+  }
+
+  // Guards that only withhold INFORMATION may be released to break a deadlock. The
+  // ones that protect the user's files are absent by design and never released.
+  const RELEASABLE_GUARDS = ['no_change_since_last_run', 'already_cached', 'already_read', 'enough_context'];
+  // Blocks at the tail of the run, path-agnostic: N in a row means the model has
+  // proposed N different things and the harness refused every one.
+  function countConsecutiveGuardBlocks(toolEvents) {
+    const events = Array.isArray(toolEvents) ? toolEvents : [];
+    let count = 0;
+    for (let i = events.length - 1; i >= 0; i -= 1) {
+      const event = events[i];
+      if (!event) continue;
+      if (event._guardBlock && event.ok === false) { count += 1; continue; }
+      break;
+    }
+    return count;
+  }
+  const GUARD_STAND_DOWN_AFTER = 2;
+  // A dedicated "the build named this file, so it must stay readable" rule was
+  // written and then removed: with the budget resetting on a failing run and
+  // blocked reads re-serving their cached content, no recorded run could produce a
+  // build-named file the model could not reach, so it was unreachable code. The
+  // invariant that would catch it still runs in the replay test.
+  function guardShouldStandDown(guardReason, toolEvents) {
+    if (!RELEASABLE_GUARDS.includes(String(guardReason || ''))) return false;
+    return countConsecutiveGuardBlocks(toolEvents) >= GUARD_STAND_DOWN_AFTER;
+  }
+
+  // Guard blocks are pushed with the SAME signature as the call they refused, so
+  // once a read is blocked the newest signature match is the block, not the read —
+  // and the re-serve branch (which needs a successful event to have content) was
+  // skipped in exactly the case it exists for. Walk back to the last SUCCESSFUL
+  // read of the same path, stopping at any mutation that would have staled it.
+  function preferSuccessfulReadIndex(toolEvents, lastIndex, signature, normalizePath, hasMutationSince) {
+    const events = Array.isArray(toolEvents) ? toolEvents : [];
+    const current = events[lastIndex];
+    if (!current || current.ok) return lastIndex;
+    if (String(signature && signature.tool) !== 'read_file') return lastIndex;
+    for (let i = lastIndex - 1; i >= 0; i -= 1) {
+      const candidate = events[i];
+      if (!candidate || !candidate.ok) continue;
+      if (String(candidate.tool || '').toLowerCase() !== 'read_file') continue;
+      if (normalizePath(candidate.path || '') !== signature.path) continue;
+      if (hasMutationSince(i, signature.path)) break;
+      return i;
+    }
+    return lastIndex;
   }
 
   function narrationWordSet(text) {
@@ -214,6 +311,17 @@
     while ((m = rx.exec(raw))) {
       const p = norm(String(m[2] || '').replace(/^\.\//, '/'));
       if (p && !out.includes(p)) out.push(p);
+    }
+    // Extensionless deliverables (.gitignore, Dockerfile, .env.local, LICENSE) matched
+    // nothing above, so their tasks could never tick off disk NOR dedupe by path —
+    // ".gitignore" and "/.gitignore" survived as two forever-unchecked rows.
+    if (!out.length) {
+      const bare = /(^|[\s"'`(])((?:\/|\.\/)?(?:[A-Za-z0-9_.-]+\/)*(?:\.[A-Za-z0-9_][A-Za-z0-9_.-]*|Dockerfile|Makefile|Procfile|LICENSE|CNAME))(?![A-Za-z0-9_.-])/g;
+      let b;
+      while ((b = bare.exec(raw))) {
+        const p = norm(String(b[2] || '').replace(/^\.\//, '/'));
+        if (p && p !== '/' && !out.includes(p)) out.push(p);
+      }
     }
     return out;
   }
@@ -1055,8 +1163,11 @@
       // different-target) batch reads and force-stopped a live run.
       const decisionPathsSignature = (decision) => {
         if (String(decision && decision.tool ? decision.tool : '').toLowerCase() !== 'read_files') return '';
+        // SORTED: the same set in a new order is the same read. Unsorted, a model that
+        // reshuffles its batch re-reads the same files forever without ever repeating a
+        // signature — which is exactly how a run looped on Scene.tsx 4x in 40 seconds.
         const raw = Array.isArray(decision && decision.paths)
-          ? decision.paths.join(',')
+          ? decision.paths.slice().sort().join(',')
           : String((decision && (decision.paths || decision.path || decision.content)) || '');
         return raw.toLowerCase().replace(/\s+/g, '').slice(0, 500);
       };
@@ -1097,19 +1208,15 @@
         // and the run dead-ended.
         command: String(decision && decision.command ? decision.command : '').trim(),
       });
-      const hasWorkspaceMutationSince = (index) => {
-        const start = Math.max(-1, Number(index));
-        for (let i = start + 1; i < toolEvents.length; i += 1) {
-          const event = toolEvents[i];
-          if (!event || !event.ok) continue;
-          if (isMutationTool(event.tool)) return true;
-          // A successful terminal command changes the environment (npm install
-          // creates node_modules/lockfile) — a run_app retry after it is NOT a
-          // no-change duplicate (this exact case force-finalized a healthy run).
-          if (String(event.tool || '').toLowerCase() === 'run_command') return true;
-        }
-        return false;
-      };
+      const hasWorkspaceMutationSince = (index, targetPath = '') => (
+        hasRelevantWorkspaceMutationSince(
+          toolEvents,
+          index,
+          targetPath,
+          normalizeDecisionPath,
+          isMutationTool,
+        )
+      );
       const findLastToolEventIndex = (predicate) => {
         for (let i = toolEvents.length - 1; i >= 0; i -= 1) {
           if (predicate(toolEvents[i], i)) return i;
@@ -1119,7 +1226,7 @@
       const getDuplicateDecisionObservation = (decision) => {
         const signature = buildDecisionSignature(decision);
         if (!signature.tool) return '';
-        const lastIndex = findLastToolEventIndex((event) => {
+        let lastIndex = findLastToolEventIndex((event) => {
           if (!event) return false;
           return String(event.tool || '').toLowerCase() === signature.tool
             && normalizeDecisionPath(event.path || '') === signature.path
@@ -1132,18 +1239,32 @@
             && String(event.command || '').trim() === signature.command;
         });
         if (lastIndex < 0) return '';
-        const lastEvent = toolEvents[lastIndex];
+        let lastEvent = toolEvents[lastIndex];
         if (!lastEvent) return '';
+        const preferred = preferSuccessfulReadIndex(
+          toolEvents, lastIndex, signature, normalizeDecisionPath, hasWorkspaceMutationSince,
+        );
+        if (preferred !== lastIndex) {
+          lastIndex = preferred;
+          lastEvent = toolEvents[lastIndex];
+        }
         if (signature.tool === 'read_file' && lastEvent.ok
           && lastEvent._fromBatchRead && lastEvent._batchPreviewClipped) {
           return '';
         }
-        if (signature.tool === 'read_file' && lastEvent.ok && !hasWorkspaceMutationSince(lastIndex)) {
+        if (signature.tool === 'read_file' && lastEvent.ok && !hasWorkspaceMutationSince(lastIndex, signature.path)) {
           const truncLimit = Number(deps.agentMaxToolOutputChars) || 8000;
           const obs = String(lastEvent.observation || '');
           const wasLikelyTruncated = obs.length >= truncLimit - 20 || obs.includes('[file continues');
           if (!wasLikelyTruncated) {
-            return `read_file blocked for ${signature.path || 'this file'}: it was already read and no workspace changes happened since then. Use that result or take the next corrective step instead of rereading it.`;
+            // RE-SERVE, don't just refuse. The earlier read may have aged out of the
+            // prompt (RECENT_TOOL_RESULTS keeps ~10 events), so "use that result" can
+            // be impossible to obey — the model then re-asks, gets blocked again, and
+            // the repeat-blocker ends the run with the fix one edit away. The content
+            // is already in the event: hand it back so there is always a way forward.
+            const cached = String(lastEvent.content || '').trim() || obs.trim();
+            const body = cached ? `\n\nCurrent content of ${signature.path}:\n${cached}` : '';
+            return `read_file blocked for ${signature.path || 'this file'}: it was already read and nothing changed since. Its content is repeated below — do NOT read it again; make the edit or take the next corrective step.${body}`;
           }
         }
         if (signature.tool === 'list_dir' && lastEvent.ok && !hasWorkspaceMutationSince(lastIndex)) {
@@ -1169,7 +1290,10 @@
         ) {
           return '';
         }
-        if (!lastEvent.ok && !hasWorkspaceMutationSince(lastIndex)) {
+        if (!lastEvent.ok && !hasWorkspaceMutationSince(
+          lastIndex,
+          signature.tool === 'read_file' ? signature.path : '',
+        )) {
           // The overwrite guard explicitly permits the same complete write_file
           // once more as confirmation that a corrupted existing file genuinely
           // needs regeneration. Let that documented escape hatch reach the
@@ -1753,7 +1877,7 @@
             pendingTasks.length ? `This phase covers: ${pendingTasks.join('; ')}` : '',
             'Sentence:',
           ].filter(Boolean).join('\n');
-          const ackRes = await deps.requestAgentPlannerInference(ackPrompt, 160, '', '', { prose: true });
+          const ackRes = await deps.requestAgentPlannerInference(ackPrompt, 160, '', '', { prose: true, tracePurpose: 'phase_narration' });
           if (ackRes && ackRes.ok) {
             let ack = String(deps.sanitizeAssistantText(String(ackRes.output || '')) || '')
               .split('\n').map((s) => s.trim()).filter(Boolean)[0] || '';
@@ -2241,6 +2365,18 @@
         }
         return count;
       };
+      // ARBITER (see guardShouldStandDown). consecutiveGuardBlocksForPath is
+      // per-PATH, so a model that rotates targets never trips it — the recorded
+      // deadlocks ran 4 and 8 steps precisely that way. This is the path-agnostic
+      // form: a harness failure however each individual veto was justified.
+      const guardMustStandDown = (guardReason) => {
+        if (!guardShouldStandDown(guardReason, toolEvents)) return false;
+        recordDebugTrace('agent_guard_arbiter_released', {
+          chatId: String(chatId || ''), guard: String(guardReason || ''),
+          consecutive: String(countConsecutiveGuardBlocks(toolEvents)),
+        }, { chatId: String(chatId || ''), guard: String(guardReason || '') });
+        return true;
+      };
       const breakGuardDeadlock = async (deadlockedDecision, path, step) => {
         let read = null;
         try { read = await deps.invokeWorkspaceAction('workspaceReadFile', { path }); } catch (_) { return false; }
@@ -2370,7 +2506,7 @@
             const suspendedDuringStep = () => Math.max(0, suspendedDuringRunMs() - suspendedBeforeStep);
             // Capture + swallow so an inference abandoned by the timeout (and later
             // aborted) cannot surface as an unhandledRejection.
-            const inferPromise = deps.requestAgentPlannerInference(agentPrompt, deps.agentDecisionMaxTokens, deps.agentDecisionGrammar, decisionSystemPrompt);
+            const inferPromise = deps.requestAgentPlannerInference(agentPrompt, deps.agentDecisionMaxTokens, deps.agentDecisionGrammar, decisionSystemPrompt, { tracePurpose: 'step_decision' });
             inferPromise.catch(() => {});
             res = await Promise.race([
               inferPromise,
@@ -2593,7 +2729,7 @@
           if (!decision) {
             const repairPrompt = await deps.buildAgentDecisionRepairPrompt(taskText, toolEvents, step, rawPlannerOutput, planSpec);
             const repair = await Promise.race([
-              deps.requestAgentPlannerInference(repairPrompt, deps.agentDecisionMaxTokens, deps.agentDecisionGrammar),
+              deps.requestAgentPlannerInference(repairPrompt, deps.agentDecisionMaxTokens, deps.agentDecisionGrammar, '', { tracePurpose: 'decision_repair' }),
               new Promise((resolve) => setTimeout(() => resolve({
                 ok: false,
                 timedOut: true,
@@ -2796,11 +2932,25 @@
         });
 
         const duplicateDecisionObservation = decision.action === 'tool'
+          && !guardMustStandDown('no_change_since_last_run')
           ? getDuplicateDecisionObservation(decision)
           : '';
         if (duplicateDecisionObservation) {
           let duplicateRepairedToFallback = false;
           const duplicateTool = String(decision.tool || '').toLowerCase();
+          // Warn tier before the kill tier. Repeating a call is a stuck SIGNAL, not proof —
+          // so the second identical block escalates with an explicit steer and the run
+          // continues; only the third ends it.
+          const priorIdenticalBlocks = toolEvents.filter((event) => (
+            event
+            && !event.ok
+            && event._guardKind === 'duplicate_no_progress'
+            && event._guardSignature === JSON.stringify(buildDecisionSignature(decision))
+          )).length;
+          const escalation = priorIdenticalBlocks >= 1
+            ? `\n\nESCALATION: this is repeat #${priorIdenticalBlocks + 1} of the same call and it will not succeed. Do NOT issue it again. Act on what is already above — make the edit, run the app, or finalize. Repeating it once more ends the run.`
+            : '';
+          const blockedObservation = `${duplicateDecisionObservation}${escalation}`;
           pushGuardBlock(decision, {
             tool: decision.tool,
             ok: false,
@@ -2816,7 +2966,7 @@
             startLine: Number(decision.start_line || 0),
             endLine: Number(decision.end_line || 0),
             pathsSig: decisionPathsSignature(decision),
-            observation: duplicateDecisionObservation.slice(0, deps.agentMaxToolOutputChars),
+            observation: blockedObservation.slice(0, deps.agentMaxToolOutputChars),
           });
           recordDebugTrace('agent_tool_result', {
             chatId: String(chatId || ''),
@@ -2878,7 +3028,8 @@
               && event._guardKind === 'duplicate_no_progress'
               && event._guardSignature === JSON.stringify(buildDecisionSignature(decision))
             )).length;
-            if (duplicateBlockedCount >= 2) {
+            // Kill tier — the warn tier already steered once with an explicit escalation.
+            if (duplicateBlockedCount >= 3) {
               const targetLabel = (duplicatePath && duplicatePath !== '/')
                 ? ` for ${duplicatePath}`
                 : (normalizeDecisionPath(decision.dstPath || '') || normalizeDecisionPath(decision.srcPath || '')
@@ -2954,7 +3105,8 @@
                 && event._guardKind === 'duplicate_no_progress'
                 && event._guardSignature === JSON.stringify(buildDecisionSignature(decision))
               )).length;
-              if (duplicateBlockedCount >= 2) {
+              // Kill tier — the warn tier already steered once with an explicit escalation.
+              if (duplicateBlockedCount >= 3) {
                 const blockerNote = duplicateTool === 'edit_file'
                   ? `Note: I stopped before fully wrapping up because editing ${duplicatePath || 'the target file'} kept hitting the same blocker. If anything still looks off there, press Continue or tell me what to change.`
                   : `Note: I stopped because ${duplicatePath || 'that file'} was already read and no workspace changes happened after it. Press Continue if something is still missing.`;
@@ -3464,7 +3616,7 @@
             return lastRead < 0 || lastMutation > lastRead;
           });
           const selected = selectVitalReadPaths(unread, 6);
-          if (!selected.length) {
+          if (!selected.length && !guardMustStandDown('already_cached')) {
             pushGuardBlock(decision, {
               tool: 'read_files',
               ok: false,
@@ -3540,7 +3692,7 @@
               continue;
             }
           }
-          if (blockReason) {
+          if (blockReason && !guardMustStandDown('already_read')) {
             recordDebugTrace('agent_read_loop_blocked', {
               chatId: String(chatId || ''), step: String(step), path: readPath, reason: blockReason,
             }, { chatId: String(chatId || ''), step, path: readPath, reason: blockReason });
@@ -3577,7 +3729,7 @@
             && deps.normalizeWorkspacePath(event.path || '') === readTarget
             && /read the file first|not known yet/i.test(String(event.observation || ''))
           ));
-          if (inspections >= inspectionCap && !editGateDemandedRead) {
+          if (inspections >= inspectionCap && !editGateDemandedRead && !guardMustStandDown('enough_context')) {
             recordDebugTrace('agent_inspection_budget_blocked', {
               chatId: String(chatId || ''), step: String(step), tool: String(decision.tool || ''), inspections: String(inspections),
             }, { chatId: String(chatId || ''), step, tool: String(decision.tool || ''), inspections });
@@ -4125,6 +4277,35 @@
             recordDebugTrace('agent_repeated_failure_escalated', {
               chatId: String(chatId || ''), step: String(step), tool: String(decision.tool || ''), path: failurePath,
             }, { chatId: String(chatId || ''), step, observation: String(toolResult.observation || '') });
+          }
+        }
+        // Result-aware no-progress: a build/run reports ok:true with runErrorCount>0, so the
+        // rejection check above never sees it. Byte-identical output across edits means the
+        // edits are not touching this failure — say so instead of letting it re-run forever.
+        if (toolResult.ok && Number(toolResult.runErrorCount || 0) > 0 && clippedObservation) {
+          const runTool = String(decision.tool || '').toLowerCase();
+          if (runTool === 'run_app' || runTool === 'run_command') {
+            // Drop volatile bits (timings, ports, hashed chunk names) before comparing.
+            const outputKey = (text) => String(text || '')
+              .replace(/\b\d+(?:\.\d+)?\s*m?s\b/gi, '#')
+              .replace(/:\d+\b/g, ':#')
+              .replace(/\b[0-9a-f]{8,}\b/gi, '#')
+              .replace(/\s+/g, ' ')
+              .trim()
+              .slice(0, 400);
+            const thisKey = outputKey(toolResult.observation);
+            const identicalBefore = toolEvents.filter((event) => event
+              && ['run_app', 'run_command'].includes(String(event.tool || '').toLowerCase())
+              && Number(event.runErrorCount || 0) > 0
+              && outputKey(event.observation) === thisKey).length;
+            const editsBetween = toolEvents.some((event) => event && event.ok
+              && ['write_file', 'edit_file', 'write_files'].includes(String(event.tool || '').toLowerCase()));
+            if (identicalBefore >= 1 && editsBetween) {
+              clippedObservation += `\n\nNO PROGRESS: this run produced the SAME failure output as ${identicalBefore + 1 === 2 ? 'the previous run' : `${identicalBefore} earlier runs`}, even though files were edited in between. Your changes are not affecting this error — so the cause is somewhere you have not looked. Stop re-running and re-check the assumption behind the fix: read the file the error actually names, and confirm the failing symbol/import/config really is what you think it is. Do not repeat the same edit-and-rerun cycle.`;
+              recordDebugTrace('agent_identical_run_output', {
+                chatId: String(chatId || ''), step: String(step), tool: runTool, repeats: String(identicalBefore + 1),
+              }, { chatId: String(chatId || ''), step, observation: String(toolResult.observation || '') });
+            }
           }
         }
         toolEvents.push({
@@ -4892,6 +5073,7 @@
         }
       }
       let fallback = '';
+      let usedNaturalCompletion = false;
       // Let the model write the wrap-up naturally (grounded in the real diffs)
       // whenever there was progress — done OR out-of-steps — instead of a robotic
       // "N of M planned items / Still to do: ..." dump.
@@ -4909,9 +5091,10 @@
           fallback = `I ran out of time before finishing.${changedClause} Press Continue and I'll pick up where I left off.`;
         } else {
           fallback = String(await deps.generateAgentCompletionText(taskText, toolEvents, getWorkspaceLabel(), planSpec) || '').trim();
+          usedNaturalCompletion = Boolean(fallback);
         }
       }
-      if (fallback && !phaseState && !(cl && cl.allDone)) {
+      if (fallback && !usedNaturalCompletion && !phaseState && !(cl && cl.allDone)) {
         fallback += " I didn't get to finish everything — press Continue and I'll keep going.";
       }
       if (!fallback) {
@@ -4919,7 +5102,10 @@
           ? "I made some changes but didn't fully wrap up — press Continue to keep going, or tell me what to adjust."
           : "I couldn't finish in time — press Continue to keep going, or tell me the exact change you want.";
       }
-      if (unresolvedValidationClause) fallback += unresolvedValidationClause;
+      // The natural completion already passed through the hard truth gate and
+      // carries the verified/unverified verdict. Appending another canned warning
+      // produced three versions of the same disclosure in one message.
+      if (unresolvedValidationClause && !usedNaturalCompletion) fallback += unresolvedValidationClause;
       // Self-aware exit: if we bailed because the model kept re-editing an already-correct file,
       // don't pretend it's finished (it tends to confabulate what it "changed"). Be honest that
       // it was circling and ask the user to pin down what they actually want.
@@ -5022,6 +5208,12 @@
     createAgentLoop,
     deriveAgentFailureSignature,
     countInspectionsSinceMutation,
+    hasRelevantWorkspaceMutationSince,
+    countConsecutiveGuardBlocks,
+    guardShouldStandDown,
+    preferSuccessfulReadIndex,
+    RELEASABLE_GUARDS,
+    GUARD_STAND_DOWN_AFTER,
     shouldSuppressAgentNarration,
     evaluateRepeatedRead,
     extractFileLikeTaskPaths,

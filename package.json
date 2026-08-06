@@ -5,6 +5,7 @@
   "license": "UNLICENSED",
   "scripts": {
     "build:codemirror": "rollup -c rollup.codemirror.config.mjs",
+    "raw-log": "node scripts/raw_log.js",
     "test:agent-dependency-safety": "node scripts/agent_dependency_safety_test.js",
     "test:agent-completion-truth-gate": "node scripts/agent_completion_truth_gate_test.js",
     "test:agent-evidence-ledger": "node scripts/agent_evidence_ledger_test.js",
@@ -55,7 +56,9 @@
     "test:enter-key-diagnostics": "node scripts/enter_key_diagnostics_static_test.js",
     "test:enter-capture-submit-guard": "node scripts/enter_capture_submit_guard_static_test.js",
     "test:preflight-confirm-ui": "node scripts/preflight_confirm_ui_static_test.js",
-    "test:preflight-confirm-resolution-edit-retry": "node scripts/preflight_confirm_resolution_edit_retry_static_test.js"
+    "test:preflight-confirm-resolution-edit-retry": "node scripts/preflight_confirm_resolution_edit_retry_static_test.js",
+    "test:agent-no-progress": "node scripts/agent_no_progress_detector_test.js",
+    "test:agent-guard-deadlock": "node scripts/agent_guard_deadlock_replay_test.js"
   },
   "dependencies": {
     "@codemirror/commands": "^6.10.2",
@@ -81,7 +84,7 @@
     "markdown-it-texmath": "^1.0.0",
     "rollup": "^4.59.0"
   },
-  "version": "9.9.8",
+  "version": "10.0.5",
   "devDependencies": {
     "eslint-linter-browserify": "^10.7.0"
   }

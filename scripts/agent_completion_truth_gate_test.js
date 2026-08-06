@@ -18,6 +18,8 @@ function sliceBetween(source, startMarker, endMarker) {
 // runtime-proof check no longer trusts a listening dev server.
 assert.match(runtime, /return enforceCompletionTruth\(text, toolEvents, workspaceLabel, taskText\)/, 'remote/external returns go through the gate with the task');
 assert.match(runtime, /return enforceCompletionTruth\(deterministicCompletion, toolEvents, workspaceLabel, taskText\)/, 'deterministic fallback goes through the gate');
+assert.match(runtime, /sanitizeCompletionForTruth\(remote\.output \|\| '', toolEvents\)/, 'remote verdict is captured before display sanitizing');
+assert.match(runtime, /sanitizeCompletionForTruth\(external\.output \|\| '', toolEvents\)/, 'external verdict is captured before display sanitizing');
 assert.match(runtime, /VERIFIED OUTCOME/, 'prompt carries the hard verified-outcome directive');
 assert.match(runtime, /const runtimeProofSeen = latestBrowserOutcome\(toolEvents\)/, 'dev-server readiness is not runtime proof');
 

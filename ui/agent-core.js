@@ -1420,7 +1420,13 @@
         ? affected
         : (Array.isArray(planSpec && planSpec.expectedFiles) ? planSpec.expectedFiles : []);
       const plannedFiles = requiredSource.map(norm).filter((p) => p && p !== '/' && p !== '/README.md');
-      const allPlannedWritten = plannedFiles.every((p) => writtenPaths.has(p));
+      // In an edit plan, files_to_inspect may overlap affected_files and the model
+      // can reasonably discover that one inspected sibling needs no change. Do not
+      // zero every completed criterion merely because that sibling stayed untouched.
+      // New projects still require every planned deliverable before criteria tick.
+      const allPlannedWritten = taskKind === 'edit'
+        ? mutations.length > 0
+        : plannedFiles.every((p) => writtenPaths.has(p));
       return list.map((text) => {
         const keywords = agentChecklistKeywords(text);
         let done = false;
@@ -1500,11 +1506,25 @@
     }
 
     function parseAgentPlanPhases(raw, maxPhases = 4, maxTasks = 6) {
-      const mkTasks = (list) => (Array.isArray(list) ? list : [])
-        .map((t) => String(t || '').trim())
-        .filter(Boolean)
-        .slice(0, maxTasks)
-        .map((text) => ({ text: formatAgentPlanSentence(text), done: false }));
+      // "/.gitignore" and ".gitignore" are the same deliverable — without this they
+      // shipped as two rows that both stayed unchecked forever.
+      const taskKey = (text) => String(text || '').trim().toLowerCase()
+        .replace(/[.\s]+$/, '')
+        .replace(/^\.?\//, '');
+      const mkTasks = (list) => {
+        const seen = new Set();
+        return (Array.isArray(list) ? list : [])
+          .map((t) => String(t || '').trim())
+          .filter(Boolean)
+          .filter((t) => {
+            const key = taskKey(t);
+            if (!key || seen.has(key)) return false;
+            seen.add(key);
+            return true;
+          })
+          .slice(0, maxTasks)
+          .map((text) => ({ text: formatAgentPlanSentence(text), done: false }));
+      };
       if (Array.isArray(raw)) {
         return raw.map((p) => {
           if (p && typeof p === 'object') {

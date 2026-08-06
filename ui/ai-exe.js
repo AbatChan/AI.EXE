@@ -8835,6 +8835,27 @@ function persistDebugEntry(channel, entry) {
     .catch(() => undefined);
 }
 
+// Raw inference transcript — EVERY prompt in and generation out, one JSON line each,
+// on its own channel so it rotates apart from debug_trace. The planner trace clipped
+// prompts at 24k and file-gen/completion calls were never logged at all, which is
+// exactly what a postmortem needs. Always on, like agent_runs.
+const RAW_INFERENCE_FIELD_CAP = 200000;
+function persistRawInferenceEntry(entry) {
+  if (!nativeBridge.available() || !entry) return;
+  const clipped = {};
+  Object.keys(entry).forEach((key) => {
+    const value = entry[key];
+    clipped[key] = typeof value === 'string' ? clipDebugText(value, RAW_INFERENCE_FIELD_CAP) : value;
+  });
+  persistedDebugLogQueue = persistedDebugLogQueue
+    .catch(() => undefined)
+    .then(() => nativeBridge.invoke('appendDebugLog', {
+      channel: 'agent_raw',
+      entry: JSON.stringify(clipped),
+    }))
+    .catch(() => undefined);
+}
+
 // Agent run lifecycle events (agent-events.js protocol) — always persisted,
 // not gated by debugTraceEnabled: this is the durable run record, not a trace.
 function persistAgentRunEvent(entry) {
@@ -10529,11 +10550,28 @@ async function requestSelectedRemoteTextCompletion(prompt, maxTokens, systemProm
   inFlightInferenceControllers.add(controller);
   noteAgentInferenceStart(String(prompt || '').length + String(systemPrompt || '').length);
   let result = null;
+  const startedAtMs = Date.now();
   try {
     result = await requestRemoteTextCompletionForCapability('agent.writeFile', prompt, maxTokens, { systemPrompt, ...requestExtra, abortController: controller });
   } finally {
     inFlightInferenceControllers.delete(controller);
     noteAgentInferenceEnd(result && result.ok ? String(result.output || '').length : 0);
+    persistRawInferenceEntry({
+      ts: new Date().toISOString(),
+      purpose: String((extra && extra.tracePurpose) || 'unlabeled'),
+      chatId: owningChatId,
+      model: String((result && result.model) || ''),
+      ok: Boolean(result && result.ok),
+      cancelled: Boolean(result && result.cancelled),
+      ms: Date.now() - startedAtMs,
+      maxTokens: Number(maxTokens) || 0,
+      promptChars: String(prompt || '').length,
+      outputChars: String((result && result.output) || '').length,
+      systemPrompt: String(systemPrompt || ''),
+      prompt: String(prompt || ''),
+      output: String((result && result.output) || ''),
+      error: result && !result.ok ? String(result.message || '') : '',
+    });
   }
   return result;
 }
@@ -14180,6 +14218,7 @@ async function requestAgentPlannerInferenceInner(prompt, maxTokens, grammar = ''
         }
       : {};
     let remote = await requestSelectedRemoteTextCompletion(prompt, maxTokens, systemPrompt, {
+      tracePurpose: String((callOptions && callOptions.tracePurpose) || 'planner_other'),
       isolatedAdapterChat: true,
       adapterChatScope: 'agent-planner',
       ...adapterStructuredOptions,
@@ -14193,6 +14232,7 @@ async function requestAgentPlannerInferenceInner(prompt, maxTokens, grammar = ''
     if ((!remote || !remote.ok) && !hardFail) {
       await new Promise((resolve) => setTimeout(resolve, 2500));
       remote = await requestSelectedRemoteTextCompletion(prompt, maxTokens, systemPrompt, {
+        tracePurpose: String((callOptions && callOptions.tracePurpose) || 'planner_other'),
         isolatedAdapterChat: true,
         adapterChatScope: 'agent-planner',
         ...adapterStructuredOptions,
@@ -14297,6 +14337,7 @@ const agentRuntime = window.AIExeAgentRuntime && typeof window.AIExeAgentRuntime
     sanitizeAgentGeneratedFileContent,
     sanitizeAgentGeneratedEditProgram,
     requestSelectedRemoteTextCompletion,
+    persistRawInferenceEntry,
     // Stop must kill hidden work too: file-gen retries/continuations check this
     // before issuing another inference or persisting bytes after cancel.
     isAgentGenerationCancelled: () => !activeInferenceRequest || activeInferenceRequest.cancelled === true,

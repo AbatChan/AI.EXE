@@ -23,7 +23,7 @@ assert.match(runtime, /agent_completion_truth_gate_kept/, 'keeping a message is 
 assert.match(runtime, /Still open: \$\{openIssues\.join\('; '\)\}/, 'the replacement carries the open findings');
 
 // ---- Behaviour: run the real predicate ----
-const start = runtime.indexOf('function completionAlreadyDisclosesRisk(text, outcome = null)');
+const start = runtime.indexOf('function completionClaimsSuccess(text)');
 const end = runtime.indexOf('function openContractIssueLines(');
 const sandbox = { console };
 vm.createContext(sandbox);

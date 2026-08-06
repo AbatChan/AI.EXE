@@ -37,6 +37,19 @@
         if (!response.ok) return null;
         const payload = await response.json();
         if (!payload || !payload.ok) return null;
+        // This path bypasses requestSelectedRemoteTextCompletion, so it logs itself.
+        if (typeof deps.persistRawInferenceEntry === 'function') {
+          deps.persistRawInferenceEntry({
+            ts: new Date().toISOString(),
+            purpose: 'planner_external',
+            ok: true,
+            maxTokens: Number(maxTokens) || 0,
+            promptChars: String(prompt || '').length,
+            outputChars: String(payload.output || '').length,
+            prompt: String(prompt || ''),
+            output: String(payload.output || ''),
+          });
+        }
         return {
           ok: true,
           output: String(payload.output || ''),
@@ -199,6 +212,7 @@
         }, { label, route, deltaCount, firstDeltaMs, maxGapMs, totalMs: Date.now() - startedAt, outChars: String(output || '').length, truncated: Boolean(truncated) });
       };
       const remote = await deps.requestSelectedRemoteTextCompletion(prompt, budget, '', {
+        tracePurpose: `file_content${label ? `:${label}` : ''}`,
         preferStreaming: true,
         // File bodies are implementation traffic, not chat turns. Keeping them in
         // the user's visible Venice conversation makes its sidebar fill with raw
@@ -512,6 +526,7 @@
       const beat = () => { if (typeof deps.markAgentToolProgress === 'function') deps.markAgentToolProgress(); };
       let streamed = '';
       const remote = await deps.requestSelectedRemoteTextCompletion(prompt, budget, '', {
+        tracePurpose: 'project_files',
         preferStreaming: true,
         isolatedAdapterChat: true,
         adapterChatScope: 'agent-project-files',
@@ -572,6 +587,7 @@
       const beat = () => { if (typeof deps.markAgentToolProgress === 'function') deps.markAgentToolProgress(); };
       let streamed = '';
       const remote = await deps.requestSelectedRemoteTextCompletion(prompt, budget, '', {
+        tracePurpose: 'batch_files',
         preferStreaming: true,
         onDelta: (delta) => { beat(); if (delta) streamed += String(delta); },
       });
@@ -600,6 +616,7 @@
       // model didn't provide an inline find/replace program in its decision).
       let streamed = '';
       const remote = await deps.requestSelectedRemoteTextCompletion(prompt, agentDecisionMaxTokens * 3, '', {
+        tracePurpose: 'edit_program',
         preferStreaming: true,
         isolatedAdapterChat: true,
         adapterChatScope: 'agent-edit-file',
@@ -651,7 +668,7 @@
     // caller treats the check as skipped rather than blocking the run.
     async function runBoundedAgentJsonInference(prompt, maxTokens, timeoutMs) {
       const attempt = (async () => {
-        const remote = await deps.requestSelectedRemoteTextCompletion(prompt, maxTokens);
+        const remote = await deps.requestSelectedRemoteTextCompletion(prompt, maxTokens, '', { tracePurpose: 'planner_json' });
         if (remote && remote.ok && String(remote.output || '').trim()) return String(remote.output || '');
         const external = await requestExternalAgentPlanner(prompt, maxTokens, timeoutMs);
         if (external && external.ok && String(external.output || '').trim()) return String(external.output || '');
@@ -981,19 +998,37 @@
         .trim();
     }
 
+    // sanitizeAssistantText intentionally strips machine-only markers before UI
+    // rendering. Completion truth checking must see the verdict first, then attach
+    // it back to the sanitized prose for enforceCompletionTruth to consume.
+    function sanitizeCompletionForTruth(rawText, toolEvents) {
+      const raw = String(rawText || '');
+      const declared = readCompletionStatusToken(raw);
+      const visible = stripCompletionPreamble(
+        stripUnverifiedLocalUrls(deps.sanitizeAssistantText(raw), toolEvents),
+      );
+      if (!declared) return visible;
+      return `${visible}${visible ? '\n' : ''}[[AIEXE_STATUS:${declared}]]`;
+    }
+
+    // Does the message ASSERT the work is done/working? Only such a claim can contradict a
+    // red or stale outcome — a neutral report contradicts nothing.
+    function completionClaimsSuccess(text) {
+      // Drop conditional/negated clauses — "before it is done" is not a claim.
+      const asserted = String(text || '').replace(
+        /\b(?:before|until|once|unless|when|after|not|never|no longer|nothing|isn'?t|aren'?t|wasn'?t|hasn'?t|haven'?t|won'?t|can'?t|don'?t|doesn'?t)\b[^.!?\n]*/gi,
+        ' ',
+      );
+      return /\b(?:it (?:now )?works|working now|is (?:now )?(?:done|complete|fixed|resolved|ready|working)|all (?:done|set|working)|task (?:is )?complete|fully (?:working|functional)|confirmed working|builds? (?:cleanly|successfully|fine|now)|build (?:now )?passes|passes? (?:the build|cleanly|successfully|now)|compiles? (?:cleanly|fine|now)|fixed it|nailed it|sorted it|no (?:more |remaining )?errors|verified working|good to ship|ready to ship)\b/i.test(asserted);
+    }
+
     // Keyed to the held outcome, not a phrase list — "not passing yet" counts too.
     function completionAlreadyDisclosesRisk(text, outcome = null) {
       const body = String(text || '');
       if (!body.trim()) return false;
       // Naming the current failure is the truth, whatever a sub-part claim says.
       if (/\bstill (?:failing|broken|fails|erroring|not (?:building|compiling|passing|working))\b|\b(?:build|it) is still\b|\bremains? broken\b|\bstill (?:does not|doesn'?t) (?:build|compile|pass|work)\b/i.test(body)) return true;
-      // Drop conditional/negated clauses — "before it is done" is not a claim.
-      const asserted = body.replace(
-        /\b(?:before|until|once|unless|when|after|not|never|no longer|isn'?t|aren'?t|wasn'?t|hasn'?t|haven'?t|won'?t|can'?t|don'?t|doesn'?t)\b[^.!?\n]*/gi,
-        ' ',
-      );
-      const claimsSuccess = /\b(?:it (?:now )?works|working now|is (?:now )?(?:done|complete|fixed|resolved|ready|working)|all (?:done|set|working)|task (?:is )?complete|fully (?:working|functional)|confirmed working|builds? (?:cleanly|successfully)|passes the build|verified working|good to ship|ready to ship)\b/i.test(asserted);
-      if (claimsSuccess) return false;
+      if (completionClaimsSuccess(body)) return false;
       if (/\bnot (?:yet )?(?:been )?(?:verified|confirmed|tested|checked|re-?checked|run|built)\b|\b(?:hasn'?t|haven'?t) been (?:verified|confirmed|checked|tested|run|built)\b|\bunverified\b|\bstill needs? (?:to be )?(?:built|verified|checked|run)\b|\bneeds? (?:to be )?(?:rebuilt|re-?verified|built and verified)\b|\bbefore (?:this|it) can be called complete\b/i.test(body)) {
         return true;
       }
@@ -1005,9 +1040,10 @@
       if (o && o.stale) subjects.push('verified', 'verify', 'rebuild', 're-?check');
       const subject = new RegExp(`\\b(?:${subjects.join('|')})\\w*\\b`, 'i');
       if (!subjects.length || !subject.test(body)) return false;
-      // …negatively. Broad on purpose; a success claim is caught above.
-      const negative = /\b(?:fail(?:s|ed|ing|ure)?|error|errors|broken|blocker|blocked|not passing|isn'?t passing|does ?n'?t pass|do ?n'?t ship|before .{0,40}(?:complete|done|ship)|red|type errors?)\b/i;
-      return negative.test(body);
+      // …negatively, IN THE SAME SENTENCE — sentence scope keeps loose markers like "yet"
+      // from being borrowed off an unrelated clause. A success claim is caught above.
+      const negative = /\b(?:fail(?:s|ed|ing|ure)?|error|errors|broken|blocker|blocked|not passing|isn'?t passing|does ?n'?t pass|do ?n'?t ship|before .{0,40}(?:complete|done|ship)|red|type errors?|yet|pending|unconfirmed|unproven|still|needs?|need to|should be|to confirm|nothing'?s?)\b/i;
+      return body.split(/(?<=[.!?\n])\s+/).some((line) => subject.test(line) && negative.test(line));
     }
 
     // Open findings, so a replaced message still names something actionable.
@@ -1061,7 +1097,8 @@
         }, { text: String(text || '').slice(0, 600) });
         return text;
       }
-      // Already unverified-by-its-own-words: nothing left to correct.
+      // Redundancy suppressor ONLY, for models that skipped the token. A miss here costs one
+      // extra sentence appended below — never a replaced message — so it may stay a heuristic.
       if (!declared && completionAlreadyDisclosesRisk(text, o)) {
         recordDebugTrace('agent_completion_truth_gate_kept', {
           buildFailed: String(o.buildFailed), stale: String(o.stale), runtimeUnverified: String(runtimeUnverified),
@@ -1083,11 +1120,19 @@
           ? 'The updated files need to be rebuilt and verified before this can be called complete.'
           : 'That must be resolved and the build rerun before the task is complete.';
       const openIssues = openContractIssueLines(toolEvents);
+      // Undisclosed + unverified = always replace. A phrase blacklist can never enumerate
+      // every way to imply success, so silence about a red build is treated as a claim.
+      // (An append-instead-of-replace variant was tried and reverted: it let
+      // "Fixed the crash! The scene works now." stand on a failing build.)
       // Only the VERDICT is wrong — drop claim lines, keep the analysis.
       const survivingDetail = String(text || '').split('\n')
         .filter((line) => {
           const trimmed = line.trim();
           if (!trimmed) return true;
+          // Same claim test the gate used to decide — one vocabulary, not two.
+          // The old narrower list let "nailed it 🔥" survive under a correction
+          // that said the opposite.
+          if (completionClaimsSuccess(trimmed)) return false;
           const asserted = trimmed.replace(
             /\b(?:before|until|once|unless|when|after|not|never|isn'?t|hasn'?t|won'?t|doesn'?t)\b[^.!?\n]*/gi,
             ' ',
@@ -1214,9 +1259,9 @@
           });
         }
       }
-      const remote = await deps.requestSelectedRemoteTextCompletion(prompt, 420);
+      const remote = await deps.requestSelectedRemoteTextCompletion(prompt, 420, '', { tracePurpose: 'completion_message' });
       if (remote && remote.ok) {
-        const text = stripCompletionPreamble(stripUnverifiedLocalUrls(deps.sanitizeAssistantText(remote.output || ''), toolEvents));
+        const text = sanitizeCompletionForTruth(remote.output || '', toolEvents);
         if (text && !isLikelyIncompleteCompletion(text)) return enforceCompletionTruth(text, toolEvents, workspaceLabel, taskText);
         recordDebugTrace('agent_completion_rejected', {
           source: 'remote',
@@ -1226,7 +1271,7 @@
       }
       const external = await requestExternalAgentPlanner(prompt, 420, 12000);
       if (external && external.ok) {
-        const text = stripCompletionPreamble(stripUnverifiedLocalUrls(deps.sanitizeAssistantText(external.output || ''), toolEvents));
+        const text = sanitizeCompletionForTruth(external.output || '', toolEvents);
         if (text && !isLikelyIncompleteCompletion(text)) return enforceCompletionTruth(text, toolEvents, workspaceLabel, taskText);
         recordDebugTrace('agent_completion_rejected', {
           source: 'external',

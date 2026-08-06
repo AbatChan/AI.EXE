@@ -44,25 +44,20 @@ if (Test-Path $guiExe) {
 $uiSourceDir = Join-Path $repoRoot "ui"
 $uiOutDir = Join-Path $outDir "ui"
 
-$uiRootFiles = @(
-  "ai-exe.html",
-  "ai-exe.css",
-  "ai-exe.js",
-  "markdown-renderer.js",
-  "prompt-core.js",
-  "agent-core.js",
-  "agent-planner.js",
-  "agent-runtime.js",
-  "agent-executor.js",
-  "agent-loop.js",
-  "chat-shell.js",
-  "chat-renderer.js",
-  "file-viewer.js",
-  "preflight-router.js",
-  "workspace-core.js",
-  "workspace-actions.js",
-  "workspace-renderer.js"
-)
+# Derive the root UI file list from ai-exe.html itself — a hardcoded list silently
+# drops new scripts and ships an app that 404s on boot. vendor/ is copied wholesale
+# below; ui-config.js comes from the build tree.
+$uiEntryHtml = Join-Path $uiSourceDir "ai-exe.html"
+if (-not (Test-Path $uiEntryHtml)) {
+  throw "Missing UI entry point: ui\ai-exe.html"
+}
+$uiEntryText = Get-Content $uiEntryHtml -Raw
+$uiRootRefs = [regex]::Matches($uiEntryText, '(?:src|href)="([^"]+\.(?:js|css))"') |
+  ForEach-Object { $_.Groups[1].Value } |
+  Where-Object { $_ -notmatch '[\\/]' -and $_ -ne "ui-config.js" } |
+  Sort-Object -Unique
+
+$uiRootFiles = @("ai-exe.html") + $uiRootRefs
 
 foreach ($uiFile in $uiRootFiles) {
   $uiSrc = Join-Path $uiSourceDir $uiFile

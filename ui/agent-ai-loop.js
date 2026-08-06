@@ -204,7 +204,7 @@
       let previousInvalidOutput = '';
       for (let step = 1; step <= maxSteps && now() < deadlineAt; step += 1) {
         const nativePrompt = buildAiNativePrompt(taskText, toolEvents, previousInvalidOutput);
-        const response = await deps.requestAgentPlannerInference(nativePrompt.prompt, maxTokens, '', nativePrompt.systemPrompt);
+        const response = await deps.requestAgentPlannerInference(nativePrompt.prompt, maxTokens, '', nativePrompt.systemPrompt, { tracePurpose: 'native_step' });
         if (!response || !response.ok) {
           if (typeof deps.surfaceAgentInferenceUnavailable === 'function') {
             deps.surfaceAgentInferenceUnavailable(
@@ -371,7 +371,7 @@
 
       const finalNative = buildAiNativePrompt(taskText, toolEvents, '');
       const finalPrompt = `${finalNative.prompt}\n\nThe step budget or time budget is exhausted. Return a final JSON object only. Explain what was completed, what remains, and the real blocker if any.`;
-      const finalResponse = await deps.requestAgentPlannerInference(finalPrompt, maxTokens, '', finalNative.systemPrompt);
+      const finalResponse = await deps.requestAgentPlannerInference(finalPrompt, maxTokens, '', finalNative.systemPrompt, { tracePurpose: 'native_final' });
       const finalParsed = normalizeDecision(extractJsonObject(String(finalResponse && finalResponse.output ? finalResponse.output : '')));
       const hasWorkspaceMutations = toolEvents.some((event) => event && event.ok && ['new_project', 'write_file', 'edit_file', 'mkdir', 'move', 'delete'].includes(String(event.tool || '').toLowerCase()));
       const rawLimitFinalText = deps.sanitizeAssistantText(

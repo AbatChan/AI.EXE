@@ -29,8 +29,8 @@ set(AI_EXE_WEBVIEW2_DIR "" CACHE PATH "Microsoft.Web.WebView2 NuGet package root
 #   - the build-label date is stamped automatically (below)
 #   - the dev-tooling package.json "version" is auto-synced (below)
 # A release = bump AI_EXE_APP_VERSION + set a fresh AI_EXE_BUILD_TAG. Nothing else.
-set(AI_EXE_APP_VERSION "9.9.8" CACHE STRING "AI.EXE app and UI version" FORCE)
-set(AI_EXE_BUILD_TAG "verdict-token-not-prose" CACHE STRING "Human-readable AI.EXE build tag" FORCE)
+set(AI_EXE_APP_VERSION "10.0.5" CACHE STRING "AI.EXE app and UI version" FORCE)
+set(AI_EXE_BUILD_TAG "guards-always-leave-a-move" CACHE STRING "Human-readable AI.EXE build tag" FORCE)
 string(TIMESTAMP AI_EXE_BUILD_DATE "%Y-%m-%d")
 set(AI_EXE_BUILD_LABEL "v${AI_EXE_APP_VERSION} (${AI_EXE_BUILD_TAG} ${AI_EXE_BUILD_DATE})")
 

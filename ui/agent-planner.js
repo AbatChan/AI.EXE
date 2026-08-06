@@ -1160,7 +1160,7 @@
     // plan or null (so the caller can retry a transient failure before degrading).
     async function attemptAgentPlanSpec(prompt, planMaxTokens, taskText, chatId, forceProjectScope) {
       const res = await Promise.race([
-        requestAgentPlannerInference(prompt, planMaxTokens, agentPlanGrammar),
+        requestAgentPlannerInference(prompt, planMaxTokens, agentPlanGrammar, '', { tracePurpose: 'plan' }),
         new Promise((resolve) => setTimeout(() => resolve({
           ok: false,
           timedOut: true,

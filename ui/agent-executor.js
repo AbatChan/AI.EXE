@@ -825,6 +825,23 @@ export default config;
     function getStructuralIssueForPath(path, content) {
       const normalized = deps.normalizeWorkspacePath(path || '');
       const text = String(content || '');
+      // .mjs is ALWAYS an ES module: require/module.exports/__dirname are undefined at
+      // runtime, so a next.config.mjs written with require() kills the dev server before
+      // it finishes starting. Objective like mangled package.json versions → blocks.
+      // createRequire(import.meta.url) is the legal escape hatch, so skip those files.
+      if (/\.mjs$/i.test(normalized) && text.trim() && !/\bcreateRequire\b/.test(text)) {
+        const bare = text
+          .replace(/\/\*[\s\S]*?\*\//g, ' ')
+          .replace(/(^|[^:])\/\/[^\n]*/g, '$1')
+          .replace(/(['"`])(?:\\.|(?!\1)[\s\S])*?\1/g, '""');
+        const cjs = [];
+        if (/(?:^|[^.\w$])require\s*(?:\(|\.\s*resolve\s*\()/.test(bare)) cjs.push('require()');
+        if (/\bmodule\.exports\b|\bexports\.\w/.test(bare)) cjs.push('module.exports');
+        if (/\b__dirname\b|\b__filename\b/.test(bare)) cjs.push('__dirname/__filename');
+        if (cjs.length) {
+          return `is an ES module (.mjs) but uses CommonJS ${cjs.join(', ')} — undefined at runtime, so the file throws on load (e.g. "ReferenceError: require is not defined"). Use import syntax instead (for a path: import path from 'path'; for __dirname: path.dirname(fileURLToPath(import.meta.url))).`;
+        }
+      }
       if (/\.(ts|tsx|js|jsx|mjs|cjs)$/i.test(normalized) && text.trim()) {
         // Plain (non-module) JS: the real JS parser is AUTHORITATIVE. The raw bracket scan
         // can't tell a regex literal like /[()]/ or /[{}]/ from real brackets and
@@ -2625,6 +2642,34 @@ export default config;
         if (!paths.length) {
           return { ok: false, mutated, observation: 'read_files needs a "paths" array of file paths. To read one file use read_file.' };
         }
+        // Per-PATH redundancy. The duplicate guard keys on the whole batch, so varying one
+        // entry re-reads every other file for free — the observed loop was Scene.tsx read
+        // 4x in 40s inside rotating batches. Drop paths already read with no change since,
+        // and say so; only when EVERY path is redundant does the call have nothing to do.
+        const alreadyReadUnchanged = (candidate) => {
+          const events = Array.isArray(toolEvents) ? toolEvents : [];
+          for (let i = events.length - 1; i >= 0; i -= 1) {
+            const event = events[i];
+            if (!event) continue;
+            const evTool = String(event.tool || '').toLowerCase();
+            if (event.ok && ['write_file', 'edit_file', 'move', 'delete'].includes(evTool)
+              && deps.normalizeWorkspacePath(event.path || '') === candidate) return false;
+            if (event.ok && ['read_file', 'read_files'].includes(evTool)
+              && deps.normalizeWorkspacePath(event.path || '') === candidate
+              && !event._batchPreviewClipped) return true;
+          }
+          return false;
+        };
+        const redundantPaths = paths.filter(alreadyReadUnchanged);
+        if (redundantPaths.length && redundantPaths.length < paths.length) {
+          paths = paths.filter((p) => !redundantPaths.includes(p));
+        } else if (redundantPaths.length === paths.length) {
+          return {
+            ok: false,
+            mutated,
+            observation: `read_files blocked: every path in this batch (${paths.join(', ')}) was already read and nothing changed since. Their contents above still stand — reshuffling the batch does not make them new. Make the edit, run the app, or finalize.`,
+          };
+        }
         const maxFiles = 10;
         const overflow = paths.slice(maxFiles);
         paths = paths.slice(0, maxFiles);
@@ -3016,7 +3061,7 @@ export default config;
           return getStructuralIssueForPath(path, content);
         };
         if (shouldAutoGenerate && !modelSuppliedComplete && !(packageJsonTarget && String(content).trim())) {
-          const generated = await deps.generateAgentWriteFileContent(taskText, toolEvents, path, content, planSpec, { persistPartials: creatingNewFile });
+          const generated = await deps.generateAgentWriteFileContent(taskText, toolEvents, path, content, planSpec, { persistPartials: false });
           if (generated) content = generated;
           // generateFullAgentFile already performs bounded continuation passes.
           // Starting a second COMPLETE-file generation here made large files visibly
@@ -3024,7 +3069,7 @@ export default config;
           // Save a still-incomplete new file with the structural warning below; the
           // next agent step can append a focused repair with edit_file.
         } else if (!shouldAutoGenerate && !String(content).trim()) {
-          const generated = await deps.generateAgentWriteFileContent(taskText, toolEvents, path, '', planSpec, { persistPartials: creatingNewFile });
+          const generated = await deps.generateAgentWriteFileContent(taskText, toolEvents, path, '', planSpec, { persistPartials: false });
           if (generated) content = generated;
         }
         if (tailwindConfigTarget && (getStructuralIssueForPath(path, content) || String(content || '').length > 8000)) {
@@ -3580,6 +3625,24 @@ export default config;
         };
       }
 
+      // Next/tsc surface ONE type error per build; list them ALL once so the model
+      // batches related fixes instead of burning a step per rebuild. Shared by run_app
+      // AND run_command — a model that types `npm run build` itself needs it just as much.
+      async function collectAllTypeErrors(outputTail) {
+        if (!/\bType error:/.test(String(outputTail || ''))) return '';
+        try {
+          deps.setActiveAgentStreamStatus(chatId, 'Collecting the full type-error list...');
+          const tscRes = await deps.invokeWorkspaceAction('runCommand', {
+            program: 'node',
+            argsLine: ['node_modules/typescript/bin/tsc', '--noEmit', '--pretty', 'false'].join('\n'),
+          });
+          const tscOut = String((tscRes && tscRes.output) || '').trim();
+          if (!tscRes || !tscRes.ok || !tscOut || /Cannot find module/.test(tscOut.slice(0, 200))) return '';
+          return `\nAll current type errors (fix ALL of these before running again):\n${tscOut.length > 3000 ? `${tscOut.slice(0, 3000)}\n…(truncated)` : tscOut}`;
+        } catch (err) { /* advisory only */ }
+        return '';
+      }
+
       // Detect the workspace stack and choose the strongest safe proof available.
       // Natural-language routing stays semantic; this detector only reads project
       // files/configs and maps them to deterministic proof commands.
@@ -3770,22 +3833,7 @@ export default config;
             };
           }
 
-          // Next/tsc surface ONE type error per build; list them ALL once so the
-          // model batches related fixes instead of burning a step per rebuild.
-          let allTypeErrors = '';
-          if (/\bType error:/.test(String(tail || ''))) {
-            try {
-              deps.setActiveAgentStreamStatus(chatId, 'Collecting the full type-error list...');
-              const tscRes = await deps.invokeWorkspaceAction('runCommand', {
-                program: 'node',
-                argsLine: ['node_modules/typescript/bin/tsc', '--noEmit', '--pretty', 'false'].join('\n'),
-              });
-              const tscOut = String((tscRes && tscRes.output) || '').trim();
-              if (tscRes && tscRes.ok && tscOut && !/Cannot find module/.test(tscOut.slice(0, 200))) {
-                allTypeErrors = `\nAll current type errors (fix ALL of these before running again):\n${tscOut.length > 3000 ? `${tscOut.slice(0, 3000)}\n…(truncated)` : tscOut}`;
-              }
-            } catch (err) { /* advisory only */ }
-          }
+          const allTypeErrors = await collectAllTypeErrors(tail);
           // Missing app dependencies surface one-per-build. When one appears, scan ALL
           // written files and list every bare import absent from package.json so the model
           // installs them in ONE approval/command instead of a rebuild per package.
@@ -3993,7 +4041,8 @@ export default config;
         if (exitCode === 0) {
           return { ok: true, mutated, runErrorCount: 0, terminalCommand: rawCommand, terminalProof, observation: `run_command \`${rawCommand}\`: finished cleanly (exit 0).${tail ? `\nOutput:\n${tail}` : ''}` };
         }
-        return { ok: true, mutated, runErrorCount: 1, terminalCommand: rawCommand, terminalProof, observation: `run_command \`${rawCommand}\`: exited with code ${exitCode}. Read the error below, fix its ROOT cause in the code, then run_command again to verify.\nOutput:\n${tail || '(no output)'}` };
+        const commandTypeErrors = await collectAllTypeErrors(tail);
+        return { ok: true, mutated, runErrorCount: 1, terminalCommand: rawCommand, terminalProof, observation: `run_command \`${rawCommand}\`: exited with code ${exitCode}. Read the error below, fix its ROOT cause in the code, then run_command again to verify.\nOutput:\n${tail || '(no output)'}${commandTypeErrors}` };
       }
 
       // Parse code files and report exact syntax errors with line/column — the

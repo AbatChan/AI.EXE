@@ -50,6 +50,26 @@ const items = ['resize search close icon', 'redesign movie cards', 'no class/id 
   ok('failed edit does not mark items done', p.every((x) => !x.done));
 }
 
+// Edit plans do not stay at 0/N merely because one inspected sibling correctly
+// needed no mutation. Project plans still require every deliverable.
+{
+  const editPlan = {
+    taskKind: 'edit',
+    affectedFiles: ['/requirements.txt', '/main.py', '/ui.py', '/organizer.py'],
+    expectedFiles: [],
+  };
+  const events = [
+    { tool: 'edit_file', ok: true, path: '/requirements.txt', content: 'watchdog' },
+    { tool: 'edit_file', ok: true, path: '/main.py', content: 'sys.platform startup guard' },
+  ];
+  const p = computeAgentChecklistProgress(
+    ['remove winreg requirement', 'guard startup on macOS'],
+    events,
+    editPlan,
+  );
+  ok('an unchanged inspected sibling does not zero valid edit progress', p.every((x) => x.done));
+}
+
 // A generic criterion with no distinctive keyword is credited once real work
 // shipped AND validation passed (the all-stopword case).
 {
