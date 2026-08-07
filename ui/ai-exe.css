@@ -3358,6 +3358,25 @@ html.platform-mac .settings-sidebar {
 .mining-calc-grid span { color: var(--text2); }
 .mining-calc-grid strong { color: var(--text); font: 12px var(--font-mono); text-align: right; }
 
+/* Finance tabs — the page outgrew a single scroll. */
+.finance-tabs { display: flex; gap: 4px; margin-bottom: 20px; padding: 4px; border-radius: 12px; background: var(--surface2); overflow-x: auto; scrollbar-width: none; }
+.finance-tabs::-webkit-scrollbar { display: none; }
+.finance-tab { position: relative; flex: none; padding: 8px 15px; border: 0; border-radius: 9px; background: transparent; color: var(--text2); font: 600 12.5px var(--font-sans); cursor: pointer; transition: color .16s ease, background .16s ease; }
+.finance-tab:hover { color: var(--text); }
+.finance-tab.active { color: var(--text); background: var(--surface); box-shadow: 0 1px 2px rgba(0, 0, 0, .28); }
+.finance-tab-badge { display: inline-flex; align-items: center; justify-content: center; min-width: 16px; height: 16px; margin-left: 7px; padding: 0 4px; border-radius: 999px; background: #f59e0b; color: #1a1400; font: 700 10px var(--font-sans); font-style: normal; vertical-align: 1px; }
+.finance-tabpane { display: none; }
+.finance-tabpane.active { display: block; }
+
+/* Paper trading. The confirmation gate is styled as a warning surface — an
+   unconfirmed order is the one thing in this panel that needs the eye. */
+.broker-mode-chip { flex: none; padding: 4px 10px; border-radius: 999px; color: #fcd34d; background: rgba(245, 158, 11, 0.12); box-shadow: inset 0 0 0 1px rgba(245, 158, 11, 0.3); font: 600 10.5px var(--font-mono); letter-spacing: 0.08em; }
+.broker-gate-panel { box-shadow: inset 0 0 0 1px rgba(245, 158, 11, 0.22); }
+.broker-gate-panel .finance-panel-title::before { background: #f59e0b; }
+.broker-pending-row { background: rgba(245, 158, 11, 0.06); }
+.broker-pending-row .broker-confirm-btn { color: var(--accent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent); }
+.broker-mark-note { padding-top: 12px; color: var(--text3); font-size: 11px; line-height: 1.5; }
+
 /* The finance panel lives between two independently collapsible sidebars. Query
    the available panel width rather than the whole window so opening either
    sidebar never forces a horizontal scrollbar at the app's minimum size. */

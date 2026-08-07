@@ -122,6 +122,17 @@ def main():
         # started at 50000, made 979*2 on the round trip, paid 200 in commission
         assert perf["latest_equity_cents"] == 50000 + (10989 - 10010) * 2 - 200
 
+        # --- an unmarked position is held at cost, not written off -----------
+        # (a fresh buy previously read as a total loss of what it just spent)
+        held = book.submit_order("NVDA", BUY, 1, 20000)
+        book.confirm_order(held["id"], held["confirmation_token"])
+        fresh = PaperBroker(data_dir)                    # no marks since the buy
+        assert fresh.performance()["latest_equity_cents"] == \
+            fresh.account()["cash_cents"] + 20020, "unmarked holdings must count at cost"
+        unwind = book.submit_order("NVDA", SELL, 1, 20000)
+        book.confirm_order(unwind["id"], unwind["confirmation_token"])
+        assert book.positions() == []
+
         # --- ledger is intact, and replay reproduces the state ---------------
         assert book.verify_ledger()["ok"] is True
         ledger_path = Path(data_dir) / "broker" / "ledger.jsonl"

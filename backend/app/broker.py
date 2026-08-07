@@ -116,6 +116,7 @@ class PaperBroker(BrokerAdapter):
         self._fees_cents = 0
         self._realized_pnl_cents = 0
         self._marks: List[dict] = []
+        self._last_prices: Dict[str, int] = {}
         self._replay()
 
     # ---------- ledger ----------
@@ -180,6 +181,7 @@ class PaperBroker(BrokerAdapter):
                 order["resolution_reason"] = data.get("reason", "")
         elif event_type == "marked":
             self._marks.append(dict(data))
+            self._last_prices.update({k: int(v) for k, v in (data.get("prices") or {}).items()})
 
     def _apply_fill(self, fill: dict) -> None:
         symbol = fill["symbol"]
@@ -373,12 +375,15 @@ class PaperBroker(BrokerAdapter):
     def mark_to_market(self, marks: Dict[str, int]) -> dict:
         """Snapshot equity against caller-supplied prices. No quotes are fetched."""
         with self._lock:
+            used = {}
             holdings = 0
             for position in self._positions.values():
                 qty = int(position["quantity"])
                 if qty == 0:
                     continue
-                price = int(marks.get(position["symbol"], position["avg_cost_cents"]))
+                symbol = position["symbol"]
+                price = int(marks.get(symbol, self._last_prices.get(symbol, position["avg_cost_cents"])))
+                used[symbol] = price
                 holdings += qty * price
             equity = self._cash_cents + holdings
             snapshot = {
@@ -386,9 +391,22 @@ class PaperBroker(BrokerAdapter):
                 "cash_cents": self._cash_cents,
                 "holdings_cents": holdings,
                 "equity_cents": equity,
+                "prices": used,
             }
             self._append("marked", snapshot)
             return dict(snapshot)
+
+    def current_equity_cents(self) -> int:
+        """Cash plus holdings at the last known price, else cost. Always live —
+        a stale snapshot would read a fresh buy as losing what it just spent."""
+        holdings = 0
+        for position in self._positions.values():
+            qty = int(position["quantity"])
+            if qty == 0:
+                continue
+            price = int(self._last_prices.get(position["symbol"], position["avg_cost_cents"]))
+            holdings += qty * price
+        return self._cash_cents + holdings
 
     def account(self) -> dict:
         return {
@@ -420,7 +438,7 @@ class PaperBroker(BrokerAdapter):
             previous = equity
         moves = [row["change_bps"] for row in series if row["change_bps"] is not None]
         start = int(self.settings["starting_cash_cents"])
-        latest = by_date[dates[-1]] if dates else self._cash_cents
+        latest = self.current_equity_cents()
         return {
             "days": len(series),
             "starting_equity_cents": start,

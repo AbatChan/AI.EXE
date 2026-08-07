@@ -833,6 +833,44 @@ function financeAuditPlaceholder(isEmpty = false) {
   </div>`;
 }
 
+const FINANCE_TABS = [
+  { id: 'overview', label: 'Overview' },
+  { id: 'records', label: 'Records' },
+  { id: 'mining', label: 'Mining' },
+  { id: 'trading', label: 'Paper trading' },
+];
+let financeActiveTab = 'overview';
+
+// Switch panes in place — re-rendering would drop the user back to Overview
+// after every save.
+function setFinanceTab(id) {
+  if (!FINANCE_TABS.some((t) => t.id === id)) return;
+  financeActiveTab = id;
+  if (!financeDashboardContent) return;
+  financeDashboardContent.querySelectorAll('.finance-tab').forEach((btn) => {
+    const on = btn.dataset.tab === id;
+    btn.classList.toggle('active', on);
+    btn.setAttribute('aria-selected', on ? 'true' : 'false');
+  });
+  financeDashboardContent.querySelectorAll('.finance-tabpane').forEach((pane) => {
+    pane.classList.toggle('active', pane.dataset.pane === id);
+  });
+}
+
+// A staged order behind an inactive tab must still be visible somewhere.
+function setFinancePendingBadge(count) {
+  const tab = financeDashboardContent && financeDashboardContent.querySelector('.finance-tab[data-tab="trading"]');
+  if (!tab) return;
+  let dot = tab.querySelector('.finance-tab-badge');
+  if (!count) { if (dot) dot.remove(); return; }
+  if (!dot) {
+    dot = document.createElement('i');
+    dot.className = 'finance-tab-badge';
+    tab.appendChild(dot);
+  }
+  dot.textContent = String(count);
+}
+
 async function renderFinanceDashboard() {
   if (!financeDashboardContent) return;
   financeDashboardContent.innerHTML = '<div class="finance-loading">Loading local finance data...</div>';
@@ -869,7 +907,12 @@ async function renderFinanceDashboard() {
           <div class="finance-invoice-empty-copy"><strong>Your invoice history starts here</strong><span>Create the first local draft above, then use this space to track whether it is drafted, sent, paid, or void. Nothing is emailed or charged from AI.EXE.</span><button type="button" id="financeInvoiceJumpBtn">Create first draft</button></div>
         </div>`;
     const currentPeriod = new Date().toISOString().slice(0, 7);
+    const pane = (id) => `finance-tabpane${financeActiveTab === id ? ' active' : ''}`;
     financeDashboardContent.innerHTML = `
+      <div class="finance-tabs" role="tablist">
+        ${FINANCE_TABS.map((t) => `<button type="button" role="tab" class="finance-tab${financeActiveTab === t.id ? ' active' : ''}" aria-selected="${financeActiveTab === t.id}" data-tab="${t.id}">${t.label}</button>`).join('')}
+      </div>
+      <div class="${pane('overview')}" data-pane="overview">
       <div class="finance-card-grid">
         <article class="finance-card"><span>Income pool</span><strong>${formatFinanceMoney(overview.income_cents, currency)}</strong><small>${overview.mock_transaction_count || 0} mock entries</small></article>
         <article class="finance-card"><span>Tax reserve</span><strong>${formatFinanceMoney(overview.tax_reserve_cents, currency)}</strong><small>${Number((overview.settings || {}).tax_reserve_bps || 0) / 100}% held locally</small></article>
@@ -877,7 +920,7 @@ async function renderFinanceDashboard() {
         <article class="finance-card"><span>Income target</span><strong>${progress}%</strong><small>${formatFinanceMoney(overview.income_cents, currency)} of ${formatFinanceMoney(target, currency)}</small><div class="finance-progress"><i style="width:${progress}%"></i></div></article>
         <article class="finance-card"><span>Open invoices</span><strong>${formatFinanceMoney(overview.open_invoice_cents, currency)}</strong><small>${overview.open_invoice_count || 0} draft or sent</small></article>
       </div>
-      <div class="finance-control-grid">
+      <div class="finance-control-grid finance-settings-grid">
         <section class="finance-panel finance-form-panel">
           <div class="finance-panel-title"><div><span>Local settings</span><small>Applied only to this device</small></div></div>
           <form class="finance-form" id="financeSettingsForm">
@@ -888,6 +931,13 @@ async function renderFinanceDashboard() {
             <button type="submit">Save settings</button>
           </form>
         </section>
+      </div>
+      <section class="finance-panel finance-report-panel"><div class="finance-panel-title"><div><span>Monthly report</span><small>Local summary and CSV export. Not tax advice.</small></div></div><div class="finance-report-controls"><label>Report month<input id="financeReportMonth" type="month" value="${currentPeriod}"></label><button type="button" class="finance-inline-btn" id="financeReportBtn">Build report</button><button type="button" class="finance-inline-btn" id="financeExportBtn">Export CSV</button></div><div class="finance-report-summary" id="financeReportSummary">Choose a month to build a local summary.</div></section>
+      <section class="finance-panel finance-audit-panel"><div class="finance-panel-title"><div><span>Audit history</span><small>Every local finance change is recorded</small></div><button type="button" class="finance-inline-btn" id="financeAuditBtn">View history</button></div><div class="finance-audit-list" id="financeAuditList">${financeAuditPlaceholder()}</div></section>
+      <div class="finance-split-note">Current split: ${Number(settings.developer_split_bps || 0) / 100}% developer / ${100 - Number(settings.developer_split_bps || 0) / 100}% client. Settings are stored only on this device.</div>
+      </div>
+      <div class="${pane('records')}" data-pane="records">
+      <div class="finance-control-grid">
         <section class="finance-panel finance-form-panel">
           <div class="finance-panel-title"><div><span>Record local entry</span><small>No bank or payment connection</small></div></div>
           <form class="finance-form" id="financeEntryForm">
@@ -912,10 +962,16 @@ async function renderFinanceDashboard() {
       </div>
       <section class="finance-panel"><div class="finance-panel-title"><div><span>Recent local records</span><small>Mock-data testing only</small></div></div>${transactionRows}</section>
       <section class="finance-panel finance-invoices-panel"><div class="finance-panel-title"><div><span>Local invoice records</span><small>Update status manually after you act outside AI.EXE.</small></div></div>${invoiceRows}</section>
-      <section class="finance-panel mining-pilot-panel" id="miningPilotSection"><div class="finance-loading">Loading mining pilot...</div></section>
-      <section class="finance-panel finance-report-panel"><div class="finance-panel-title"><div><span>Monthly report</span><small>Local summary and CSV export. Not tax advice.</small></div></div><div class="finance-report-controls"><label>Report month<input id="financeReportMonth" type="month" value="${currentPeriod}"></label><button type="button" class="finance-inline-btn" id="financeReportBtn">Build report</button><button type="button" class="finance-inline-btn" id="financeExportBtn">Export CSV</button></div><div class="finance-report-summary" id="financeReportSummary">Choose a month to build a local summary.</div></section>
-      <section class="finance-panel finance-audit-panel"><div class="finance-panel-title"><div><span>Audit history</span><small>Every local finance change is recorded</small></div><button type="button" class="finance-inline-btn" id="financeAuditBtn">View history</button></div><div class="finance-audit-list" id="financeAuditList">${financeAuditPlaceholder()}</div></section>
-      <div class="finance-split-note">Current split: ${Number(settings.developer_split_bps || 0) / 100}% developer / ${100 - Number(settings.developer_split_bps || 0) / 100}% client. Settings are stored only on this device.</div>`;
+      </div>
+      <div class="${pane('mining')}" data-pane="mining">
+        <section class="finance-panel mining-pilot-panel" id="miningPilotSection"><div class="finance-loading">Loading mining pilot...</div></section>
+      </div>
+      <div class="${pane('trading')}" data-pane="trading">
+        <section class="finance-panel broker-panel" id="brokerSection"><div class="finance-loading">Loading paper trading...</div></section>
+      </div>`;
+    financeDashboardContent.querySelectorAll('.finance-tab').forEach((btn) => {
+      btn.addEventListener('click', () => setFinanceTab(btn.dataset.tab));
+    });
     const seedButton = document.getElementById('financeSeedMockBtn');
     if (seedButton) {
       seedButton.addEventListener('click', async () => {
@@ -1092,6 +1148,7 @@ async function renderFinanceDashboard() {
       });
     }
     renderMiningPilot(currency);
+    renderBrokerPanel(currency);
   } catch (error) {
     financeDashboardError(error && error.message ? error.message : 'The local AI.EXE backend is not running.');
   }
@@ -1238,6 +1295,186 @@ async function renderMiningPilot(currency = 'USD') {
           <small>${escapeHtml(r.disclaimer)}</small>`;
       } catch (error) {
         calcResult.textContent = error && error.message ? error.message : 'Calculator failed.';
+      }
+    });
+  }
+}
+
+// Paper trading: simulated fills only. Staged orders sit unfilled until the
+// operator confirms each one — no strategy can trade on its own.
+async function renderBrokerPanel(currency = 'USD') {
+  const host = document.getElementById('brokerSection');
+  if (!host) return;
+  const base = getAIExeBackendUrl();
+  let account; let orders; let positions; let perf; let ledger;
+  try {
+    const [a, o, p, f, l] = await Promise.all([
+      fetch(base + '/api/broker/account'),
+      fetch(base + '/api/broker/orders?limit=12'),
+      fetch(base + '/api/broker/positions'),
+      fetch(base + '/api/broker/performance'),
+      fetch(base + '/api/broker/ledger/verify'),
+    ]);
+    if (!a.ok || !o.ok || !p.ok || !f.ok || !l.ok) throw new Error('bad status');
+    account = await a.json();
+    orders = (await o.json()).orders || [];
+    positions = (await p.json()).positions || [];
+    perf = await f.json();
+    ledger = await l.json();
+  } catch (_) {
+    host.innerHTML = '<div class="finance-empty-state"><strong>Paper trading unavailable</strong><span>Restart the local backend to load it.</span></div>';
+    return;
+  }
+  const money = (c) => formatFinanceMoney(c || 0, currency);
+  const signed = (c) => (c < 0 ? '−' : '+') + money(Math.abs(c || 0));
+  const pct = (bps) => (bps == null ? 'n/a' : `${(bps / 100).toFixed(2)}%`);
+  const pending = orders.filter((o) => o.status === 'pending_confirmation');
+  setFinancePendingBadge(pending.length);
+
+  const pendingRows = pending.length
+    ? pending.map((o) => `
+        <div class="finance-row broker-pending-row">
+          <div><strong>${escapeHtml(o.side.toUpperCase())} ${o.quantity} ${escapeHtml(o.symbol)} @ ${money(o.price_cents)}</strong><span>${escapeHtml(o.strategy || 'manual')}${o.memo ? ' · ' + escapeHtml(o.memo) : ''} · staged ${escapeHtml(o.created_at || '')}</span></div>
+          <div class="finance-row-actions">
+            <button type="button" class="finance-inline-btn broker-confirm-btn" data-order-id="${escapeHtml(o.id)}" data-token="${escapeHtml(o.confirmation_token)}">Confirm fill</button>
+            <button type="button" class="finance-inline-btn broker-cancel-btn" data-order-id="${escapeHtml(o.id)}">Cancel</button>
+          </div>
+        </div>`).join('')
+    : '<div class="finance-empty-state"><strong>Nothing awaiting confirmation</strong><span>Staged orders appear here and stay unfilled until you confirm each one.</span></div>';
+
+  const positionRows = positions.length
+    ? positions.map((p) => `
+        <div class="finance-row">
+          <div><strong>${escapeHtml(p.symbol)} · ${p.quantity} unit(s)</strong><span>Avg cost ${money(p.avg_cost_cents)} · realized ${signed(p.realized_pnl_cents)}</span></div>
+        </div>`).join('')
+    : '<div class="finance-empty-state"><strong>No open positions</strong><span>Confirmed fills build positions here.</span></div>';
+
+  const history = orders.filter((o) => o.status !== 'pending_confirmation').slice(0, 8);
+  const historyRows = history.length
+    ? history.map((o) => `
+        <div class="finance-row">
+          <div><strong>${escapeHtml(o.side.toUpperCase())} ${o.quantity} ${escapeHtml(o.symbol)} · ${escapeHtml(o.status)}</strong><span>${o.status === 'filled' ? `filled ${money(o.fill_price_cents)} vs quote ${money(o.quote_price_cents)} · fee ${money(o.commission_cents)} · by ${escapeHtml(o.confirmed_by || '')}` : escapeHtml(o.resolution_reason || '')}</span></div>
+        </div>`).join('')
+    : '<div class="finance-empty-state"><strong>No order history yet</strong></div>';
+
+  host.innerHTML = `
+    <div class="finance-panel-title"><div><span>Paper trading</span><small>Simulated fills only · no broker, no live order, no network</small></div><span class="broker-mode-chip">${escapeHtml(String(account.mode || 'paper').toUpperCase())}</span></div>
+    <div class="finance-card-grid">
+      <article class="finance-card"><span>Equity</span><strong>${money(perf.latest_equity_cents)}</strong><small>Started ${money(perf.starting_equity_cents)} · ${perf.days} marked day(s)</small></article>
+      <article class="finance-card"><span>Cash</span><strong>${money(account.cash_cents)}</strong><small>${account.open_positions} open position(s)</small></article>
+      <article class="finance-card"><span>Realized P&amp;L</span><strong class="${account.realized_pnl_cents < 0 ? 'expense' : ''}">${signed(account.realized_pnl_cents)}</strong><small>Total return ${pct(perf.total_return_bps)}</small></article>
+      <article class="finance-card"><span>Costs paid</span><strong>${money(account.fees_cents)}</strong><small>Slippage ${(Number(account.settings.slippage_bps) / 100).toFixed(2)}% per fill</small></article>
+      <article class="finance-card"><span>Measured daily</span><strong class="${perf.mean_daily_bps < 0 ? 'expense' : ''}">${pct(perf.mean_daily_bps)}</strong><small>Best ${pct(perf.best_daily_bps)} · worst ${pct(perf.worst_daily_bps)}</small></article>
+      <article class="finance-card"><span>Audit ledger</span><strong>${ledger.ok ? 'Verified' : 'BROKEN'}</strong><small>${ledger.ok ? `${ledger.records} record(s), chain intact` : `tampered at #${ledger.broken_at}`}</small></article>
+    </div>
+    <section class="finance-panel broker-gate-panel">
+      <div class="finance-panel-title"><div><span>Awaiting your confirmation</span><small>Nothing fills unless you approve it here</small></div></div>
+      ${pendingRows}
+    </section>
+    <div class="finance-control-grid">
+      <section class="finance-panel finance-form-panel">
+        <div class="finance-panel-title"><div><span>Stage an order</span><small>Staging never moves cash</small></div></div>
+        <form class="finance-form" id="brokerOrderForm">
+          <label>Symbol<input name="symbol" required maxlength="24" placeholder="AAPL"></label>
+          <label>Side<select name="side"><option value="buy">Buy</option><option value="sell">Sell</option></select></label>
+          <label>Quantity<input name="quantity" type="number" min="1" step="1" required placeholder="1"></label>
+          <label>Price (${currency})<input name="price" type="number" min="0.01" step="0.01" required placeholder="0.00"></label>
+          <label>Strategy<input name="strategy" maxlength="80" placeholder="manual"></label>
+          <label>Note<input name="memo" maxlength="500" placeholder="Optional"></label>
+          <button type="submit">Stage order</button>
+        </form>
+      </section>
+      <section class="finance-panel finance-form-panel">
+        <div class="finance-panel-title"><div><span>Mark to market</span><small>Snapshot equity at today's prices</small></div></div>
+        <form class="finance-form" id="brokerMarkForm">
+          <label>Prices<input name="marks" maxlength="300" placeholder="AAPL=182.50, BTC=61000"></label>
+          <button type="submit">Record snapshot</button>
+        </form>
+        <div class="broker-mark-note">Positions with no price given are held at cost. Snapshots build the daily-return series above.</div>
+      </section>
+    </div>
+    <section class="finance-panel"><div class="finance-panel-title"><div><span>Open positions</span></div></div>${positionRows}</section>
+    <section class="finance-panel"><div class="finance-panel-title"><div><span>Order history</span><small>Every fill records slippage and commission</small></div></div>${historyRows}</section>`;
+
+  const reload = () => renderBrokerPanel(currency);
+  const post = async (url, body) => {
+    const res = await fetch(base + url, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}),
+    });
+    if (!res.ok) {
+      let detail = 'Request failed.';
+      try { detail = (await res.json()).detail || detail; } catch (_) {}
+      throw new Error(detail);
+    }
+    return res.json();
+  };
+
+  host.querySelectorAll('.broker-confirm-btn').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      btn.disabled = true;
+      btn.textContent = 'Confirming...';
+      try {
+        await post(`/api/broker/orders/${encodeURIComponent(btn.dataset.orderId)}/confirm`,
+          { confirmation_token: btn.dataset.token, confirmed_by: 'operator' });
+        reload();
+      } catch (error) {
+        btn.disabled = false;
+        btn.textContent = 'Confirm fill';
+        financeDashboardError(error.message);
+      }
+    });
+  });
+  host.querySelectorAll('.broker-cancel-btn').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      btn.disabled = true;
+      try {
+        await post(`/api/broker/orders/${encodeURIComponent(btn.dataset.orderId)}/cancel`, { reason: 'cancelled from finance panel' });
+        reload();
+      } catch (error) {
+        btn.disabled = false;
+        financeDashboardError(error.message);
+      }
+    });
+  });
+
+  const orderForm = document.getElementById('brokerOrderForm');
+  if (orderForm) {
+    orderForm.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const data = new FormData(orderForm);
+      try {
+        await post('/api/broker/orders', {
+          symbol: String(data.get('symbol') || '').trim(),
+          side: String(data.get('side') || 'buy'),
+          quantity: Math.round(Number(data.get('quantity') || 0)),
+          price_cents: Math.round(Number(data.get('price') || 0) * 100),
+          strategy: String(data.get('strategy') || 'manual').trim() || 'manual',
+          memo: String(data.get('memo') || '').trim(),
+        });
+        orderForm.reset();
+        reload();
+      } catch (error) {
+        financeDashboardError(error.message);
+      }
+    });
+  }
+
+  const markForm = document.getElementById('brokerMarkForm');
+  if (markForm) {
+    markForm.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const raw = String(new FormData(markForm).get('marks') || '');
+      const marks = {};
+      raw.split(',').forEach((pair) => {
+        const [sym, price] = pair.split('=').map((s) => (s || '').trim());
+        if (sym && price && !Number.isNaN(Number(price))) marks[sym.toUpperCase()] = Math.round(Number(price) * 100);
+      });
+      try {
+        await post('/api/broker/mark', { marks });
+        markForm.reset();
+        reload();
+      } catch (error) {
+        financeDashboardError(error.message);
       }
     });
   }
