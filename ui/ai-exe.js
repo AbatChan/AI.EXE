@@ -1381,16 +1381,23 @@ async function renderBrokerPanel(currency = 'USD') {
           <label>Price (${currency})<input name="price" type="number" min="0.01" step="0.01" required placeholder="0.00"></label>
           <label>Strategy<input name="strategy" maxlength="80" placeholder="manual"></label>
           <label>Note<input name="memo" maxlength="500" placeholder="Optional"></label>
-          <button type="submit">Stage order</button>
+          <div class="broker-form-actions">
+            <button type="submit">Stage order</button>
+            <button type="button" class="finance-inline-btn" id="brokerQuoteBtn">Use live price</button>
+          </div>
         </form>
+        <div class="broker-mark-note" id="brokerQuoteNote">Live quotes cover equities and crypto — AAPL, MSFT, BTC-USD.</div>
       </section>
       <section class="finance-panel finance-form-panel">
         <div class="finance-panel-title"><div><span>Mark to market</span><small>Snapshot equity at today's prices</small></div></div>
         <form class="finance-form" id="brokerMarkForm">
-          <label>Prices<input name="marks" maxlength="300" placeholder="AAPL=182.50, BTC=61000"></label>
-          <button type="submit">Record snapshot</button>
+          <label>Manual override<input name="marks" maxlength="300" placeholder="AAPL=182.50, BTC-USD=61000"></label>
+          <div class="broker-form-actions">
+            <button type="button" id="brokerLiveMarkBtn">Fetch live &amp; snapshot</button>
+            <button type="submit" class="finance-inline-btn">Snapshot at cost</button>
+          </div>
         </form>
-        <div class="broker-mark-note">Positions with no price given are held at cost. Snapshots build the daily-return series above.</div>
+        <div class="broker-mark-note" id="brokerMarkNote">Live prices fill any held symbol you don't override. Snapshots build the daily-return series above.</div>
       </section>
     </div>
     <section class="finance-panel"><div class="finance-panel-title"><div><span>Open positions</span></div></div>${positionRows}</section>
@@ -1459,24 +1466,63 @@ async function renderBrokerPanel(currency = 'USD') {
     });
   }
 
-  const markForm = document.getElementById('brokerMarkForm');
-  if (markForm) {
-    markForm.addEventListener('submit', async (event) => {
-      event.preventDefault();
-      const raw = String(new FormData(markForm).get('marks') || '');
-      const marks = {};
-      raw.split(',').forEach((pair) => {
-        const [sym, price] = pair.split('=').map((s) => (s || '').trim());
-        if (sym && price && !Number.isNaN(Number(price))) marks[sym.toUpperCase()] = Math.round(Number(price) * 100);
-      });
+  // Pull a live quote into the price field so fills stop being hand-typed.
+  const quoteBtn = document.getElementById('brokerQuoteBtn');
+  const quoteNote = document.getElementById('brokerQuoteNote');
+  if (quoteBtn && orderForm) {
+    quoteBtn.addEventListener('click', async () => {
+      const symbol = String(new FormData(orderForm).get('symbol') || '').trim().toUpperCase();
+      if (!symbol) { quoteNote.textContent = 'Enter a symbol first.'; return; }
+      quoteBtn.disabled = true;
+      quoteBtn.textContent = 'Fetching...';
       try {
-        await post('/api/broker/mark', { marks });
-        markForm.reset();
-        reload();
+        const res = await fetch(`${base}/api/prices/quote?symbols=${encodeURIComponent(symbol)}`);
+        const data = await res.json();
+        const quote = (data.quotes || {})[symbol];
+        if (!quote) throw new Error((data.errors || {})[symbol] || `No quote for ${symbol}.`);
+        orderForm.querySelector('[name="price"]').value = (quote.price_cents / 100).toFixed(2);
+        quoteNote.textContent = `${quote.symbol} ${(quote.price_cents / 100).toFixed(2)} ${quote.currency}`
+          + (quote.stale ? ' — cached, feed unreachable' : ` — fetched ${quote.fetched_at}`);
       } catch (error) {
-        financeDashboardError(error.message);
+        quoteNote.textContent = error.message;
+      } finally {
+        quoteBtn.disabled = false;
+        quoteBtn.textContent = 'Use live price';
       }
     });
+  }
+
+  const markForm = document.getElementById('brokerMarkForm');
+  const markNote = document.getElementById('brokerMarkNote');
+  const readMarks = () => {
+    const marks = {};
+    String(new FormData(markForm).get('marks') || '').split(',').forEach((pair) => {
+      const [sym, price] = pair.split('=').map((s) => (s || '').trim());
+      if (sym && price && !Number.isNaN(Number(price))) marks[sym.toUpperCase()] = Math.round(Number(price) * 100);
+    });
+    return marks;
+  };
+  const snapshot = async (useLive) => {
+    try {
+      const result = await post('/api/broker/mark', { marks: readMarks(), use_live: useLive });
+      const failed = Object.keys(result.quote_errors || {});
+      markForm.reset();
+      if (failed.length) markNote.textContent = `No live price for ${failed.join(', ')} — held at cost.`;
+      reload();
+    } catch (error) {
+      financeDashboardError(error.message);
+    }
+  };
+  if (markForm) {
+    markForm.addEventListener('submit', (event) => { event.preventDefault(); snapshot(false); });
+    const liveBtn = document.getElementById('brokerLiveMarkBtn');
+    if (liveBtn) {
+      liveBtn.addEventListener('click', async () => {
+        liveBtn.disabled = true;
+        liveBtn.textContent = 'Fetching...';
+        await snapshot(true);
+      });
+    }
   }
 }
 

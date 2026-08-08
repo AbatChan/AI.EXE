@@ -3,6 +3,7 @@ import os
 
 from .adapter import AdapterManager
 from .broker import PaperBroker
+from .prices import QuoteFeed
 from .config import settings
 from .chatstore import ChatStore
 from .finance import FinanceStore
@@ -32,6 +33,9 @@ finance_store = FinanceStore(data_dir=settings.data_dir)
 
 # Paper-mode only; see broker.py. No live venue, no network.
 paper_broker = PaperBroker(data_dir=settings.data_dir)
+
+# The only networked part of the trading stack; the broker is handed prices.
+quote_feed = QuoteFeed()
 
 # Durable chat storage — see chatstore.py. Never trimmed to reclaim space.
 chat_store = ChatStore(data_dir=settings.data_dir)

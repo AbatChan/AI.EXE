@@ -21,6 +21,7 @@ TESTS = [
     "smoke_adapter",    # Venice Pro adapter process manager
     "smoke_finance",    # local finance foundation (was never registered)
     "smoke_broker",     # paper-mode broker adapter + confirmation gate
+    "smoke_prices",     # live quote feed (stubbed fetcher)
 ]
 
 

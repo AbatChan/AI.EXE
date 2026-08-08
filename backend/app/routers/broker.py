@@ -8,7 +8,7 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from ..broker import ConfirmationRequired, LiveTradingBlocked, OrderRejected
-from ..services import paper_broker
+from ..services import paper_broker, quote_feed
 
 router = APIRouter(tags=["broker"])
 
@@ -33,6 +33,7 @@ class OrderCancel(BaseModel):
 
 class MarkRequest(BaseModel):
     marks: dict = Field(default_factory=dict)
+    use_live: bool = False
 
 
 @router.get("/broker/account")
@@ -85,8 +86,28 @@ def broker_positions():
 
 @router.post("/broker/mark")
 def broker_mark(payload: MarkRequest):
+    """Live prices are fetched HERE and handed to the broker — the broker never
+    reaches the network itself."""
     marks = {str(k).upper(): int(v) for k, v in (payload.marks or {}).items()}
-    return paper_broker.mark_to_market(marks)
+    errors = {}
+    if payload.use_live:
+        held = [p["symbol"] for p in paper_broker.positions()]
+        wanted = [s for s in held if s not in marks]
+        if wanted:
+            fetched = quote_feed.quotes(wanted)
+            marks.update({s: q["price_cents"] for s, q in fetched["quotes"].items()})
+            errors = fetched["errors"]
+    snapshot = paper_broker.mark_to_market(marks)
+    snapshot["quote_errors"] = errors
+    return snapshot
+
+
+@router.get("/prices/quote")
+def price_quote(symbols: str = Query(min_length=1, max_length=200)):
+    wanted = [s.strip().upper() for s in symbols.split(",") if s.strip()][:12]
+    if not wanted:
+        raise HTTPException(status_code=400, detail="at least one symbol is required")
+    return quote_feed.quotes(wanted)
 
 
 @router.get("/broker/performance")
