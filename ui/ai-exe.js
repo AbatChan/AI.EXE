@@ -1334,7 +1334,7 @@ async function renderBrokerPanel(currency = 'USD') {
   const pendingRows = pending.length
     ? pending.map((o) => `
         <div class="finance-row broker-pending-row">
-          <div><strong>${escapeHtml(o.side.toUpperCase())} ${o.quantity} ${escapeHtml(o.symbol)} @ ${money(o.price_cents)}</strong><span>${escapeHtml(o.strategy || 'manual')}${o.memo ? ' · ' + escapeHtml(o.memo) : ''} · staged ${escapeHtml(o.created_at || '')}</span></div>
+          <div><strong>${escapeHtml(o.side.toUpperCase())} ${o.quantity} ${escapeHtml(o.symbol)} @ ${money(o.price_cents)}</strong><span>${escapeHtml(o.strategy || 'manual')}${o.memo ? ' · ' + escapeHtml(o.memo) : ''} · ${escapeHtml(o.quote_source || 'manual')} quote · staged ${escapeHtml(o.created_at || '')}</span></div>
           <div class="finance-row-actions">
             <button type="button" class="finance-inline-btn broker-confirm-btn" data-order-id="${escapeHtml(o.id)}" data-token="${escapeHtml(o.confirmation_token)}">Confirm fill</button>
             <button type="button" class="finance-inline-btn broker-cancel-btn" data-order-id="${escapeHtml(o.id)}">Cancel</button>
@@ -1381,6 +1381,7 @@ async function renderBrokerPanel(currency = 'USD') {
           <label>Price (${currency})<input name="price" type="number" min="0.01" step="0.01" required placeholder="0.00"></label>
           <label>Strategy<input name="strategy" maxlength="80" placeholder="manual"></label>
           <label>Note<input name="memo" maxlength="500" placeholder="Optional"></label>
+          <label>Instruction / rationale<input name="instruction" maxlength="2000" placeholder="Optional operator or AI proposal text"></label>
           <div class="broker-form-actions">
             <button type="submit">Stage order</button>
             <button type="button" class="finance-inline-btn" id="brokerQuoteBtn">Use live price</button>
@@ -1445,20 +1446,30 @@ async function renderBrokerPanel(currency = 'USD') {
   });
 
   const orderForm = document.getElementById('brokerOrderForm');
+  let stagedQuote = null;
   if (orderForm) {
     orderForm.addEventListener('submit', async (event) => {
       event.preventDefault();
       const data = new FormData(orderForm);
+      const orderSymbol = String(data.get('symbol') || '').trim().toUpperCase();
+      const quotedOrder = stagedQuote && String(stagedQuote.symbol || '').toUpperCase() === orderSymbol
+        ? stagedQuote : null;
       try {
         await post('/api/broker/orders', {
-          symbol: String(data.get('symbol') || '').trim(),
+          symbol: orderSymbol,
           side: String(data.get('side') || 'buy'),
           quantity: Math.round(Number(data.get('quantity') || 0)),
           price_cents: Math.round(Number(data.get('price') || 0) * 100),
           strategy: String(data.get('strategy') || 'manual').trim() || 'manual',
           memo: String(data.get('memo') || '').trim(),
+          origin: 'manual_form',
+          instruction: String(data.get('instruction') || '').trim(),
+          quote_source: quotedOrder ? String(quotedOrder.source || 'approved_market_feed') : 'manual',
+          quote_fetched_at: quotedOrder ? String(quotedOrder.fetched_at || quotedOrder.as_of || '') : '',
+          quote_stale: Boolean(quotedOrder && quotedOrder.stale),
         });
         orderForm.reset();
+        stagedQuote = null;
         reload();
       } catch (error) {
         financeDashboardError(error.message);
@@ -1480,6 +1491,7 @@ async function renderBrokerPanel(currency = 'USD') {
         const data = await res.json();
         const quote = (data.quotes || {})[symbol];
         if (!quote) throw new Error((data.errors || {})[symbol] || `No quote for ${symbol}.`);
+        stagedQuote = quote;
         orderForm.querySelector('[name="price"]').value = (quote.price_cents / 100).toFixed(2);
         quoteNote.textContent = `${quote.symbol} ${(quote.price_cents / 100).toFixed(2)} ${quote.currency}`
           + (quote.stale ? ' — cached, feed unreachable' : ` — fetched ${quote.fetched_at}`);
@@ -2203,9 +2215,8 @@ try {
   window.addEventListener('load', applyBuildVer); // re-apply if the topbar re-renders
 } catch (_) {}
 
-// In-app update check: compare our version to the latest public GitHub Release and
-// surface an "Update" badge. Clicking it runs the native auto-updater (download +
-// swap + relaunch) on the desktop app, or opens the release page as a fallback.
+// Update checks only run after the operator clicks the badge. Successful checks
+// can then stage the release in the background.
 (function setupUpdateCheck() {
   const REPO = 'AbatChan/AI.EXE';
   const cmpVer = (a, b) => {
@@ -2256,6 +2267,10 @@ try {
     };
   }
   async function checkForUpdate() {
+    const badge = document.getElementById('updateBadge');
+    const text = document.getElementById('updateBadgeText');
+    if (badge) badge.disabled = true;
+    if (text) text.textContent = 'Checking…';
     ulog('update_check_start', { current: AI_EXE_VERSION, repo: REPO });
     try {
       let release = null;
@@ -2275,7 +2290,11 @@ try {
         source: String(release && release.source || 'unknown'),
         badgeEl: String(Boolean(document.getElementById('updateBadge'))),
       });
-      if (!latest || newer <= 0) return;
+      if (!latest || newer <= 0) {
+        if (text) text.textContent = 'Up to date';
+        if (badge) badge.dataset.tooltip = `v${AI_EXE_VERSION} is current — click to check again`;
+        return false;
+      }
       updateInfo = {
         version: latest,
         url: String(release.url || ''),
@@ -2291,8 +2310,14 @@ try {
         ulog('update_badge_shown', { latest });
       }
       startBackgroundStage();
+      return true;
     } catch (err) {
       ulog('update_check_error', { error: String(err && err.message ? err.message : err) });
+      if (text) text.textContent = 'Check update';
+      if (badge) badge.dataset.tooltip = 'Update check failed — click to retry';
+      return false;
+    } finally {
+      if (badge) badge.disabled = false;
     }
   }
   // Background staging: download the new build while the app keeps working, so
@@ -2354,8 +2379,11 @@ try {
       } catch (_) {}
     }, 2000);
   }
-  function onBadgeClick() {
-    if (!updateInfo) return;
+  async function onBadgeClick() {
+    if (!updateInfo) {
+      await checkForUpdate();
+      return;
+    }
     const nativeOk = typeof nativeBridge !== 'undefined'
       && nativeBridge && nativeBridge.available && nativeBridge.available();
     if (nativeOk && updateInfo.url) {
@@ -2374,8 +2402,6 @@ try {
   const startUpdateChecks = () => {
     const badge = document.getElementById('updateBadge');
     if (badge) badge.addEventListener('click', onBadgeClick);
-    setTimeout(checkForUpdate, 2500);
-    setInterval(checkForUpdate, 5 * 60 * 1000);
   };
   // Run even if 'load' already fired before this script executed (otherwise the
   // listener never fires and the check never runs).

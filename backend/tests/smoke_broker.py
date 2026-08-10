@@ -5,6 +5,7 @@ a confirmation gate that cannot be bypassed, one adapter seam, a tamper-evident
 append-only ledger, and no network.
 """
 import json
+import stat
 import sys
 import tempfile
 from pathlib import Path
@@ -40,8 +41,14 @@ def main():
             pass
 
         # --- an order does not fill on submission ----------------------------
-        order = book.submit_order("AAPL", BUY, 2, 10000, strategy="test", memo="entry")
+        order = book.submit_order(
+            "AAPL", BUY, 2, 10000, strategy="test", memo="entry",
+            origin="manual_form", instruction="Buy two shares for the paper test",
+            quote_source="nasdaq", quote_fetched_at="2026-08-10T12:00:00Z",
+        )
         assert order["status"] == STATUS_PENDING
+        assert order["instruction"] == "Buy two shares for the paper test"
+        assert order["quote_source"] == "nasdaq"
         assert book.account()["cash_cents"] == 50000, "staging an order must not move cash"
         assert book.positions() == [], "staging an order must not open a position"
 
@@ -137,6 +144,8 @@ def main():
         assert book.verify_ledger()["ok"] is True
         ledger_path = Path(data_dir) / "broker" / "ledger.jsonl"
         assert ledger_path.exists()
+        if sys.platform != "win32":
+            assert stat.S_IMODE(ledger_path.stat().st_mode) == 0o600
 
         reopened = PaperBroker(data_dir)
         assert reopened.account()["cash_cents"] == book.account()["cash_cents"]

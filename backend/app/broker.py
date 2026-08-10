@@ -64,6 +64,13 @@ def _canonical(payload: dict) -> str:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 
+def _protect(path: str, mode: int) -> None:
+    try:
+        os.chmod(path, mode)
+    except OSError:
+        pass
+
+
 class BrokerAdapter:
     """The single adapter seam. Subclasses declare a mode; only paper runs.
 
@@ -102,7 +109,10 @@ class PaperBroker(BrokerAdapter):
         super().__init__()
         broker_dir = os.path.join(data_dir, "broker")
         os.makedirs(broker_dir, exist_ok=True)
+        _protect(broker_dir, 0o700)
         self._path = os.path.join(broker_dir, "ledger.jsonl")
+        if os.path.exists(self._path):
+            _protect(self._path, 0o600)
         self._lock = threading.RLock()
         self.settings = dict(DEFAULT_SETTINGS)
         if settings:
@@ -155,6 +165,7 @@ class PaperBroker(BrokerAdapter):
             ).hexdigest()
             with open(self._path, "a", encoding="utf-8") as handle:
                 handle.write(json.dumps(record) + "\n")
+            _protect(self._path, 0o600)
             self._prev_hash = record["hash"]
             self._apply(event_type, data)
             return record
@@ -267,7 +278,9 @@ class PaperBroker(BrokerAdapter):
                 })
 
     def submit_order(self, symbol: str, side: str, quantity: int, price_cents: int,
-                     strategy: str = "manual", memo: str = "") -> dict:
+                     strategy: str = "manual", memo: str = "", origin: str = "manual",
+                     instruction: str = "", quote_source: str = "manual",
+                     quote_fetched_at: str = "", quote_stale: bool = False) -> dict:
         """Stage an order. It does NOT fill — confirm_order does that."""
         if self.mode != PAPER or LIVE_TRADING_SUPPORTED:
             raise LiveTradingBlocked("paper mode is the only supported operating mode")
@@ -302,6 +315,11 @@ class PaperBroker(BrokerAdapter):
                 "price_cents": int(price_cents),
                 "strategy": strategy[:80],
                 "memo": memo[:500],
+                "origin": str(origin or "manual")[:40],
+                "instruction": str(instruction or "")[:2000],
+                "quote_source": str(quote_source or "manual")[:80],
+                "quote_fetched_at": str(quote_fetched_at or "")[:60],
+                "quote_stale": bool(quote_stale),
             }
             self._append("order_submitted", order)
             return dict(self._orders[order["id"]])

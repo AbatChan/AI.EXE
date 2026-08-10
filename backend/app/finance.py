@@ -25,17 +25,30 @@ def _now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
+def _protect(path: str, mode: int) -> None:
+    try:
+        os.chmod(path, mode)
+    except OSError:
+        pass
+
+
 class FinanceStore:
     """Small SQLite-backed ledger with append-only audit records."""
 
     def __init__(self, data_dir: str):
         os.makedirs(data_dir, exist_ok=True)
+        _protect(data_dir, 0o700)
         self._path = os.path.join(data_dir, "finance.sqlite3")
         self._lock = threading.RLock()
         self._init_db()
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self._path)
+        _protect(self._path, 0o600)
+        for suffix in ("-wal", "-shm"):
+            sidecar = self._path + suffix
+            if os.path.exists(sidecar):
+                _protect(sidecar, 0o600)
         conn.row_factory = sqlite3.Row
         return conn
 
@@ -97,6 +110,7 @@ class FinanceStore:
                     "INSERT OR IGNORE INTO finance_settings (key, value, updated_at) VALUES (?, ?, ?)",
                     (key, json.dumps(value), _now()),
                 )
+        _protect(self._path, 0o600)
 
     def _audit(self, conn: sqlite3.Connection, action: str, detail: Dict) -> None:
         conn.execute(

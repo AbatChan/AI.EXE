@@ -20,6 +20,11 @@ class OrderCreate(BaseModel):
     price_cents: int = Field(gt=0)
     strategy: str = Field(default="manual", max_length=80)
     memo: str = Field(default="", max_length=500)
+    origin: str = Field(default="manual", max_length=40)
+    instruction: str = Field(default="", max_length=2000)
+    quote_source: str = Field(default="manual", max_length=80)
+    quote_fetched_at: str = Field(default="", max_length=60)
+    quote_stale: bool = False
 
 
 class OrderConfirm(BaseModel):
@@ -52,6 +57,9 @@ def broker_submit_order(payload: OrderCreate):
         return paper_broker.submit_order(
             symbol=payload.symbol, side=payload.side, quantity=payload.quantity,
             price_cents=payload.price_cents, strategy=payload.strategy, memo=payload.memo,
+            origin=payload.origin, instruction=payload.instruction,
+            quote_source=payload.quote_source, quote_fetched_at=payload.quote_fetched_at,
+            quote_stale=payload.quote_stale,
         )
     except LiveTradingBlocked as exc:
         raise HTTPException(status_code=403, detail=str(exc))

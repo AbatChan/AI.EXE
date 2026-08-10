@@ -1,4 +1,5 @@
 """Smoke test for the local Phase 3 finance foundation."""
+import stat
 import sys
 import tempfile
 from datetime import datetime, timezone
@@ -43,6 +44,8 @@ def main():
         assert report["invoice_count"] == 1
         assert report["invoice_totals"]["sent"] == 37500
         assert len(store.audit_log()) >= 7
+        if sys.platform != "win32":
+            assert stat.S_IMODE((Path(data_dir) / "finance.sqlite3").stat().st_mode) == 0o600
     print("finance smoke test: ok")
 
 

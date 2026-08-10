@@ -11,7 +11,7 @@ Windows is the primary target. macOS builds are used for development and preview
 Grab the latest `AI.EXE-Windows.zip` from
 [Releases](https://github.com/AbatChan/AI.EXE/releases). Unzip and run
 `AI.EXE.exe` — no installer. The app checks for new releases and can update
-itself in place; chats and settings survive updates.
+itself in place when you click **Check update**; chats and settings survive updates.
 
 ## What it does
 
@@ -85,4 +85,5 @@ every shipped change — the release tag comes from it.
 - The UI is plain HTML/CSS/JS on purpose: one codebase renders in WebView2 on
   Windows and WKWebView on macOS with no build step.
 - API keys are stored locally on your machine and sent only to the provider
-  you configured. Nothing phones home except the GitHub release check.
+  you configured. AI.EXE makes no startup update request. GitHub update checks,
+  hosted-model requests, and allowlisted market quotes require a user action.
