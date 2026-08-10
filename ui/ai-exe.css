@@ -640,6 +640,7 @@ body.resizing-panels .panel-resizer {
   transition: transform 0.2s var(--ease-out), box-shadow 0.25s var(--ease-out), opacity 0.15s ease;
   animation: update-badge-pulse 2.4s ease-in-out infinite;
 }
+.update-badge[hidden] { display: none; }
 /* soft shimmer sweeping across the pill — quiet, premium "something new" cue */
 .update-badge::after {
   content: '';
@@ -655,7 +656,7 @@ body.resizing-panels .panel-resizer {
   box-shadow: 0 6px 18px rgba(0, 229, 255, 0.25), 0 2px 8px rgba(124, 58, 237, 0.2);
 }
 .update-badge > svg { flex: 0 0 auto; }
-#updateBadgeText { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#updateStatusText { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .update-badge:active { transform: translateY(0) scale(0.97); }
 .update-badge:disabled { cursor: default; opacity: 0.7; animation: none; }
 .update-badge:disabled::after { animation: none; }

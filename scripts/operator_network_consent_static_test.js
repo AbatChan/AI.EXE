@@ -4,19 +4,28 @@ const fs = require('fs');
 const source = fs.readFileSync('ui/ai-exe.js', 'utf8');
 const html = fs.readFileSync('ui/ai-exe.html', 'utf8');
 const prices = fs.readFileSync('backend/app/prices.py', 'utf8');
+const windows = fs.readFileSync('src/gui_main_win_webview.cpp', 'utf8');
+const releaseWorkflow = fs.readFileSync('.github/workflows/build-windows.yml', 'utf8');
 
 const start = source.indexOf('(function setupUpdateCheck()');
 const end = source.indexOf('// Boot nudge:', start);
 assert.ok(start >= 0 && end > start, 'update-check block must exist');
 const update = source.slice(start, end);
 
-assert.doesNotMatch(update, /setTimeout\s*\(\s*checkForUpdate/);
-assert.doesNotMatch(update, /setInterval\s*\(\s*checkForUpdate/);
-assert.match(update, /async function onBadgeClick\(\)[\s\S]*await checkForUpdate\(\)/);
-assert.match(html, /id="updateBadge"[^>]*data-tooltip="Check GitHub/);
-assert.doesNotMatch(html, /id="updateBadge"[^>]*display\s*:\s*none/);
+assert.match(update, /setTimeout\(\(\) => \{ void checkForUpdate\(false\); \}, 8000\)/);
+assert.match(update, /setInterval\(\(\) => \{ void checkForUpdate\(false\); \}, AUTO_CHECK_INTERVAL_MS\)/);
+assert.match(update, /armUpdateOnQuit/);
+assert.match(update, /validSha256/);
+assert.doesNotMatch(html, /id="updateBadge"/);
+assert.match(html, /id="updateStatus"[^>]*hidden/);
+assert.match(html, /id="settingsUpdateCheckBtn"/);
+
+assert.match(windows, /Get-FileHash -Algorithm SHA256/);
+assert.match(windows, /case WM_CLOSE:[\s\S]*LaunchPendingUpdateOnQuit/);
+assert.match(windows, /LaunchUpdater\(pending->url, pending->version, pending->sha256, false/);
+assert.match(releaseWorkflow, /AI\.EXE-Windows\.zip\.sha256/);
 
 const marketHosts = [...prices.matchAll(/https:\/\/([^/"']+)/g)].map((match) => match[1]);
 assert.deepEqual([...new Set(marketHosts)].sort(), ['api.coingecko.com', 'api.nasdaq.com']);
 
-console.log('PASS: startup update traffic is disabled and market data hosts are allowlisted');
+console.log('PASS: verified automatic updates install on quit and market data hosts are allowlisted');

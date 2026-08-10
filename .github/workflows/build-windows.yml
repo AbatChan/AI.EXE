@@ -176,9 +176,11 @@ jobs:
           $ver = (Select-String -Path CMakeLists.txt -Pattern 'AI_EXE_APP_VERSION "([0-9.]+)"').Matches[0].Groups[1].Value
           $tag = "v$ver"
           Compress-Archive -Path release/AI.EXE/* -DestinationPath "AI.EXE-Windows.zip" -Force
+          $sha = (Get-FileHash -Algorithm SHA256 "AI.EXE-Windows.zip").Hash.ToLowerInvariant()
+          "$sha  AI.EXE-Windows.zip" | Set-Content -Encoding ASCII -NoNewline "AI.EXE-Windows.zip.sha256"
           gh release view $tag *> $null
           if ($LASTEXITCODE -eq 0) {
-            gh release upload $tag "AI.EXE-Windows.zip" --clobber
+            gh release upload $tag "AI.EXE-Windows.zip" "AI.EXE-Windows.zip.sha256" --clobber
           } else {
-            gh release create $tag "AI.EXE-Windows.zip" --title "AI.EXE $tag" --notes "Automated build of AI.EXE $tag."
+            gh release create $tag "AI.EXE-Windows.zip" "AI.EXE-Windows.zip.sha256" --title "AI.EXE $tag" --notes "Automated build of AI.EXE $tag."
           }

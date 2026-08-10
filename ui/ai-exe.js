@@ -2215,10 +2215,12 @@ try {
   window.addEventListener('load', applyBuildVer); // re-apply if the topbar re-renders
 } catch (_) {}
 
-// Update checks only run after the operator clicks the badge. Successful checks
-// can then stage the release in the background.
+// Quietly keep the latest verified Windows release staged. A ready update installs
+// on normal quit, or immediately when the operator chooses restart.
 (function setupUpdateCheck() {
   const REPO = 'AbatChan/AI.EXE';
+  const AUTO_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
+  const VISIBILITY_RECHECK_MS = 30 * 60 * 1000;
   const cmpVer = (a, b) => {
     const pa = String(a).split('.').map((n) => parseInt(n, 10) || 0);
     const pb = String(b).split('.').map((n) => parseInt(n, 10) || 0);
@@ -2229,24 +2231,23 @@ try {
     return 0;
   };
   let updateInfo = null;
+  let stagePoll = null;
+  let updateStaged = false;
+  let lastStageBytes = 0;
+  let lastCheckAt = 0;
+  let checkPromise = null;
+  let stageGeneration = 0;
   const ulog = (event, fields) => {
     try { if (typeof recordDebugTrace === 'function') recordDebugTrace(event, fields || {}, fields || {}); } catch (_) {}
     try { console.log(`[update] ${event}`, fields || {}); } catch (_) {}
   };
-  async function latestFromRawVersion() {
-    const raw = `https://raw.githubusercontent.com/${REPO}/main/CMakeLists.txt?t=${Date.now()}`;
-    const res = await fetch(raw, { cache: 'no-store' });
-    if (!res || !res.ok) throw new Error(`raw version HTTP ${res && res.status}`);
-    const source = await res.text();
-    const match = source.match(/AI_EXE_APP_VERSION\s+"([0-9]+(?:\.[0-9]+){2})"/);
-    if (!match) throw new Error('raw version marker missing');
-    const latest = match[1];
-    return {
-      latest,
-      url: `https://github.com/${REPO}/releases/download/v${latest}/AI.EXE-Windows.zip`,
-      page: `https://github.com/${REPO}/releases/tag/v${latest}`,
-      source: 'raw',
-    };
+  const validSha256 = (value) => /^[a-f0-9]{64}$/i.test(String(value || '').trim());
+  async function fetchChecksum(url) {
+    if (!url) return '';
+    const res = await fetch(url, { cache: 'no-store' });
+    if (!res || !res.ok) throw new Error(`checksum HTTP ${res && res.status}`);
+    const match = (await res.text()).match(/\b([a-f0-9]{64})\b/i);
+    return match ? match[1].toLowerCase() : '';
   }
   async function latestFromReleaseApi() {
     const res = await fetch(`https://api.github.com/repos/${REPO}/releases/latest`, {
@@ -2255,31 +2256,47 @@ try {
     if (!res || !res.ok) throw new Error(`release API HTTP ${res && res.status}`);
     const data = await res.json();
     const latest = String(data.tag_name || '').replace(/^v/i, '').trim();
-    const asset = Array.isArray(data.assets)
-      ? data.assets.find((a) => /\.zip$/i.test(a && a.name || ''))
-      : null;
+    const assets = Array.isArray(data.assets) ? data.assets : [];
+    const asset = assets.find((a) => String(a && a.name || '') === 'AI.EXE-Windows.zip')
+      || assets.find((a) => /\.zip$/i.test(a && a.name || ''));
+    const checksumAsset = assets.find((a) => String(a && a.name || '') === `${asset && asset.name}.sha256`);
+    let sha256 = String(asset && asset.digest || '').replace(/^sha256:/i, '').trim().toLowerCase();
+    if (!validSha256(sha256) && checksumAsset && checksumAsset.browser_download_url) {
+      try { sha256 = await fetchChecksum(checksumAsset.browser_download_url); } catch (_) { sha256 = ''; }
+    }
     return {
       latest,
       url: asset ? asset.browser_download_url : '',
       page: data.html_url || '',
       size: asset ? (Number(asset.size) || 0) : 0,
+      sha256: validSha256(sha256) ? sha256 : '',
       source: 'api',
     };
   }
-  async function checkForUpdate() {
-    const badge = document.getElementById('updateBadge');
-    const text = document.getElementById('updateBadgeText');
-    if (badge) badge.disabled = true;
-    if (text) text.textContent = 'Checking…';
+  const getStatus = () => document.getElementById('updateStatus');
+  const setStatus = (label, tooltip, options = {}) => {
+    const status = getStatus();
+    const text = document.getElementById('updateStatusText');
+    if (!status || !text) return;
+    status.hidden = Boolean(options.hidden);
+    status.disabled = Boolean(options.disabled);
+    text.textContent = String(label || '');
+    status.dataset.tooltip = String(tooltip || '');
+  };
+  const setSettingsStatus = (message) => {
+    const el = document.getElementById('settingsUpdateStatus');
+    if (el) el.textContent = String(message || '');
+  };
+  async function checkForUpdate(manual = false) {
+    if (checkPromise) return checkPromise;
+    checkPromise = (async () => {
+      lastCheckAt = Date.now();
+      const manualBtn = document.getElementById('settingsUpdateCheckBtn');
+      if (manualBtn && manual) manualBtn.disabled = true;
+      if (manual) setSettingsStatus('Checking for the latest verified release…');
     ulog('update_check_start', { current: AI_EXE_VERSION, repo: REPO });
     try {
-      let release = null;
-      try {
-        release = await latestFromRawVersion();
-      } catch (rawErr) {
-        ulog('update_raw_version_fail', { error: String(rawErr && rawErr.message ? rawErr.message : rawErr) });
-        release = await latestFromReleaseApi();
-      }
+      const release = await latestFromReleaseApi();
       const latest = String(release && release.latest || '').trim();
       const newer = latest ? cmpVer(latest, AI_EXE_VERSION) : 0;
       ulog('update_check_result', {
@@ -2288,120 +2305,123 @@ try {
         isNewer: String(newer > 0),
         hasAsset: String(Boolean(release && release.url)),
         source: String(release && release.source || 'unknown'),
-        badgeEl: String(Boolean(document.getElementById('updateBadge'))),
+        verifiedAsset: String(Boolean(release && release.sha256)),
       });
       if (!latest || newer <= 0) {
-        if (text) text.textContent = 'Up to date';
-        if (badge) badge.dataset.tooltip = `v${AI_EXE_VERSION} is current — click to check again`;
+        if (!updateStaged) setStatus('', '', { hidden: true });
+        setSettingsStatus(`AI.EXE v${AI_EXE_VERSION} is current. Automatic updates are enabled.`);
+        if (manual) showAppNotification({ title: 'AI.EXE is up to date', message: `Version ${AI_EXE_VERSION} is the latest release.`, kind: 'success' });
         return false;
       }
+      if (!release.url || !validSha256(release.sha256)) {
+        ulog('update_unverified_asset', { latest, hasAsset: String(Boolean(release.url)) });
+        setSettingsStatus(`Version ${latest} is available, but its package could not be verified. AI.EXE will retry automatically.`);
+        if (manual) showAppNotification({ title: 'Update verification pending', message: `Version ${latest} will download after its signed checksum is available.`, kind: 'warning' });
+        return false;
+      }
+      const replacing = updateInfo && cmpVer(latest, updateInfo.version) > 0;
+      if (updateInfo && latest === updateInfo.version && (stagePoll || updateStaged)) return true;
+      if (stagePoll) { clearInterval(stagePoll); stagePoll = null; }
+      updateStaged = false;
+      lastStageBytes = 0;
       updateInfo = {
         version: latest,
         url: String(release.url || ''),
         page: String(release.page || ''),
         size: Number(release.size) || 0,
+        sha256: String(release.sha256 || '').toLowerCase(),
       };
-      const badge = document.getElementById('updateBadge');
-      const text = document.getElementById('updateBadgeText');
-      if (badge) {
-        if (text) text.textContent = `Update to v${latest}`;
-        badge.style.display = '';
-        badge.dataset.tooltip = `Version ${latest} is available — click to update`;
-        ulog('update_badge_shown', { latest });
-      }
+      setSettingsStatus(`${replacing ? 'A newer' : 'An'} update, v${latest}, is downloading automatically.`);
       startBackgroundStage();
       return true;
     } catch (err) {
       ulog('update_check_error', { error: String(err && err.message ? err.message : err) });
-      if (text) text.textContent = 'Check update';
-      if (badge) badge.dataset.tooltip = 'Update check failed — click to retry';
+      setSettingsStatus(`Automatic update check could not connect. AI.EXE will retry; current version: v${AI_EXE_VERSION}.`);
+      if (manual) showAppNotification({ title: 'Could not check for updates', message: 'AI.EXE will retry automatically when a connection is available.', kind: 'warning' });
       return false;
     } finally {
-      if (badge) badge.disabled = false;
+      if (manualBtn) manualBtn.disabled = false;
     }
+    })();
+    try { return await checkPromise; } finally { checkPromise = null; }
   }
-  // Background staging: download the new build while the app keeps working, so
-  // install is always a fast local swap. A click BEFORE staging finishes waits
-  // for the download (button shows progress) instead of closing the app to
-  // download — the app only closes for the seconds-long install itself.
-  let stagePoll = null;
-  let updateStaged = false;
-  let pendingInstall = false;
-  let lastStageBytes = 0;
-  let lastStageProgressAt = Date.now();
-  const setBadgeText = (t) => { const el = document.getElementById('updateBadgeText'); if (el) el.textContent = t; };
-  function doApplyUpdate(label) {
-    const badge = document.getElementById('updateBadge');
-    if (badge) badge.disabled = true;
-    setBadgeText(label);
-    nativeBridge.invoke('applyUpdate', { url: updateInfo.url, version: updateInfo.version });
+  function doApplyUpdate() {
+    if (!updateInfo || !updateStaged) return;
+    setStatus('Restarting…', `Installing v${updateInfo.version}`, { disabled: true });
+    nativeBridge.invoke('applyUpdate', {
+      url: updateInfo.url, version: updateInfo.version, sha256: updateInfo.sha256,
+    }).then((res) => {
+      if (res && res.ok) return;
+      setStatus('Update ready', `v${updateInfo.version} installs when you quit — click to restart now`);
+      showAppNotification({ title: 'Could not restart for update', message: 'The update remains ready and will install when AI.EXE quits.', kind: 'warning' });
+    });
   }
   function startBackgroundStage() {
     const nativeOk = typeof nativeBridge !== 'undefined'
       && nativeBridge && nativeBridge.available && nativeBridge.available();
-    if (!nativeOk || !updateInfo || !updateInfo.url || stagePoll) return;
-    try { nativeBridge.invoke('stageUpdate', { url: updateInfo.url, version: updateInfo.version }); } catch (_) { return; }
+    if (!nativeOk || !updateInfo || !updateInfo.url || !updateInfo.sha256 || stagePoll) return;
+    const generation = ++stageGeneration;
+    const stagedVersion = updateInfo.version;
+    nativeBridge.invoke('stageUpdate', {
+      url: updateInfo.url, version: stagedVersion, sha256: updateInfo.sha256,
+    }).then((res) => {
+      if (!res || !res.ok) {
+        if (generation !== stageGeneration) return;
+        if (stagePoll) clearInterval(stagePoll);
+        stagePoll = null;
+        setStatus('', '', { hidden: true });
+        setSettingsStatus(`Update v${stagedVersion} could not be downloaded. AI.EXE will retry automatically.`);
+      }
+    }).catch(() => {});
     ulog('update_stage_started', { version: updateInfo.version });
-    lastStageProgressAt = Date.now();
+    setStatus('Downloading update…', `Downloading verified AI.EXE v${stagedVersion} in the background`, { disabled: true });
     stagePoll = setInterval(async () => {
       try {
-        const badge = document.getElementById('updateBadge');
-        if (!pendingInstall && badge && badge.disabled) return;   // direct install already running
-        const res = await nativeBridge.invoke('updateStageStatus', { version: updateInfo.version });
+        if (generation !== stageGeneration || !updateInfo || updateInfo.version !== stagedVersion) {
+          clearInterval(stagePoll); stagePoll = null; return;
+        }
+        const res = await nativeBridge.invoke('updateStageStatus', { version: stagedVersion });
         const st = res && typeof res.output === 'string' && res.output ? JSON.parse(res.output) : null;
         if (!st) return;
         if (st.staged) {
           updateStaged = true;
           clearInterval(stagePoll);
-          ulog('update_staged', { version: updateInfo.version, pendingInstall: String(pendingInstall) });
-          if (pendingInstall) { doApplyUpdate('Installing…'); return; }
-          setBadgeText('Restart to update');   // short label; detail in tooltip
-          if (badge) badge.dataset.tooltip = `v${updateInfo.version} is downloaded — click to install (a few seconds)`;
+          stagePoll = null;
+          const armed = await nativeBridge.invoke('armUpdateOnQuit', {
+            url: updateInfo.url, version: updateInfo.version, sha256: updateInfo.sha256,
+          });
+          if (!armed || !armed.ok) throw new Error('could not arm install-on-quit');
+          ulog('update_staged', { version: updateInfo.version });
+          setStatus('Update ready', `v${updateInfo.version} installs when you quit — click to restart now`);
+          setSettingsStatus(`AI.EXE v${updateInfo.version} is downloaded and verified. It will install when AI.EXE quits.`);
+          showAppNotification({
+            title: `AI.EXE v${updateInfo.version} is ready`,
+            message: 'It will install when you quit. Click here to restart and update now.',
+            kind: 'success', sticky: true, onClick: doApplyUpdate,
+          });
           return;
         }
-        if (st.bytes > lastStageBytes) { lastStageBytes = st.bytes; lastStageProgressAt = Date.now(); }
+        if (st.bytes > lastStageBytes) lastStageBytes = st.bytes;
         if (st.bytes > 0) {
           const pct = updateInfo.size > 0 ? Math.min(99, Math.round((st.bytes * 100) / updateInfo.size)) : 0;
-          setBadgeText(pct ? `Downloading… ${pct}%` : 'Downloading…');   // keep it inside the pill
-          if (badge) {
-            badge.dataset.tooltip = pendingInstall
-              ? `v${updateInfo.version} — installs and restarts when the download finishes`
-              : `Downloading v${updateInfo.version} in the background`;
-          }
+          setStatus(pct ? `Downloading… ${pct}%` : 'Downloading update…', `Downloading verified AI.EXE v${updateInfo.version}`, { disabled: true });
         }
-        // Download stalled after an install click — fall back to the classic flow
-        // so the update is never unreachable.
-        if (pendingInstall && Date.now() - lastStageProgressAt > 90000) {
-          clearInterval(stagePoll);
-          ulog('update_stage_stalled_fallback', { version: updateInfo.version });
-          doApplyUpdate('Updating…');
-        }
-      } catch (_) {}
+      } catch (err) {
+        ulog('update_stage_status_error', { error: String(err && err.message ? err.message : err) });
+      }
     }, 2000);
   }
-  async function onBadgeClick() {
-    if (!updateInfo) {
-      await checkForUpdate();
-      return;
-    }
-    const nativeOk = typeof nativeBridge !== 'undefined'
-      && nativeBridge && nativeBridge.available && nativeBridge.available();
-    if (nativeOk && updateInfo.url) {
-      if (updateStaged) { doApplyUpdate('Installing…'); return; }
-      pendingInstall = true;
-      lastStageProgressAt = Date.now();
-      startBackgroundStage();
-      if (!stagePoll) { doApplyUpdate('Updating…'); return; }   // staging unavailable — classic flow
-      setBadgeText('Downloading…');
-      const badge = document.getElementById('updateBadge');
-      if (badge) badge.dataset.tooltip = `v${updateInfo.version} — installs and restarts when the download finishes`;
-    } else if (updateInfo.page) {
-      openExternalUrl(updateInfo.page);
-    }
-  }
   const startUpdateChecks = () => {
-    const badge = document.getElementById('updateBadge');
-    if (badge) badge.addEventListener('click', onBadgeClick);
+    const status = getStatus();
+    const manualBtn = document.getElementById('settingsUpdateCheckBtn');
+    if (status) status.addEventListener('click', doApplyUpdate);
+    if (manualBtn) manualBtn.addEventListener('click', () => { void checkForUpdate(true); });
+    setSettingsStatus(`AI.EXE v${AI_EXE_VERSION}. Updates are checked and downloaded automatically.`);
+    setTimeout(() => { void checkForUpdate(false); }, 8000);
+    setInterval(() => { void checkForUpdate(false); }, AUTO_CHECK_INTERVAL_MS);
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden && Date.now() - lastCheckAt >= VISIBILITY_RECHECK_MS) void checkForUpdate(false);
+    });
   };
   // Run even if 'load' already fired before this script executed (otherwise the
   // listener never fires and the check never runs).

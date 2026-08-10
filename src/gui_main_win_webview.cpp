@@ -18,6 +18,7 @@
 #include <tlhelp32.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <cstdlib>
@@ -1467,15 +1468,82 @@ std::filesystem::path StagedUpdateZip(const std::string &version) {
   return UpdateStagingDir() / ("v" + SanitizeVersionTag(version) + ".zip");
 }
 
+std::filesystem::path StagedUpdateVerifiedMarker(const std::string &version) {
+  return UpdateStagingDir() / ("v" + SanitizeVersionTag(version) + ".verified");
+}
+
+bool IsSha256(const std::string &value) {
+  return value.size() == 64 && std::all_of(value.begin(), value.end(), [](char c) {
+    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+  });
+}
+
+struct PendingUpdate {
+  std::string version;
+  std::string url;
+  std::string sha256;
+};
+
+std::filesystem::path PendingUpdatePath() {
+  return UpdateStagingDir() / "pending.txt";
+}
+
+std::filesystem::path ActiveStagePath() {
+  return UpdateStagingDir() / "active-stage.txt";
+}
+
+bool WritePendingUpdate(const PendingUpdate &pending) {
+  if (SanitizeVersionTag(pending.version) != pending.version || pending.url.empty() ||
+      pending.url.find_first_of("\r\n") != std::string::npos || !IsSha256(pending.sha256)) {
+    return false;
+  }
+  const auto path = PendingUpdatePath();
+  const std::filesystem::path temp(path.wstring() + L".tmp");
+  {
+    std::ofstream out(temp, std::ios::binary | std::ios::trunc);
+    if (!out) return false;
+    out << pending.version << '\n' << pending.url << '\n' << pending.sha256 << '\n';
+  }
+  std::error_code ec;
+  std::filesystem::remove(path, ec);
+  std::filesystem::rename(temp, path, ec);
+  return !ec;
+}
+
+std::optional<PendingUpdate> ReadPendingUpdate() {
+  std::ifstream in(PendingUpdatePath(), std::ios::binary);
+  PendingUpdate pending;
+  if (!in || !std::getline(in, pending.version) || !std::getline(in, pending.url) ||
+      !std::getline(in, pending.sha256)) {
+    return std::nullopt;
+  }
+  if (SanitizeVersionTag(pending.version) != pending.version || pending.url.empty() ||
+      !IsSha256(pending.sha256)) {
+    return std::nullopt;
+  }
+  return pending;
+}
+
 // Background downloader: hidden PowerShell fills <ver>.zip.part then renames it
 // to <ver>.zip; the badge polls updateStageStatus for progress
-bool StageUpdateDownload(const std::string &url, const std::string &version) {
+bool StageUpdateDownload(const std::string &url, const std::string &version,
+                         const std::string &sha256) {
+  if (!IsSha256(sha256)) return false;
   const auto zip = StagedUpdateZip(version);
+  const auto verified = StagedUpdateVerifiedMarker(version);
   std::error_code ec;
-  if (std::filesystem::exists(zip, ec)) return true;
-  for (auto it = std::filesystem::directory_iterator(UpdateStagingDir(), ec);
-       it != std::filesystem::directory_iterator(); ++it) {   // drop stale versions
-    if (it->path() != zip) std::filesystem::remove(it->path(), ec);
+  if (std::filesystem::exists(zip, ec) && std::filesystem::exists(verified, ec)) {
+    std::ifstream marker(verified, std::ios::binary);
+    std::string marked_hash;
+    std::getline(marker, marked_hash);
+    if (marked_hash == sha256) return true;
+  }
+  std::filesystem::remove(zip, ec);
+  std::filesystem::remove(verified, ec);
+  {
+    std::ofstream active(ActiveStagePath(), std::ios::binary | std::ios::trunc);
+    if (!active) return false;
+    active << version;
   }
   auto psq = [](const std::wstring &s) {
     std::wstring out;
@@ -1488,6 +1556,10 @@ bool StageUpdateDownload(const std::string &url, const std::string &version) {
      << L"$u='" << psq(Utf8ToWide(url)) << L"'\r\n"
      << L"$z='" << psq(wzip) << L"'\r\n"
      << L"$p=$z+'.part'\r\n"
+     << L"$sha='" << psq(Utf8ToWide(sha256)) << L"'\r\n"
+     << L"$ver='" << psq(Utf8ToWide(version)) << L"'\r\n"
+     << L"$active='" << psq(ActiveStagePath().wstring()) << L"'\r\n"
+     << L"$verified='" << psq(verified.wstring()) << L"'\r\n"
      << L"if(Test-Path -LiteralPath $z){ exit }\r\n"
      << L"Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue\r\n"
      << L"$ok=$false\r\n"
@@ -1499,7 +1571,9 @@ bool StageUpdateDownload(const std::string &url, const std::string &version) {
      << L"  $fs.Close(); $rs.Close(); $resp.Close(); $ok=$true\r\n"
      << L"} catch { $ok=$false }\r\n"
      << L"if(-not $ok){ curl.exe -L -o $p $u }\r\n"
-     << L"if((Test-Path -LiteralPath $p) -and ((Get-Item -LiteralPath $p).Length -gt 102400)){ Move-Item -LiteralPath $p -Destination $z -Force } else { Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue }\r\n";
+     << L"$hash=''; try { if(Test-Path -LiteralPath $p){ $hash=(Get-FileHash -Algorithm SHA256 -LiteralPath $p).Hash.ToLowerInvariant() } } catch {}\r\n"
+     << L"$current=''; try { $current=(Get-Content -LiteralPath $active -Raw).Trim() } catch {}\r\n"
+     << L"if((Test-Path -LiteralPath $p) -and ((Get-Item -LiteralPath $p).Length -gt 102400) -and ($hash -eq $sha.ToLowerInvariant()) -and ($current -eq $ver)){ Move-Item -LiteralPath $p -Destination $z -Force; Set-Content -LiteralPath $verified -Value $hash -NoNewline -Encoding ASCII } else { Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue; Remove-Item -LiteralPath $verified -Force -ErrorAction SilentlyContinue }\r\n";
   wchar_t tmp_buf[MAX_PATH] = {};
   const DWORD tlen = GetTempPathW(MAX_PATH, tmp_buf);
   const std::filesystem::path tmp_dir =
@@ -1526,7 +1600,12 @@ bool StageUpdateDownload(const std::string &url, const std::string &version) {
 // quits right after launching it. User data lives in %LOCALAPPDATA% and projects in
 // Downloads, so replacing the app folder is safe.
 bool LaunchUpdater(const std::string &url, const std::string &version,
+                   const std::string &sha256, bool relaunch,
                    std::string *err) {
+  if (!IsSha256(sha256)) {
+    if (err) *err = "The update checksum is missing or invalid.";
+    return false;
+  }
   wchar_t exe_buf[MAX_PATH] = {};
   if (GetModuleFileNameW(nullptr, exe_buf, MAX_PATH) == 0) {
     if (err) *err = "Could not resolve the app path.";
@@ -1552,13 +1631,18 @@ bool LaunchUpdater(const std::string &url, const std::string &version,
   // label updates as it waits → downloads → installs → restarts.
   std::wstring ver_label = psq(Utf8ToWide(version));
   const std::wstring staged_zip = StagedUpdateZip(version).wstring();
+  const std::wstring staged_verified = StagedUpdateVerifiedMarker(version).wstring();
   std::wstringstream ss;
   ss << L"$ErrorActionPreference='SilentlyContinue'\r\n"
      << L"$u='" << psq(Utf8ToWide(url)) << L"'\r\n"
      << L"$app='" << psq(app_dir.wstring()) << L"'\r\n"
      << L"$exe='" << psq(exe_path.wstring()) << L"'\r\n"
      << L"$ver='" << ver_label << L"'\r\n"
+     << L"$sha='" << psq(Utf8ToWide(sha256)) << L"'\r\n"
      << L"$staged='" << psq(staged_zip) << L"'\r\n"
+     << L"$stagedVerified='" << psq(staged_verified) << L"'\r\n"
+     << L"$pending='" << psq(PendingUpdatePath().wstring()) << L"'\r\n"
+     << L"$relaunch='" << (relaunch ? L"1" : L"0") << L"'\r\n"
      << L"Add-Type -AssemblyName System.Windows.Forms,System.Drawing\r\n"
      << L"[Windows.Forms.Application]::EnableVisualStyles()\r\n"
      << L"$acc=[Drawing.Color]::FromArgb(0,229,255)\r\n"
@@ -1601,7 +1685,7 @@ bool LaunchUpdater(const std::string &url, const std::string &version,
      << L"$f.Controls.AddRange(@($left,$si,$title,$sub,$bar,$phaseLbl,$pctLbl))\r\n"
      // Heavy work off the UI thread; streamed download reports real percent via $status.
      << L"$script:job=Start-Job -ScriptBlock {\r\n"
-     << L"  param($u,$app,$exe,$oldpid,$status,$ver,$staged)\r\n"
+     << L"  param($u,$app,$exe,$oldpid,$status,$ver,$sha,$staged,$stagedVerified,$pending,$relaunch)\r\n"
      << L"  $ErrorActionPreference='SilentlyContinue'\r\n"
      << L"  function St($t){ Set-Content -LiteralPath $status -Value $t -Encoding UTF8 }\r\n"
      << L"  St('prep|-1')\r\n"
@@ -1626,7 +1710,7 @@ bool LaunchUpdater(const std::string &url, const std::string &version,
      << L"  St('install|-1')\r\n"
      << L"  $x=Join-Path $t 'x'\r\n"
      // Missing/tiny zip = failed download; bail
-     << L"  $zok=$false; try { if((Test-Path -LiteralPath $zip) -and ((Get-Item -LiteralPath $zip).Length -gt 102400)){ $zok=$true } } catch {}\r\n"
+     << L"  $zok=$false; try { if((Test-Path -LiteralPath $zip) -and ((Get-Item -LiteralPath $zip).Length -gt 102400)){ $actual=(Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash.ToLowerInvariant(); if($actual -eq $sha.ToLowerInvariant()){ $zok=$true } } } catch {}\r\n"
      // .NET ZipFile is several times faster than Expand-Archive on many-file zips
      << L"  if($zok){ try { Add-Type -AssemblyName System.IO.Compression.FileSystem; [System.IO.Compression.ZipFile]::ExtractToDirectory($zip,$x) } catch { try { Expand-Archive -Path $zip -DestinationPath $x -Force -ErrorAction Stop } catch { $zok=$false } } }\r\n"
      // Unwrap single top-level folder zips
@@ -1651,15 +1735,13 @@ bool LaunchUpdater(const std::string &url, const std::string &version,
      << L"    }\r\n"
      << L"    if((-not $swapped) -and $vok){ $swapped=$true; UL('version verified despite robocopy failures — treating as success') }\r\n"
      << L"  }\r\n"
-     // Verified swap → reopen (+ drop the consumed staged zip); else failed briefly, still relaunch
-     << L"  if($swapped){ St('reopen|100'); if($staged){ Remove-Item -LiteralPath $staged -Force -ErrorAction SilentlyContinue } } else { St('failed|-1'); Start-Sleep -Milliseconds 2600 }\r\n"
+     // Verified swap consumes the staged files. Normal quit stays closed; restart-now reopens.
+     << L"  if($swapped){ if($relaunch -eq '1'){ St('reopen|100') } else { St('complete|100') }; if($staged){ Remove-Item -LiteralPath $staged -Force -ErrorAction SilentlyContinue }; if($stagedVerified){ Remove-Item -LiteralPath $stagedVerified -Force -ErrorAction SilentlyContinue }; if($pending){ Remove-Item -LiteralPath $pending -Force -ErrorAction SilentlyContinue }; if($relaunch -ne '1'){ Start-Sleep -Milliseconds 900 } } else { St('failed|-1'); Start-Sleep -Milliseconds 2600 }\r\n"
      // Schedule the relaunch in a detached helper so this updater window can close
      // cleanly first; otherwise both windows overlap for a visible beat.
-     << L"  $cmd=\"Start-Sleep -Milliseconds 350; Start-Process -FilePath '\"+$exe.Replace(\"'\",\"''\")+\"' -WorkingDirectory '\"+$app.Replace(\"'\",\"''\")+\"'\"\r\n"
-     << L"  $enc=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($cmd))\r\n"
-     << L"  Start-Process powershell.exe -WindowStyle Hidden -ArgumentList @('-NoProfile','-EncodedCommand',$enc)\r\n"
+     << L"  if($relaunch -eq '1'){ $cmd=\"Start-Sleep -Milliseconds 350; Start-Process -FilePath '\"+$exe.Replace(\"'\",\"''\")+\"' -WorkingDirectory '\"+$app.Replace(\"'\",\"''\")+\"'\"; $enc=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($cmd)); Start-Process powershell.exe -WindowStyle Hidden -ArgumentList @('-NoProfile','-EncodedCommand',$enc) }\r\n"
      << L"  Remove-Item -Recurse -Force $t -ErrorAction SilentlyContinue\r\n"
-     << L"} -ArgumentList $u,$app,$exe," << pid << L",$status,$ver,$staged\r\n"
+     << L"} -ArgumentList $u,$app,$exe," << pid << L",$status,$ver,$sha,$staged,$stagedVerified,$pending,$relaunch\r\n"
      << L"$timer=New-Object Windows.Forms.Timer; $timer.Interval=33\r\n"
      << L"$timer.Add_Tick({\r\n"
      << L"  $script:spin=($script:spin+11)%360; if($script:pct -lt 0){ $script:anim+=0.02; if($script:anim -ge 1){ $script:anim-=1 } }\r\n"
@@ -1668,7 +1750,7 @@ bool LaunchUpdater(const std::string &url, const std::string &version,
      << L"  if($script:tc % 5 -eq 0){\r\n"
      << L"    $raw=Get-Content -LiteralPath $status -Raw -ErrorAction SilentlyContinue\r\n"
      << L"    if($raw){ $pp=$raw.Trim().Split('|'); $ph=$pp[0]; $pc= if($pp.Length -gt 1){ [int]$pp[1] } else { -1 }\r\n"
-     << L"      if($ph -ne $script:phase){ $script:phase=$ph; switch($ph){ 'prep' { $title.Text='Preparing update'; $sub.Text='Getting things ready...'; $phaseLbl.Text='Prepare' } 'download' { $title.Text='Downloading update'; $sub.Text='Please keep this window open.'; $phaseLbl.Text='Download' } 'install' { $title.Text='Installing update'; $sub.Text='This may take a moment.'; $phaseLbl.Text='Install' } 'reopen' { $title.Text='Reopening AI.EXE'; $sub.Text='Update complete.'; $phaseLbl.Text='Reopen' } 'failed' { $title.Text='Update failed'; $sub.Text='Could not apply the update. Please try again.'; $phaseLbl.Text='Failed' } } }\r\n"
+     << L"      if($ph -ne $script:phase){ $script:phase=$ph; switch($ph){ 'prep' { $title.Text='Preparing update'; $sub.Text='Getting things ready...'; $phaseLbl.Text='Prepare' } 'download' { $title.Text='Downloading update'; $sub.Text='Please keep this window open.'; $phaseLbl.Text='Download' } 'install' { $title.Text='Installing update'; $sub.Text='This may take a moment.'; $phaseLbl.Text='Install' } 'reopen' { $title.Text='Reopening AI.EXE'; $sub.Text='Update complete.'; $phaseLbl.Text='Reopen' } 'complete' { $title.Text='Update installed'; $sub.Text='It will be ready next time you open AI.EXE.'; $phaseLbl.Text='Complete' } 'failed' { $title.Text='Update failed'; $sub.Text='Could not apply the update. Please try again.'; $phaseLbl.Text='Failed' } } }\r\n"
      << L"      if($pc -ne $script:pct){ $script:pct=$pc; if($pc -ge 0){ $pctLbl.Text=(''+$pc+'%') } else { $pctLbl.Text='' } }\r\n"
      << L"    }\r\n"
      << L"    if(-not $script:done -and $script:job){ $stt=(Get-Job -Id $script:job.Id).State; if($stt -eq 'Completed' -or $stt -eq 'Failed' -or $stt -eq 'Stopped'){ $script:done=$true; $timer.Stop(); $f.Close() } }\r\n"
@@ -2108,6 +2190,9 @@ private:
         self->PostPowerEventAsync("didWake");
       }
       return TRUE;
+    case WM_CLOSE:
+      self->LaunchPendingUpdateOnQuit();
+      return DefWindowProcW(hwnd, msg, wparam, lparam);
     case WM_DESTROY:
       KillTimer(hwnd, kBackendWatchTimerId);
       // Never leave the machine pinned awake after the window is gone.
@@ -2127,6 +2212,27 @@ private:
       return 0;
     default:
       return DefWindowProcW(hwnd, msg, wparam, lparam);
+    }
+  }
+
+  void LaunchPendingUpdateOnQuit() {
+    if (update_launch_started_.load()) return;
+    const auto pending = ReadPendingUpdate();
+    if (!pending) return;
+    const auto staged = StagedUpdateZip(pending->version);
+    const auto verified = StagedUpdateVerifiedMarker(pending->version);
+    std::error_code ec;
+    std::ifstream marker(verified, std::ios::binary);
+    std::string marked_hash;
+    std::getline(marker, marked_hash);
+    if (!std::filesystem::exists(staged, ec) ||
+        std::filesystem::file_size(staged, ec) <= 102400 ||
+        marked_hash != pending->sha256) {
+      return;
+    }
+    std::string err;
+    if (LaunchUpdater(pending->url, pending->version, pending->sha256, false, &err)) {
+      update_launch_started_.store(true);
     }
   }
 
@@ -2688,14 +2794,16 @@ private:
       }
     } else if (action == "applyUpdate") {
       const std::string url = ExtractJsonStringField(request_json, "url");
+      const std::string sha256 = ExtractJsonStringField(request_json, "sha256");
       if (url.empty()) {
         ok = false;
         message = "No update URL provided.";
       } else if (!LaunchUpdater(url, ExtractJsonStringField(request_json, "version"),
-                                &op_err)) {
+                                sha256, true, &op_err)) {
         ok = false;
         message = op_err.empty() ? "Could not start the updater." : op_err;
       } else {
+        update_launch_started_.store(true);
         message = "Updating — the app will close and reopen on the new version.";
         // Keep the window visible ~1.5s so the updater's progress window appears
         // before we vanish (PowerShell + WinForms cold start), then close so the
@@ -2705,20 +2813,54 @@ private:
     } else if (action == "stageUpdate") {
       const std::string url = ExtractJsonStringField(request_json, "url");
       const std::string version = ExtractJsonStringField(request_json, "version");
-      if (url.empty() || version.empty()) {
+      const std::string sha256 = ExtractJsonStringField(request_json, "sha256");
+      if (url.empty() || version.empty() || !IsSha256(sha256)) {
         ok = false;
-        message = "Missing update URL or version.";
-      } else if (StageUpdateDownload(url, version)) {
+        message = "Missing update URL, version, or verified checksum.";
+      } else if (StageUpdateDownload(url, version, sha256)) {
         message = "Staging update in the background.";
       } else {
         ok = false;
         message = "Could not start the background download.";
       }
+    } else if (action == "armUpdateOnQuit") {
+      PendingUpdate pending{
+          ExtractJsonStringField(request_json, "version"),
+          ExtractJsonStringField(request_json, "url"),
+          ExtractJsonStringField(request_json, "sha256")};
+      const auto staged = StagedUpdateZip(pending.version);
+      const auto verified = StagedUpdateVerifiedMarker(pending.version);
+      std::error_code fec;
+      std::ifstream marker(verified, std::ios::binary);
+      std::string marked_hash;
+      std::getline(marker, marked_hash);
+      if (!std::filesystem::exists(staged, fec) ||
+          std::filesystem::file_size(staged, fec) <= 102400 ||
+          marked_hash != pending.sha256) {
+        ok = false;
+        message = "The verified update package is not staged.";
+      } else if (!WritePendingUpdate(pending)) {
+        ok = false;
+        message = "Could not save the pending update.";
+      } else {
+        const std::filesystem::path part(staged.wstring() + L".part");
+        for (auto it = std::filesystem::directory_iterator(UpdateStagingDir(), fec);
+             it != std::filesystem::directory_iterator(); ++it) {
+          const auto ext = it->path().extension().wstring();
+          if ((ext == L".zip" || ext == L".part" || ext == L".verified") &&
+              it->path() != staged && it->path() != verified && it->path() != part) {
+            std::filesystem::remove(it->path(), fec);
+          }
+        }
+        message = "The verified update will install when AI.EXE quits.";
+      }
     } else if (action == "updateStageStatus") {
       const std::string version = ExtractJsonStringField(request_json, "version");
       const auto staged_zip = StagedUpdateZip(version);
+      const auto verified = StagedUpdateVerifiedMarker(version);
       std::error_code fec;
-      if (std::filesystem::exists(staged_zip, fec)) {
+      if (std::filesystem::exists(staged_zip, fec) &&
+          std::filesystem::exists(verified, fec)) {
         output = "{\"staged\":true,\"bytes\":" +
                  std::to_string(static_cast<long long>(std::filesystem::file_size(staged_zip, fec))) + "}";
       } else {
@@ -2951,6 +3093,7 @@ private:
   std::filesystem::path runtime_root_;
   DWORD backend_restart_tick_ = 0;
   int backend_fast_deaths_ = 0;
+  std::atomic<bool> update_launch_started_{false};
 
 #if AI_EXE_HAVE_WEBVIEW2_HEADER
   Microsoft::WRL::ComPtr<ICoreWebView2Controller> controller_;

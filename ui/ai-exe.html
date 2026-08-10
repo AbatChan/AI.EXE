@@ -107,9 +107,9 @@
               <span id="sidebarBuildVer" data-app-version>v...</span>
             </span>
           </div>
-          <button id="updateBadge" class="update-badge ui-tooltip-anchor" type="button" data-tooltip="Check GitHub for an AI.EXE update">
+          <button id="updateStatus" class="update-badge ui-tooltip-anchor" type="button" data-tooltip="AI.EXE update status" hidden>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
-            <span id="updateBadgeText">Check update</span>
+            <span id="updateStatusText">Downloading update…</span>
           </button>
         </div>
 
@@ -1080,7 +1080,9 @@
                 <button class="modal-btn" id="settingsImportBtn" type="button">Import / Replace Model</button>
                 <button class="modal-btn" id="settingsVerifyBtn" type="button">Verify</button>
                 <button class="modal-btn" id="settingsDebugDumpBtn" type="button">Dump Debug</button>
+                <button class="modal-btn" id="settingsUpdateCheckBtn" type="button">Check for updates</button>
               </div>
+              <div class="settings-note-block" id="settingsUpdateStatus">Updates are checked and downloaded automatically. A ready update installs when AI.EXE quits.</div>
             </div>
             <div class="settings-section">
               <div class="settings-section-title">Notes</div>

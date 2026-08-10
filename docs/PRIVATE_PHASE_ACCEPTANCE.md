@@ -1,6 +1,6 @@
 # AI.EXE Private Finance Phase — Acceptance Record
 
-Version under review: **10.1.1**
+Version under review: **10.2.0**
 
 Prepared: **2026-08-10**
 
@@ -13,7 +13,7 @@ This record covers the private/internal build only. It does not approve live tra
 | Requirement | Result | Evidence | Remaining external check |
 |---|---|---|---|
 | Existing desktop stabilized | Pass locally | JavaScript regression suite and backend smoke suite | Clean Windows run |
-| Windows hosted-provider package | Pass for 10.0.9 | Published Windows ZIP and successful workflow | Rebuild 10.1.1 |
+| Windows hosted-provider package | Pass for 10.1.1 | Published Windows ZIP and successful workflow | Build 10.2.0 |
 | Broker abstraction | Pass | `BrokerAdapter` and `PaperBroker` | None |
 | Simulation only | Pass | Live adapter construction is blocked; no broker credentials or venue client | None |
 | Manual order confirmation | Pass | Staging leaves cash unchanged; a matching one-time token is required to fill | UI confirmation on clean Windows |
@@ -22,7 +22,7 @@ This record covers the private/internal build only. It does not approve live tra
 | Instruction and quote provenance | Pass for manual paper orders | Order ledger stores origin, optional instruction, quote source/time/stale status | AI-generated proposals are not in this phase |
 | Finance foundation | Pass | Local income/expense/settings/invoice/report/mining-pilot smoke tests | UI walkthrough on clean Windows |
 | Protected local finance storage | Pass locally | Owner-only database, WAL/SHM and broker-ledger permissions where supported | Confirm Windows ACL inherited from user profile |
-| Zero outbound traffic by default | Pass by code inspection | Automatic update polling removed | Observe startup on clean Windows |
+| Controlled automatic update traffic | Pass by code inspection | GitHub Release metadata only; downloads require a SHA-256 digest | Observe startup on clean Windows |
 | Approved endpoint boundary | Pass for market data | Quote code contains only Nasdaq and CoinGecko URLs; each request follows a labelled user action | Record client approval of those hosts |
 | Local-only backend | Pass | Loopback host and foreign-origin middleware | Confirm Windows firewall prompt is absent |
 | Release documentation | Pass | `PRIVATE_PHASE_DELIVERY.md` and this record | Add final ZIP checksum |

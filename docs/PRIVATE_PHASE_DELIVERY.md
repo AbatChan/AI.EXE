@@ -2,7 +2,7 @@
 
 Delivery target: Alex / private internal testing
 
-Build: **AI.EXE 10.1.1 — private-handoff-hardening**
+Build: **AI.EXE 10.2.0 — verified-auto-update**
 
 ## Included
 
@@ -28,9 +28,12 @@ Build: **AI.EXE 10.1.1 — private-handoff-hardening**
 
 ## Network behavior
 
-The application does not check GitHub on startup. External activity happens only after an operator action:
+The application performs one quiet update check shortly after startup and then
+periodically while it remains open. Other external activity requires an operator action:
 
-- **Check update**: `raw.githubusercontent.com`, with fallback to `api.github.com`; a selected release downloads from GitHub.
+- **Automatic updates**: `api.github.com` is checked quietly; a newer Windows
+  release downloads from GitHub only when its SHA-256 digest is available. The
+  verified package installs on quit or when the user chooses restart and update.
 - **Use live price / Fetch live & snapshot**: `api.nasdaq.com` for equities or `api.coingecko.com` for supported crypto.
 - **Send a hosted-model prompt**: the provider or custom endpoint selected by the operator.
 

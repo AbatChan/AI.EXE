@@ -59,7 +59,8 @@
     "test:preflight-confirm-resolution-edit-retry": "node scripts/preflight_confirm_resolution_edit_retry_static_test.js",
     "test:agent-no-progress": "node scripts/agent_no_progress_detector_test.js",
     "test:agent-guard-deadlock": "node scripts/agent_guard_deadlock_replay_test.js",
-    "test:operator-network-consent": "node scripts/operator_network_consent_static_test.js"
+    "test:operator-network-consent": "node scripts/operator_network_consent_static_test.js",
+    "test:auto-update-lifecycle": "node scripts/auto_update_lifecycle_test.js"
   },
   "dependencies": {
     "@codemirror/commands": "^6.10.2",
@@ -85,7 +86,7 @@
     "markdown-it-texmath": "^1.0.0",
     "rollup": "^4.59.0"
   },
-  "version": "10.1.1",
+  "version": "10.2.0",
   "devDependencies": {
     "eslint-linter-browserify": "^10.7.0"
   }
