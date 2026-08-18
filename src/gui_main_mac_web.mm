@@ -657,19 +657,89 @@ bool RequestSpeechAndMicPermissions(std::string *err) {
   return true;
 }
 
+struct DictationTranscriptSegment {
+  double timestamp = 0.0;
+  double duration = 0.0;
+  std::string text;
+};
+
 struct DictationSessionState {
   std::mutex mu;
   bool active = false;
   bool finished = false;
   AVAudioEngine *audio_engine = nil;
   AVAudioInputNode *input_node = nil;
+  SFSpeechRecognizer *recognizer = nil;
   SFSpeechAudioBufferRecognitionRequest *request = nil;
   SFSpeechRecognitionTask *task = nil;
   dispatch_semaphore_t sem = nil;
+  int recognition_generation = 0;
+  std::vector<DictationTranscriptSegment> transcript_segments;
+  std::string committed_text;
   std::string best_text;
   std::string last_error;
   double level_rms = 0.0;
 };
+
+std::string CurrentDictationPhrase(const DictationSessionState &st) {
+  std::ostringstream combined;
+  for (const auto &segment : st.transcript_segments) {
+    if (segment.text.empty()) continue;
+    if (combined.tellp() > 0) combined << ' ';
+    combined << segment.text;
+  }
+  return TrimCopy(combined.str());
+}
+
+void RebuildDictationBestText(DictationSessionState &st) {
+  const std::string current = CurrentDictationPhrase(st);
+  st.best_text = st.committed_text;
+  if (!current.empty()) {
+    if (!st.best_text.empty()) st.best_text += ' ';
+    st.best_text += current;
+  }
+}
+
+void CommitCurrentDictationPhrase(DictationSessionState &st) {
+  const std::string current = CurrentDictationPhrase(st);
+  if (!current.empty()) {
+    if (!st.committed_text.empty()) st.committed_text += ' ';
+    st.committed_text += current;
+  }
+  st.transcript_segments.clear();
+  st.best_text = st.committed_text;
+}
+
+void UpdateDictationTranscriptSegments(
+    DictationSessionState &st,
+    SFTranscription *transcription) {
+  if (!transcription) return;
+  for (SFTranscriptionSegment *segment in transcription.segments) {
+    if (!segment || !segment.substring.length) continue;
+    const double timestamp = std::max(0.0, segment.timestamp);
+    const double duration = std::max(0.0, segment.duration);
+    const std::string text = TrimCopy(
+        std::string([segment.substring UTF8String] ?: ""));
+    if (text.empty()) continue;
+    auto existing = std::find_if(
+        st.transcript_segments.begin(), st.transcript_segments.end(),
+        [timestamp](const DictationTranscriptSegment &candidate) {
+          return std::abs(candidate.timestamp - timestamp) < 0.12;
+        });
+    const DictationTranscriptSegment captured{timestamp, duration, text};
+    if (existing == st.transcript_segments.end()) {
+      st.transcript_segments.push_back(captured);
+    } else {
+      *existing = captured;
+    }
+  }
+  std::sort(st.transcript_segments.begin(), st.transcript_segments.end(),
+            [](const DictationTranscriptSegment &left,
+               const DictationTranscriptSegment &right) {
+              return left.timestamp < right.timestamp;
+            });
+  RebuildDictationBestText(st);
+}
 
 DictationSessionState &DictationSession() {
   static DictationSessionState state;
@@ -691,14 +761,67 @@ void ResetDictationSessionLocked(DictationSessionState &st, bool cancel_task) {
   }
   st.audio_engine = nil;
   st.input_node = nil;
+  st.recognizer = nil;
   st.request = nil;
   st.task = nil;
   st.sem = nil;
+  ++st.recognition_generation;
   st.active = false;
   st.finished = false;
+  st.transcript_segments.clear();
+  st.committed_text.clear();
   st.best_text.clear();
   st.last_error.clear();
   st.level_rms = 0.0;
+}
+
+bool StartDictationRecognitionTaskLocked(DictationSessionState &st) {
+  if (!st.recognizer) return false;
+  st.request = [[SFSpeechAudioBufferRecognitionRequest alloc] init];
+  st.request.shouldReportPartialResults = YES;
+  if (@available(macOS 13.0, *)) {
+    st.request.requiresOnDeviceRecognition = YES;
+  }
+  const int generation = ++st.recognition_generation;
+  st.task = [st.recognizer
+      recognitionTaskWithRequest:st.request
+                   resultHandler:^(SFSpeechRecognitionResult *result,
+                                   NSError *rec_error) {
+                     auto &cb = DictationSession();
+                     std::lock_guard<std::mutex> cb_lock(cb.mu);
+                     if (generation != cb.recognition_generation) return;
+                     if (result && result.bestTranscription) {
+                       UpdateDictationTranscriptSegments(
+                           cb, result.bestTranscription);
+                     }
+                     if (rec_error) {
+                       NSString *msg = [rec_error localizedDescription];
+                       cb.last_error =
+                           msg ? std::string([msg UTF8String])
+                               : std::string("Offline dictation failed.");
+                       cb.active = false;
+                       cb.finished = true;
+                       if (cb.sem) dispatch_semaphore_signal(cb.sem);
+                       return;
+                     }
+                     if (!(result && result.isFinal)) return;
+                     if (cb.active) {
+                       CommitCurrentDictationPhrase(cb);
+                       if (!StartDictationRecognitionTaskLocked(cb)) {
+                         cb.last_error =
+                             "Failed to continue dictation after a pause.";
+                         cb.active = false;
+                         cb.finished = true;
+                         if (cb.sem) dispatch_semaphore_signal(cb.sem);
+                       }
+                       return;
+                     }
+                     if (!cb.finished) {
+                       cb.finished = true;
+                       if (cb.sem) dispatch_semaphore_signal(cb.sem);
+                     }
+                   }];
+  return st.task != nil;
 }
 
 bool StartOfflineDictationSessionOnMac(const std::string &locale_hint,
@@ -756,43 +879,19 @@ bool StartOfflineDictationSessionOnMac(const std::string &locale_hint,
     return false;
   }
 
-  st.request = [[SFSpeechAudioBufferRecognitionRequest alloc] init];
-  st.request.shouldReportPartialResults = YES;
-  if (@available(macOS 13.0, *)) {
-    st.request.requiresOnDeviceRecognition = YES;
-  }
+  st.recognizer = recognizer;
   st.sem = dispatch_semaphore_create(0);
   st.finished = false;
+  st.transcript_segments.clear();
+  st.committed_text.clear();
   st.best_text.clear();
   st.last_error.clear();
   st.level_rms = 0.0;
-
-  st.task = [recognizer
-      recognitionTaskWithRequest:st.request
-                   resultHandler:^(SFSpeechRecognitionResult *result,
-                                   NSError *rec_error) {
-                     auto &cb = DictationSession();
-                     std::lock_guard<std::mutex> cb_lock(cb.mu);
-                     if (result &&
-                         result.bestTranscription.formattedString.length > 0) {
-                       cb.best_text =
-                           std::string([result.bestTranscription
-                                            .formattedString UTF8String]);
-                     }
-                     if (rec_error) {
-                       NSString *msg = [rec_error localizedDescription];
-                       cb.last_error =
-                           msg ? std::string([msg UTF8String])
-                               : std::string("Offline dictation failed.");
-                     }
-                     if (!cb.finished &&
-                         (rec_error || (result && result.isFinal))) {
-                       cb.finished = true;
-                       if (cb.sem) {
-                         dispatch_semaphore_signal(cb.sem);
-                       }
-                     }
-                   }];
+  if (!StartDictationRecognitionTaskLocked(st)) {
+    if (err) *err = "Failed to start offline speech recognition.";
+    ResetDictationSessionLocked(st, true);
+    return false;
+  }
 
   AVAudioFormat *format = [st.input_node outputFormatForBus:0];
   [st.input_node removeTapOnBus:0];
@@ -820,7 +919,7 @@ bool StartOfflineDictationSessionOnMac(const std::string &locale_hint,
                     rms = std::sqrt(sum / static_cast<double>(frames));
                   }
                   tap.level_rms = std::clamp(
-                      (tap.level_rms * 0.72) + (rms * 0.28), 0.0, 1.0);
+                      (tap.level_rms * 0.20) + (rms * 0.80), 0.0, 1.0);
                 }];
 
   NSError *start_error = nil;
@@ -854,6 +953,7 @@ bool FinalizeOfflineDictationSessionOnMac(int timeout_ms,
         *err = "No active dictation session.";
       return false;
     }
+    st.active = false;
     if (st.request) {
       [st.request endAudio];
     }
@@ -911,7 +1011,7 @@ void CancelOfflineDictationSessionOnMac() {
 double GetOfflineDictationLevelOnMac() {
   auto &st = DictationSession();
   std::lock_guard<std::mutex> lock(st.mu);
-  const double level = std::clamp(st.level_rms * 5.5, 0.0, 1.0);
+  const double level = std::clamp(st.level_rms * 3.6, 0.0, 1.0);
   return level;
 }
 

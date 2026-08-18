@@ -732,6 +732,37 @@ function getArtifactTypeLabel(itemOrType, canvasFormat = '') {
   return 'Artifact';
 }
 
+function getArtifactSourceName(item) {
+  const linkedChat = findChatById(item && item.chatId);
+  if (!linkedChat) return '';
+  const projectName = String(
+    (linkedChat.phaseTracker && linkedChat.phaseTracker.projectName)
+    || linkedChat.projectName
+    || ''
+  ).trim();
+  return projectName || String(linkedChat.name || '').trim();
+}
+
+function getArtifactDisplayName(item) {
+  const storedName = String(item && item.name ? item.name : '').trim();
+  const generatedName = /^(?:code_\d+_\d+|canvas_(?:code|text)_\d+)(?:\.[a-z0-9]+)?$/i.test(storedName);
+  if (storedName && !generatedName) return storedName;
+  return getArtifactSourceName(item) || (isCodeArtifact(item) ? 'Untitled code' : 'Untitled artifact');
+}
+
+function getArtifactKindLabel(item) {
+  if (!isCodeArtifact(item)) return 'TEXT';
+  const language = String(item && item.language ? item.language : '').trim().toLowerCase();
+  const labels = {
+    javascript: 'JS', js: 'JS', typescript: 'TS', ts: 'TS',
+    python: 'PYTHON', py: 'PYTHON', markdown: 'MD', md: 'MD',
+    shell: 'SHELL', sh: 'SHELL', bash: 'SHELL', zsh: 'SHELL',
+  };
+  if (language) return labels[language] || language.toUpperCase();
+  const extension = String(item && item.name ? item.name : '').split('.').pop().trim().toUpperCase();
+  return extension && extension !== String(item && item.name ? item.name : '').toUpperCase() ? extension : 'CODE';
+}
+
 function openArtifactsView(btn) {
   if (!ensureSignedIn()) return;
   artifactListFilter = 'all';
@@ -1612,6 +1643,7 @@ const menuContextBtn = document.getElementById('menuContextBtn');
 const micBtn = document.getElementById('micBtn');
 const dictationBar = document.getElementById('dictationBar');
 const dictationWaveCanvas = document.getElementById('dictationWaveCanvas');
+const dictationTimer = document.getElementById('dictationTimer');
 const dictationCancelBtn = document.getElementById('dictationCancelBtn');
 const dictationApplyBtn = document.getElementById('dictationApplyBtn');
 const attachFileInput = document.getElementById('attachFileInput');
@@ -1923,9 +1955,15 @@ let dictationWaveAudioCtx = null;
 let dictationWaveAnalyser = null;
 let dictationWaveData = null;
 let dictationWaveHistory = [];
-let dictationWaveFallbackPhase = 0;
+let dictationWaveLastSampleMs = 0;
+let dictationWaveEnvelope = 0;
+let dictationWaveGateOpen = false;
+let dictationWaveQuietFrames = 0;
+let dictationWaveNoiseFloor = 0.018;
 let dictationNativeLevel = 0;
 let dictationLevelPollTimer = 0;
+let dictationStartedAt = 0;
+let dictationTimerInterval = 0;
 let latestCanvasName = '';
 let middleViewMode = 'chat';
 let artifactDetailKey = '';
@@ -4491,8 +4529,8 @@ function renderSearchDropdown(query, contentMatches = []) {
   if (matchedArtifacts.length > 0) {
     html += '<div class="search-section-label">ARTIFACTS</div>';
     matchedArtifacts.forEach((a) => {
-      const typeLabel = isCodeArtifact(a) ? (a.language || 'code').toUpperCase() : 'Canvas';
-      html += `<button class="search-result-item" data-type="artifact" data-key="${escapeHtml(makeArtifactKey(a))}" type="button"><svg class="search-result-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M8 10h8"/><path d="M8 14h5"/></svg><div class="search-result-text"><div class="search-result-title">${escapeHtml(a.name || 'Artifact')}</div><div class="search-result-sub">${escapeHtml(typeLabel)}</div></div></button>`;
+      const typeLabel = getArtifactKindLabel(a);
+      html += `<button class="search-result-item" data-type="artifact" data-key="${escapeHtml(makeArtifactKey(a))}" type="button"><svg class="search-result-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M8 10h8"/><path d="M8 14h5"/></svg><div class="search-result-text"><div class="search-result-title">${escapeHtml(getArtifactDisplayName(a))}</div><div class="search-result-sub">${escapeHtml(typeLabel)}</div></div></button>`;
     });
   }
   if (matchedProjects.length > 0) {
@@ -15590,7 +15628,7 @@ function renderArtifactBrowser() {
     if (!hasUser) {
       artifactBrowserTitle.textContent = 'Artifacts';
     } else if (detailMode) {
-      artifactBrowserTitle.textContent = selected.name || 'Artifact';
+      artifactBrowserTitle.textContent = getArtifactDisplayName(selected);
     } else {
       artifactBrowserTitle.textContent = showingCodeOnly ? 'Code' : 'Artifacts';
     }
@@ -15639,18 +15677,15 @@ function renderArtifactBrowser() {
       const row = document.createElement('div');
       row.className = 'artifact-row';
       const linkedChat = findChatById(item.chatId);
-      const chatName = linkedChat ? linkedChat.name : 'Unknown chat';
-      const langBadge = isCodeArtifact(item) && item.language
-        ? String(item.language).trim().toUpperCase()
-        : '';
+      const displayName = getArtifactDisplayName(item);
       const preview = String(item.content || '').trim().slice(0, 180);
       const allowDelete = Boolean(item) && (isCodeArtifact(item) || item.type !== 'canvas');
-      const kindLabel = langBadge || (item.type === 'canvas' ? 'CANVAS' : 'FILE');
+      const kindLabel = getArtifactKindLabel(item);
       row.innerHTML = `
-          <button type="button" class="artifact-row-main" aria-label="Open ${escapeHtml(item.name)}">
+          <button type="button" class="artifact-row-main" aria-label="Open ${escapeHtml(displayName)}">
             <div class="artifact-row-preview-head">
               <span class="artifact-row-badge">${escapeHtml(kindLabel)}</span>
-              <span class="artifact-row-open-hint">Open</span>
+              <time class="artifact-row-time">${escapeHtml(formatTimeAgo(item.createdAt))}</time>
             </div>
             ${preview ? `<div class="artifact-row-preview">${escapeHtml(preview)}</div>` : ''}
           </button>
@@ -15673,8 +15708,8 @@ function renderArtifactBrowser() {
             </button>` : ''}
           </div>
           <div class="artifact-row-info">
-            <div class="artifact-row-title">${escapeHtml(item.name)}</div>
-            <div class="artifact-row-meta">${escapeHtml(chatName)} • ${escapeHtml(formatTimeAgo(item.createdAt))} • ${escapeHtml(item.size || '0 B')}</div>
+            <div class="artifact-row-title">${escapeHtml(displayName)}</div>
+            <div class="artifact-row-meta">${escapeHtml(item.size || '0 B')}</div>
           </div>
         `;
       const mainBtn = row.querySelector('.artifact-row-main');
@@ -15731,10 +15766,7 @@ function renderArtifactBrowser() {
   }
 
   if (artifactDetailMeta) {
-    const linkedChat = findChatById(selected.chatId);
-    const chatName = linkedChat ? linkedChat.name : 'Unknown chat';
-    const typeLabel = getArtifactTypeLabel(selected);
-    artifactDetailMeta.textContent = `${typeLabel} • ${chatName} • ${formatTimeAgo(selected.createdAt)} • ${selected.size || '0 B'}`;
+    artifactDetailMeta.textContent = `${getArtifactKindLabel(selected)} • ${formatTimeAgo(selected.createdAt)} • ${selected.size || '0 B'}`;
   }
   if (artifactEditor) {
     artifactEditor.value = String(selected.content || '');
@@ -19209,6 +19241,36 @@ function clearInputBox() {
   syncSendButtonAvailability();
 }
 
+function formatDictationDuration(elapsedMs) {
+  const totalSeconds = Math.max(0, Math.floor(Number(elapsedMs || 0) / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  return hours > 0
+    ? `${hours}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
+    : `${minutes}:${String(seconds).padStart(2, '0')}`;
+}
+
+function stopDictationTimer(reset = true) {
+  if (dictationTimerInterval) {
+    clearInterval(dictationTimerInterval);
+    dictationTimerInterval = 0;
+  }
+  dictationStartedAt = 0;
+  if (reset && dictationTimer) dictationTimer.textContent = '0:00';
+}
+
+function startDictationTimer() {
+  stopDictationTimer(true);
+  dictationStartedAt = Date.now();
+  const render = () => {
+    if (!dictationTimer || !dictationStartedAt) return;
+    dictationTimer.textContent = formatDictationDuration(Date.now() - dictationStartedAt);
+  };
+  render();
+  dictationTimerInterval = window.setInterval(render, 250);
+}
+
 function setMicListeningState(listening) {
   speechRecognitionActive = Boolean(listening);
   pushDictationTrace('mic_state', { listening: speechRecognitionActive });
@@ -19223,6 +19285,7 @@ function setMicListeningState(listening) {
   if (dictationBar) {
     dictationBar.classList.toggle('hidden', !speechRecognitionActive);
   }
+  if (!speechRecognitionActive) stopDictationTimer(true);
   if (!speechRecognitionActive) {
     setDictationApplyLoading(false);
     dictationApplyPending = false;
@@ -19263,7 +19326,7 @@ function startDictationLevelPolling() {
     } catch (_) { }
   };
   poll();
-  dictationLevelPollTimer = window.setInterval(poll, 70);
+  dictationLevelPollTimer = window.setInterval(poll, 33);
 }
 
 function stopDictationLevelPolling() {
@@ -19342,6 +19405,11 @@ function stopDictationWaveVisualizer() {
   }
   dictationWaveAudioCtx = null;
   dictationWaveHistory = [];
+  dictationWaveLastSampleMs = 0;
+  dictationWaveEnvelope = 0;
+  dictationWaveGateOpen = false;
+  dictationWaveQuietFrames = 0;
+  dictationWaveNoiseFloor = 0.018;
 }
 
 function drawDictationWaveFrame() {
@@ -19377,45 +19445,85 @@ function drawDictationWaveFrame() {
     const rms = Math.sqrt(sum / Math.max(1, dictationWaveData.length));
     amplitude = Math.min(1, rms * 2.8);
   } else {
-    const native = Math.max(0, Math.min(1, Number(dictationNativeLevel) || 0));
-    if (native > 0) {
-      amplitude = native;
-    } else {
-      dictationWaveFallbackPhase += 0.2;
-      amplitude = 0.08 + (Math.sin(dictationWaveFallbackPhase) + 1) * 0.08;
-    }
+    amplitude = Math.max(0, Math.min(1, Number(dictationNativeLevel) || 0));
+  }
+  const rawAmplitude = amplitude;
+  if (!dictationWaveGateOpen) {
+    const floorMix = rawAmplitude < dictationWaveNoiseFloor ? 0.12 : 0.025;
+    dictationWaveNoiseFloor += (rawAmplitude - dictationWaveNoiseFloor) * floorMix;
+    dictationWaveNoiseFloor = Math.max(0.006, Math.min(0.080, dictationWaveNoiseFloor));
+  }
+  const gateOpenThreshold = Math.max(0.020, dictationWaveNoiseFloor + 0.010);
+  const gateCloseThreshold = Math.max(0.014, dictationWaveNoiseFloor + 0.004);
+  if (!dictationWaveGateOpen && rawAmplitude >= gateOpenThreshold) {
+    dictationWaveGateOpen = true;
+    dictationWaveQuietFrames = 0;
+  } else if (dictationWaveGateOpen && rawAmplitude < gateCloseThreshold) {
+    dictationWaveQuietFrames += 1;
+    if (dictationWaveQuietFrames >= 4) dictationWaveGateOpen = false;
+  } else {
+    dictationWaveQuietFrames = 0;
   }
 
-  const samples = Math.max(50, Math.floor(cssWidth / 3));
-  dictationWaveHistory.push(amplitude);
+  const gatedTarget = dictationWaveGateOpen
+    ? Math.pow(Math.min(1, Math.max(0, rawAmplitude - dictationWaveNoiseFloor) / 0.18), 0.72)
+    : 0;
+  const envelopeMix = gatedTarget > dictationWaveEnvelope ? 0.82 : 0.28;
+  dictationWaveEnvelope += (gatedTarget - dictationWaveEnvelope) * envelopeMix;
+  if (!dictationWaveGateOpen && dictationWaveEnvelope < 0.035) dictationWaveEnvelope = 0;
+  amplitude = dictationWaveEnvelope;
+
+  const sampleIntervalMs = 150;
+  const barStepCss = 6.5;
+  const samples = Math.max(24, Math.ceil(cssWidth / barStepCss) + 1);
+  const nowMs = performance.now();
+  if (!dictationWaveHistory.length) {
+    dictationWaveHistory = Array(samples).fill(0);
+  }
+  if (!dictationWaveLastSampleMs) dictationWaveLastSampleMs = nowMs - sampleIntervalMs;
+  while (nowMs - dictationWaveLastSampleMs >= sampleIntervalMs) {
+    dictationWaveHistory.push(amplitude);
+    dictationWaveLastSampleMs += sampleIntervalMs;
+  }
   if (dictationWaveHistory.length > samples) {
     dictationWaveHistory.splice(0, dictationWaveHistory.length - samples);
   }
+  const sampleProgress = Math.max(0, Math.min(1,
+    (nowMs - dictationWaveLastSampleMs) / sampleIntervalMs));
+  const displayHistory = [...dictationWaveHistory, amplitude];
 
   const w = targetWidth;
   const h = targetHeight;
   const centerY = h * 0.5;
   ctx.clearRect(0, 0, w, h);
 
-  ctx.strokeStyle = 'rgba(235, 240, 248, 0.72)';
-  ctx.lineWidth = Math.max(1, dpr);
-  ctx.setLineDash([2 * dpr, 2.6 * dpr]);
-  ctx.beginPath();
-  ctx.moveTo(0, centerY);
-  ctx.lineTo(w, centerY);
-  ctx.stroke();
-  ctx.setLineDash([]);
-
-  const step = 3 * dpr;
-  const barW = Math.max(1, Math.round(1.4 * dpr));
-  for (let i = 0; i < dictationWaveHistory.length; i += 1) {
-    const value = dictationWaveHistory[dictationWaveHistory.length - 1 - i];
-    const x = w - (i * step) - barW;
-    if (x < 0) break;
-    const barH = Math.max(2 * dpr, (h * 0.7 * value) + (1.5 * dpr));
-    const y = centerY - (barH / 2);
-    ctx.fillStyle = value > 0.18 ? 'rgba(246, 250, 255, 0.95)' : 'rgba(220, 229, 238, 0.75)';
-    ctx.fillRect(x, y, barW, barH);
+  const step = barStepCss * dpr;
+  const barW = Math.max(2, 3.2 * dpr);
+  const dotRadius = Math.max(1, 1.2 * dpr);
+  const flowOffset = sampleProgress * step;
+  const historyStartX = w - ((displayHistory.length - 1) * step) - flowOffset;
+  for (let i = 0; i < displayHistory.length; i += 1) {
+    const value = displayHistory[i];
+    const x = historyStartX + (i * step);
+    const centerX = x + (barW * 0.5);
+    if (centerX < -barW) continue;
+    if (centerX > w + barW) break;
+    if (value <= 0) {
+      ctx.fillStyle = 'rgba(171, 182, 196, 0.48)';
+      ctx.beginPath();
+      ctx.arc(centerX, centerY, dotRadius, 0, Math.PI * 2);
+      ctx.fill();
+      continue;
+    }
+    const barH = Math.max(barW, (h * 0.82 * value) + (2 * dpr));
+    const halfLine = Math.max(0, (barH - barW) * 0.5);
+    ctx.strokeStyle = value > 0.55 ? 'rgba(255, 255, 255, 0.96)' : 'rgba(196, 207, 220, 0.76)';
+    ctx.lineWidth = barW;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(centerX, centerY - halfLine);
+    ctx.lineTo(centerX, centerY + halfLine);
+    ctx.stroke();
   }
   dictationWaveRaf = requestAnimationFrame(drawDictationWaveFrame);
 }
@@ -19495,6 +19603,7 @@ async function startDictation() {
       });
       return;
     }
+    startDictationTimer();
     startDictationLevelPolling();
   } catch (err) {
     setMicListeningState(false);

@@ -2267,6 +2267,63 @@ html.platform-mac .settings-sidebar {
   gap: 12px;
 }
 
+.settings-section-copy {
+  margin: -10px 0 20px;
+  color: var(--text2);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.settings-advanced-section .settings-action-grid .modal-btn {
+  min-height: 48px;
+}
+
+.settings-maintenance-status {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  min-height: 48px;
+  margin-top: 14px;
+  padding: 13px 16px;
+  border-radius: 12px;
+  background: rgba(19, 22, 31, 0.84);
+  box-shadow: inset 0 0 0 1px rgba(37, 43, 61, 0.9);
+  color: var(--text2);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.settings-maintenance-status-dot {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: var(--accent);
+  box-shadow: 0 0 10px rgba(0, 229, 255, 0.42);
+}
+
+.settings-maintenance-note {
+  display: grid;
+  grid-template-columns: 160px minmax(0, 1fr);
+  gap: 20px;
+  margin-top: 26px;
+  padding: 22px 2px 0;
+  border-top: 1px solid rgba(37, 43, 61, 0.82);
+}
+
+.settings-maintenance-note strong {
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.settings-maintenance-note span {
+  max-width: 760px;
+  color: var(--text2);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
 .settings-main .chat-modal-label {
   margin: 0 0 6px 0;
 }
@@ -2383,6 +2440,11 @@ html.platform-mac .settings-sidebar {
 
   .settings-toggle-row {
     align-items: flex-start;
+  }
+
+  .settings-maintenance-note {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 7px;
   }
 
   .settings-mode-card {
@@ -3572,6 +3634,17 @@ html.platform-mac .settings-sidebar {
   font-weight: 700;
   letter-spacing: 0.75px;
 }
+
+.artifact-row-time {
+  color: var(--text3);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  white-space: nowrap;
+  transition: opacity 0.15s ease;
+}
+
+.artifact-row:hover .artifact-row-time,
+.artifact-row:focus-within .artifact-row-time { opacity: 0; }
 
 .artifact-row-open-hint {
   color: var(--text3);
@@ -6512,7 +6585,6 @@ html.platform-mac .settings-sidebar {
   min-height: 78px;
 }
 
-.input-row.dictation-active .input-text-line,
 .input-row.dictation-active .input-controls-line {
   display: none;
 }
@@ -7007,6 +7079,7 @@ html.platform-mac .settings-sidebar {
 .dictation-bar {
   display: flex;
   align-items: center;
+  order: 2;
   gap: 8px;
   min-height: 44px;
   width: 100%;
@@ -7021,22 +7094,6 @@ html.platform-mac .settings-sidebar {
   display: none !important;
 }
 
-.dictation-plus-ghost {
-  width: 26px;
-  height: 26px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border: none;
-  background: transparent;
-  color: var(--text3);
-  font-size: 28px;
-  line-height: 1;
-  padding: 0;
-  opacity: 0.75;
-  pointer-events: none;
-}
-
 .dictation-wave {
   flex: 1;
   height: 22px;
@@ -7049,6 +7106,16 @@ html.platform-mac .settings-sidebar {
   width: 100%;
   height: 100%;
   display: block;
+}
+
+.dictation-time {
+  min-width: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  color: var(--text2);
+  font: 500 12px var(--font-mono);
+  font-variant-numeric: tabular-nums;
 }
 
 .dictation-action {
@@ -7071,7 +7138,7 @@ html.platform-mac .settings-sidebar {
 }
 
 #dictationCancelBtn {
-  margin-right: -2px;
+  margin-left: -2px;
 }
 
 .dictation-check-icon {

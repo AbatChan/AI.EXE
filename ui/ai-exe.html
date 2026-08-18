@@ -407,16 +407,16 @@
         <div class="phase-tracker hidden" id="phaseTracker" aria-hidden="true"></div>
         <div class="input-row" id="inputRow">
           <div class="dictation-bar hidden" id="dictationBar">
-            <button class="dictation-plus-ghost" id="dictationPlusGhost" type="button" aria-hidden="true">+</button>
-            <div class="dictation-wave" id="dictationWave" aria-label="Recording waveform">
-              <canvas id="dictationWaveCanvas" aria-hidden="true"></canvas>
-            </div>
             <button class="dictation-action danger" id="dictationCancelBtn" type="button" aria-label="Cancel dictation">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3">
                 <line x1="18" y1="6" x2="6" y2="18"></line>
                 <line x1="6" y1="6" x2="18" y2="18"></line>
               </svg>
             </button>
+            <div class="dictation-wave" id="dictationWave" aria-label="Recording waveform">
+              <canvas id="dictationWaveCanvas" aria-hidden="true"></canvas>
+            </div>
+            <div class="dictation-time" aria-label="Recording duration"><span id="dictationTimer">0:00</span></div>
             <button class="dictation-action success" id="dictationApplyBtn" type="button" aria-label="Apply transcript">
               <svg class="dictation-check-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                 stroke-width="2.3">
@@ -1074,20 +1074,21 @@
           </div>
 
           <div class="settings-pane" data-settings-pane="advanced">
-            <div class="settings-section">
+            <div class="settings-section settings-advanced-section">
               <div class="settings-section-title">Maintenance</div>
+              <div class="settings-section-copy">Model tools and diagnostics for the local AI.EXE runtime.</div>
               <div class="settings-action-grid">
                 <button class="modal-btn" id="settingsImportBtn" type="button">Import / Replace Model</button>
                 <button class="modal-btn" id="settingsVerifyBtn" type="button">Verify</button>
                 <button class="modal-btn" id="settingsDebugDumpBtn" type="button">Dump Debug</button>
-                <button class="modal-btn" id="settingsUpdateCheckBtn" type="button">Check for updates</button>
               </div>
-              <div class="settings-note-block" id="settingsUpdateStatus">Updates are checked and downloaded automatically. A ready update installs when AI.EXE quits.</div>
-            </div>
-            <div class="settings-section">
-              <div class="settings-section-title">Notes</div>
-              <div class="settings-note-block">
-                Use advanced tools for verification and diagnostics. These actions do not change chat content, but they can affect runtime state and debug visibility.
+              <div class="settings-maintenance-status" id="settingsUpdateStatus">
+                <span class="settings-maintenance-status-dot" aria-hidden="true"></span>
+                <span>Updates are checked and downloaded automatically. A ready update installs when AI.EXE quits.</span>
+              </div>
+              <div class="settings-maintenance-note">
+                <strong>Advanced tools</strong>
+                <span>Verification and diagnostics leave chat content unchanged, but they can affect runtime state and debug visibility.</span>
               </div>
             </div>
           </div>
