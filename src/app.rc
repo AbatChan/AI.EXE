@@ -1,3 +1,5 @@
 // Windows application icon. The lowest-ID ICON resource becomes the .exe's
 // icon in Explorer/taskbar; the app also loads ID 1 for its window icon.
 1 ICON "app.ico"
+2 ICON "status-icon-light.ico"
+3 ICON "status-icon-dark.ico"

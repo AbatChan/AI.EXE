@@ -41,6 +41,12 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Check background service contract
+        run: node scripts/paper_background_service_static_test.js
+
+      - name: Check adaptive finance and dictation UI
+        run: node scripts/adaptive_finance_dictation_static_test.js
+
       - name: Build AI.EXE GUI
         shell: cmd
         run: |
@@ -114,6 +120,31 @@ jobs:
             }
           } finally {
             if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force }
+          }
+
+          # A background launch must survive the short-lived process that starts it,
+          # even if parent-watch was inherited in the environment.
+          $env:AIEXE_BACKEND_PORT = "18766"
+          $env:AIEXE_PARENT_WATCH = "1"
+          $env:AIEXE_BACKGROUND_SMOKE_EXE = $backend
+          $backgroundPid = python -c "import os, subprocess; print(subprocess.Popen([os.environ['AIEXE_BACKGROUND_SMOKE_EXE'], '--background'], creationflags=0x08000000).pid)"
+          try {
+            $ready = $false
+            1..50 | ForEach-Object {
+              Start-Sleep -Milliseconds 500
+              try {
+                $res = Invoke-WebRequest -UseBasicParsing "http://127.0.0.1:18766/health"
+                if ($res.StatusCode -eq 200) { $ready = $true; break }
+              } catch { }
+            }
+            if (-not $ready) { throw "Background backend did not become healthy" }
+            Start-Sleep -Seconds 6
+            $res = Invoke-WebRequest -UseBasicParsing "http://127.0.0.1:18766/health"
+            if ($res.StatusCode -ne 200) { throw "Background backend did not survive parent exit" }
+          } finally {
+            Stop-Process -Id ([int]$backgroundPid) -Force -ErrorAction SilentlyContinue
+            Remove-Item Env:AIEXE_PARENT_WATCH -ErrorAction SilentlyContinue
+            Remove-Item Env:AIEXE_BACKGROUND_SMOKE_EXE -ErrorAction SilentlyContinue
           }
 
       - name: Assemble release

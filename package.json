@@ -82,11 +82,12 @@
     "@lezer/highlight": "^1.2.3",
     "@rollup/plugin-node-resolve": "^16.0.3",
     "katex": "^0.16.35",
+    "lightweight-charts": "^5.0.9",
     "markdown-it": "^14.1.1",
     "markdown-it-texmath": "^1.0.0",
     "rollup": "^4.59.0"
   },
-  "version": "10.6.3",
+  "version": "10.7.8",
   "devDependencies": {
     "eslint-linter-browserify": "^10.7.0"
   }

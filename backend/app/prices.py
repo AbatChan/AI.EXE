@@ -21,14 +21,27 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Dict, List
 
-EQUITY_URL = "https://api.nasdaq.com/api/quote/{symbol}/info?assetclass=stocks"
+EQUITY_URL = "https://api.nasdaq.com/api/quote/{symbol}/info?assetclass={assetclass}"
+EQUITY_CHART_URL = "https://api.nasdaq.com/api/quote/{symbol}/chart?assetclass={assetclass}"
+EQUITY_SEARCH_URL = "https://api.nasdaq.com/api/autocomplete/slookup/10?search={query}"
+EQUITY_HISTORY_URL = (
+    "https://api.nasdaq.com/api/quote/{symbol}/historical?assetclass={assetclass}"
+    "&fromdate={from_date}&todate={to_date}&limit=5000"
+)
+# Nasdaq keys every endpoint by asset class — SPY is an etf, not a stock.
+ASSET_CLASSES = ("stocks", "etf", "index")
 CRYPTO_URL = "https://api.coingecko.com/api/v3/simple/price?ids={ids}&vs_currencies=usd&include_last_updated_at=true"
+CRYPTO_CHART_URL = "https://api.bybit.com/v5/market/kline?category=spot&symbol={pair}&interval=1&limit=240"
 USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/124 Safari/537.36"
 
 DEFAULT_TTL_SECONDS = 30
+INTRADAY_TTL_SECONDS = 8
+# A replayed chart is a placeholder, not a price — past this it is just wrong.
+REPLAY_MAX_AGE_SECONDS = 900
 REQUEST_TIMEOUT = 8
 # Retrying into a rate limit just extends it; stop calling out until it clears.
 RATE_LIMIT_COOLDOWN = 90
@@ -40,6 +53,18 @@ CRYPTO_IDS = {
     "LINK": "chainlink", "AVAX": "avalanche-2", "MATIC": "matic-network",
     "TRX": "tron", "BCH": "bitcoin-cash", "XLM": "stellar", "ATOM": "cosmos",
 }
+
+DEFAULT_ASSETS = [
+    {"symbol": "BAC", "name": "Bank of America", "exchange": "NYSE", "asset_class": "equity"},
+    {"symbol": "AAPL", "name": "Apple", "exchange": "NASDAQ", "asset_class": "equity"},
+    {"symbol": "MSFT", "name": "Microsoft", "exchange": "NASDAQ", "asset_class": "equity"},
+    {"symbol": "NVDA", "name": "NVIDIA", "exchange": "NASDAQ", "asset_class": "equity"},
+    {"symbol": "SPY", "name": "SPDR S&P 500 ETF", "exchange": "NYSE ARCA", "asset_class": "equity",
+     "nasdaq_class": "etf"},
+    {"symbol": "BTC-USD", "name": "Bitcoin", "exchange": "Bybit spot", "asset_class": "crypto"},
+    {"symbol": "ETH-USD", "name": "Ethereum", "exchange": "Bybit spot", "asset_class": "crypto"},
+    {"symbol": "SOL-USD", "name": "Solana", "exchange": "Bybit spot", "asset_class": "crypto"},
+]
 
 
 class QuoteUnavailable(RuntimeError):
@@ -70,7 +95,25 @@ def _to_cents(value) -> int:
     text = str(value).replace("$", "").replace(",", "").strip()
     if not text:
         raise QuoteUnavailable("empty price")
-    return int(round(float(text) * 100))
+    try:
+        return int((Decimal(text) * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+    except InvalidOperation as exc:
+        raise QuoteUnavailable(f"invalid price: {text}") from exc
+
+
+def _to_optional_cents(value) -> int:
+    try:
+        return _to_cents(value or 0)
+    except QuoteUnavailable:
+        return 0
+
+
+def _to_bps(value) -> int:
+    text = str(value or "0").replace("%", "").replace(",", "").strip()
+    try:
+        return int((Decimal(text) * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+    except InvalidOperation:
+        return 0
 
 
 class QuoteFeed:
@@ -81,8 +124,32 @@ class QuoteFeed:
         self._ttl = int(ttl_seconds)
         self._fetch = fetcher or _http_get_json
         self._cache: Dict[str, dict] = {}
+        self._intraday_cache: Dict[str, dict] = {}
+        self._search_cache: Dict[str, dict] = {}
+        # Seeded so a known ETF never pays for a wrong-class miss first.
+        self._asset_class: Dict[str, str] = {
+            asset["symbol"]: asset["nasdaq_class"]
+            for asset in DEFAULT_ASSETS if asset.get("nasdaq_class")
+        }
         self._blocked_until = 0.0
         self._lock = threading.RLock()
+
+    def _fetch_nasdaq(self, template: str, symbol: str, **fields) -> dict:
+        """Nasdaq rejects a symbol under the wrong asset class, so try the
+        classes in turn and remember the one that answered."""
+        with self._lock:
+            known = self._asset_class.get(symbol)
+        order = [known] + [c for c in ASSET_CLASSES if c != known] if known else list(ASSET_CLASSES)
+        last: dict = {}
+        for asset_class in order:
+            payload = self._fetch(template.format(
+                symbol=urllib.parse.quote(symbol), assetclass=asset_class, **fields)) or {}
+            if int((payload.get("status") or {}).get("rCode") or 0) == 200:
+                with self._lock:
+                    self._asset_class[symbol] = asset_class
+                return payload
+            last = payload
+        return last
 
     def _fetch_crypto(self, symbol: str, coin: str) -> dict:
         payload = self._fetch(CRYPTO_URL.format(ids=urllib.parse.quote(coin))) or {}
@@ -99,13 +166,14 @@ class QuoteFeed:
         }
 
     def _fetch_equity(self, symbol: str) -> dict:
-        payload = self._fetch(EQUITY_URL.format(symbol=urllib.parse.quote(symbol))) or {}
+        payload = self._fetch_nasdaq(EQUITY_URL, symbol)
         status = payload.get("status") or {}
         if int(status.get("rCode") or 0) != 200:
             messages = status.get("bCodeMessage") or []
             detail = messages[0].get("errorMessage") if messages else "not found"
             raise QuoteUnavailable(f"{symbol}: {detail}")
-        primary = ((payload.get("data") or {}).get("primaryData") or {})
+        data = payload.get("data") or {}
+        primary = data.get("primaryData") or {}
         if not primary.get("lastSalePrice"):
             raise QuoteUnavailable(f"{symbol}: no price returned")
         return {
@@ -115,6 +183,11 @@ class QuoteFeed:
             "asset_class": "equity",
             "source": "nasdaq",
             "as_of": primary.get("lastTradeTimestamp") or "",
+            "market_status": data.get("marketStatus") or "Unknown",
+            "is_realtime": bool(primary.get("isRealTime")),
+            "net_change_cents": _to_optional_cents(primary.get("netChange")),
+            "percentage_change_bps": _to_bps(primary.get("percentageChange")),
+            "delta": primary.get("deltaIndicator") or "unchanged",
             "fetched_at": _now_iso(),
         }
 
@@ -164,6 +237,190 @@ class QuoteFeed:
             except QuoteUnavailable as exc:
                 errors[(symbol or "").strip().upper()] = str(exc)
         return {"quotes": found, "errors": errors}
+
+    def search(self, query: str = "", limit: int = 10) -> List[dict]:
+        """Company/symbol lookup with useful offline defaults."""
+        clean = (query or "").strip()
+        needle = clean.casefold()
+        limit = max(1, min(int(limit), 12))
+        defaults = [dict(item) for item in DEFAULT_ASSETS if not needle or needle in (
+            f"{item['symbol']} {item['name']} {item['exchange']}".casefold()
+        )]
+        if not clean:
+            return defaults[:limit]
+        with self._lock:
+            cached = self._search_cache.get(needle)
+            if cached and (time.time() - cached["_at"]) < 300:
+                return [dict(item) for item in cached["results"][:limit]]
+        remote = []
+        try:
+            payload = self._fetch(EQUITY_SEARCH_URL.format(
+                query=urllib.parse.quote(clean, safe=""))) or {}
+            for item in payload.get("data") or []:
+                symbol = str(item.get("symbol") or "").strip().upper()
+                name = str(item.get("name") or "").strip()
+                if not symbol or not name or str(item.get("asset") or "").upper() != "STOCKS":
+                    continue
+                remote.append({
+                    "symbol": symbol,
+                    "name": name,
+                    "exchange": str(item.get("exchange") or "US market"),
+                    "asset_class": "equity",
+                })
+        except (urllib.error.URLError, OSError, ValueError, KeyError, TypeError):
+            remote = []
+        results = []
+        seen = set()
+        for item in defaults + remote:
+            if item["symbol"] in seen:
+                continue
+            seen.add(item["symbol"])
+            results.append(item)
+        with self._lock:
+            self._search_cache[needle] = {"_at": time.time(), "results": results}
+        return [dict(item) for item in results[:limit]]
+
+    def cached_intraday(self, symbol: str):
+        """Last known chart for an instant first paint. None means nothing seen
+        yet; anything returned is labelled stale until a fresh fetch lands."""
+        symbol = (symbol or "").strip().upper()
+        with self._lock:
+            cached = self._intraday_cache.get(symbol)
+        if not cached or (time.time() - cached["_at"]) > REPLAY_MAX_AGE_SECONDS:
+            return None
+        data = dict(cached["data"])
+        data["stale"] = True
+        return data
+
+    def history(self, symbol: str, lookback_days: int = 550) -> dict:
+        """Daily equity closes from the same approved Nasdaq feed."""
+        symbol = (symbol or "").strip().upper()
+        if not symbol or crypto_id(symbol):
+            raise QuoteUnavailable("strategy history currently supports US equities")
+        to_date = date.today()
+        from_date = to_date - timedelta(days=max(120, min(int(lookback_days), 730)))
+        try:
+            payload = self._fetch_nasdaq(
+                EQUITY_HISTORY_URL, symbol,
+                from_date=from_date.isoformat(), to_date=to_date.isoformat())
+            status = payload.get("status") or {}
+            if int(status.get("rCode") or 0) != 200:
+                raise QuoteUnavailable(f"{symbol}: historical prices unavailable")
+            raw = ((((payload.get("data") or {}).get("tradesTable") or {}).get("rows")) or [])
+            rows = []
+            for item in reversed(raw):
+                rows.append({
+                    "date": datetime.strptime(item["date"], "%m/%d/%Y").date().isoformat(),
+                    "close_cents": _to_cents(item["close"]),
+                })
+            if len(rows) < 80:
+                raise QuoteUnavailable(f"{symbol}: only {len(rows)} daily closes returned")
+            return {"symbol": symbol, "source": "nasdaq", "rows": rows, "fetched_at": _now_iso()}
+        except QuoteUnavailable:
+            raise
+        except (urllib.error.URLError, OSError, ValueError, KeyError, TypeError) as exc:
+            raise QuoteUnavailable(f"{symbol}: {exc}")
+
+    def crypto_intraday_points(self, symbol: str) -> List[dict]:
+        """Recent one-minute closes to seed the exchange stream chart."""
+        symbol = (symbol or "").strip().upper()
+        if not crypto_id(symbol):
+            raise QuoteUnavailable("crypto intraday history requires a supported crypto symbol")
+        base = symbol
+        for suffix in ("-USD", "/USD", "USD"):
+            if base.endswith(suffix) and len(base) > len(suffix):
+                base = base[:-len(suffix)]
+                break
+        # Re-fetching a minute chart on every reconnect just delays the paint.
+        cache_key = f"crypto:{symbol}"
+        with self._lock:
+            cached = self._intraday_cache.get(cache_key)
+            if cached and (time.time() - cached["_at"]) < INTRADAY_TTL_SECONDS * 4:
+                return list(cached["data"])
+        try:
+            payload = self._fetch(CRYPTO_CHART_URL.format(pair=urllib.parse.quote(f"{base}USDT"))) or {}
+            if int(payload.get("retCode") or 0) != 0:
+                raise QuoteUnavailable(f"{symbol}: crypto chart unavailable")
+            rows = ((payload.get("result") or {}).get("list")) or []
+            points = [{"ts_ms": int(item[0]), "price_mills": int(round(float(item[4]) * 1000))}
+                      for item in reversed(rows) if len(item) >= 5]
+            if not points:
+                raise QuoteUnavailable(f"{symbol}: no crypto chart prices returned")
+            with self._lock:
+                self._intraday_cache[cache_key] = {"_at": time.time(), "data": list(points)}
+            return points
+        except QuoteUnavailable:
+            raise
+        except (urllib.error.URLError, OSError, ValueError, KeyError, TypeError) as exc:
+            raise QuoteUnavailable(f"{symbol}: {exc}")
+
+    def intraday(self, symbol: str, allow_stale: bool = True) -> dict:
+        """Current Nasdaq session, normalized for the local live display."""
+        symbol = (symbol or "").strip().upper()
+        if not symbol or crypto_id(symbol):
+            raise QuoteUnavailable("intraday chart currently supports US equities")
+        with self._lock:
+            cached = self._intraday_cache.get(symbol)
+            if cached and (time.time() - cached["_at"]) < INTRADAY_TTL_SECONDS:
+                return dict(cached["data"])
+            if time.time() < self._blocked_until:
+                if cached and allow_stale:
+                    stale = dict(cached["data"])
+                    stale["stale"] = True
+                    return stale
+                raise QuoteUnavailable(f"{symbol}: quote feed rate-limited, retry shortly")
+        try:
+            payload = self._fetch_nasdaq(EQUITY_CHART_URL, symbol)
+            status = payload.get("status") or {}
+            if int(status.get("rCode") or 0) != 200:
+                raise QuoteUnavailable(f"{symbol}: intraday chart unavailable")
+            data = payload.get("data") or {}
+            raw_points = data.get("chart") or []
+            points = []
+            for item in raw_points:
+                value = item.get("y")
+                if value is None:
+                    value = (item.get("z") or {}).get("value")
+                if value is None or item.get("x") is None:
+                    continue
+                points.append({
+                    "ts_ms": int(item["x"]),
+                    "price_mills": int(round(float(value) * 1000)),
+                })
+            if not points:
+                raise QuoteUnavailable(f"{symbol}: no intraday prices returned")
+            parsed = {
+                "symbol": symbol,
+                "company": data.get("company") or symbol,
+                "source": "nasdaq",
+                "market_status": data.get("marketStatus") or "Unknown",
+                "is_realtime": bool(data.get("isRealTime", True)),
+                "as_of": data.get("timeAsOf") or "",
+                "price_cents": _to_cents(data.get("lastSalePrice")),
+                "previous_close_cents": _to_optional_cents(data.get("previousClose")),
+                "net_change_cents": _to_optional_cents(data.get("netChange")),
+                "percentage_change_bps": _to_bps(data.get("percentageChange")),
+                "delta": data.get("deltaIndicator") or "unchanged",
+                "volume": str(data.get("volume") or ""),
+                "points": points[-720:],
+                "fetched_at": _now_iso(),
+                "stale": False,
+            }
+        except QuoteUnavailable:
+            raise
+        except (urllib.error.URLError, OSError, ValueError, KeyError, TypeError) as exc:
+            with self._lock:
+                if getattr(exc, "code", None) == 429:
+                    self._blocked_until = time.time() + RATE_LIMIT_COOLDOWN
+                cached = self._intraday_cache.get(symbol)
+            if cached and allow_stale:
+                stale = dict(cached["data"])
+                stale["stale"] = True
+                return stale
+            raise QuoteUnavailable(f"{symbol}: {exc}")
+        with self._lock:
+            self._intraday_cache[symbol] = {"_at": time.time(), "data": parsed}
+        return dict(parsed)
 
     def price_map(self, symbols: List[str]) -> Dict[str, int]:
         """symbol -> price_cents, shaped for PaperBroker.mark_to_market()."""

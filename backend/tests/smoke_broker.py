@@ -136,6 +136,16 @@ def main():
         fresh = PaperBroker(data_dir)                    # no marks since the buy
         assert fresh.performance()["latest_equity_cents"] == \
             fresh.account()["cash_cents"] + 20020, "unmarked holdings must count at cost"
+        # --- a recorded mark says which prices were live ---------------------
+        stamped = book.mark_to_market(
+            {"NVDA": 21000},
+            {"NVDA": {"source": "nasdaq", "as_of": "2026-08-19T12:00:00Z", "stale": True}},
+        )
+        assert stamped["cached_prices"] == ["NVDA"], "a mark must record prices it could not refresh"
+        assert stamped["price_sources"]["NVDA"]["source"] == "nasdaq"
+        live = book.mark_to_market({"NVDA": 21000}, {"NVDA": {"source": "nasdaq", "stale": False}})
+        assert live["cached_prices"] == [], "a live mark must not be flagged as cached"
+
         unwind = book.submit_order("NVDA", SELL, 1, 20000)
         book.confirm_order(unwind["id"], unwind["confirmation_token"])
         assert book.positions() == []

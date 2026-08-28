@@ -208,6 +208,13 @@ function isMacNativeUi() {
   return document.documentElement.classList.contains('platform-mac') && nativeBridge.available();
 }
 
+function isDesktopNativeUi() {
+  return nativeBridge.available() && (
+    document.documentElement.classList.contains('platform-mac')
+    || document.documentElement.classList.contains('platform-windows')
+  );
+}
+
 function collectNativeUiStorage() {
   const entries = {};
   try {
@@ -623,7 +630,25 @@ function applyRightSidebarCollapsed(collapsed) {
   if (btn) btn.title = isCollapsed ? 'Expand Explorer' : 'Collapse Explorer';
 }
 
+let financeAutoCollapsedExplorer = false;
+
+function syncExplorerForMiddleView() {
+  const collapsed = Boolean(rightSidebar && rightSidebar.classList.contains('collapsed'));
+  if (middleViewMode === 'finance') {
+    if (!collapsed) {
+      financeAutoCollapsedExplorer = true;
+      applyRightSidebarCollapsed(true);
+    }
+    return;
+  }
+  if (financeAutoCollapsedExplorer) {
+    financeAutoCollapsedExplorer = false;
+    applyRightSidebarCollapsed(false);
+  }
+}
+
 function toggleRightSidebar() {
+  financeAutoCollapsedExplorer = false;
   const next = !(rightSidebar && rightSidebar.classList.contains('collapsed'));
   applyRightSidebarCollapsed(next);
   persistLayoutWidths();
@@ -789,6 +814,7 @@ function openCodeArtifactsView(btn) {
 
 function openFinanceView(btn) {
   if (btn) setActive(btn);
+  financeActiveTab = 'trading';
   middleViewMode = 'finance';
   artifactDetailKey = '';
   artifactDetailOrigin = 'artifacts';
@@ -835,10 +861,69 @@ function formatFinanceMoney(cents, currency = 'USD') {
   }
 }
 
-function formatFinanceDate(value) {
-  if (!value) return 'No due date';
-  const date = new Date(String(value).length === 10 ? `${value}T12:00:00` : value);
-  return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+function financeOrdinal(day) {
+  const value = Number(day);
+  const remainder = value % 100;
+  if (remainder >= 11 && remainder <= 13) return `${value}th`;
+  return `${value}${value % 10 === 1 ? 'st' : value % 10 === 2 ? 'nd' : value % 10 === 3 ? 'rd' : 'th'}`;
+}
+
+function financeFriendlyDateParts(year, monthIndex, day, time = '', includeCurrentYear = false) {
+  const month = new Intl.DateTimeFormat(undefined, { month: 'long' }).format(new Date(2000, monthIndex, 1));
+  const yearText = !includeCurrentYear && Number(year) === new Date().getFullYear() ? '' : ` ${year}`;
+  return `${financeOrdinal(day)} of ${month}${yearText}${time ? ` · ${time}` : ''}`;
+}
+
+function formatFinanceDate(value, fallback = 'No due date', includeCurrentYear = false) {
+  if (!value) return fallback;
+  const text = String(value).trim();
+  const plain = /^(\d{4})-(\d{2})-(\d{2})$/.exec(text);
+  if (plain) return financeFriendlyDateParts(Number(plain[1]), Number(plain[2]) - 1, Number(plain[3]), '', includeCurrentYear);
+  const market = /^([A-Za-z]{3})\s+(\d{1,2}),\s+(\d{4})(?:\s+(.+))?$/.exec(text);
+  if (market) {
+    const monthIndex = new Date(`${market[1]} 1, 2000`).getMonth();
+    return financeFriendlyDateParts(Number(market[3]), monthIndex, Number(market[2]), market[4] || '', includeCurrentYear);
+  }
+  const date = new Date(text);
+  return Number.isNaN(date.getTime()) ? text : financeFriendlyDateParts(date.getFullYear(), date.getMonth(), date.getDate(), '', includeCurrentYear);
+}
+
+// How old the approved price is — the number you confirm, not the clock time.
+function financePriceAge(value) {
+  const at = new Date(String(value || '')).getTime();
+  if (!at || Number.isNaN(at)) return { text: '', stale: false };
+  const seconds = Math.max(0, Math.round((Date.now() - at) / 1000));
+  if (seconds < 45) return { text: 'price just quoted', stale: false };
+  if (seconds < 90) return { text: 'price 1 min old', stale: false };
+  if (seconds < 3600) return { text: `price ${Math.round(seconds / 60)} min old`, stale: seconds > 120 };
+  const hours = Math.round(seconds / 3600);
+  return { text: `price ${hours} hr old`, stale: true };
+}
+
+function refreshFinancePriceAges(root) {
+  (root || document).querySelectorAll('.broker-price-age[data-at]').forEach((node) => {
+    const age = financePriceAge(node.dataset.at);
+    node.textContent = age.text;
+    node.classList.toggle('stale', age.stale);
+  });
+}
+
+function formatFinanceDateTime(value, fallback = '') {
+  if (!value) return fallback;
+  const text = String(value).trim();
+  const market = /^([A-Za-z]{3})\s+(\d{1,2}),\s+(\d{4})(?:\s+(.+))?$/.exec(text);
+  if (market) return formatFinanceDate(text, fallback);
+  const date = new Date(text);
+  if (Number.isNaN(date.getTime())) return text;
+  const time = date.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+  return financeFriendlyDateParts(date.getFullYear(), date.getMonth(), date.getDate(), time);
+}
+
+function formatFinancePeriod(value) {
+  const match = /^(\d{4})-(\d{2})$/.exec(String(value || ''));
+  if (!match) return String(value || '');
+  const month = new Intl.DateTimeFormat(undefined, { month: 'long' }).format(new Date(2000, Number(match[2]) - 1, 1));
+  return Number(match[1]) === new Date().getFullYear() ? month : `${month} ${match[1]}`;
 }
 
 function financePeriodParts(value) {
@@ -849,6 +934,9 @@ function financePeriodParts(value) {
 }
 
 function financeDashboardError(message) {
+  stopBrokerLiveUpdates();
+  disposeFinanceChart();
+  financeDashboardLoaded = false;
   if (!financeDashboardContent) return;
   financeDashboardContent.innerHTML = `
     <div class="finance-empty-state">
@@ -857,20 +945,11 @@ function financeDashboardError(message) {
     </div>`;
 }
 
-function financeAuditPlaceholder(isEmpty = false) {
-  return `<div class="finance-audit-empty-state">
-    <div class="finance-audit-empty-mark" aria-hidden="true">A</div>
-    <div><strong>${isEmpty ? 'No audit entries yet' : 'Audit trail standing by'}</strong><span>${isEmpty ? 'Your next settings change, local entry, or invoice update will appear here.' : 'Review the local timeline whenever you want to see every saved finance change.'}</span></div>
-  </div>`;
-}
-
 const FINANCE_TABS = [
-  { id: 'overview', label: 'Overview' },
-  { id: 'records', label: 'Records' },
-  { id: 'mining', label: 'Mining' },
-  { id: 'trading', label: 'Paper trading' },
+  { id: 'trading', label: 'Trading' },
+  { id: 'business', label: 'Business records' },
 ];
-let financeActiveTab = 'overview';
+let financeActiveTab = 'trading';
 
 // Switch panes in place — re-rendering would drop the user back to Overview
 // after every save.
@@ -886,6 +965,19 @@ function setFinanceTab(id) {
   financeDashboardContent.querySelectorAll('.finance-tabpane').forEach((pane) => {
     pane.classList.toggle('active', pane.dataset.pane === id);
   });
+  if (id === 'trading' && document.getElementById('brokerLivePanel')) {
+    requestAnimationFrame(() => {
+      if (financeChartNeedsVisibleRebuild) {
+        financeChartNeedsVisibleRebuild = false;
+        disposeFinanceChart();
+        const cached = financeLiveCache.get(financeLiveSymbol);
+        const host = document.getElementById('brokerLivePanel');
+        if (cached && host) renderBrokerLiveSnapshot(host, cached, financeLiveCurrency, financeLiveRequest);
+      }
+      resizeFinanceChart();
+      startBrokerLiveUpdates(financeLiveCurrency, financeLiveSymbol);
+    });
+  }
 }
 
 // A staged order behind an inactive tab must still be visible somewhere.
@@ -902,9 +994,95 @@ function setFinancePendingBadge(count) {
   dot.textContent = String(count);
 }
 
-async function renderFinanceDashboard() {
+// Skeletons: keep every static label/frame on screen and shimmer only the data slots.
+function skelBar(cls = 'skel-line', width = '') {
+  return `<i class="skel ${cls}"${width ? ` style="width:${width}"` : ''}></i>`;
+}
+
+function skelCards(cards) {
+  return `<div class="finance-card-grid">${cards.map((label, i) => `
+    <article class="finance-card"><span>${label}</span>${skelBar(`skel-line lg d${i % 4}`, '64%')}${skelBar(`skel-line sm d${(i + 1) % 4}`, '86%')}</article>`).join('')}</div>`;
+}
+
+function skelRows(count = 3) {
+  return `<div class="finance-skeleton-rows">${Array.from({ length: count }, (_, i) => skelBar(`skel-row d${i % 4}`)).join('')}</div>`;
+}
+
+function skelPanelTitle(title, subtitle, chip = '') {
+  return `<div class="finance-panel-title"><div><span>${title}</span><small>${subtitle}</small></div>${chip ? `<span class="broker-mode-chip">${chip}</span>` : ''}</div>`;
+}
+
+function financeDashboardSkeleton() {
+  return `
+    <div class="finance-tabs" role="tablist">
+      ${FINANCE_TABS.map((t) => `<button type="button" class="finance-tab${financeActiveTab === t.id ? ' active' : ''}" data-tab="${t.id}" disabled>${t.label}</button>`).join('')}
+    </div>
+    <div class="finance-tabpane active">
+      <div class="finance-section-intro"><strong>Business records</strong><span>Contract-backed local accounting kept separate from strategy testing.</span></div>
+      ${skelCards(['Income pool', 'Tax reserve', 'Distributable', 'Income target', 'Open invoices'])}
+      <section class="finance-panel">${skelPanelTitle('Recent local records', 'Mock-data testing only')}${skelRows(4)}</section>
+    </div>`;
+}
+
+function brokerPanelSkeleton() {
+  return `
+    ${skelPanelTitle('Paper portfolio', 'Simulated fills only · every proposal requires confirmation')}
+    ${skelCards(['Portfolio equity', 'Realized P&amp;L', 'Measured daily', 'Audit ledger'])}`;
+}
+
+function strategyLabSkeleton(symbol = '') {
+  return `
+    ${skelPanelTitle('Strategy lab', 'Walk-forward paper research · historical data stays separate from live execution', 'RESEARCH')}
+    <div class="strategy-lab-toolbar">
+      <label>Symbol${skelBar('skel-box', '130px')}</label>
+      ${skelBar('skel-box btn d1')}${skelBar('skel-box btn d2', '150px')}
+    </div>
+    ${skelCards(['Selected baseline', 'Test return', 'Maximum drawdown', 'Current signal'])}
+    <div class="broker-mark-note">${symbol ? `Testing ${escapeHtml(symbol)} against unseen market days…` : 'Testing historical prices…'}</div>`;
+}
+
+function marketStreamSkeleton(symbol = '', note = '') {
+  const watchlist = FINANCE_DEFAULT_ASSETS.map((asset, i) => `
+    <div class="broker-watch-asset"><span><strong>${asset.symbol}</strong><small>${asset.name}</small></span>${skelBar(`skel-line d${i % 4}`, '34px')}</div>`).join('');
+  const metrics = ['Paper equity', 'Unrealized P&amp;L', 'Position', 'Market value'].map((label, i) => `
+    <div><span>${label}</span>${skelBar(`skel-line d${i % 4}`, '72%')}</div>`).join('');
+  return `
+    <div class="broker-live-shell broker-live-skeleton">
+      <div class="finance-panel-title broker-live-title">
+        <div><span>Paper research terminal${symbol ? ` · ${escapeHtml(symbol)}` : ''}</span><small>Market feed bridge · display only, never submits orders</small></div>
+        <span class="broker-market-chip"><i></i>CONNECTING</span>
+      </div>
+      <div class="broker-terminal-grid">
+        <aside class="broker-watchlist" aria-label="Default markets">
+          <div class="broker-watchlist-head"><strong>Markets</strong><small>Quick picks</small></div>
+          ${watchlist}
+        </aside>
+        <div class="broker-chart-stage">
+          <div class="broker-live-toolbar">
+            <div><strong class="broker-symbol">${escapeHtml(symbol || '')}</strong>${skelBar('skel-line sm', '110px')}</div>
+            <div class="broker-live-price">${skelBar('skel-line lg', '120px')}${skelBar('skel-line sm d1', '80px')}</div>
+          </div>
+          ${skelBar('skel-chart')}
+          <div class="broker-chart-help"><span>Scroll to zoom · drag to pan · crosshair for price</span></div>
+        </div>
+      </div>
+      <div class="broker-live-metrics">${metrics}</div>
+      <div class="broker-live-foot">${note || 'Opening market stream…'}</div>
+    </div>`;
+}
+
+async function renderFinanceDashboard(force = false) {
+  if (!force && financeDashboardLoaded && financeDashboardContent && document.getElementById('brokerSection')) {
+    setFinanceTab(financeActiveTab);
+    return;
+  }
   if (!financeDashboardContent) return;
-  financeDashboardContent.innerHTML = '<div class="finance-loading">Loading local finance data...</div>';
+  if (financeDashboardLoadPromise) return financeDashboardLoadPromise;
+  let finishFinanceLoad;
+  financeDashboardLoadPromise = new Promise((resolve) => { finishFinanceLoad = resolve; });
+  stopBrokerLiveUpdates();
+  disposeFinanceChart();
+  financeDashboardContent.innerHTML = financeDashboardSkeleton();
   try {
     const base = getAIExeBackendUrl();
     const [overviewResponse, transactionsResponse, invoicesResponse] = await Promise.all([
@@ -943,8 +1121,9 @@ async function renderFinanceDashboard() {
       <div class="finance-tabs" role="tablist">
         ${FINANCE_TABS.map((t) => `<button type="button" role="tab" class="finance-tab${financeActiveTab === t.id ? ' active' : ''}" aria-selected="${financeActiveTab === t.id}" data-tab="${t.id}">${t.label}</button>`).join('')}
       </div>
-      <div class="${pane('overview')}" data-pane="overview">
-      <div class="finance-card-grid">
+      <div class="${pane('business')} finance-business-pane" data-pane="business">
+      <div class="finance-section-intro"><strong>Business records</strong><span>Contract-backed local accounting kept separate from strategy testing.</span></div>
+      <div class="finance-card-grid finance-business-kpis">
         <article class="finance-card"><span>Income pool</span><strong>${formatFinanceMoney(overview.income_cents, currency)}</strong><small>${overview.mock_transaction_count || 0} mock entries</small></article>
         <article class="finance-card"><span>Tax reserve</span><strong>${formatFinanceMoney(overview.tax_reserve_cents, currency)}</strong><small>${Number((overview.settings || {}).tax_reserve_bps || 0) / 100}% held locally</small></article>
         <article class="finance-card"><span>Distributable</span><strong>${formatFinanceMoney(overview.distributable_cents, currency)}</strong><small>After recorded expenses and reserve</small></article>
@@ -964,10 +1143,9 @@ async function renderFinanceDashboard() {
         </section>
       </div>
       <section class="finance-panel finance-report-panel"><div class="finance-panel-title"><div><span>Monthly report</span><small>Local summary and CSV export. Not tax advice.</small></div></div><div class="finance-report-controls"><label>Report month<input id="financeReportMonth" type="month" value="${currentPeriod}"></label><button type="button" class="finance-inline-btn" id="financeReportBtn">Build report</button><button type="button" class="finance-inline-btn" id="financeExportBtn">Export CSV</button></div><div class="finance-report-summary" id="financeReportSummary">Choose a month to build a local summary.</div></section>
-      <section class="finance-panel finance-audit-panel"><div class="finance-panel-title"><div><span>Audit history</span><small>Every local finance change is recorded</small></div><button type="button" class="finance-inline-btn" id="financeAuditBtn">View history</button></div><div class="finance-audit-list" id="financeAuditList">${financeAuditPlaceholder()}</div></section>
+      <section class="finance-panel finance-audit-panel"><div class="finance-panel-title"><div><span>Audit history</span><small>Every local finance change is recorded</small></div><button type="button" class="finance-inline-btn" id="financeAuditBtn">View history</button></div><div class="finance-audit-list hidden" id="financeAuditList"></div></section>
       <div class="finance-split-note">Current split: ${Number(settings.developer_split_bps || 0) / 100}% developer / ${100 - Number(settings.developer_split_bps || 0) / 100}% client. Settings are stored only on this device.</div>
-      </div>
-      <div class="${pane('records')}" data-pane="records">
+      <div class="finance-section-divider"><span>Entries and invoices</span></div>
       <div class="finance-control-grid">
         <section class="finance-panel finance-form-panel">
           <div class="finance-panel-title"><div><span>Record local entry</span><small>No bank or payment connection</small></div></div>
@@ -994,11 +1172,8 @@ async function renderFinanceDashboard() {
       <section class="finance-panel"><div class="finance-panel-title"><div><span>Recent local records</span><small>Mock-data testing only</small></div></div>${transactionRows}</section>
       <section class="finance-panel finance-invoices-panel"><div class="finance-panel-title"><div><span>Local invoice records</span><small>Update status manually after you act outside AI.EXE.</small></div></div>${invoiceRows}</section>
       </div>
-      <div class="${pane('mining')}" data-pane="mining">
-        <section class="finance-panel mining-pilot-panel" id="miningPilotSection"><div class="finance-loading">Loading mining pilot...</div></section>
-      </div>
       <div class="${pane('trading')}" data-pane="trading">
-        <section class="finance-panel broker-panel" id="brokerSection"><div class="finance-loading">Loading paper trading...</div></section>
+        <section class="finance-panel broker-panel" id="brokerSection">${brokerPanelSkeleton()}</section>
       </div>`;
     financeDashboardContent.querySelectorAll('.finance-tab').forEach((btn) => {
       btn.addEventListener('click', () => setFinanceTab(btn.dataset.tab));
@@ -1011,7 +1186,7 @@ async function renderFinanceDashboard() {
         try {
           const response = await fetch(getAIExeBackendUrl() + '/api/finance/mock-income', { method: 'POST' });
           if (!response.ok) throw new Error('Could not load mock data.');
-          await renderFinanceDashboard();
+          await renderFinanceDashboard(true);
         } catch (error) {
           financeDashboardError(error && error.message ? error.message : 'Could not load mock data.');
         }
@@ -1038,7 +1213,7 @@ async function renderFinanceDashboard() {
             }),
           });
           if (!response.ok) throw new Error('Could not save finance settings.');
-          await renderFinanceDashboard();
+          await renderFinanceDashboard(true);
         } catch (error) {
           financeDashboardError(error && error.message ? error.message : 'Could not save finance settings.');
         }
@@ -1059,7 +1234,7 @@ async function renderFinanceDashboard() {
             }),
           });
           if (!response.ok) throw new Error('Could not record this entry.');
-          await renderFinanceDashboard();
+          await renderFinanceDashboard(true);
         } catch (error) {
           financeDashboardError(error && error.message ? error.message : 'Could not record this entry.');
         }
@@ -1088,7 +1263,7 @@ async function renderFinanceDashboard() {
             }),
           });
           if (!response.ok) throw new Error('Could not create the local invoice draft.');
-          await renderFinanceDashboard();
+          await renderFinanceDashboard(true);
         } catch (error) {
           financeDashboardError(error && error.message ? error.message : 'Could not create the local invoice draft.');
         }
@@ -1104,7 +1279,7 @@ async function renderFinanceDashboard() {
             method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: select.value }),
           });
           if (!response.ok) throw new Error('Could not update the invoice status.');
-          await renderFinanceDashboard();
+          await renderFinanceDashboard(true);
         } catch (error) {
           financeDashboardError(error && error.message ? error.message : 'Could not update the invoice status.');
         } finally {
@@ -1125,7 +1300,7 @@ async function renderFinanceDashboard() {
           if (!response.ok) throw new Error('Could not build the local report.');
           const report = await response.json();
           const sources = (report.source_totals || []).slice(0, 4).map((item) => `${escapeHtml(item.source)}: ${formatFinanceMoney(item.amount_cents, report.currency)}`).join(' · ');
-          reportSummary.innerHTML = `<strong>${escapeHtml(report.period)} summary</strong><span>Income ${formatFinanceMoney(report.income_cents, report.currency)} · Expenses ${formatFinanceMoney(report.expense_cents, report.currency)} · Reserve ${formatFinanceMoney(report.tax_reserve_cents, report.currency)} · Distributable ${formatFinanceMoney(report.distributable_cents, report.currency)}</span><small>${sources || 'No local entries for this month.'}</small>`;
+          reportSummary.innerHTML = `<strong>${escapeHtml(formatFinancePeriod(report.period))} summary</strong><span>Income ${formatFinanceMoney(report.income_cents, report.currency)} · Expenses ${formatFinanceMoney(report.expense_cents, report.currency)} · Reserve ${formatFinanceMoney(report.tax_reserve_cents, report.currency)} · Distributable ${formatFinanceMoney(report.distributable_cents, report.currency)}</span><small>${sources || 'No local entries for this month.'}</small>`;
         } catch (error) {
           reportSummary.textContent = error && error.message ? error.message : 'Could not build the local report.';
         } finally {
@@ -1163,26 +1338,58 @@ async function renderFinanceDashboard() {
       auditButton.addEventListener('click', async () => {
         const list = document.getElementById('financeAuditList');
         if (!list) return;
+        if (!list.classList.contains('hidden')) {
+          list.classList.add('hidden');
+          auditButton.textContent = 'View history';
+          return;
+        }
         auditButton.disabled = true;
         auditButton.textContent = 'Loading...';
         try {
           const response = await fetch(getAIExeBackendUrl() + '/api/finance/audit?limit=20');
           if (!response.ok) throw new Error('Could not load audit history.');
           const events = (await response.json()).events || [];
-          list.innerHTML = events.length ? events.map((item) => `<div class="finance-audit-row"><strong>${escapeHtml(item.action || 'change')}</strong><span>${escapeHtml(item.occurred_at || '')} · ${escapeHtml(JSON.stringify(item.detail || {}))}</span></div>`).join('') : financeAuditPlaceholder(true);
+          if (!events.length) {
+            list.innerHTML = '';
+            list.classList.add('hidden');
+            auditButton.textContent = 'No history yet';
+            window.setTimeout(() => { if (auditButton) auditButton.textContent = 'View history'; }, 1500);
+            return;
+          }
+          list.innerHTML = events.map((item) => `<div class="finance-audit-row"><strong>${escapeHtml(item.action || 'change')}</strong><span>${escapeHtml(formatFinanceDateTime(item.occurred_at, ''))} · ${escapeHtml(JSON.stringify(item.detail || {}))}</span></div>`).join('');
+          list.classList.remove('hidden');
+          auditButton.textContent = 'Hide history';
         } catch (error) {
-          list.textContent = error && error.message ? error.message : 'Could not load audit history.';
+          list.innerHTML = '';
+          list.classList.add('hidden');
+          showAppNotification({ title: 'Audit history unavailable', message: error && error.message ? error.message : 'Could not load audit history.', kind: 'error' });
         } finally {
           auditButton.disabled = false;
-          auditButton.textContent = 'View history';
+          if (auditButton.textContent === 'Loading...') auditButton.textContent = 'View history';
         }
       });
     }
-    renderMiningPilot(currency);
-    renderBrokerPanel(currency);
+    financeDashboardLoaded = true;
+    await renderBrokerPanel(currency);
+    if (financeDashboard && !financeDashboard.classList.contains('hidden')) {
+      setFinanceTab(financeActiveTab);
+    }
   } catch (error) {
     financeDashboardError(error && error.message ? error.message : 'The local AI.EXE backend is not running.');
+  } finally {
+    const loaded = financeDashboardLoaded;
+    finishFinanceLoad(loaded);
+    financeDashboardLoadPromise = null;
   }
+}
+
+async function warmFinanceDashboardOnStartup(attempt = 0) {
+  if (financeDashboardLoaded) return;
+  financeChartNeedsVisibleRebuild = true;
+  await renderFinanceDashboard();
+  if (financeDashboardLoaded || attempt >= 5) return;
+  const delay = Math.min(5000, 700 * (2 ** attempt));
+  setTimeout(() => { void warmFinanceDashboardOnStartup(attempt + 1); }, delay);
 }
 
 // Mining Pilot dashboard: records daily payouts/power/fees/downtime and runs a
@@ -1208,7 +1415,7 @@ async function renderMiningPilot(currency = 'USD') {
   const entryRows = entries.length
     ? entries.slice(0, 12).map((e) => `
         <div class="finance-row mining-entry-row">
-          <div><strong>${escapeHtml(e.occurred_date)} · net ${signed(e.payout_cents - e.power_cost_cents - e.provider_fee_cents)}</strong><span>${(e.hashrate_th || 0)} TH/s · ${(e.downtime_hours || 0)}h down · payout ${money(e.payout_cents)} · power ${money(e.power_cost_cents)} · fee ${money(e.provider_fee_cents)}${e.provider ? ' · ' + escapeHtml(e.provider) : ''}</span></div>
+          <div><strong>${escapeHtml(formatFinanceDate(e.occurred_date, 'Date unavailable'))} · net ${signed(e.payout_cents - e.power_cost_cents - e.provider_fee_cents)}</strong><span>${(e.hashrate_th || 0)} TH/s · ${(e.downtime_hours || 0)}h down · payout ${money(e.payout_cents)} · power ${money(e.power_cost_cents)} · fee ${money(e.provider_fee_cents)}${e.provider ? ' · ' + escapeHtml(e.provider) : ''}</span></div>
           <button type="button" class="finance-inline-btn mining-del-btn" data-entry-id="${escapeHtml(e.id)}">Remove</button>
         </div>`).join('')
     : '<div class="finance-empty-state"><strong>No pilot days recorded yet</strong><span>Log your first mining day below. Import real NiceHash payout data as you go.</span></div>';
@@ -1333,7 +1540,463 @@ async function renderMiningPilot(currency = 'USD') {
 
 // Paper trading: simulated fills only. Staged orders sit unfilled until the
 // operator confirms each one — no strategy can trade on its own.
+const FINANCE_DEFAULT_ASSETS = [
+  { symbol: 'BAC', name: 'Bank of America', market: 'NYSE' },
+  { symbol: 'AAPL', name: 'Apple', market: 'NASDAQ' },
+  { symbol: 'MSFT', name: 'Microsoft', market: 'NASDAQ' },
+  { symbol: 'NVDA', name: 'NVIDIA', market: 'NASDAQ' },
+  { symbol: 'SPY', name: 'S&P 500 ETF', market: 'NYSE ARCA' },
+  { symbol: 'BTC-USD', name: 'Bitcoin', market: 'BYBIT' },
+  { symbol: 'ETH-USD', name: 'Ethereum', market: 'BYBIT' },
+  { symbol: 'SOL-USD', name: 'Solana', market: 'BYBIT' },
+];
+
+// v2: the old key held a stale test symbol; reset once to the first quick pick.
+const FINANCE_LIVE_SYMBOL_KEY = 'ai_exe_finance_live_symbol_v2';
+
+function disposeFinanceChart() {
+  if (financeChartObserver) financeChartObserver.disconnect();
+  if (financeChart) financeChart.remove();
+  financeChartObserver = null;
+  financeChartHost = null;
+  financeChartPendingQuote = null;
+  financeChart = null;
+  financeChartSeries = null;
+  financeChartLineSeries = null;
+  financeChartSymbol = '';
+}
+
+function observeFinanceChartHost(host) {
+  if (!host || financeChartHost === host) return;
+  if (financeChartObserver) financeChartObserver.disconnect();
+  financeChartHost = host;
+  financeChartObserver = new ResizeObserver((entries) => {
+    const entry = entries[entries.length - 1];
+    if (!entry || entry.contentRect.width <= 0 || entry.contentRect.height <= 0) return;
+    const width = financeChartVisibleWidth(host);
+    if (financeChart && width > 0) financeChart.resize(width, entry.contentRect.height);
+    if (financeChartPendingQuote) {
+      const pending = financeChartPendingQuote;
+      financeChartPendingQuote = null;
+      updateFinanceChart(pending);
+    }
+  });
+  financeChartObserver.observe(host);
+}
+
+function financeCandles(points, intervalMs) {
+  const buckets = new Map();
+  (Array.isArray(points) ? points : []).forEach((point) => {
+    const ts = Number(point.ts_ms);
+    const value = Number(point.price_mills) / 1000;
+    if (!Number.isFinite(ts) || !Number.isFinite(value)) return;
+    const bucket = Math.floor(ts / intervalMs) * intervalMs;
+    const current = buckets.get(bucket);
+    if (!current) {
+      buckets.set(bucket, { time: Math.floor(bucket / 1000), open: value, high: value, low: value, close: value });
+      return;
+    }
+    current.high = Math.max(current.high, value);
+    current.low = Math.min(current.low, value);
+    current.close = value;
+  });
+  return Array.from(buckets.values()).sort((a, b) => a.time - b.time);
+}
+
+function financeChartVisibleWidth(host) {
+  if (!host) return 0;
+  const rect = host.getBoundingClientRect();
+  const panel = host.closest('.broker-live-panel');
+  if (panel && panel.classList.contains('expanded')) return Math.floor(rect.width);
+  const dashboardRect = financeDashboard ? financeDashboard.getBoundingClientRect() : null;
+  const visibleRight = Math.min(window.innerWidth, dashboardRect ? dashboardRect.right : window.innerWidth);
+  return Math.max(0, Math.floor(Math.min(rect.width, visibleRight - rect.left)));
+}
+
+function resizeFinanceChart() {
+  const host = document.getElementById('brokerInteractiveChart');
+  const width = financeChartVisibleWidth(host);
+  if (financeChart && host && width > 0) financeChart.resize(width, host.clientHeight || 330);
+}
+
+function updateFinanceChart(quote) {
+  const host = document.getElementById('brokerInteractiveChart');
+  const library = window.LightweightCharts;
+  if (!host || !library) {
+    if (host) host.innerHTML = '<div class="broker-live-chart-empty">Interactive chart library unavailable.</div>';
+    return;
+  }
+  observeFinanceChartHost(host);
+  const visibleWidth = financeChartVisibleWidth(host);
+  if (visibleWidth <= 0 || host.clientHeight <= 0) {
+    financeChartPendingQuote = quote;
+    return;
+  }
+  const candles = financeCandles(quote.points, financeChartInterval);
+  host.setAttribute('aria-label', `Interactive candlestick chart, ${candles.length} candle${candles.length === 1 ? '' : 's'}`);
+  const symbol = String(quote.symbol || financeLiveSymbol);
+  try {
+    if (!financeChart || financeChartSymbol !== symbol || !financeChartSeries || !financeChartLineSeries) {
+      disposeFinanceChart();
+      observeFinanceChartHost(host);
+      financeChart = library.createChart(host, {
+        width: visibleWidth,
+        height: host.clientHeight,
+        layout: { background: { type: library.ColorType.Solid, color: '#111817' }, textColor: '#8f9b98', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace' },
+        grid: { vertLines: { color: 'rgba(255,255,255,.035)' }, horzLines: { color: 'rgba(255,255,255,.045)' } },
+        rightPriceScale: { borderColor: 'rgba(255,255,255,.09)' },
+        timeScale: { borderColor: 'rgba(255,255,255,.09)', timeVisible: true, secondsVisible: financeChartInterval < 60000, rightOffset: 4, barSpacing: 9 },
+        crosshair: { mode: library.CrosshairMode.Normal },
+        handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: false },
+        handleScale: { axisPressedMouseMove: true, mouseWheel: true, pinch: true },
+      });
+      financeChartSeries = financeChart.addSeries(library.CandlestickSeries, {
+        upColor: '#31d07c', downColor: '#f06473', wickUpColor: '#31d07c', wickDownColor: '#f06473', borderVisible: false,
+        priceFormat: { type: 'price', precision: Number(quote.price_cents || 0) > 100000 ? 2 : 3, minMove: Number(quote.price_cents || 0) > 100000 ? 0.01 : 0.001 },
+      });
+      financeChartLineSeries = financeChart.addSeries(library.LineSeries, {
+        color: '#54e6b1', lineWidth: 2, crosshairMarkerVisible: true,
+        priceLineVisible: true, lastValueVisible: true,
+        priceFormat: { type: 'price', precision: Number(quote.price_cents || 0) > 100000 ? 2 : 3, minMove: Number(quote.price_cents || 0) > 100000 ? 0.01 : 0.001 },
+      });
+      financeChartSymbol = symbol;
+      if (candles.length) {
+        financeChartSeries.setData(candles);
+        financeChartLineSeries.setData(candles.map((candle) => ({ time: candle.time, value: candle.close })));
+      }
+      financeChart.timeScale().fitContent();
+      requestAnimationFrame(() => {
+        const width = financeChartVisibleWidth(host);
+        if (!financeChart || financeChartHost !== host || !host.isConnected || width <= 0) return;
+        financeChart.resize(width, host.clientHeight);
+        financeChart.timeScale().fitContent();
+      });
+    } else if (candles.length) {
+      financeChart.resize(visibleWidth, host.clientHeight);
+      financeChartSeries.update(candles[candles.length - 1]);
+      const latest = candles[candles.length - 1];
+      financeChartLineSeries.update({ time: latest.time, value: latest.close });
+    }
+  } catch (error) {
+    disposeFinanceChart();
+    host.innerHTML = `<div class="broker-live-chart-empty">Chart renderer: ${escapeHtml(error && error.message ? error.message : 'unknown error')}</div>`;
+  }
+}
+
+function renderFinanceAssetResults(host, assets, currency) {
+  if (!host) return;
+  host.innerHTML = (assets || []).map((asset) => `
+    <button type="button" data-symbol="${escapeHtml(asset.symbol)}">
+      <strong>${escapeHtml(asset.symbol)}</strong><span>${escapeHtml(asset.name || asset.symbol)}</span><small>${escapeHtml(asset.exchange || asset.market || '')}</small>
+    </button>`).join('') || '<div class="broker-asset-empty">No matching US stock or supported crypto.</div>';
+  host.classList.add('open');
+  host.querySelectorAll('button[data-symbol]').forEach((button) => {
+    button.addEventListener('click', () => {
+      host.classList.remove('open');
+      startBrokerLiveUpdates(currency, button.dataset.symbol);
+    });
+  });
+}
+
+function bindFinanceMarketControls(host, currency) {
+  const search = host.querySelector('#brokerAssetSearch');
+  const results = host.querySelector('#brokerAssetResults');
+  const runSearch = async () => {
+    const query = String(search && search.value || '').trim();
+    try {
+      const response = await fetch(`${getAIExeBackendUrl()}/api/prices/search?q=${encodeURIComponent(query)}&limit=10`);
+      const data = response.ok ? await response.json() : { results: [] };
+      renderFinanceAssetResults(results, data.results, currency);
+    } catch (_) {
+      renderFinanceAssetResults(results, FINANCE_DEFAULT_ASSETS, currency);
+    }
+  };
+  if (search) {
+    search.addEventListener('focus', runSearch);
+    search.addEventListener('input', () => {
+      if (financeAssetSearchTimer) clearTimeout(financeAssetSearchTimer);
+      financeAssetSearchTimer = setTimeout(runSearch, 180);
+    });
+    search.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') results.classList.remove('open');
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        const first = results.querySelector('button[data-symbol]');
+        if (first) first.click();
+        else if (search.value.trim()) startBrokerLiveUpdates(currency, search.value.trim());
+      }
+    });
+    search.addEventListener('blur', () => setTimeout(() => results.classList.remove('open'), 160));
+  }
+  host.querySelectorAll('.broker-watch-asset[data-symbol]').forEach((button) => {
+    button.addEventListener('click', () => startBrokerLiveUpdates(currency, button.dataset.symbol));
+  });
+  host.querySelectorAll('.broker-interval-btn').forEach((button) => {
+    button.addEventListener('click', () => {
+      financeChartInterval = Number(button.dataset.interval || 60000);
+      localStorage.setItem('ai_exe_finance_chart_interval', String(financeChartInterval));
+      host.querySelectorAll('.broker-interval-btn').forEach((item) => item.classList.toggle('active', item === button));
+      disposeFinanceChart();
+      const cached = financeLiveCache.get(financeLiveSymbol);
+      if (cached) updateFinanceChart(cached.quote || {});
+    });
+  });
+  const fit = host.querySelector('#brokerChartFitBtn');
+  if (fit) fit.addEventListener('click', () => { if (financeChart) financeChart.timeScale().fitContent(); });
+  const expand = host.querySelector('#brokerChartExpandBtn');
+  if (expand) expand.addEventListener('click', () => {
+    const panel = host.closest('.broker-live-panel');
+    if (!panel) return;
+    panel.classList.toggle('expanded');
+    const expanded = panel.classList.contains('expanded');
+    expand.textContent = expanded ? '×' : 'Expand';
+    expand.setAttribute('aria-label', expanded ? 'Close expanded chart' : 'Expand chart');
+    setTimeout(resizeFinanceChart, 30);
+  });
+}
+
+function stopBrokerLiveUpdates() {
+  if (financeLiveTimer) clearTimeout(financeLiveTimer);
+  financeLiveTimer = null;
+  if (financeLiveSocket) {
+    financeLiveSocket.onclose = null;
+    financeLiveSocket.close();
+    financeLiveSocket = null;
+  }
+  financeLiveRequest += 1;
+}
+
+async function syncBrokerRecordedSummary(currency = 'USD') {
+  const base = getAIExeBackendUrl();
+  try {
+    const [performanceResponse, ledgerResponse] = await Promise.all([
+      fetch(base + '/api/broker/performance'),
+      fetch(base + '/api/broker/ledger/verify'),
+    ]);
+    if (!performanceResponse.ok || !ledgerResponse.ok) return;
+    const performance = await performanceResponse.json();
+    const ledger = await ledgerResponse.json();
+    const daily = document.getElementById('brokerMeasuredDaily');
+    if (daily) {
+      daily.textContent = `${(Number(performance.mean_daily_bps || 0) / 100).toFixed(2)}%`;
+      daily.className = Number(performance.mean_daily_bps || 0) < 0 ? 'expense' : '';
+    }
+    const ledgerState = document.getElementById('brokerLedgerState');
+    if (ledgerState) ledgerState.textContent = ledger.ok ? 'Verified' : 'BROKEN';
+    const ledgerNote = document.getElementById('brokerLedgerNote');
+    if (ledgerNote) ledgerNote.textContent = ledger.ok
+      ? `${ledger.records} record(s), chain intact`
+      : `tampered at #${ledger.broken_at}`;
+  } catch (_) {}
+}
+
+function renderBrokerLiveSnapshot(host, data, currency, request) {
+  const quote = data.quote || {};
+  const portfolio = data.portfolio || {};
+  const position = portfolio.selected_position || null;
+  const money = (cents) => formatFinanceMoney(Number(cents || 0), currency);
+  const signedMoney = (cents) => `${Number(cents || 0) < 0 ? '−' : '+'}${money(Math.abs(Number(cents || 0)))}`;
+  const rising = Number(quote.percentage_change_bps || 0) >= 0;
+  const change = `${rising ? '+' : '−'}${Math.abs(Number(quote.percentage_change_bps || 0) / 100).toFixed(2)}%`;
+  const market = String(quote.market_status || 'Unknown').toUpperCase();
+  const exchangeStream = quote.stream_type === 'exchange_websocket';
+  let shellCreated = false;
+  if (!host.querySelector('#brokerInteractiveChart')) {
+    shellCreated = true;
+    const watchlist = FINANCE_DEFAULT_ASSETS.map((asset) => `
+      <button type="button" class="broker-watch-asset" data-symbol="${asset.symbol}">
+        <span><strong>${asset.symbol}</strong><small>${asset.name}</small></span><i id="brokerWatchPrice-${asset.symbol.replace(/[^A-Z0-9]/g, '')}">—</i>
+      </button>`).join('');
+    host.innerHTML = `
+      <div class="broker-live-shell">
+        <div class="finance-panel-title broker-live-title">
+          <div><span id="brokerLiveTitle">Paper research terminal</span><small id="brokerLiveSubtitle">Live display feed · simulated portfolio</small></div>
+          <span class="broker-market-chip open" id="brokerLiveStatus"><i></i>CONNECTING</span>
+        </div>
+        <div class="broker-terminal-grid">
+          <aside class="broker-watchlist" aria-label="Default markets">
+            <div class="broker-watchlist-head"><strong>Markets</strong><small>Quick picks</small></div>
+            ${watchlist}
+          </aside>
+          <div class="broker-chart-stage">
+            <div class="broker-market-toolbar">
+              <div class="broker-asset-search-wrap">
+                <input id="brokerAssetSearch" autocomplete="off" placeholder="Search company or symbol" aria-label="Search company or symbol">
+                <div class="broker-asset-results" id="brokerAssetResults" role="listbox"></div>
+              </div>
+              <div class="broker-chart-actions">
+                ${[[60000, '1m'], [300000, '5m'], [900000, '15m'], [3600000, '1h']].map(([value, label]) => `<button type="button" class="broker-interval-btn${financeChartInterval === value ? ' active' : ''}" data-interval="${value}">${label}</button>`).join('')}
+                <button type="button" id="brokerChartFitBtn">Fit</button><button type="button" id="brokerChartExpandBtn" aria-label="Expand chart">Expand</button>
+              </div>
+            </div>
+            <div class="broker-live-toolbar">
+              <div><strong class="broker-symbol" id="brokerLiveSymbolLabel">${escapeHtml(quote.symbol || financeLiveSymbol)}</strong><small id="brokerLiveCompany">${escapeHtml(quote.company || '')}</small></div>
+              <div class="broker-live-price"><strong id="brokerLivePrice" role="status">—</strong><span id="brokerLiveChange">—</span></div>
+            </div>
+            <div class="broker-interactive-chart" id="brokerInteractiveChart" aria-label="Interactive candlestick chart"></div>
+            <div class="broker-chart-help"><span>Scroll to zoom · drag to pan · crosshair for price</span><a href="https://www.tradingview.com/" target="_blank" rel="noopener">Charts by TradingView</a></div>
+          </div>
+        </div>
+        <div class="broker-live-metrics">
+          <div><span>Paper equity</span><strong id="brokerLiveEquity">—</strong></div>
+          <div><span>Unrealized P&amp;L</span><strong id="brokerLivePnl">—</strong></div>
+          <div><span id="brokerLivePositionLabel">Position</span><strong id="brokerLivePosition">—</strong></div>
+          <div><span>Market value</span><strong id="brokerLiveValue">—</strong></div>
+        </div>
+        <div class="broker-live-foot" id="brokerLiveFoot"></div>
+      </div>`;
+    bindFinanceMarketControls(host, currency);
+  }
+  if (request !== financeLiveRequest) return;
+  host.classList.remove('broker-live-loading');
+  refreshFinancePriceAges(document);
+  const setText = (selector, value) => { const node = host.querySelector(selector); if (node) node.textContent = value; };
+  setText('#brokerLiveTitle', `Paper research terminal · ${quote.symbol || financeLiveSymbol}`);
+  setText('#brokerLiveSubtitle', `${exchangeStream ? 'Direct exchange stream' : 'Market feed bridge'} · display only, never submits orders`);
+  setText('#brokerLiveSymbolLabel', quote.symbol || financeLiveSymbol);
+  setText('#brokerLiveCompany', quote.company || quote.symbol || '');
+  setText('#brokerLivePrice', money(quote.price_cents));
+  setText('#brokerLiveChange', `${change} · ${signedMoney(quote.net_change_cents)}`);
+  setText('#brokerLiveEquity', money(portfolio.equity_cents));
+  setText('#brokerLivePnl', signedMoney(portfolio.unrealized_pnl_cents));
+  setText('#brokerLivePositionLabel', `${quote.symbol || ''} position`);
+  setText('#brokerLivePosition', position ? `${position.quantity} @ ${money(position.avg_cost_cents)}` : 'No position');
+  setText('#brokerLiveValue', position ? money(position.market_value_cents) : '—');
+  const status = host.querySelector('#brokerLiveStatus');
+  if (status) {
+    status.classList.toggle('open', !quote.stale);
+    status.lastChild.textContent = quote.stale ? ' CACHED' : ' STREAMING';
+  }
+  const changeNode = host.querySelector('#brokerLiveChange');
+  if (changeNode) changeNode.className = rising ? 'gain' : 'expense';
+  const pnlNode = host.querySelector('#brokerLivePnl');
+  if (pnlNode) pnlNode.className = Number(portfolio.unrealized_pnl_cents || 0) < 0 ? 'expense' : 'gain';
+  host.querySelectorAll('.broker-watch-asset').forEach((button) => button.classList.toggle('active', button.dataset.symbol === quote.symbol));
+  const watchPrice = host.querySelector(`#brokerWatchPrice-${String(quote.symbol || '').replace(/[^A-Z0-9]/g, '')}`);
+  if (watchPrice) watchPrice.textContent = money(quote.price_cents);
+  if (shellCreated) {
+    requestAnimationFrame(() => {
+      if (request === financeLiveRequest && host.querySelector('#brokerInteractiveChart')) updateFinanceChart(quote);
+    });
+  } else {
+    updateFinanceChart(quote);
+  }
+  const summaryEquity = document.getElementById('brokerPortfolioEquity');
+  if (summaryEquity) summaryEquity.textContent = money(portfolio.equity_cents);
+  const summaryCash = document.getElementById('brokerPortfolioCash');
+  if (summaryCash) summaryCash.textContent = `${money(portfolio.cash_cents)} cash · live mark`;
+  const summaryRealized = document.getElementById('brokerPortfolioRealized');
+  if (summaryRealized) {
+    summaryRealized.textContent = signedMoney(portfolio.realized_pnl_cents);
+    summaryRealized.className = Number(portfolio.realized_pnl_cents || 0) < 0 ? 'expense' : '';
+  }
+  const startingCash = Number(portfolio.starting_cash_cents || 0);
+  const liveEquity = Number(portfolio.equity_cents || 0);
+  const liveReturnBps = startingCash ? Math.round((liveEquity - startingCash) * 10000 / startingCash) : 0;
+  const summaryReturn = document.getElementById('brokerPortfolioReturn');
+  if (summaryReturn) {
+    summaryReturn.textContent = `${(liveReturnBps / 100).toFixed(2)}%`;
+    summaryReturn.className = liveReturnBps < 0 ? 'expense' : '';
+  }
+  const source = exchangeStream ? 'Bybit spot WebSocket · event-driven' : 'Nasdaq source · pushed through AI.EXE stream bridge';
+  setText('#brokerLiveFoot', `${source} · ${market} · ${formatFinanceDateTime(quote.as_of || quote.fetched_at, 'time unavailable')}. Portfolio equity marks move with this feed; business records and daily test results change only when an event is recorded.`);
+}
+
+// Symbol switch keeps the terminal mounted; only the value slots go quiet.
+function markMarketPanelLoading(host, symbol) {
+  host.classList.add('broker-live-loading');
+  const set = (selector, value) => { const node = host.querySelector(selector); if (node) node.textContent = value; };
+  set('#brokerLiveTitle', `Paper research terminal · ${symbol}`);
+  set('#brokerLiveSymbolLabel', symbol);
+  set('#brokerLiveCompany', 'Loading market data…');
+  ['#brokerLivePrice', '#brokerLiveChange', '#brokerLiveEquity', '#brokerLivePnl',
+    '#brokerLivePosition', '#brokerLiveValue'].forEach((selector) => set(selector, '—'));
+  set('#brokerLivePositionLabel', `${symbol} position`);
+  const status = host.querySelector('#brokerLiveStatus');
+  if (status) {
+    status.classList.remove('open');
+    if (status.lastChild) status.lastChild.textContent = ' CONNECTING';
+  }
+  host.querySelectorAll('.broker-watch-asset').forEach((button) => button.classList.toggle('active', button.dataset.symbol === symbol));
+}
+
+function startBrokerLiveUpdates(currency = 'USD', requestedSymbol = FINANCE_DEFAULT_ASSETS[0].symbol) {
+  const nextSymbol = String(requestedSymbol || FINANCE_DEFAULT_ASSETS[0].symbol).trim().toUpperCase();
+  const host = document.getElementById('brokerLivePanel');
+  if (!host) return;
+  if (financeLiveSocket && financeLiveSocket.readyState <= 1 && financeLiveSymbol === nextSymbol) {
+    const cached = financeLiveCache.get(nextSymbol);
+    if (cached) renderBrokerLiveSnapshot(host, cached, currency, financeLiveRequest);
+    else resizeFinanceChart();
+    return;
+  }
+  stopBrokerLiveUpdates();
+  disposeFinanceChart();
+  const base = getAIExeBackendUrl();
+  const request = financeLiveRequest;
+  financeLiveCurrency = currency;
+  financeLiveSymbol = nextSymbol;
+  localStorage.setItem(FINANCE_LIVE_SYMBOL_KEY, financeLiveSymbol);
+  const websocketBase = base.replace(/^http/i, 'ws');
+  const cached = financeLiveCache.get(financeLiveSymbol);
+  // Switching symbols must not tear the terminal down — an upstream quote takes
+  // seconds, and a full rebuild reads as a flicker every time.
+  if (cached) renderBrokerLiveSnapshot(host, cached, currency, request);
+  else if (host.querySelector('#brokerInteractiveChart')) markMarketPanelLoading(host, financeLiveSymbol);
+  else host.innerHTML = marketStreamSkeleton(financeLiveSymbol);
+  let received = false;
+  let feedError = '';
+  let retryMs = 1500;
+  const connect = () => {
+    if (request !== financeLiveRequest) return;
+    const socket = new WebSocket(`${websocketBase}/api/broker/live-stream?symbol=${encodeURIComponent(financeLiveSymbol)}`);
+    financeLiveSocket = socket;
+    socket.onmessage = (event) => {
+      if (request !== financeLiveRequest) return;
+      let data;
+      try { data = JSON.parse(event.data); } catch (_) { return; }
+      if (data.error) {
+        feedError = String(data.error);
+        host.innerHTML = `<div class="finance-empty-state"><strong>${escapeHtml(financeLiveSymbol)} market stream unavailable</strong><span>${escapeHtml(feedError)}</span><span class="broker-retry-note" id="brokerRetryNote">Retrying…</span></div>`;
+        return;
+      }
+      received = true;
+      feedError = '';
+      retryMs = 1500;
+      financeLiveCache.set(financeLiveSymbol, data);
+      const rebuildVisibleChart = financeChartNeedsVisibleRebuild
+        && financeDashboard && !financeDashboard.classList.contains('hidden');
+      if (rebuildVisibleChart) {
+        financeChartNeedsVisibleRebuild = false;
+        disposeFinanceChart();
+      }
+      renderBrokerLiveSnapshot(host, data, currency, request);
+      if (rebuildVisibleChart) {
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          if (request !== financeLiveRequest || !host.querySelector('#brokerInteractiveChart')) return;
+          disposeFinanceChart();
+          updateFinanceChart(data.quote || {});
+        }));
+      }
+    };
+    socket.onclose = () => {
+      if (request !== financeLiveRequest) return;
+      // A failing symbol used to reconnect every 1.5s forever, redrawing the
+      // panel each time; back off and leave the reason on screen.
+      if (feedError) retryMs = Math.min(retryMs * 2, 30000);
+      else if (!received && !host.querySelector('#brokerInteractiveChart')) {
+        host.innerHTML = marketStreamSkeleton(financeLiveSymbol, 'Reconnecting market stream…');
+      }
+      const note = host.querySelector('#brokerRetryNote');
+      if (note) note.textContent = `Retrying in ${Math.round(retryMs / 1000)}s…`;
+      financeLiveTimer = setTimeout(connect, retryMs);
+    };
+  };
+  connect();
+}
+
 async function renderBrokerPanel(currency = 'USD') {
+  stopBrokerLiveUpdates();
   const host = document.getElementById('brokerSection');
   if (!host) return;
   const base = getAIExeBackendUrl();
@@ -1362,47 +2025,50 @@ async function renderBrokerPanel(currency = 'USD') {
   const pending = orders.filter((o) => o.status === 'pending_confirmation');
   setFinancePendingBadge(pending.length);
 
-  const pendingRows = pending.length
-    ? pending.map((o) => `
+  const pendingRows = pending.map((o) => `
         <div class="finance-row broker-pending-row">
-          <div><strong>${escapeHtml(o.side.toUpperCase())} ${o.quantity} ${escapeHtml(o.symbol)} @ ${money(o.price_cents)}</strong><span>${escapeHtml(o.strategy || 'manual')}${o.memo ? ' · ' + escapeHtml(o.memo) : ''} · ${escapeHtml(o.quote_source || 'manual')} quote · staged ${escapeHtml(o.created_at || '')}</span></div>
+          <div><strong>${escapeHtml(o.side.toUpperCase())} ${o.quantity} ${escapeHtml(o.symbol)} @ ${money(o.price_cents)}</strong><span>${escapeHtml(o.strategy || 'manual')}${o.memo ? ' · ' + escapeHtml(o.memo) : ''} · ${escapeHtml(o.quote_source || 'manual')} quote · staged ${escapeHtml(formatFinanceDateTime(o.created_at, 'time unavailable'))} · <i class="broker-price-age${financePriceAge(o.created_at).stale ? ' stale' : ''}" data-at="${escapeHtml(o.created_at || '')}">${escapeHtml(financePriceAge(o.created_at).text)}</i></span></div>
           <div class="finance-row-actions">
-            <button type="button" class="finance-inline-btn broker-confirm-btn" data-order-id="${escapeHtml(o.id)}" data-token="${escapeHtml(o.confirmation_token)}">Confirm fill</button>
+            <button type="button" class="finance-inline-btn broker-confirm-btn" data-order-id="${escapeHtml(o.id)}" data-token="${escapeHtml(o.confirmation_token)}" data-at="${escapeHtml(o.created_at || '')}">Confirm fill</button>
             <button type="button" class="finance-inline-btn broker-cancel-btn" data-order-id="${escapeHtml(o.id)}">Cancel</button>
           </div>
-        </div>`).join('')
-    : '<div class="finance-empty-state"><strong>Nothing awaiting confirmation</strong><span>Staged orders appear here and stay unfilled until you confirm each one.</span></div>';
+        </div>`).join('');
+  const pendingPanel = pending.length ? `
+    <section class="finance-panel broker-gate-panel finance-actionable-panel">
+      <div class="finance-panel-title"><div><span>Awaiting your confirmation</span><small>Nothing fills unless you approve it here</small></div><span class="finance-action-count">${pending.length}</span></div>
+      ${pendingRows}
+    </section>` : '';
 
-  const positionRows = positions.length
-    ? positions.map((p) => `
+  const positionRows = positions.map((p) => `
         <div class="finance-row">
           <div><strong>${escapeHtml(p.symbol)} · ${p.quantity} unit(s)</strong><span>Avg cost ${money(p.avg_cost_cents)} · realized ${signed(p.realized_pnl_cents)}</span></div>
-        </div>`).join('')
-    : '<div class="finance-empty-state"><strong>No open positions</strong><span>Confirmed fills build positions here.</span></div>';
+        </div>`).join('');
+  const positionsPanel = positions.length ? `
+    <section class="finance-panel"><div class="finance-panel-title"><div><span>Open positions</span></div></div>${positionRows}</section>` : '';
 
   const history = orders.filter((o) => o.status !== 'pending_confirmation').slice(0, 8);
-  const historyRows = history.length
-    ? history.map((o) => `
+  const historyRows = history.map((o) => `
         <div class="finance-row">
           <div><strong>${escapeHtml(o.side.toUpperCase())} ${o.quantity} ${escapeHtml(o.symbol)} · ${escapeHtml(o.status)}</strong><span>${o.status === 'filled' ? `filled ${money(o.fill_price_cents)} vs quote ${money(o.quote_price_cents)} · fee ${money(o.commission_cents)} · by ${escapeHtml(o.confirmed_by || '')}` : escapeHtml(o.resolution_reason || '')}</span></div>
-        </div>`).join('')
-    : '<div class="finance-empty-state"><strong>No order history yet</strong></div>';
+        </div>`).join('');
+  const historyPanel = history.length ? `
+    <section class="finance-panel"><div class="finance-panel-title"><div><span>Order history</span><small>Every fill records slippage and commission</small></div></div>${historyRows}</section>` : '';
+  financeLiveSymbol = String(localStorage.getItem(FINANCE_LIVE_SYMBOL_KEY) || (positions.length ? positions[0].symbol : FINANCE_DEFAULT_ASSETS[0].symbol)).toUpperCase();
 
   host.innerHTML = `
-    <div class="finance-panel-title"><div><span>Paper trading</span><small>Simulated fills only · no broker, no live order, no network</small></div><span class="broker-mode-chip">${escapeHtml(String(account.mode || 'paper').toUpperCase())}</span></div>
-    <div class="finance-card-grid">
-      <article class="finance-card"><span>Equity</span><strong>${money(perf.latest_equity_cents)}</strong><small>Started ${money(perf.starting_equity_cents)} · ${perf.days} marked day(s)</small></article>
-      <article class="finance-card"><span>Cash</span><strong>${money(account.cash_cents)}</strong><small>${account.open_positions} open position(s)</small></article>
-      <article class="finance-card"><span>Realized P&amp;L</span><strong class="${account.realized_pnl_cents < 0 ? 'expense' : ''}">${signed(account.realized_pnl_cents)}</strong><small>Total return ${pct(perf.total_return_bps)}</small></article>
-      <article class="finance-card"><span>Costs paid</span><strong>${money(account.fees_cents)}</strong><small>Slippage ${(Number(account.settings.slippage_bps) / 100).toFixed(2)}% per fill</small></article>
-      <article class="finance-card"><span>Measured daily</span><strong class="${perf.mean_daily_bps < 0 ? 'expense' : ''}">${pct(perf.mean_daily_bps)}</strong><small>Best ${pct(perf.best_daily_bps)} · worst ${pct(perf.worst_daily_bps)}</small></article>
-      <article class="finance-card"><span>Audit ledger</span><strong>${ledger.ok ? 'Verified' : 'BROKEN'}</strong><small>${ledger.ok ? `${ledger.records} record(s), chain intact` : `tampered at #${ledger.broken_at}`}</small></article>
+    <div class="finance-panel-title"><div><span>Paper portfolio</span><small>Simulated fills only · every proposal requires confirmation</small></div><span class="broker-mode-chip">${escapeHtml(String(account.mode || 'paper').toUpperCase())}</span></div>
+    <div class="finance-card-grid broker-portfolio-grid">
+      <article class="finance-card broker-live-summary"><span>Portfolio equity <i>LIVE MARK</i></span><strong id="brokerPortfolioEquity">${money(perf.latest_equity_cents)}</strong><small id="brokerPortfolioCash">${money(account.cash_cents)} cash · ${account.open_positions} open position(s)</small></article>
+      <article class="finance-card"><span>Realized P&amp;L</span><strong id="brokerPortfolioRealized" class="${account.realized_pnl_cents < 0 ? 'expense' : ''}">${signed(account.realized_pnl_cents)}</strong><small>Total return <span id="brokerPortfolioReturn" class="${perf.total_return_bps < 0 ? 'expense' : ''}">${pct(perf.total_return_bps)}</span> · costs ${money(account.fees_cents)}</small></article>
+      <article class="finance-card"><span>Measured daily</span><strong id="brokerMeasuredDaily" class="${perf.mean_daily_bps < 0 ? 'expense' : ''}">${pct(perf.mean_daily_bps)}</strong><small>Updates only when a daily snapshot is recorded</small></article>
+      <article class="finance-card"><span>Audit ledger</span><strong id="brokerLedgerState">${ledger.ok ? 'Verified' : 'BROKEN'}</strong><small id="brokerLedgerNote">${ledger.ok ? `${ledger.records} record(s), chain intact` : `tampered at #${ledger.broken_at}`}</small></article>
     </div>
-    <section class="finance-panel broker-gate-panel">
-      <div class="finance-panel-title"><div><span>Awaiting your confirmation</span><small>Nothing fills unless you approve it here</small></div></div>
-      ${pendingRows}
-    </section>
-    <div class="finance-control-grid">
+    <section class="finance-panel broker-live-panel" id="brokerLivePanel">${marketStreamSkeleton(financeLiveSymbol, 'Connecting to live market data…')}</section>
+    <section class="finance-panel strategy-lab-panel" id="strategyLabSection">${strategyLabSkeleton(financeStrategySymbol)}</section>
+    ${pendingPanel}
+    <details class="broker-advanced-panel">
+      <summary>Advanced paper controls</summary>
+      <div class="finance-control-grid">
       <section class="finance-panel finance-form-panel">
         <div class="finance-panel-title"><div><span>Stage an order</span><small>Staging never moves cash</small></div></div>
         <form class="finance-form" id="brokerOrderForm">
@@ -1431,9 +2097,15 @@ async function renderBrokerPanel(currency = 'USD') {
         </form>
         <div class="broker-mark-note" id="brokerMarkNote">Live prices fill any held symbol you don't override. Snapshots build the daily-return series above.</div>
       </section>
-    </div>
-    <section class="finance-panel"><div class="finance-panel-title"><div><span>Open positions</span></div></div>${positionRows}</section>
-    <section class="finance-panel"><div class="finance-panel-title"><div><span>Order history</span><small>Every fill records slippage and commission</small></div></div>${historyRows}</section>`;
+      </div>
+    </details>
+    ${positionsPanel}
+    ${historyPanel}`;
+
+  void renderStrategyLab(currency, financeStrategySymbol);
+  startBrokerLiveUpdates(currency, financeLiveSymbol);
+  if (financeSummarySyncTimer) clearTimeout(financeSummarySyncTimer);
+  financeSummarySyncTimer = setTimeout(() => syncBrokerRecordedSummary(currency), 4000);
 
   const reload = () => renderBrokerPanel(currency);
   const post = async (url, body) => {
@@ -1449,7 +2121,24 @@ async function renderBrokerPanel(currency = 'USD') {
   };
 
   host.querySelectorAll('.broker-confirm-btn').forEach((btn) => {
+    let armed = false;
     btn.addEventListener('click', async () => {
+      // A price this old is no longer the market — make the second click deliberate.
+      const age = financePriceAge(btn.dataset.at);
+      if (age.stale && !armed) {
+        armed = true;
+        btn.classList.add('armed');
+        btn.textContent = `Fill at this ${age.text.replace('price ', '')}?`;
+        setTimeout(() => {
+          if (!armed) return;
+          armed = false;
+          btn.classList.remove('armed');
+          btn.textContent = 'Confirm fill';
+        }, 8000);
+        return;
+      }
+      armed = false;
+      btn.classList.remove('armed');
       btn.disabled = true;
       btn.textContent = 'Confirming...';
       try {
@@ -1518,14 +2207,15 @@ async function renderBrokerPanel(currency = 'USD') {
       quoteBtn.disabled = true;
       quoteBtn.textContent = 'Fetching...';
       try {
-        const res = await fetch(`${base}/api/prices/quote?symbols=${encodeURIComponent(symbol)}`);
+        // fresh=1: an order price is never allowed to come from the cache.
+        const res = await fetch(`${base}/api/prices/quote?fresh=1&symbols=${encodeURIComponent(symbol)}`);
         const data = await res.json();
         const quote = (data.quotes || {})[symbol];
-        if (!quote) throw new Error((data.errors || {})[symbol] || `No quote for ${symbol}.`);
+        if (!quote) throw new Error((data.errors || {})[symbol] || `No live quote for ${symbol}.`);
         stagedQuote = quote;
         orderForm.querySelector('[name="price"]').value = (quote.price_cents / 100).toFixed(2);
         quoteNote.textContent = `${quote.symbol} ${(quote.price_cents / 100).toFixed(2)} ${quote.currency}`
-          + (quote.stale ? ' — cached, feed unreachable' : ` — fetched ${quote.fetched_at}`);
+          + ` — fetched ${formatFinanceDateTime(quote.fetched_at, 'just now')}`;
       } catch (error) {
         quoteNote.textContent = error.message;
       } finally {
@@ -1569,6 +2259,260 @@ async function renderBrokerPanel(currency = 'USD') {
   }
 }
 
+async function syncPaperTestCloseGuard(active = null) {
+  if (!isDesktopNativeUi()) return;
+  let running = active;
+  if (running === null) {
+    try {
+      const response = await fetch(getAIExeBackendUrl() + '/api/broker/paper-test');
+      if (!response.ok) return;
+      const status = await response.json();
+      running = Boolean(status && status.session && status.session.active);
+    } catch (_) {
+      return;
+    }
+  }
+  void nativeBridge.invoke('paperTestCloseGuard', {
+    content: running ? '1' : '0', timeoutMs: 3000,
+  });
+}
+
+async function renderStrategyLab(currency = 'USD', requestedSymbol = FINANCE_DEFAULT_ASSETS[0].symbol) {
+  const host = document.getElementById('strategyLabSection');
+  if (!host) return;
+  const base = getAIExeBackendUrl();
+  const symbol = String(requestedSymbol || FINANCE_DEFAULT_ASSETS[0].symbol).trim().toUpperCase();
+  financeStrategySymbol = symbol;
+  host.innerHTML = strategyLabSkeleton(symbol);
+  try {
+    const [response, trackingResponse] = await Promise.all([
+      fetch(`${base}/api/broker/strategy-lab?symbol=${encodeURIComponent(symbol)}`),
+      fetch(base + '/api/broker/paper-test'),
+    ]);
+    let report = {};
+    try { report = await response.json(); } catch (_) {}
+    if (!response.ok) throw new Error(report.detail || 'Strategy test failed.');
+    let tracking = { session: { active: false }, report: { days: 0 } };
+    if (trackingResponse.ok) {
+      try { tracking = await trackingResponse.json(); } catch (_) {}
+    }
+    const selected = report.selected || {};
+    const test = selected.test || {};
+    const benchmark = report.benchmark || {};
+    const session = tracking.session || {};
+    const forward = tracking.report || {};
+    void syncPaperTestCloseGuard(Boolean(session.active));
+    const trackingThisSymbol = Boolean(session.active && session.symbol === report.symbol);
+    void syncBrokerRecordedSummary(currency);
+    const pct = (bps) => `${(Number(bps || 0) / 100).toFixed(2)}%`;
+    const money = (cents) => formatFinanceMoney(Number(cents || 0), currency);
+    const rows = (report.candidates || []).map((candidate) => `
+      <div class="strategy-result-row${candidate.name === selected.name ? ' selected' : ''}">
+        <span>${escapeHtml(candidate.name)}</span>
+        <strong>${pct(candidate.test.total_return_bps)}</strong>
+        <small>drawdown ${pct(candidate.test.max_drawdown_bps)} · ${candidate.test.trades} fills · costs ${money(candidate.test.total_costs_cents)}</small>
+      </div>`).join('');
+    const backgroundLocation = document.documentElement.classList.contains('platform-windows')
+      ? 'system tray'
+      : 'menu bar';
+    const backgroundPanel = isDesktopNativeUi() ? `
+      <div class="paper-background-service">
+        <label class="settings-toggle-row" for="paperBackgroundToggle">
+          <span class="settings-toggle-copy">
+            <strong>Keep paper testing active in the background</strong>
+            <span>Shows AI.EXE in your ${backgroundLocation} and keeps daily checks running after this window closes.</span>
+          </span>
+          <input type="checkbox" id="paperBackgroundToggle" aria-label="Keep paper testing active in the background">
+        </label>
+        <ul class="paper-background-notes">
+          <li>Paper simulation only. It cannot place or confirm live orders.</li>
+          <li>Uses a small amount of memory, network data, and battery during scheduled checks.</li>
+          <li>Turning it off stops background checks; reopening AI.EXE will catch up missed market days.</li>
+        </ul>
+        <div class="paper-background-status" id="paperBackgroundStatus">Checking background service…</div>
+      </div>` : '';
+    const forwardPanel = session.active ? `
+      <section class="strategy-forward-panel${trackingThisSymbol ? ' active' : ''}">
+        <div class="finance-panel-title"><div><span>Daily forward test · ${escapeHtml(session.symbol || '')}</span><small>${forward.days || 0} market day(s) recorded · next check ${escapeHtml(formatFinanceDateTime(tracking.next_run_at, 'not scheduled'))}</small></div><span class="broker-mode-chip">${trackingThisSymbol ? 'RUNNING' : 'OTHER SYMBOL'}</span></div>
+        <div class="strategy-forward-grid">
+          <div><span>Forward return</span><strong>${pct(forward.forward_return_bps)}</strong></div>
+          <div><span>Benchmark</span><strong>${pct(forward.benchmark_return_bps)}</strong></div>
+          <div><span>Difference</span><strong>${pct(forward.alpha_bps)}</strong></div>
+          <div><span>Drawdown</span><strong>${pct(forward.max_drawdown_bps)}</strong></div>
+          <div><span>Latest signal</span><strong>${escapeHtml(String(session.latest_signal || 'waiting').toUpperCase())}</strong></div>
+          <div><span>Action</span><strong>${escapeHtml(String(session.pending_action || 'hold').toUpperCase())}</strong></div>
+          <div><span>Modeled costs</span><strong>${money(forward.strategy_costs_cents)}</strong></div>
+          <div><span>Post-start fills</span><strong>${Number((forward.trading_activity || {}).filled_orders || 0)}</strong></div>
+        </div>
+        <div class="broker-mark-note">Signals: ${Number((forward.signal_counts || {}).long || 0)} long · ${Number((forward.signal_counts || {}).cash || 0)} cash. Buy-and-hold uses the same starting exposure, so its entry cost is $0.00 in this forward comparison.</div>
+        <div class="strategy-runner-actions">
+          ${trackingThisSymbol ? '' : '<button type="button" class="finance-inline-btn" id="strategyViewActiveBtn">View active test</button>'}
+          <button type="button" class="finance-inline-btn" id="strategyReportBtn">Export test data</button>
+          <button type="button" class="finance-inline-btn" id="strategyStopBtn">Stop test</button>
+        </div>
+        ${backgroundPanel}
+        ${session.last_error ? `<div class="broker-mark-note expense">Last check: ${escapeHtml(session.last_error)}</div>` : ''}
+      </section>` : `
+      <section class="strategy-forward-panel">
+        <div class="finance-panel-title"><div><span>Daily forward test</span><small>Build Alex's 2–3 week case-study record automatically</small></div></div>
+        <button type="button" class="finance-inline-btn strategy-stage-btn" id="strategyStartBtn">Start daily test for ${escapeHtml(report.symbol || symbol)}</button>
+        ${backgroundPanel}
+      </section>`;
+    host.innerHTML = `
+      <div class="finance-panel-title">
+        <div><span>Strategy lab</span><small>Walk-forward paper research · historical data stays separate from live execution</small></div>
+        <span class="broker-mode-chip">RESEARCH</span>
+      </div>
+      <div class="strategy-lab-toolbar">
+        <label>Symbol<input id="strategyLabSymbol" maxlength="24" value="${escapeHtml(report.symbol || symbol)}"></label>
+        <button type="button" class="finance-inline-btn" id="strategyLabRunBtn">Run test</button>
+        <button type="button" class="finance-inline-btn strategy-stage-btn" id="strategyLabStageBtn">Stage paper proposal</button>
+      </div>
+      <div class="finance-card-grid strategy-card-grid">
+        <article class="finance-card"><span>Selected baseline</span><strong>${escapeHtml(selected.name || 'n/a')}</strong><small>${report.test_observations || 0} unseen trading day(s)</small></article>
+        <article class="finance-card"><span>Test return</span><strong class="${Number(test.total_return_bps || 0) < 0 ? 'expense' : ''}">${pct(test.total_return_bps)}</strong><small>${test.trades || 0} fills · modeled costs ${money(test.total_costs_cents)}</small></article>
+        <article class="finance-card"><span>Maximum drawdown</span><strong class="${Number(test.max_drawdown_bps || 0) > 0 ? 'expense' : ''}">${pct(test.max_drawdown_bps)}</strong><small>Worst peak-to-trough test loss</small></article>
+        <article class="finance-card"><span>Current signal</span><strong>${escapeHtml(String(report.recommendation || 'cash').toUpperCase())}</strong><small>Benchmark ${pct(benchmark.total_return_bps)} · difference ${pct(Number(test.total_return_bps || 0) - Number(benchmark.total_return_bps || 0))}</small></article>
+      </div>
+      <details class="strategy-research-details"><summary>Research details · ${(report.candidates || []).length} candidate strategies</summary><div class="strategy-result-list">${rows}</div></details>
+      <div class="broker-mark-note" id="strategyLabNote">${escapeHtml(formatFinanceDate(report.from_date, '', true))} – ${escapeHtml(formatFinanceDate(report.to_date, '', true))} · ${report.observations} Nasdaq closes · ${escapeHtml(report.disclaimer || '')}</div>
+      ${forwardPanel}`;
+
+    const input = document.getElementById('strategyLabSymbol');
+    const runButton = document.getElementById('strategyLabRunBtn');
+    const stageButton = document.getElementById('strategyLabStageBtn');
+    const note = document.getElementById('strategyLabNote');
+    const runnerPost = async (path, body) => {
+      const runnerResponse = await fetch(base + path, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: body ? JSON.stringify(body) : undefined,
+      });
+      const runnerResult = await runnerResponse.json();
+      if (!runnerResponse.ok) throw new Error(runnerResult.detail || 'Daily test request failed.');
+      return runnerResult;
+    };
+    const backgroundToggle = document.getElementById('paperBackgroundToggle');
+    const backgroundStatus = document.getElementById('paperBackgroundStatus');
+    if (backgroundToggle && backgroundStatus) {
+      const setBackgroundStatus = (enabled, message = '', isError = false) => {
+        backgroundStatus.classList.toggle('enabled', enabled && !isError);
+        backgroundStatus.classList.toggle('error', isError);
+        backgroundStatus.textContent = message || (enabled
+          ? `On · closing the window keeps AI.EXE in the ${backgroundLocation}.`
+          : 'Off · checks run only while AI.EXE is open, then catch up next time.');
+      };
+      backgroundToggle.disabled = true;
+      nativeBridge.invoke('paperBackgroundService', { content: '', timeoutMs: 10000 })
+        .then((state) => {
+          if (!state || !state.ok) throw new Error((state && state.message) || 'Background service unavailable.');
+          const enabled = String(state.output || '') === '1';
+          backgroundToggle.checked = enabled;
+          backgroundToggle.disabled = false;
+          setBackgroundStatus(enabled);
+        })
+        .catch((error) => {
+          backgroundToggle.disabled = true;
+          setBackgroundStatus(false, error.message || 'Background service unavailable.', true);
+        });
+      backgroundToggle.addEventListener('change', async () => {
+        const enabled = backgroundToggle.checked;
+        backgroundToggle.disabled = true;
+        setBackgroundStatus(enabled, enabled ? 'Starting background service…' : 'Stopping background service…');
+        financeChartNeedsVisibleRebuild = true;
+        financeLiveCache.delete(financeLiveSymbol);
+        stopBrokerLiveUpdates();
+        const result = await nativeBridge.invoke('paperBackgroundService', {
+          content: enabled ? '1' : '0', timeoutMs: 30000,
+        });
+        if (!result || !result.ok) {
+          backgroundToggle.checked = !enabled;
+          setBackgroundStatus(!enabled, (result && result.message) || 'Could not change the background service.', true);
+        } else {
+          setBackgroundStatus(enabled);
+        }
+        setTimeout(() => {
+          if (document.getElementById('brokerLivePanel')) {
+            startBrokerLiveUpdates(financeLiveCurrency, financeLiveSymbol);
+          }
+        }, 150);
+        backgroundToggle.disabled = false;
+      });
+    }
+    if (runButton && input) runButton.addEventListener('click', () => renderStrategyLab(currency, input.value));
+    if (input) input.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') { event.preventDefault(); renderStrategyLab(currency, input.value); }
+    });
+    if (stageButton && input) stageButton.addEventListener('click', async () => {
+      stageButton.disabled = true;
+      stageButton.textContent = 'Checking signal...';
+      try {
+        const staged = await fetch(base + '/api/broker/strategy-lab/stage', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ symbol: String(input.value || symbol).trim().toUpperCase() }),
+        });
+        const result = await staged.json();
+        if (!staged.ok) throw new Error(result.detail || 'Could not stage proposal.');
+        if (result.status === 'staged') {
+          await renderBrokerPanel(currency);
+        } else {
+          note.textContent = result.reason || 'No paper order is needed for the current signal.';
+          stageButton.disabled = false;
+          stageButton.textContent = 'Stage paper proposal';
+        }
+      } catch (error) {
+        note.textContent = error.message;
+        stageButton.disabled = false;
+        stageButton.textContent = 'Stage paper proposal';
+      }
+    });
+    const startButton = document.getElementById('strategyStartBtn');
+    if (startButton) startButton.addEventListener('click', async () => {
+      startButton.disabled = true;
+      startButton.textContent = 'Starting...';
+      try {
+        await runnerPost('/api/broker/paper-test/start', { symbol: report.symbol || symbol });
+        await renderBrokerPanel(currency);
+      } catch (error) {
+        note.textContent = error.message;
+        startButton.disabled = false;
+        startButton.textContent = `Start daily test for ${report.symbol || symbol}`;
+      }
+    });
+    const dailyRunButton = document.getElementById('strategyDailyRunBtn');
+    if (dailyRunButton) dailyRunButton.addEventListener('click', async () => {
+      dailyRunButton.disabled = true;
+      dailyRunButton.textContent = 'Checking...';
+      try { await runnerPost('/api/broker/paper-test/run'); await renderBrokerPanel(currency); }
+      catch (error) { note.textContent = error.message; dailyRunButton.disabled = false; dailyRunButton.textContent = 'Run daily check'; }
+    });
+    const viewActiveButton = document.getElementById('strategyViewActiveBtn');
+    if (viewActiveButton) viewActiveButton.addEventListener('click', () => renderStrategyLab(currency, session.symbol));
+    const stopButton = document.getElementById('strategyStopBtn');
+    if (stopButton) stopButton.addEventListener('click', async () => {
+      stopButton.disabled = true;
+      try { await runnerPost('/api/broker/paper-test/stop'); await renderBrokerPanel(currency); }
+      catch (error) { note.textContent = error.message; stopButton.disabled = false; }
+    });
+    const reportButton = document.getElementById('strategyReportBtn');
+    if (reportButton) reportButton.addEventListener('click', async () => {
+      try {
+        const reportResponse = await fetch(base + '/api/broker/paper-test/report');
+        const data = await reportResponse.json();
+        if (!reportResponse.ok) throw new Error(data.detail || 'Report unavailable.');
+        const anchor = document.createElement('a');
+        anchor.href = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }));
+        anchor.download = `ai-exe-paper-test-${String(session.symbol || 'report').toLowerCase()}.json`;
+        anchor.click();
+        URL.revokeObjectURL(anchor.href);
+      } catch (error) { note.textContent = error.message; }
+    });
+  } catch (error) {
+    host.innerHTML = `<div class="finance-empty-state"><strong>Strategy lab unavailable</strong><span>${escapeHtml(error.message || 'Historical data could not be loaded.')}</span><button type="button" id="strategyLabRetryBtn">Retry</button></div>`;
+    const retry = document.getElementById('strategyLabRetryBtn');
+    if (retry) retry.addEventListener('click', () => renderStrategyLab(currency, symbol));
+  }
+}
+
 function openWorkView() {
   if (activeTabId !== 'chat') {
     renderMiddleView();
@@ -1609,8 +2553,28 @@ const artifactListView = document.getElementById('artifactListView');
 const artifactDetailView = document.getElementById('artifactDetailView');
 const financeDashboard = document.getElementById('financeDashboard');
 const financeDashboardContent = document.getElementById('financeDashboardContent');
+let financeStrategySymbol = 'BAC';
+let financeLiveSymbol = 'BAC';
+let financeLiveCurrency = 'USD';
+let financeLiveTimer = null;
+let financeLiveSocket = null;
+let financeLiveRequest = 0;
+let financeSummarySyncTimer = null;
+let financeDashboardLoaded = false;
+let financeDashboardLoadPromise = null;
+let financeChart = null;
+let financeChartSeries = null;
+let financeChartLineSeries = null;
+let financeChartSymbol = '';
+let financeChartObserver = null;
+let financeChartHost = null;
+let financeChartPendingQuote = null;
+let financeChartNeedsVisibleRebuild = false;
+let financeChartInterval = Number(localStorage.getItem('ai_exe_finance_chart_interval') || 60000);
+let financeLiveCache = new Map();
+let financeAssetSearchTimer = null;
 const financeRefreshBtn = document.getElementById('financeRefreshBtn');
-if (financeRefreshBtn) financeRefreshBtn.addEventListener('click', () => { void renderFinanceDashboard(); });
+if (financeRefreshBtn) financeRefreshBtn.addEventListener('click', () => { void renderFinanceDashboard(true); });
 const artifactDetailMeta = document.getElementById('artifactDetailMeta');
 const artifactEditor = document.getElementById('artifactEditor');
 const artifactOpenChatBtn = document.getElementById('artifactOpenChatBtn');
@@ -15781,6 +16745,7 @@ function renderArtifactBrowser() {
 }
 
 function renderMiddleView() {
+  syncExplorerForMiddleView();
   if (chatShell && typeof chatShell.renderMiddleView === 'function') {
     const result = chatShell.renderMiddleView();
     syncFloatingViewToggle();
@@ -22391,6 +23356,9 @@ async function bootstrapAiExeUi() {
   updateLoginUi();
   loadAppSettings();
   startBackendProviderSync();  // push the saved provider/key to the backend on startup + retry
+  setTimeout(() => { void warmFinanceDashboardOnStartup(); }, 350);
+  setTimeout(() => { void syncPaperTestCloseGuard(); }, 2500);
+  setTimeout(() => { void syncPaperTestCloseGuard(); }, 12000);
   moveGlobalControlsIntoSidebar();
   setupComposerKeyboardDiagnostics();
   setupComposerEnterCaptureSubmitGuard();

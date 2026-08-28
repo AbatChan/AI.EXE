@@ -23,7 +23,7 @@ from fastapi.responses import JSONResponse
 from .config import settings
 from .routers import (adapter, broker, chats, finance, generate, health, modules, package, pdf, projects,
                       run, status, usage, workshop)
-from .services import adapter_manager
+from .services import adapter_manager, paper_test_runner
 
 
 def _stop_children() -> None:
@@ -153,12 +153,14 @@ app.include_router(workshop.router)
 @app.on_event("startup")
 def _on_startup() -> None:
     _watch_parent_and_exit()
+    paper_test_runner.start_scheduler()
 
 
 @app.on_event("shutdown")
 def _on_shutdown() -> None:
     # Graceful stop (app quit -> SIGTERM -> uvicorn shutdown): retire the adapter now.
     _stop_children()
+    paper_test_runner.stop_scheduler()
 
 
 @app.get("/")

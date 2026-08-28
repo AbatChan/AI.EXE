@@ -12,7 +12,10 @@ def configure_frozen_runtime() -> None:
         return
     base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
     os.environ.setdefault("AIEXE_BACKEND_DATA_DIR", os.path.join(base, "AI_EXE", "backend"))
-    os.environ.setdefault("AIEXE_PARENT_WATCH", "1")
+    if "--background" in sys.argv[1:]:
+        os.environ.pop("AIEXE_PARENT_WATCH", None)
+    else:
+        os.environ.setdefault("AIEXE_PARENT_WATCH", "1")
     os.makedirs(os.environ["AIEXE_BACKEND_DATA_DIR"], exist_ok=True)
 
 

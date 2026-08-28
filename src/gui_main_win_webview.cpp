@@ -9,6 +9,8 @@
 // windows.h must come first — the shell/common-dialog headers below depend on
 // its base types (CALLBACK, HWND, …); including them first breaks prsht.h.
 #include <windows.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #include <commctrl.h>
 #include <commdlg.h>
 #include <dwmapi.h>
@@ -61,9 +63,18 @@ namespace {
 
 constexpr wchar_t kWindowClassName[] = L"AI_EXE_WEBVIEW_WINDOW";
 constexpr wchar_t kSingleInstanceMutex[] = L"Local\\AI_EXE_GUI_SINGLE_INSTANCE";
+constexpr wchar_t kPaperBackgroundRunKey[] =
+    L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+constexpr wchar_t kPaperBackgroundRunValue[] = L"AI.EXE Paper Background";
 
 constexpr UINT kMsgShowError = WM_APP + 1;
 constexpr UINT kMsgPostWebResponse = WM_APP + 2;
+constexpr UINT kMsgPaperTrayIcon = WM_APP + 3;
+constexpr UINT kMsgRefreshPaperTray = WM_APP + 4;
+constexpr UINT kPaperTrayOpenCommand = 0xA101;
+constexpr UINT kPaperTrayStopCommand = 0xA102;
+constexpr int kPaperTrayLightIcon = 2;
+constexpr int kPaperTrayDarkIcon = 3;
 constexpr LONG kMinWindowWidth = static_cast<LONG>(kUiMinWindowWidth);
 constexpr LONG kMinWindowHeight = static_cast<LONG>(kUiMinWindowHeight);
 
@@ -89,6 +100,25 @@ bool SetPreventIdleSleepOnWindows(bool prevent, const std::string &why,
 }
 
 bool IsPreventingIdleSleepOnWindows() { return g_prevent_idle_sleep; }
+
+bool WindowsUsesLightSystemTheme() {
+  DWORD value = 0;
+  DWORD bytes = sizeof(value);
+  const LONG result = RegGetValueW(
+      HKEY_CURRENT_USER,
+      L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+      L"SystemUsesLightTheme", RRF_RT_REG_DWORD, nullptr, &value, &bytes);
+  return result == ERROR_SUCCESS && value != 0;
+}
+
+HICON LoadPaperTrayIcon() {
+  const int resource = WindowsUsesLightSystemTheme()
+                           ? kPaperTrayLightIcon
+                           : kPaperTrayDarkIcon;
+  return static_cast<HICON>(LoadImageW(
+      GetModuleHandleW(nullptr), MAKEINTRESOURCEW(resource), IMAGE_ICON, 0, 0,
+      LR_DEFAULTSIZE | LR_SHARED));
+}
 
 // --- High-DPI support (resolved at runtime; no manifest / SDK-version dependency) ---
 // Without process DPI awareness Windows bitmap-stretches the whole window on a
@@ -567,6 +597,224 @@ void RetireStaleBundledBackend(const std::filesystem::path &backend) {
   // Give an old adapter's parent-watch a moment to retire its Chrome tree and
   // release port 8765 before the replacement backend binds it.
   if (retired) Sleep(650);
+}
+
+std::wstring PaperBackgroundCommand(
+    const std::filesystem::path &runtime_root) {
+  const auto backend = runtime_root / "backend" / "AI.EXE Backend.exe";
+  return L"\"" + backend.wstring() + L"\" --background";
+}
+
+bool ReadPaperBackgroundCommand(std::wstring *command) {
+  if (command) command->clear();
+  HKEY key = nullptr;
+  if (RegOpenKeyExW(HKEY_CURRENT_USER, kPaperBackgroundRunKey, 0,
+                    KEY_QUERY_VALUE, &key) != ERROR_SUCCESS) {
+    return false;
+  }
+  DWORD type = 0;
+  DWORD bytes = 0;
+  LONG rc = RegQueryValueExW(key, kPaperBackgroundRunValue, nullptr, &type,
+                             nullptr, &bytes);
+  if (rc != ERROR_SUCCESS || (type != REG_SZ && type != REG_EXPAND_SZ) ||
+      bytes < sizeof(wchar_t)) {
+    RegCloseKey(key);
+    return false;
+  }
+  std::vector<wchar_t> value(bytes / sizeof(wchar_t) + 1, L'\0');
+  rc = RegQueryValueExW(key, kPaperBackgroundRunValue, nullptr, &type,
+                        reinterpret_cast<BYTE *>(value.data()), &bytes);
+  RegCloseKey(key);
+  if (rc != ERROR_SUCCESS) return false;
+  if (command) *command = value.data();
+  return true;
+}
+
+bool IsPaperBackgroundServiceEnabledWindows(
+    const std::filesystem::path &runtime_root) {
+  std::wstring saved;
+  return ReadPaperBackgroundCommand(&saved) &&
+         _wcsicmp(saved.c_str(), PaperBackgroundCommand(runtime_root).c_str()) ==
+             0;
+}
+
+bool ConfigurePaperBackgroundServiceWindows(
+    const std::filesystem::path &runtime_root, bool enabled,
+    std::string *err) {
+  HKEY key = nullptr;
+  if (!enabled) {
+    const LONG open = RegOpenKeyExW(HKEY_CURRENT_USER, kPaperBackgroundRunKey,
+                                    0, KEY_SET_VALUE, &key);
+    if (open == ERROR_FILE_NOT_FOUND) return true;
+    if (open != ERROR_SUCCESS) {
+      if (err) *err = "Windows could not open the startup setting.";
+      return false;
+    }
+    const LONG removed = RegDeleteValueW(key, kPaperBackgroundRunValue);
+    RegCloseKey(key);
+    if (removed != ERROR_SUCCESS && removed != ERROR_FILE_NOT_FOUND) {
+      if (err) *err = "Windows could not remove the startup setting.";
+      return false;
+    }
+    return true;
+  }
+
+  const auto backend = runtime_root / "backend" / "AI.EXE Backend.exe";
+  if (!FileExists(backend)) {
+    if (err) *err = "The bundled Windows backend is unavailable.";
+    return false;
+  }
+  const std::wstring command = PaperBackgroundCommand(runtime_root);
+  if (command.size() >= 260) {
+    if (err) *err = "The AI.EXE folder path is too long for Windows startup.";
+    return false;
+  }
+  DWORD disposition = 0;
+  const LONG created = RegCreateKeyExW(
+      HKEY_CURRENT_USER, kPaperBackgroundRunKey, 0, nullptr, 0, KEY_SET_VALUE,
+      nullptr, &key, &disposition);
+  if (created != ERROR_SUCCESS) {
+    if (err) *err = "Windows could not create the startup setting.";
+    return false;
+  }
+  const DWORD bytes =
+      static_cast<DWORD>((command.size() + 1) * sizeof(wchar_t));
+  const LONG written = RegSetValueExW(
+      key, kPaperBackgroundRunValue, 0, REG_SZ,
+      reinterpret_cast<const BYTE *>(command.c_str()), bytes);
+  RegCloseKey(key);
+  if (written != ERROR_SUCCESS) {
+    if (err) *err = "Windows could not save the startup setting.";
+    return false;
+  }
+  return true;
+}
+
+void RemoveStalePaperBackgroundServiceWindows(
+    const std::filesystem::path &runtime_root) {
+  std::wstring saved;
+  if (!ReadPaperBackgroundCommand(&saved) ||
+      _wcsicmp(saved.c_str(), PaperBackgroundCommand(runtime_root).c_str()) ==
+          0) {
+    return;
+  }
+  ConfigurePaperBackgroundServiceWindows(runtime_root, false, nullptr);
+  std::wstring old_path;
+  if (!saved.empty() && saved.front() == L'"') {
+    const std::size_t end = saved.find(L'"', 1);
+    if (end != std::wstring::npos) old_path = saved.substr(1, end - 1);
+  }
+  const std::filesystem::path old_backend(old_path);
+  if (!old_path.empty() &&
+      _wcsicmp(old_backend.filename().wstring().c_str(),
+               L"AI.EXE Backend.exe") == 0) {
+    RetireStaleBundledBackend(old_backend);
+  }
+}
+
+bool IsLocalBackendReachableWindows() {
+  WSADATA data{};
+  if (WSAStartup(MAKEWORD(2, 2), &data) != 0) return false;
+  SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+  if (sock == INVALID_SOCKET) {
+    WSACleanup();
+    return false;
+  }
+  u_long nonblocking = 1;
+  ioctlsocket(sock, FIONBIO, &nonblocking);
+  sockaddr_in address{};
+  address.sin_family = AF_INET;
+  address.sin_port = htons(8765);
+  InetPtonW(AF_INET, L"127.0.0.1", &address.sin_addr);
+  int connected = connect(sock, reinterpret_cast<sockaddr *>(&address),
+                          sizeof(address));
+  if (connected == SOCKET_ERROR && WSAGetLastError() == WSAEWOULDBLOCK) {
+    fd_set writable;
+    FD_ZERO(&writable);
+    FD_SET(sock, &writable);
+    timeval timeout{0, 250000};
+    connected = select(0, nullptr, &writable, nullptr, &timeout) > 0
+                    ? 0
+                    : SOCKET_ERROR;
+    if (connected == 0) {
+      int socket_error = 0;
+      int error_size = sizeof(socket_error);
+      if (getsockopt(sock, SOL_SOCKET, SO_ERROR,
+                     reinterpret_cast<char *>(&socket_error), &error_size) !=
+              0 ||
+          socket_error != 0) {
+        connected = SOCKET_ERROR;
+      }
+    }
+  }
+  bool healthy = false;
+  if (connected == 0) {
+    nonblocking = 0;
+    ioctlsocket(sock, FIONBIO, &nonblocking);
+    DWORD timeout_ms = 350;
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO,
+               reinterpret_cast<const char *>(&timeout_ms),
+               sizeof(timeout_ms));
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO,
+               reinterpret_cast<const char *>(&timeout_ms),
+               sizeof(timeout_ms));
+    constexpr char request[] =
+        "GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
+    if (send(sock, request, static_cast<int>(sizeof(request) - 1), 0) > 0) {
+      std::string response;
+      char chunk[1024] = {};
+      while (response.size() < 4096) {
+        const int received = recv(sock, chunk, sizeof(chunk), 0);
+        if (received <= 0) break;
+        response.append(chunk, received);
+        if (response.find("ai-exe-backend") != std::string::npos) break;
+      }
+      healthy = response.find(" 200 ") != std::string::npos &&
+                response.find("ai-exe-backend") != std::string::npos;
+    }
+  }
+  closesocket(sock);
+  WSACleanup();
+  return healthy;
+}
+
+bool WaitForLocalBackendWindows(bool reachable, DWORD timeout_ms) {
+  const DWORD start = GetTickCount();
+  do {
+    if (IsLocalBackendReachableWindows() == reachable) return true;
+    Sleep(100);
+  } while (GetTickCount() - start < timeout_ms);
+  return false;
+}
+
+bool StartBackgroundBundledBackend(
+    const std::filesystem::path &runtime_root, std::string *err) {
+  const auto backend = runtime_root / "backend" / "AI.EXE Backend.exe";
+  if (!FileExists(backend)) {
+    if (err) *err = "The bundled Windows backend is unavailable.";
+    return false;
+  }
+  RetireStaleBundledBackend(backend);
+  std::wstring command = PaperBackgroundCommand(runtime_root);
+  STARTUPINFOW startup{};
+  startup.cb = sizeof(startup);
+  PROCESS_INFORMATION process{};
+  const DWORD flags =
+      CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB;
+  if (!CreateProcessW(backend.wstring().c_str(), command.data(), nullptr,
+                      nullptr, FALSE, flags, nullptr,
+                      backend.parent_path().wstring().c_str(), &startup,
+                      &process)) {
+    if (err) {
+      *err = GetLastError() == ERROR_ACCESS_DENIED
+                 ? "Windows is preventing AI.EXE from leaving its app process."
+                 : "Windows could not start background paper testing.";
+    }
+    return false;
+  }
+  CloseHandle(process.hThread);
+  CloseHandle(process.hProcess);
+  return true;
 }
 
 HANDLE StartBundledBackend(const std::filesystem::path &runtime_root,
@@ -2101,8 +2349,24 @@ public:
     std::string runtime_err;
     const auto runtime_root = ResolveRuntimeRoot(ui_html_);
     runtime_root_ = runtime_root;
-    backend_process_ = StartBundledBackend(runtime_root, &backend_job_);
-    if (backend_process_) SetTimer(hwnd_, kBackendWatchTimerId, 3000, nullptr);
+    RemoveStalePaperBackgroundServiceWindows(runtime_root);
+    if (IsPaperBackgroundServiceEnabledWindows(runtime_root)) {
+      if (!IsLocalBackendReachableWindows()) {
+        std::string background_error;
+        if (!StartBackgroundBundledBackend(runtime_root, &background_error)) {
+          ConfigurePaperBackgroundServiceWindows(runtime_root, false, nullptr);
+          backend_process_ = StartBundledBackend(runtime_root, &backend_job_);
+        } else {
+          background_restart_tick_ = GetTickCount();
+        }
+      }
+    } else {
+      backend_process_ = StartBundledBackend(runtime_root, &backend_job_);
+    }
+    SetTimer(hwnd_, kBackendWatchTimerId, 3000, nullptr);
+    if (IsPaperBackgroundServiceEnabledWindows(runtime_root)) {
+      EnsurePaperTrayIcon();
+    }
     runtime_.Initialize(runtime_root, false, &runtime_err);
     if (!runtime_err.empty()) {
       runtime_init_error_ = runtime_err;
@@ -2175,6 +2439,27 @@ private:
       }
       return 0;
     }
+    case kMsgRefreshPaperTray:
+      if (wparam) {
+        self->EnsurePaperTrayIcon();
+      } else {
+        self->RemovePaperTrayIcon();
+      }
+      return 0;
+    case kMsgPaperTrayIcon: {
+      const UINT event = LOWORD(lparam);
+      if (event == WM_LBUTTONUP || event == WM_LBUTTONDBLCLK ||
+          event == NIN_SELECT || event == NIN_KEYSELECT) {
+        self->ShowMainWindowFromTray();
+      } else if (event == WM_RBUTTONUP || event == WM_CONTEXTMENU) {
+        self->ShowPaperTrayMenu();
+      }
+      return 0;
+    }
+    case WM_SETTINGCHANGE:
+    case WM_THEMECHANGED:
+      self->RefreshPaperTrayIconTheme();
+      return DefWindowProcW(hwnd, msg, wparam, lparam);
     case WM_TIMER:
       if (wparam == kBackendWatchTimerId) {
         self->OnBackendWatchTick();
@@ -2192,20 +2477,28 @@ private:
       return TRUE;
     case WM_CLOSE:
       self->LaunchPendingUpdateOnQuit();
+      if (self->update_launch_started_.load() || self->allow_close_) {
+        return DefWindowProcW(hwnd, msg, wparam, lparam);
+      }
+      if (IsPaperBackgroundServiceEnabledWindows(self->runtime_root_)) {
+        self->EnsurePaperTrayIcon();
+        ShowWindow(hwnd, SW_HIDE);
+        return 0;
+      }
+      if (self->paper_test_active_.load()) {
+        if (!self->ConfirmQuitWithActivePaperTest()) return 0;
+        self->allow_close_ = true;
+      }
       return DefWindowProcW(hwnd, msg, wparam, lparam);
     case WM_DESTROY:
       KillTimer(hwnd, kBackendWatchTimerId);
+      self->RemovePaperTrayIcon();
       // Never leave the machine pinned awake after the window is gone.
       SetPreventIdleSleepOnWindows(false, "", nullptr);
       DevServerManager::Instance().StopAll();
-      if (self->backend_job_) {
-        TerminateJobObject(self->backend_job_, 0);
-        CloseHandle(self->backend_job_);
-        self->backend_job_ = nullptr;
-      }
-      if (self->backend_process_) {
-        CloseHandle(self->backend_process_);
-        self->backend_process_ = nullptr;
+      {
+        std::lock_guard<std::mutex> lock(self->backend_mu_);
+        self->StopOwnedBackendLocked();
       }
       SaveWindowPlacementToIni(hwnd);
       PostQuitMessage(0);
@@ -2237,7 +2530,17 @@ private:
   }
 
   void OnBackendWatchTick() {
+    std::lock_guard<std::mutex> lock(backend_mu_);
     const DWORD now = GetTickCount();
+    if (IsPaperBackgroundServiceEnabledWindows(runtime_root_)) {
+      if (!IsLocalBackendReachableWindows() &&
+          (!background_restart_tick_ ||
+           now - background_restart_tick_ >= 30000)) {
+        background_restart_tick_ = now;
+        StartBackgroundBundledBackend(runtime_root_, nullptr);
+      }
+      return;
+    }
     if (!backend_process_) {
       // Crash-loop pause: retry once after a 10-min cool-off instead of never
       if (backend_fast_deaths_ >= 3 && backend_restart_tick_ &&
@@ -2266,6 +2569,117 @@ private:
     if (backend_fast_deaths_ >= 3) return;     // pause; cool-off path above retries
     backend_process_ = StartBundledBackend(runtime_root_, &backend_job_);
     if (!backend_process_) backend_fast_deaths_ = 3;   // spawn failed — treat as loop
+  }
+
+  void StopOwnedBackendLocked() {
+    if (backend_job_) {
+      TerminateJobObject(backend_job_, 0);
+      CloseHandle(backend_job_);
+      backend_job_ = nullptr;
+    }
+    if (backend_process_) {
+      WaitForSingleObject(backend_process_, 1500);
+      CloseHandle(backend_process_);
+      backend_process_ = nullptr;
+    }
+  }
+
+  void EnsurePaperTrayIcon() {
+    if (paper_tray_visible_ || !hwnd_) return;
+    NOTIFYICONDATAW icon{};
+    icon.cbSize = sizeof(icon);
+    icon.hWnd = hwnd_;
+    icon.uID = 1;
+    icon.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+    icon.uCallbackMessage = kMsgPaperTrayIcon;
+    icon.hIcon = LoadPaperTrayIcon();
+    if (!icon.hIcon) icon.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+    wcsncpy_s(icon.szTip, _countof(icon.szTip),
+              L"AI.EXE paper testing is active", _TRUNCATE);
+    if (Shell_NotifyIconW(NIM_ADD, &icon)) {
+      paper_tray_visible_ = true;
+      icon.uVersion = NOTIFYICON_VERSION_4;
+      Shell_NotifyIconW(NIM_SETVERSION, &icon);
+    }
+  }
+
+  void RefreshPaperTrayIconTheme() {
+    if (!paper_tray_visible_ || !hwnd_) return;
+    NOTIFYICONDATAW icon{};
+    icon.cbSize = sizeof(icon);
+    icon.hWnd = hwnd_;
+    icon.uID = 1;
+    icon.uFlags = NIF_ICON;
+    icon.hIcon = LoadPaperTrayIcon();
+    if (icon.hIcon) Shell_NotifyIconW(NIM_MODIFY, &icon);
+  }
+
+  void RemovePaperTrayIcon() {
+    if (!paper_tray_visible_ || !hwnd_) return;
+    NOTIFYICONDATAW icon{};
+    icon.cbSize = sizeof(icon);
+    icon.hWnd = hwnd_;
+    icon.uID = 1;
+    Shell_NotifyIconW(NIM_DELETE, &icon);
+    paper_tray_visible_ = false;
+  }
+
+  void ShowMainWindowFromTray() {
+    ShowWindow(hwnd_, SW_RESTORE);
+    ShowWindow(hwnd_, SW_SHOW);
+    SetForegroundWindow(hwnd_);
+  }
+
+  void ShowPaperTrayMenu() {
+    POINT cursor{};
+    GetCursorPos(&cursor);
+    HMENU menu = CreatePopupMenu();
+    if (!menu) return;
+    AppendMenuW(menu, MF_STRING, kPaperTrayOpenCommand, L"Open AI.EXE");
+    AppendMenuW(menu, MF_STRING | MF_DISABLED, 0, L"Paper testing active");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, kPaperTrayStopCommand,
+                L"Stop background testing and quit");
+    SetForegroundWindow(hwnd_);
+    const UINT command = TrackPopupMenu(
+        menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY, cursor.x,
+        cursor.y, 0, hwnd_, nullptr);
+    DestroyMenu(menu);
+    PostMessageW(hwnd_, WM_NULL, 0, 0);
+    if (command == kPaperTrayOpenCommand) {
+      ShowMainWindowFromTray();
+    } else if (command == kPaperTrayStopCommand) {
+      StopBackgroundAndQuitFromTray();
+    }
+  }
+
+  void StopBackgroundAndQuitFromTray() {
+    std::string err;
+    {
+      std::lock_guard<std::mutex> lock(backend_mu_);
+      if (!ConfigurePaperBackgroundServiceWindows(runtime_root_, false, &err)) {
+        MessageBoxA(hwnd_, err.empty() ? "Background testing could not stop."
+                                       : err.c_str(),
+                    "AI.EXE", MB_OK | MB_ICONERROR);
+        return;
+      }
+      RetireStaleBundledBackend(runtime_root_ / "backend" /
+                               "AI.EXE Backend.exe");
+    }
+    allow_close_ = true;
+    RemovePaperTrayIcon();
+    DestroyWindow(hwnd_);
+  }
+
+  bool ConfirmQuitWithActivePaperTest() {
+    const int choice = MessageBoxW(
+        hwnd_,
+        L"Background testing is Off. If you quit now, daily checks pause "
+        L"until AI.EXE opens again. Missed market days will catch up "
+        L"automatically.\n\nQuit anyway?",
+        L"Paper testing is still running",
+        MB_OKCANCEL | MB_ICONWARNING | MB_DEFBUTTON2);
+    return choice == IDOK;
   }
 
   void ShowFallback(const std::wstring &text) {
@@ -2461,6 +2875,70 @@ private:
       }
     } else if (action == "powerKeepAwakeState") {
       output = IsPreventingIdleSleepOnWindows() ? "1" : "0";
+    } else if (action == "paperTestCloseGuard") {
+      paper_test_active_.store(workspace_content == "1" ||
+                               workspace_content == "true");
+      output = paper_test_active_.load() ? "1" : "0";
+    } else if (action == "paperBackgroundService") {
+      std::lock_guard<std::mutex> lock(backend_mu_);
+      if (workspace_content.empty()) {
+        const bool enabled =
+            IsPaperBackgroundServiceEnabledWindows(runtime_root_);
+        output = enabled ? "1" : "0";
+        PostMessageW(hwnd_, kMsgRefreshPaperTray, enabled ? 1 : 0, 0);
+      } else {
+        const bool enable =
+            workspace_content == "1" || workspace_content == "true";
+        if (enable) {
+          if (!ConfigurePaperBackgroundServiceWindows(runtime_root_, true,
+                                                       &op_err)) {
+            ok = false;
+          } else {
+            StopOwnedBackendLocked();
+            WaitForLocalBackendWindows(false, 2500);
+            if (!StartBackgroundBundledBackend(runtime_root_, &op_err) ||
+                !WaitForLocalBackendWindows(true, 15000)) {
+              ok = false;
+              if (op_err.empty()) {
+                op_err = "Background paper testing did not become ready.";
+              }
+              ConfigurePaperBackgroundServiceWindows(runtime_root_, false,
+                                                       nullptr);
+              RetireStaleBundledBackend(
+                  runtime_root_ / "backend" / "AI.EXE Backend.exe");
+              backend_process_ =
+                  StartBundledBackend(runtime_root_, &backend_job_);
+            } else {
+              background_restart_tick_ = GetTickCount();
+            }
+          }
+        } else {
+          if (!ConfigurePaperBackgroundServiceWindows(runtime_root_, false,
+                                                       &op_err)) {
+            ok = false;
+          } else {
+            RetireStaleBundledBackend(
+                runtime_root_ / "backend" / "AI.EXE Backend.exe");
+            WaitForLocalBackendWindows(false, 2500);
+            backend_process_ = StartBundledBackend(runtime_root_, &backend_job_);
+            if (!backend_process_) {
+              ok = false;
+              op_err = "AI.EXE could not restart its local backend.";
+            }
+          }
+        }
+        if (!ok) {
+          message = op_err.empty() ? "Could not change the background service."
+                                   : op_err;
+          output = IsPaperBackgroundServiceEnabledWindows(runtime_root_) ? "1"
+                                                                          : "0";
+        } else {
+          output = enable ? "1" : "0";
+          message = enable ? "Background paper testing enabled."
+                           : "Background paper testing disabled.";
+          PostMessageW(hwnd_, kMsgRefreshPaperTray, enable ? 1 : 0, 0);
+        }
+      }
     } else if (action == "workspaceList") {
       if (!BuildWorkspaceListOutput(runtime_, workspace_path, &output,
                                     &op_err)) {
@@ -3090,10 +3568,15 @@ private:
   std::string runtime_init_error_;
   HANDLE backend_process_ = nullptr;
   HANDLE backend_job_ = nullptr;
+  std::mutex backend_mu_;
   std::filesystem::path runtime_root_;
   DWORD backend_restart_tick_ = 0;
+  DWORD background_restart_tick_ = 0;
   int backend_fast_deaths_ = 0;
   std::atomic<bool> update_launch_started_{false};
+  std::atomic<bool> paper_test_active_{false};
+  bool paper_tray_visible_ = false;
+  bool allow_close_ = false;
 
 #if AI_EXE_HAVE_WEBVIEW2_HEADER
   Microsoft::WRL::ComPtr<ICoreWebView2Controller> controller_;

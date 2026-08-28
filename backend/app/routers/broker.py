@@ -4,13 +4,24 @@ Nothing here reaches a live venue. Order submission only STAGES an order;
 /confirm is the single path to a fill and it requires the token handed back at
 submission time.
 """
-from fastapi import APIRouter, HTTPException, Query
+import asyncio
+import json
+import time
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
+
+import websockets
+from fastapi import APIRouter, HTTPException, Query, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 
 from ..broker import ConfirmationRequired, LiveTradingBlocked, OrderRejected
-from ..services import paper_broker, quote_feed
+from ..config import settings
+from ..prices import QuoteUnavailable, crypto_id
+from ..services import paper_broker, paper_test_runner, quote_feed
+from ..strategy import analyze_history
 
 router = APIRouter(tags=["broker"])
+BYBIT_SPOT_STREAM = "wss://stream.bybit.com/v5/public/spot"
 
 
 class OrderCreate(BaseModel):
@@ -39,6 +50,14 @@ class OrderCancel(BaseModel):
 class MarkRequest(BaseModel):
     marks: dict = Field(default_factory=dict)
     use_live: bool = False
+
+
+class StrategyStageRequest(BaseModel):
+    symbol: str = Field(default="AAPL", min_length=1, max_length=24)
+
+
+class PaperTestStartRequest(BaseModel):
+    symbol: str = Field(default="AAPL", min_length=1, max_length=24)
 
 
 @router.get("/broker/account")
@@ -98,6 +117,7 @@ def broker_mark(payload: MarkRequest):
     reaches the network itself."""
     marks = {str(k).upper(): int(v) for k, v in (payload.marks or {}).items()}
     errors = {}
+    sources: dict = {}
     if payload.use_live:
         held = [p["symbol"] for p in paper_broker.positions()]
         wanted = [s for s in held if s not in marks]
@@ -105,22 +125,334 @@ def broker_mark(payload: MarkRequest):
             fetched = quote_feed.quotes(wanted)
             marks.update({s: q["price_cents"] for s, q in fetched["quotes"].items()})
             errors = fetched["errors"]
-    snapshot = paper_broker.mark_to_market(marks)
+            # A snapshot is a record: it must say which prices were actually live.
+            sources = {s: {"source": q.get("source") or "", "as_of": q.get("as_of") or q.get("fetched_at") or "",
+                           "stale": bool(q.get("stale"))}
+                       for s, q in fetched["quotes"].items()}
+    snapshot = paper_broker.mark_to_market(marks, sources)
     snapshot["quote_errors"] = errors
     return snapshot
 
 
 @router.get("/prices/quote")
-def price_quote(symbols: str = Query(min_length=1, max_length=200)):
+def price_quote(symbols: str = Query(min_length=1, max_length=200),
+                fresh: bool = Query(default=False)):
+    """fresh=1 refuses a cached price — anything that becomes an order price
+    must be a real quote, not the last one we happen to remember."""
     wanted = [s.strip().upper() for s in symbols.split(",") if s.strip()][:12]
     if not wanted:
         raise HTTPException(status_code=400, detail="at least one symbol is required")
-    return quote_feed.quotes(wanted)
+    result = quote_feed.quotes(wanted, allow_stale=not fresh)
+    if fresh:
+        for symbol, quote in list(result["quotes"].items()):
+            if quote.get("stale"):
+                result["errors"][symbol] = "only a cached price is available — type the price manually"
+                result["quotes"].pop(symbol)
+    return result
+
+
+@router.get("/prices/search")
+def price_search(q: str = Query(default="", max_length=80),
+                 limit: int = Query(default=10, ge=1, le=12)):
+    return {"results": quote_feed.search(q, limit=limit)}
+
+
+def _portfolio_for_quote(quote: dict) -> dict:
+    positions = paper_broker.positions()
+    account = paper_broker.account()
+    symbol = quote["symbol"]
+    marks = {symbol: int(quote["price_cents"])}
+    errors = {}
+    others = [p["symbol"] for p in positions if p["symbol"] not in marks]
+    if others:
+        fetched = quote_feed.quotes(others)
+        marks.update({key: int(value["price_cents"])
+                      for key, value in fetched["quotes"].items()})
+        errors = fetched["errors"]
+    holdings = 0
+    unrealized = 0
+    selected = None
+    for position in positions:
+        price = marks.get(position["symbol"], int(position["avg_cost_cents"]))
+        quantity = int(position["quantity"])
+        value = price * quantity
+        pnl = (price - int(position["avg_cost_cents"])) * quantity
+        holdings += value
+        unrealized += pnl
+        if position["symbol"] == symbol:
+            selected = {**position, "live_price_cents": price,
+                        "market_value_cents": value, "unrealized_pnl_cents": pnl}
+    return {
+        "starting_cash_cents": int(account["starting_cash_cents"]),
+        "cash_cents": int(account["cash_cents"]),
+        "holdings_cents": holdings,
+        "equity_cents": int(account["cash_cents"]) + holdings,
+        "unrealized_pnl_cents": unrealized,
+        "realized_pnl_cents": int(account["realized_pnl_cents"]),
+        "selected_position": selected,
+        "quote_errors": errors,
+    }
+
+
+def _merge_equity(intraday: dict, spot: dict) -> dict:
+    intraday.update({
+        "price_cents": int(spot.get("price_cents", intraday.get("price_cents") or 0)),
+        "market_status": spot.get("market_status") or intraday.get("market_status"),
+        "is_realtime": bool(spot.get("is_realtime", intraday.get("is_realtime"))),
+        "as_of": spot.get("as_of") or intraday.get("as_of"),
+        "net_change_cents": int(spot.get("net_change_cents") if spot.get("net_change_cents") is not None
+                                 else (intraday.get("net_change_cents") or 0)),
+        "percentage_change_bps": int(spot.get("percentage_change_bps")
+                                     if spot.get("percentage_change_bps") is not None
+                                     else (intraday.get("percentage_change_bps") or 0)),
+        "delta": spot.get("delta") or intraday.get("delta"),
+        "stale": bool(spot.get("stale") or intraday.get("stale") or not spot),
+        "stream_type": "equity_bridge",
+    })
+    return {"quote": intraday, "portfolio": _portfolio_for_quote(intraday),
+            "display_only": True}
+
+
+def _equity_live_payload(symbol: str) -> dict:
+    """Chart and spot price are two upstream calls — run them side by side so a
+    symbol switch costs one round trip, not two."""
+    normalized = (symbol or "").strip().upper()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        chart = pool.submit(quote_feed.intraday, normalized)
+        price = pool.submit(quote_feed.quote, normalized)
+        intraday = chart.result()
+        try:
+            spot = price.result()
+        except QuoteUnavailable:
+            spot = {}
+    return _merge_equity(intraday, spot)
+
+
+def _cached_equity_payload(symbol: str):
+    """Whatever we already know, sent before the network is touched."""
+    intraday = quote_feed.cached_intraday(symbol)
+    if not intraday:
+        return None
+    return _merge_equity(intraday, {})
+
+
+@router.get("/broker/live")
+def broker_live(symbol: str = Query(default="AAPL", min_length=1, max_length=24)):
+    """Compatibility snapshot; the UI uses /live-stream."""
+    try:
+        return _equity_live_payload(symbol)
+    except QuoteUnavailable as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+def _crypto_base(symbol: str) -> str:
+    value = (symbol or "").strip().upper()
+    for suffix in ("-USD", "/USD", "USD"):
+        if value.endswith(suffix) and len(value) > len(suffix):
+            return value[:-len(suffix)]
+    return value
+
+
+def _stream_origin_allowed(origin: str) -> bool:
+    origin = (origin or "").strip()
+    allowed = {item.strip() for item in settings.allowed_origins if item.strip()}
+    return not origin or origin == "null" or origin.startswith("file://") or origin in allowed
+
+
+async def _stream_bybit(websocket: WebSocket, symbol: str) -> None:
+    base = _crypto_base(symbol)
+    pair = f"{base}USDT"
+    try:
+        points = await asyncio.to_thread(quote_feed.crypto_intraday_points, symbol)
+    except QuoteUnavailable:
+        points = []
+    # Draw the seed chart now rather than sitting blank until the first tick.
+    if points:
+        seed_price = points[-1]["price_mills"] / 1000
+        first = points[0]["price_mills"] / 1000
+        seed = {
+            "symbol": symbol, "company": f"{base}/USDT spot", "source": "bybit_kline",
+            "market_status": "OPEN", "is_realtime": False,
+            "as_of": datetime.fromtimestamp(points[-1]["ts_ms"] / 1000, timezone.utc).isoformat(),
+            "price_cents": int(round(seed_price * 100)),
+            "previous_close_cents": int(round(first * 100)),
+            "net_change_cents": int(round((seed_price - first) * 100)),
+            "percentage_change_bps": int(round((seed_price - first) / first * 10000)) if first else 0,
+            "delta": "up" if seed_price >= first else "down",
+            "volume": "", "points": list(points),
+            "fetched_at": datetime.now(timezone.utc).isoformat(),
+            "stale": True, "stream_type": "exchange_websocket",
+        }
+        portfolio = await asyncio.to_thread(_portfolio_for_quote, seed)
+        await websocket.send_json({"quote": seed, "portfolio": portfolio, "display_only": True})
+    last_sent = 0.0
+    async with websockets.connect(BYBIT_SPOT_STREAM, ping_interval=20, ping_timeout=12,
+                                  close_timeout=2) as upstream:
+        await upstream.send(json.dumps({"op": "subscribe", "args": [f"tickers.{pair}"]}))
+        async for raw in upstream:
+            message = json.loads(raw)
+            if message.get("topic") != f"tickers.{pair}":
+                continue
+            data = message.get("data") or {}
+            if isinstance(data, list):
+                data = data[0] if data else {}
+            if not data.get("lastPrice"):
+                continue
+            now = time.monotonic()
+            price = float(data["lastPrice"])
+            timestamp = int(message.get("ts") or time.time() * 1000)
+            points.append({"ts_ms": timestamp, "price_mills": int(round(price * 1000))})
+            points = points[-720:]
+            if now - last_sent < 0.10:
+                continue
+            last_sent = now
+            previous = float(data.get("prevPrice24h") or price)
+            change_fraction = float(data.get("price24hPcnt") or 0)
+            quote = {
+                "symbol": symbol,
+                "company": f"{base}/USDT spot",
+                "source": "bybit_websocket",
+                "market_status": "OPEN",
+                "is_realtime": True,
+                "as_of": datetime.fromtimestamp(timestamp / 1000, timezone.utc).isoformat(),
+                "price_cents": int(round(price * 100)),
+                "previous_close_cents": int(round(previous * 100)),
+                "net_change_cents": int(round((price - previous) * 100)),
+                "percentage_change_bps": int(round(change_fraction * 10000)),
+                "delta": "up" if price >= previous else "down",
+                "volume": str(data.get("volume24h") or ""),
+                "points": points,
+                "fetched_at": datetime.now(timezone.utc).isoformat(),
+                "stale": False,
+                "stream_type": "exchange_websocket",
+            }
+            portfolio = await asyncio.to_thread(_portfolio_for_quote, quote)
+            await websocket.send_json({"quote": quote, "portfolio": portfolio,
+                                       "display_only": True})
+
+
+async def _stream_equity(websocket: WebSocket, symbol: str) -> None:
+    previous = None
+    warm = await asyncio.to_thread(_cached_equity_payload, symbol)
+    if warm:
+        await websocket.send_json(warm)
+    while True:
+        payload = await asyncio.to_thread(_equity_live_payload, symbol)
+        fingerprint = json.dumps(payload.get("quote", {}), sort_keys=True)
+        if fingerprint != previous:
+            await websocket.send_json(payload)
+            previous = fingerprint
+        await asyncio.sleep(2)
+
+
+@router.websocket("/broker/live-stream")
+async def broker_live_stream(websocket: WebSocket, symbol: str = "AAPL"):
+    """Push-only local stream. Crypto is exchange WebSocket; equities use the
+    approved Nasdaq source until a licensed equity WebSocket is configured."""
+    if not _stream_origin_allowed(websocket.headers.get("origin") or ""):
+        await websocket.close(code=1008)
+        return
+    await websocket.accept()
+    symbol = (symbol or "AAPL").strip().upper()[:24]
+    try:
+        if crypto_id(symbol):
+            await _stream_bybit(websocket, symbol)
+        else:
+            await _stream_equity(websocket, symbol)
+    except WebSocketDisconnect:
+        return
+    except Exception as exc:
+        try:
+            await websocket.send_json({"error": str(exc)})
+            await websocket.close(code=1011)
+        except Exception:
+            pass
 
 
 @router.get("/broker/performance")
 def broker_performance():
     return paper_broker.performance()
+
+
+@router.get("/broker/strategy-lab")
+def broker_strategy_lab(symbol: str = Query(default="AAPL", min_length=1, max_length=24)):
+    try:
+        history = quote_feed.history(symbol)
+        report = analyze_history(history["rows"])
+        report.update({"symbol": history["symbol"], "source": history["source"],
+                       "fetched_at": history["fetched_at"]})
+        return report
+    except (QuoteUnavailable, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post("/broker/strategy-lab/stage")
+def broker_strategy_stage(payload: StrategyStageRequest):
+    try:
+        history = quote_feed.history(payload.symbol)
+        report = analyze_history(history["rows"])
+        quote = quote_feed.quote(history["symbol"], allow_stale=False)
+        held = next((int(p["quantity"]) for p in paper_broker.positions()
+                     if p["symbol"] == history["symbol"]), 0)
+        target = report["recommendation"]
+        if target == "long" and held == 0:
+            allocation = min(paper_broker.account()["cash_cents"],
+                             max(0, paper_broker.current_equity_cents() // 4))
+            quantity = allocation // int(quote["price_cents"])
+            if quantity <= 0:
+                return {"status": "no_action", "reason": "25% allocation cannot buy one whole unit",
+                        "report": report}
+            side = "buy"
+        elif target == "cash" and held > 0:
+            side, quantity = "sell", held
+        else:
+            return {"status": "no_action", "reason": f"portfolio already matches {target} signal",
+                    "report": report}
+        selected = report["selected"]
+        order = paper_broker.submit_order(
+            history["symbol"], side, quantity, int(quote["price_cents"]),
+            strategy=selected["name"], origin="strategy_lab",
+            memo=(f"Out-of-sample return {selected['test']['total_return_bps'] / 100:.2f}%; "
+                  f"drawdown {selected['test']['max_drawdown_bps'] / 100:.2f}%"),
+            instruction=f"Paper proposal: move portfolio to {target}; operator must confirm.",
+            quote_source=quote["source"], quote_fetched_at=quote.get("fetched_at", ""),
+            quote_stale=bool(quote.get("stale")),
+        )
+        return {"status": "staged", "order": order, "report": report}
+    except (QuoteUnavailable, ValueError, OrderRejected) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.get("/broker/paper-test")
+def broker_paper_test_status():
+    return paper_test_runner.status()
+
+
+@router.post("/broker/paper-test/start")
+def broker_paper_test_start(payload: PaperTestStartRequest):
+    try:
+        return paper_test_runner.start(payload.symbol)
+    except (QuoteUnavailable, ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post("/broker/paper-test/run")
+def broker_paper_test_run():
+    try:
+        result = paper_test_runner.run_once()
+        return {"result": result, **paper_test_runner.status()}
+    except (QuoteUnavailable, ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post("/broker/paper-test/stop")
+def broker_paper_test_stop():
+    return paper_test_runner.stop()
+
+
+@router.get("/broker/paper-test/report")
+def broker_paper_test_report():
+    return paper_test_runner.report()
 
 
 @router.get("/broker/ledger/verify")

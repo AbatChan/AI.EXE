@@ -29,8 +29,8 @@ set(AI_EXE_WEBVIEW2_DIR "" CACHE PATH "Microsoft.Web.WebView2 NuGet package root
 #   - the build-label date is stamped automatically (below)
 #   - the dev-tooling package.json "version" is auto-synced (below)
 # A release = bump AI_EXE_APP_VERSION + set a fresh AI_EXE_BUILD_TAG. Nothing else.
-set(AI_EXE_APP_VERSION "10.6.3" CACHE STRING "AI.EXE app and UI version" FORCE)
-set(AI_EXE_BUILD_TAG "fluid-tight-dictation-waveform" CACHE STRING "Human-readable AI.EXE build tag" FORCE)
+set(AI_EXE_APP_VERSION "10.7.8" CACHE STRING "AI.EXE app and UI version" FORCE)
+set(AI_EXE_BUILD_TAG "paper-test-audit-costs" CACHE STRING "Human-readable AI.EXE build tag" FORCE)
 string(TIMESTAMP AI_EXE_BUILD_DATE "%Y-%m-%d")
 set(AI_EXE_BUILD_LABEL "v${AI_EXE_APP_VERSION} (${AI_EXE_BUILD_TAG} ${AI_EXE_BUILD_DATE})")
 
@@ -257,6 +257,8 @@ if(APPLE)
   set(MAC_UI_CONFIG_JS "${CMAKE_BINARY_DIR}/generated/ui/ui-config.js")
   file(GLOB MAC_UI_PROMPT_FILES ui/prompts/*.md)
   set(MAC_UI_VENDOR_DIR ui/vendor)
+  set(MAC_LIGHTWEIGHT_CHARTS_JS ui/vendor/lightweight-charts/lightweight-charts.standalone.production.js)
+  set(MAC_LIGHTWEIGHT_CHARTS_LICENSE ui/vendor/lightweight-charts/LICENSE)
   set_source_files_properties(${MAC_UI_HTML} PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
   set_source_files_properties(${MAC_UI_CSS} PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
   set_source_files_properties(${MAC_UI_JS} PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
@@ -278,15 +280,20 @@ if(APPLE)
   set_source_files_properties(${MAC_WORKSPACE_RENDERER_JS} PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
   set_source_files_properties(${MAC_UI_CONFIG_JS} PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
   set_source_files_properties(${MAC_UI_PROMPT_FILES} PROPERTIES MACOSX_PACKAGE_LOCATION Resources/prompts)
+  set_source_files_properties(${MAC_LIGHTWEIGHT_CHARTS_JS} ${MAC_LIGHTWEIGHT_CHARTS_LICENSE}
+    PROPERTIES MACOSX_PACKAGE_LOCATION Resources/vendor/lightweight-charts)
 
   set(MAC_APP_ICON "${CMAKE_SOURCE_DIR}/src/AppIcon.icns")
+  set(MAC_STATUS_ICON "${CMAKE_SOURCE_DIR}/logo/AI exe logo white.svg")
   set_source_files_properties(${MAC_APP_ICON} PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
+  set_source_files_properties(${MAC_STATUS_ICON} PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
 
   add_executable(ai_exe_gui_mac MACOSX_BUNDLE
     src/gui_main_mac_web.mm
     src/web_runtime_bridge.cpp
     src/local_app_server.cpp
     ${MAC_APP_ICON}
+    ${MAC_STATUS_ICON}
     ${AI_EXE_RUNTIME_SOURCES}
     ${MAC_UI_HTML}
     ${MAC_UI_CSS}
@@ -309,6 +316,8 @@ if(APPLE)
     ${MAC_WORKSPACE_RENDERER_JS}
     ${MAC_UI_CONFIG_JS}
     ${MAC_UI_PROMPT_FILES}
+    ${MAC_LIGHTWEIGHT_CHARTS_JS}
+    ${MAC_LIGHTWEIGHT_CHARTS_LICENSE}
   )
   set_target_properties(ai_exe_gui_mac PROPERTIES
     MACOSX_BUNDLE_INFO_PLIST "${CMAKE_SOURCE_DIR}/src/Info.plist.in"

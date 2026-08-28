@@ -7,19 +7,25 @@
 #import <WebKit/WebKit.h>
 
 #include <algorithm>
+#include <atomic>
+#include <cerrno>
 #include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <dispatch/dispatch.h>
 #include <filesystem>
+#include <fcntl.h>
 #include <fstream>
 #include <mutex>
 #include <optional>
+#include <signal.h>
 #include <sstream>
 #include <string>
 #include <string_view>
 #include <sys/stat.h>
+#include <sys/file.h>
+#include <unistd.h>
 #include <vector>
 
 #include "command_runner.h"
@@ -49,6 +55,38 @@ std::filesystem::path UiStateBackupPath() {
   }
   return std::filesystem::path([base_url.path UTF8String]) / "AI.EXE" /
          "ui-storage-v1.json";
+}
+
+int AcquireGuiInstanceLock(bool *already_running) {
+  if (already_running) *already_running = false;
+  const auto state_path = UiStateBackupPath();
+  if (state_path.empty()) return -1;
+  const auto lock_path = state_path.parent_path() / "gui-instance.lock";
+  std::error_code ec;
+  std::filesystem::create_directories(lock_path.parent_path(), ec);
+  if (ec) return -1;
+  const int fd = open(lock_path.c_str(), O_CREAT | O_RDWR, S_IRUSR | S_IWUSR);
+  if (fd < 0) return -1;
+  if (flock(fd, LOCK_EX | LOCK_NB) == 0) return fd;
+  if (already_running && (errno == EWOULDBLOCK || errno == EAGAIN)) {
+    *already_running = true;
+  }
+  close(fd);
+  return -1;
+}
+
+void SignalExistingGuiInstance() {
+  [[NSDistributedNotificationCenter defaultCenter]
+      postNotificationName:@"com.aiexe.desktop.show-main-window"
+                    object:nil];
+  NSArray<NSRunningApplication *> *running =
+      [NSRunningApplication runningApplicationsWithBundleIdentifier:
+                                @"com.aiexe.desktop"];
+  for (NSRunningApplication *candidate in running) {
+    if (candidate.processIdentifier == getpid()) continue;
+    [candidate activateWithOptions:NSApplicationActivateAllWindows];
+    break;
+  }
 }
 
 bool ReadUiStateBackup(std::string *output, std::string *err) {
@@ -1053,6 +1091,159 @@ bool IsBackendReachable() {
   return ok;
 }
 
+NSString *PaperBackgroundAgentLabel() {
+  return @"com.aiexe.paper-background";
+}
+
+std::filesystem::path PaperBackgroundAgentPath() {
+  NSString *home = NSHomeDirectory();
+  if (!home.length) return {};
+  return std::filesystem::path([home UTF8String]) / "Library" / "LaunchAgents" /
+         "com.aiexe.paper-background.plist";
+}
+
+bool RunLaunchctl(NSArray<NSString *> *arguments, bool accept_missing,
+                  std::string *err) {
+  NSTask *task = [[NSTask alloc] init];
+  task.executableURL = [NSURL fileURLWithPath:@"/bin/launchctl"];
+  task.arguments = arguments;
+  task.standardOutput = [NSFileHandle fileHandleWithNullDevice];
+  NSPipe *error_pipe = [NSPipe pipe];
+  task.standardError = error_pipe;
+  NSError *launch_error = nil;
+  if (![task launchAndReturnError:&launch_error]) {
+    if (err) *err = [[launch_error localizedDescription] UTF8String];
+    return false;
+  }
+  [task waitUntilExit];
+  if (task.terminationStatus == 0 || accept_missing) return true;
+  NSData *error_data = [[error_pipe fileHandleForReading] readDataToEndOfFile];
+  NSString *detail = [[NSString alloc] initWithData:error_data
+                                           encoding:NSUTF8StringEncoding];
+  detail = [detail stringByTrimmingCharactersInSet:
+                       [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+  if (err) {
+    *err = detail.length ? std::string([detail UTF8String])
+                         : "launchctl could not update the background service.";
+  }
+  return false;
+}
+
+bool WaitForLaunchdJobRemoval(NSString *target) {
+  for (int attempt = 0; attempt < 160; ++attempt) {
+    if (!RunLaunchctl(@[@"print", target], false, nullptr)) return true;
+    usleep(50000);
+  }
+  return !RunLaunchctl(@[@"print", target], false, nullptr);
+}
+
+bool IsPaperBackgroundServiceEnabled() {
+  NSString *domain = [NSString stringWithFormat:@"gui/%u", getuid()];
+  NSString *target = [NSString stringWithFormat:@"%@/%@", domain,
+                                                PaperBackgroundAgentLabel()];
+  return RunLaunchctl(@[@"print", target], false, nullptr);
+}
+
+bool ConfigurePaperBackgroundService(
+    const std::filesystem::path &runtime_root, bool enabled, std::string *err) {
+  const auto plist_path = PaperBackgroundAgentPath();
+  if (plist_path.empty()) {
+    if (err) *err = "The user LaunchAgents folder is unavailable.";
+    return false;
+  }
+  NSString *domain = [NSString stringWithFormat:@"gui/%u", getuid()];
+  NSString *target = [NSString stringWithFormat:@"%@/%@", domain,
+                                                PaperBackgroundAgentLabel()];
+  if (!enabled) {
+    RunLaunchctl(@[@"bootout", target], true, nullptr);
+    if (!WaitForLaunchdJobRemoval(target)) {
+      if (err) *err = "The previous background service is still stopping. Please try again.";
+      return false;
+    }
+    std::error_code ec;
+    std::filesystem::remove(plist_path, ec);
+    if (ec) {
+      if (err) *err = "Could not remove the background service setting.";
+      return false;
+    }
+    return true;
+  }
+
+  const auto backend_dir = runtime_root / "backend";
+  const auto python_path = backend_dir / ".venv" / "bin" / "python";
+  const auto main_path = backend_dir / "app" / "main.py";
+  if (!FileExists(python_path) || !FileExists(main_path)) {
+    if (err) *err = "The bundled backend is unavailable.";
+    return false;
+  }
+
+  const auto data_dir = backend_dir / ".data";
+  std::error_code ec;
+  std::filesystem::create_directories(plist_path.parent_path(), ec);
+  std::filesystem::create_directories(data_dir, ec);
+  if (ec) {
+    if (err) *err = "Could not prepare the background service folders.";
+    return false;
+  }
+  NSString *python = [NSString stringWithUTF8String:python_path.c_str()];
+  NSString *backend = [NSString stringWithUTF8String:backend_dir.c_str()];
+  NSString *data = [NSString stringWithUTF8String:data_dir.c_str()];
+  NSString *log = [data stringByAppendingPathComponent:@"backend-background.log"];
+  NSDictionary *plist = @{
+    @"Label": PaperBackgroundAgentLabel(),
+    @"ProgramArguments": @[
+      python, @"-m", @"uvicorn", @"app.main:app", @"--host", @"127.0.0.1",
+      @"--port", @"8765"
+    ],
+    @"WorkingDirectory": backend,
+    @"EnvironmentVariables": @{ @"AIEXE_BACKEND_DATA_DIR": data },
+    @"RunAtLoad": @YES,
+    @"KeepAlive": @YES,
+    @"ThrottleInterval": @10,
+    @"ProcessType": @"Background",
+    @"StandardOutPath": log,
+    @"StandardErrorPath": log,
+  };
+  NSError *plist_error = nil;
+  NSData *plist_data = [NSPropertyListSerialization
+      dataWithPropertyList:plist
+                    format:NSPropertyListXMLFormat_v1_0
+                   options:0
+                     error:&plist_error];
+  NSString *plist_string = [NSString stringWithUTF8String:plist_path.c_str()];
+  if (!plist_data || ![plist_data writeToFile:plist_string
+                                       options:NSDataWritingAtomic
+                                         error:&plist_error]) {
+    if (err) *err = plist_error ? [[plist_error localizedDescription] UTF8String]
+                                : "Could not write the background service.";
+    return false;
+  }
+  chmod(plist_path.c_str(), S_IRUSR | S_IWUSR);
+  RunLaunchctl(@[@"bootout", target], true, nullptr);
+  if (!WaitForLaunchdJobRemoval(target)) {
+    if (err) *err = "The previous background service is still stopping. Please try again.";
+    std::filesystem::remove(plist_path, ec);
+    return false;
+  }
+  for (int attempt = 0; attempt < 5; ++attempt) {
+    if (attempt > 0) {
+      usleep(static_cast<useconds_t>(attempt * 150000));
+    }
+    std::string bootstrap_error;
+    if (RunLaunchctl(@[@"bootstrap", domain, plist_string], false,
+                     &bootstrap_error)) {
+      return true;
+    }
+    if (attempt == 4) {
+      if (err) *err = bootstrap_error;
+      std::filesystem::remove(plist_path, ec);
+      return false;
+    }
+    RunLaunchctl(@[@"bootout", target], true, nullptr);
+  }
+  return false;
+}
+
 NSTask *StartFastApiBackend(const std::filesystem::path &runtime_root) {
   if (IsBackendReachable()) {
     return nil;
@@ -1848,6 +2039,9 @@ static bool IsPreventingIdleSleepOnMac() {
   NSWindow *_window;
   WKWebView *_webView;
   NSTask *_backendTask;
+  NSStatusItem *_paperStatusItem;
+  std::atomic<bool> _paperTestActive;
+  BOOL _allowTermination;
   std::filesystem::path _loadedHtmlPath;
   WebRuntimeBridge _runtime;
   std::string _runtimeInitError;
@@ -1906,6 +2100,162 @@ static bool IsPreventingIdleSleepOnMac() {
   [edit_item setSubmenu:edit_menu];
 
   [NSApp setMainMenu:main_menu];
+}
+
+- (void)setPaperStatusItemVisible:(BOOL)visible {
+  if (!visible) {
+    if (_paperStatusItem) {
+      [[NSStatusBar systemStatusBar] removeStatusItem:_paperStatusItem];
+      _paperStatusItem = nil;
+    }
+    return;
+  }
+  if (_paperStatusItem) return;
+
+  _paperStatusItem =
+      [[NSStatusBar systemStatusBar] statusItemWithLength:NSSquareStatusItemLength];
+  NSStatusBarButton *button = _paperStatusItem.button;
+  NSString *statusIconPath = [[NSBundle mainBundle]
+      pathForResource:@"AI exe logo white"
+               ofType:@"svg"];
+  NSImage *image = statusIconPath
+                       ? [[NSImage alloc] initWithContentsOfFile:statusIconPath]
+                       : [[NSApp applicationIconImage] copy];
+  if (image) {
+    [image setSize:NSMakeSize(18.0, 18.0)];
+    [image setTemplate:(statusIconPath != nil)];
+    image.accessibilityDescription = @"AI.EXE paper testing";
+    button.image = image;
+  } else {
+    button.title = @"AI";
+  }
+  button.toolTip = @"AI.EXE paper testing is active";
+
+  NSMenu *menu = [[NSMenu alloc] initWithTitle:@"AI.EXE"];
+  NSMenuItem *open = [[NSMenuItem alloc] initWithTitle:@"Open AI.EXE"
+                                                action:@selector(showMainWindowFromStatus:)
+                                         keyEquivalent:@""];
+  open.target = self;
+  [menu addItem:open];
+  NSMenuItem *state = [[NSMenuItem alloc]
+      initWithTitle:@"Paper testing active"
+             action:nil
+      keyEquivalent:@""];
+  state.enabled = NO;
+  [menu addItem:state];
+  [menu addItem:[NSMenuItem separatorItem]];
+  NSMenuItem *stop = [[NSMenuItem alloc]
+      initWithTitle:@"Stop background testing and quit"
+             action:@selector(stopBackgroundAndQuitFromStatus:)
+      keyEquivalent:@""];
+  stop.target = self;
+  [menu addItem:stop];
+  _paperStatusItem.menu = menu;
+}
+
+- (void)showMainWindowFromStatus:(id)sender {
+  (void)sender;
+  [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+  [_window makeKeyAndOrderFront:nil];
+  [NSApp activateIgnoringOtherApps:YES];
+}
+
+- (void)showMainWindowFromExternalLaunch:(NSNotification *)notification {
+  (void)notification;
+  [self showMainWindowFromStatus:nil];
+}
+
+- (BOOL)applicationShouldHandleReopen:(NSApplication *)sender
+                    hasVisibleWindows:(BOOL)flag {
+  (void)sender;
+  if (!flag) [self showMainWindowFromStatus:nil];
+  return YES;
+}
+
+- (void)stopBackgroundAndQuitFromStatus:(id)sender {
+  NSMenuItem *menu_item = [sender isKindOfClass:[NSMenuItem class]]
+                              ? (NSMenuItem *)sender
+                              : nil;
+  menu_item.enabled = NO;
+  const auto runtime_root = ResolveRuntimeRoot(_loadedHtmlPath);
+  void (^stop_service)(void) = ^{
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+      std::string err;
+      const bool stopped =
+          ConfigurePaperBackgroundService(runtime_root, false, &err);
+      dispatch_async(dispatch_get_main_queue(), ^{
+        if (!stopped) {
+          menu_item.enabled = YES;
+          NSAlert *alert = [[NSAlert alloc] init];
+          alert.messageText = @"Background testing could not stop";
+          alert.informativeText = err.empty()
+                                      ? @"Open AI.EXE and try turning it off again."
+                                      : [NSString stringWithUTF8String:err.c_str()];
+          [alert runModal];
+          return;
+        }
+        _allowTermination = YES;
+        [self setPaperStatusItemVisible:NO];
+        [NSApp terminate:nil];
+      });
+    });
+  };
+  if (_webView) {
+    [_webView evaluateJavaScript:
+                  @"if (typeof stopBrokerLiveUpdates === 'function') "
+                   "stopBrokerLiveUpdates();"
+               completionHandler:^(id _Nullable result, NSError *_Nullable error) {
+                 (void)result;
+                 (void)error;
+                 stop_service();
+               }];
+  } else {
+    stop_service();
+  }
+}
+
+- (BOOL)confirmQuitWithActivePaperTest {
+  NSAlert *alert = [[NSAlert alloc] init];
+  alert.alertStyle = NSAlertStyleWarning;
+  alert.messageText = @"Paper testing is still running";
+  alert.informativeText =
+      @"Background testing is Off. If you quit now, daily checks pause until "
+       "AI.EXE opens again. Missed market days will catch up automatically.";
+  [alert addButtonWithTitle:@"Keep AI.EXE open"];
+  [alert addButtonWithTitle:@"Quit anyway"];
+  return [alert runModal] == NSAlertSecondButtonReturn;
+}
+
+- (BOOL)windowShouldClose:(NSWindow *)sender {
+  (void)sender;
+  if (IsPaperBackgroundServiceEnabled()) {
+    [self setPaperStatusItemVisible:YES];
+    [_window orderOut:nil];
+    [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
+    return NO;
+  }
+  if (_paperTestActive.load() && !_allowTermination) {
+    if (![self confirmQuitWithActivePaperTest]) return NO;
+    _allowTermination = YES;
+  }
+  return YES;
+}
+
+- (NSApplicationTerminateReply)applicationShouldTerminate:
+    (NSApplication *)sender {
+  (void)sender;
+  if (_allowTermination) return NSTerminateNow;
+  if (IsPaperBackgroundServiceEnabled()) {
+    [self setPaperStatusItemVisible:YES];
+    [_window orderOut:nil];
+    [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
+    return NSTerminateCancel;
+  }
+  if (_paperTestActive.load() && ![self confirmQuitWithActivePaperTest]) {
+    return NSTerminateCancel;
+  }
+  _allowTermination = YES;
+  return NSTerminateNow;
 }
 
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:
@@ -2266,6 +2616,64 @@ static bool IsPreventingIdleSleepOnMac() {
     }
   } else if (action == "powerKeepAwakeState") {
     output = IsPreventingIdleSleepOnMac() ? "1" : "0";
+  } else if (action == "paperTestCloseGuard") {
+    _paperTestActive.store(workspace_content == "1" ||
+                           workspace_content == "true");
+    output = _paperTestActive.load() ? "1" : "0";
+  } else if (action == "paperBackgroundService") {
+    if (workspace_content.empty()) {
+      const bool enabled = IsPaperBackgroundServiceEnabled();
+      output = enabled ? "1" : "0";
+      dispatch_async(dispatch_get_main_queue(), ^{
+        [self setPaperStatusItemVisible:enabled ? YES : NO];
+      });
+    } else {
+      const bool enable = workspace_content == "1" || workspace_content == "true";
+      const auto runtime_root = ResolveRuntimeRoot(_loadedHtmlPath);
+      if (enable) {
+        __block NSTask *owned_task = nil;
+        dispatch_sync(dispatch_get_main_queue(), ^{
+          owned_task = _backendTask;
+          _backendTask = nil;
+        });
+        if (owned_task && [owned_task isRunning]) {
+          [owned_task terminate];
+          for (int attempt = 0; attempt < 15 && [owned_task isRunning]; ++attempt) {
+            usleep(50000);
+          }
+          if ([owned_task isRunning]) {
+            kill(owned_task.processIdentifier, SIGKILL);
+            for (int attempt = 0; attempt < 20 && [owned_task isRunning]; ++attempt) {
+              usleep(50000);
+            }
+          }
+        }
+      }
+      if (!ConfigurePaperBackgroundService(runtime_root, enable, &op_err)) {
+        ok = false;
+        message = op_err.empty() ? "Could not change the background service."
+                                 : op_err;
+      } else {
+        output = enable ? "1" : "0";
+        message = enable ? "Background paper testing enabled."
+                         : "Background paper testing disabled.";
+        dispatch_async(dispatch_get_main_queue(), ^{
+          [self setPaperStatusItemVisible:enable ? YES : NO];
+        });
+      }
+      if (!enable && ok) {
+        for (int attempt = 0; attempt < 40 && IsBackendReachable(); ++attempt) {
+          usleep(50000);
+        }
+      }
+      if (!enable || !ok) {
+        dispatch_sync(dispatch_get_main_queue(), ^{
+          if (!_backendTask || ![_backendTask isRunning]) {
+            _backendTask = StartFastApiBackend(runtime_root);
+          }
+        });
+      }
+    }
   } else if (action == "workspaceList") {
     if (!BuildWorkspaceListOutput(_runtime, workspace_path, &output, &op_err)) {
       ok = false;
@@ -2847,6 +3255,11 @@ static bool IsPreventingIdleSleepOnMac() {
 
   [self installMainMenu];
   [self registerPowerNotifications];
+  [[NSDistributedNotificationCenter defaultCenter]
+      addObserver:self
+         selector:@selector(showMainWindowFromExternalLaunch:)
+             name:@"com.aiexe.desktop.show-main-window"
+           object:nil];
 
   NSRect frame =
       NSMakeRect(0, 0, kUiDefaultWindowWidth, kUiDefaultWindowHeight);
@@ -2938,6 +3351,7 @@ static bool IsPreventingIdleSleepOnMac() {
   [_window makeKeyAndOrderFront:nil];
   [_window makeFirstResponder:_webView];
   [self loadUiHtml];
+  [self setPaperStatusItemVisible:IsPaperBackgroundServiceEnabled() ? YES : NO];
   _backendTask = StartFastApiBackend(ResolveRuntimeRoot(_loadedHtmlPath));
   [self initializeRuntime];
 }
@@ -2949,10 +3363,17 @@ int main(int argc, const char *argv[]) {
   (void)argv;
 
   @autoreleasepool {
+    bool already_running = false;
+    const int instance_lock = AcquireGuiInstanceLock(&already_running);
+    if (already_running) {
+      SignalExistingGuiInstance();
+      return 0;
+    }
     NSApplication *app = [NSApplication sharedApplication];
     AppDelegate *delegate = [[AppDelegate alloc] init];
     [app setDelegate:delegate];
     [app run];
+    if (instance_lock >= 0) close(instance_lock);
   }
 
   return 0;

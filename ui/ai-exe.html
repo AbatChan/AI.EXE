@@ -80,7 +80,7 @@
             <path d="M12 19h8" />
           </svg>
         </div>
-        <div class="col-icon" title="Finance" onclick="openFinanceView(financeBtn)">
+        <div class="col-icon" title="Trading" onclick="openFinanceView(financeBtn)">
           <svg class="icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <rect x="3" y="5" width="18" height="15" rx="2"></rect><path d="M3 10h18M7 15h3"></path>
           </svg>
@@ -142,7 +142,7 @@
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <rect x="3" y="5" width="18" height="15" rx="2"></rect><path d="M3 10h18M7 15h3"></path>
             </svg>
-            Finance
+            Trading
           </button>
         </div>
 
@@ -361,12 +361,12 @@
         </div>
       </div>
 
-      <section class="finance-dashboard hidden" id="financeDashboard" aria-label="Finance foundation">
+      <section class="finance-dashboard hidden" id="financeDashboard" aria-label="Trading workspace">
         <div class="finance-dashboard-head">
           <div>
-            <div class="finance-eyebrow">Phase 3 foundation</div>
-            <h1>Finance</h1>
-            <p>Local recordkeeping only. No live banking, crypto, trading, or payment connections.</p>
+            <div class="finance-eyebrow">Research desk · paper mode</div>
+            <h1>Trading</h1>
+            <p>Streaming market data, strategy research, and confirmed paper fills. Live orders remain blocked.</p>
           </div>
           <button class="finance-refresh-btn" id="financeRefreshBtn" type="button">Refresh</button>
         </div>
@@ -1217,6 +1217,7 @@
   <script src="chat-renderer.js"></script>
   <script src="file-viewer.js"></script>
   <script src="preflight-router.js"></script>
+  <script src="vendor/lightweight-charts/lightweight-charts.standalone.production.js"></script>
   <script src="ai-exe.js"></script>
 </body>
 

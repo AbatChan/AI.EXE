@@ -390,8 +390,10 @@ class PaperBroker(BrokerAdapter):
 
     # ---------- reporting ----------
 
-    def mark_to_market(self, marks: Dict[str, int]) -> dict:
-        """Snapshot equity against caller-supplied prices. No quotes are fetched."""
+    def mark_to_market(self, marks: Dict[str, int], sources: Dict[str, dict] = None,
+                       snapshot_date: str = "") -> dict:
+        """Snapshot equity against caller-supplied prices. No quotes are fetched.
+        `sources` records where each price came from and whether it was live."""
         with self._lock:
             used = {}
             holdings = 0
@@ -405,14 +407,41 @@ class PaperBroker(BrokerAdapter):
                 holdings += qty * price
             equity = self._cash_cents + holdings
             snapshot = {
-                "date": _now()[:10],
+                "date": str(snapshot_date or _now()[:10])[:10],
                 "cash_cents": self._cash_cents,
                 "holdings_cents": holdings,
                 "equity_cents": equity,
                 "prices": used,
+                "price_sources": {s: v for s, v in (sources or {}).items() if s in used},
+                "cached_prices": sorted(s for s, v in (sources or {}).items()
+                                        if s in used and v.get("stale")),
             }
             self._append("marked", snapshot)
             return dict(snapshot)
+
+    def trading_activity_since(self, since: str = "") -> dict:
+        """Confirmed paper fills and modeled costs after an ISO timestamp."""
+        submitted = 0
+        fills = 0
+        slippage = 0
+        commissions = 0
+        for event in self.audit_log(limit=1000000):
+            if since and str(event.get("ts") or "") < since:
+                continue
+            data = event.get("data") or {}
+            if event.get("type") == "order_submitted":
+                submitted += 1
+            elif event.get("type") == "order_filled":
+                fills += 1
+                slippage += int(data.get("slippage_cents") or 0)
+                commissions += int(data.get("commission_cents") or 0)
+        return {
+            "submitted_orders": submitted,
+            "filled_orders": fills,
+            "slippage_cents": slippage,
+            "commission_cents": commissions,
+            "total_costs_cents": slippage + commissions,
+        }
 
     def current_equity_cents(self) -> int:
         """Cash plus holdings at the last known price, else cost. Always live —

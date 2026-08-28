@@ -24,6 +24,47 @@ def crypto_payload(coin="bitcoin", usd=64974):
     return {coin: {"usd": usd, "last_updated_at": 1786181770}}
 
 
+def history_payload(count=90):
+    rows = []
+    for index in range(count):
+        rows.append({"date": f"08/{(index % 28) + 1:02d}/2026", "close": f"${300 + index / 10:.2f}"})
+    return {"status": {"rCode": 200}, "data": {"tradesTable": {"rows": rows}}}
+
+
+def chart_payload():
+    return {
+        "status": {"rCode": 200},
+        "data": {
+            "symbol": "AAPL", "company": "Apple Inc.", "marketStatus": "Open",
+            "isRealTime": True, "timeAsOf": "Aug 10, 2026 12:07 PM ET",
+            "lastSalePrice": "$313.335", "previousClose": "$310.00",
+            "netChange": "+3.335", "percentageChange": "+1.08%",
+            "deltaIndicator": "up", "volume": "12,345",
+            "chart": [
+                {"x": 1786334400000, "y": 310.125},
+                {"x": 1786334460000, "z": {"value": "313.335"}},
+            ],
+        },
+    }
+
+
+def search_payload():
+    return {"status": {"rCode": 200}, "data": [
+        {"symbol": "AAPL", "name": "Apple Inc. Common Stock",
+         "exchange": "NASDAQ-GS", "asset": "STOCKS"},
+        {"symbol": "APLE", "name": "Apple Hospitality REIT, Inc.",
+         "exchange": "NYSE", "asset": "STOCKS"},
+        {"symbol": "AAPLX", "name": "Example fund", "exchange": "OTC", "asset": "FUNDS"},
+    ]}
+
+
+def crypto_chart_payload():
+    return {"retCode": 0, "result": {"list": [
+        ["1786334460000", "65000", "65100", "64900", "65050", "1", "1"],
+        ["1786334400000", "64900", "65020", "64850", "65000", "1", "1"],
+    ]}}
+
+
 def main():
     # --- symbol routing: tickers, pairs and suffixes all resolve ----------
     assert crypto_id("BTC") == "bitcoin"
@@ -32,6 +73,18 @@ def main():
     assert crypto_id("ETH-USD") == "ethereum"
     assert crypto_id("AAPL") is None, "equities must not route to the crypto feed"
     assert crypto_id("") is None
+
+    # --- search accepts company names and keeps offline defaults ----------
+    defaults = QuoteFeed(fetcher=lambda u: search_payload()).search("")
+    assert [item["symbol"] for item in defaults[:3]] == ["BAC", "AAPL", "MSFT"]
+    search_calls = []
+    def search_fetch(url):
+        search_calls.append(url)
+        return search_payload()
+    matches = QuoteFeed(fetcher=search_fetch).search("apple")
+    assert [item["symbol"] for item in matches] == ["AAPL", "APLE"]
+    assert matches[0]["name"] == "Apple"
+    assert "autocomplete" in search_calls[0] and "apple" in search_calls[0]
 
     # --- equities: dollar sign and commas are stripped, not parsed as float
     calls = []
@@ -47,6 +100,48 @@ def main():
     assert isinstance(quote["price_cents"], int)
     assert quote["asset_class"] == "equity" and quote["source"] == "nasdaq"
     assert "nasdaq.com" in calls[0]
+
+    # --- historical closes are normalized oldest-first -------------------
+    history_calls = []
+
+    def history_fetch(url):
+        history_calls.append(url)
+        return history_payload()
+
+    history = QuoteFeed(fetcher=history_fetch).history("AAPL")
+    assert history["source"] == "nasdaq" and len(history["rows"]) == 90
+    assert history["rows"][0]["close_cents"] == 30890
+    assert history["rows"][-1]["close_cents"] == 30000
+    assert "historical" in history_calls[0] and "fromdate=" in history_calls[0]
+    try:
+        QuoteFeed(fetcher=history_fetch).history("BTC-USD")
+        raise AssertionError("crypto history is not supported by this feed")
+    except QuoteUnavailable:
+        pass
+
+    # --- intraday prices keep chart precision and market metadata ----------
+    intraday = QuoteFeed(fetcher=lambda u: chart_payload()).intraday("aapl")
+    assert intraday["symbol"] == "AAPL" and intraday["market_status"] == "Open"
+    assert intraday["is_realtime"] is True and intraday["price_cents"] == 31334
+    assert intraday["percentage_change_bps"] == 108
+    assert intraday["points"] == [
+        {"ts_ms": 1786334400000, "price_mills": 310125},
+        {"ts_ms": 1786334460000, "price_mills": 313335},
+    ]
+    unavailable_change = chart_payload()
+    unavailable_change["data"].update({
+        "previousClose": "N/A", "netChange": "N/A", "percentageChange": "N/A",
+    })
+    degraded_intraday = QuoteFeed(fetcher=lambda u: unavailable_change).intraday("BAC")
+    assert degraded_intraday["price_cents"] == 31334
+    assert degraded_intraday["previous_close_cents"] == 0
+    assert degraded_intraday["net_change_cents"] == 0
+    assert degraded_intraday["percentage_change_bps"] == 0
+    try:
+        QuoteFeed(fetcher=lambda u: chart_payload()).intraday("BTC-USD")
+        raise AssertionError("crypto intraday chart is not supported by this feed")
+    except QuoteUnavailable:
+        pass
 
     big = QuoteFeed(fetcher=lambda u: equity_payload("$1,234.50")).quote("BRK")
     assert big["price_cents"] == 123450, big
@@ -66,6 +161,11 @@ def main():
     assert btc["price_cents"] == 6497400, btc
     assert btc["asset_class"] == "crypto" and btc["source"] == "coingecko"
     assert "coingecko.com" in crypto_calls[0]
+    crypto_points = QuoteFeed(fetcher=lambda u: crypto_chart_payload()).crypto_intraday_points("BTC-USD")
+    assert crypto_points == [
+        {"ts_ms": 1786334400000, "price_mills": 65000000},
+        {"ts_ms": 1786334460000, "price_mills": 65050000},
+    ]
 
     # --- sub-cent prices round rather than truncate -----------------------
     assert QuoteFeed(fetcher=lambda u: equity_payload("$2.346")).quote("X")["price_cents"] == 235
@@ -143,6 +243,34 @@ def main():
 
     # --- price_map is shaped for PaperBroker.mark_to_market() -------------
     assert QuoteFeed(fetcher=equity_fetch).price_map(["AAPL"]) == {"AAPL": 31333}
+
+    # --- ETFs answer under a different Nasdaq asset class ----------------
+    seen = []
+
+    def etf_only(url):
+        seen.append(url)
+        if "assetclass=etf" not in url:
+            return {"status": {"rCode": 400}}
+        return chart_payload() if "/chart" in url else equity_payload()
+
+    etf_feed = QuoteFeed(ttl_seconds=0, fetcher=etf_only)
+    assert etf_feed.intraday("VOO")["points"], "an ETF chart must fall back off assetclass=stocks"
+    assert etf_feed.quote("VOO")["price_cents"] == 31333
+    tried = [u for u in seen if "/chart" in u]
+    assert "assetclass=stocks" in tried[0], "the stock class must still be tried first"
+    seen.clear()
+    etf_feed.intraday("VOO")
+    assert all("assetclass=etf" in u for u in seen), f"the working class must be remembered, retried {seen}"
+
+    # --- a cached chart is available without touching the network --------
+    warm = QuoteFeed(ttl_seconds=0, fetcher=lambda url: chart_payload())
+    assert warm.cached_intraday("AAPL") is None, "nothing seen yet means nothing to replay"
+    warm.intraday("AAPL")
+    replay = warm.cached_intraday("AAPL")
+    assert replay and replay["stale"] is True, "a replayed chart must be labelled stale"
+    for entry in warm._intraday_cache.values():
+        entry["_at"] -= 1000
+    assert warm.cached_intraday("AAPL") is None, "an old chart must not be replayed as a placeholder"
 
     print("prices smoke test: ok")
 
