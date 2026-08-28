@@ -40,7 +40,7 @@ assert.ok(mac.includes('UpdateDictationTranscriptSegments'), 'Mac must accumulat
 assert.ok(mac.includes('transcript_segments.push_back'), 'Mac must preserve earlier recognition segments');
 assert.ok(mac.includes('CommitCurrentDictationPhrase(cb)'), 'Mac must commit each completed phrase before continuing');
 assert.ok(mac.includes('StartDictationRecognitionTaskLocked(cb)'), 'Mac must restart recognition after a pause-finalized phrase');
-assert.ok(mac.includes('st.active = false;\n    if (st.request)'), 'Mac finalization must stop phrase rollover before ending audio');
+assert.ok(/st\.active = false;\r?\n    if \(st\.request\)/.test(mac), 'Mac finalization must stop phrase rollover before ending audio');
 assert.ok(!mac.includes('cb.best_text =\n                           std::string([result.bestTranscription'), 'Mac must not replace the full transcript with the newest partial phrase');
 assert.ok(mac.includes('st.level_rms * 3.6'), 'Mac waveform gain must expose quiet speech to the adaptive gate');
 assert.ok(js.includes("ctx.lineCap = 'round'"), 'active waveform bars must use smooth rounded ends');
