@@ -2593,7 +2593,7 @@ private:
     icon.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
     icon.uCallbackMessage = kMsgPaperTrayIcon;
     icon.hIcon = LoadPaperTrayIcon();
-    if (!icon.hIcon) icon.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+    if (!icon.hIcon) icon.hIcon = LoadIconW(nullptr, MAKEINTRESOURCEW(32512));
     wcsncpy_s(icon.szTip, _countof(icon.szTip),
               L"AI.EXE paper testing is active", _TRUNCATE);
     if (Shell_NotifyIconW(NIM_ADD, &icon)) {

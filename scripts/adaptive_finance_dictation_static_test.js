@@ -73,6 +73,7 @@ assert.ok(win.includes('SpeechRecognizer'), 'Windows must keep native speech rec
 assert.ok(win.includes('kSingleInstanceMutex'), 'Windows must reject duplicate GUI instances');
 assert.ok(win.includes('SystemUsesLightTheme'), 'Windows tray icon must follow the taskbar theme');
 assert.ok(win.includes('RefreshPaperTrayIconTheme'), 'Windows tray icon must refresh after a theme change');
+assert.ok(win.includes('LoadIconW(nullptr, MAKEINTRESOURCEW(32512))'), 'Windows tray fallback must use a wide resource identifier');
 assert.ok(winResources.includes('2 ICON "status-icon-light.ico"'), 'Windows light-theme tray icon must be embedded');
 assert.ok(winResources.includes('3 ICON "status-icon-dark.ico"'), 'Windows dark-theme tray icon must be embedded');
 assert.ok(js.includes("document.documentElement.classList.contains('platform-windows')"), 'Windows must use its live WebAudio waveform path');
