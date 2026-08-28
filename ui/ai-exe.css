@@ -3463,6 +3463,46 @@ html.platform-mac .settings-sidebar {
 .strategy-forward-grid > div { min-width: 0; padding: 10px 11px; border-radius: 9px; background: rgba(0, 0, 0, 0.16); }
 .strategy-forward-grid span { display: block; margin-bottom: 5px; color: var(--text3); font-size: 9px; font-weight: 600; letter-spacing: 0.45px; text-transform: uppercase; }
 .strategy-forward-grid strong { color: var(--text); font: 600 13px var(--font-mono); }
+.ai-research-lab { margin-top: 18px; padding: 18px; border-radius: 12px; background: #0c1514; box-shadow: inset 0 0 0 1px rgba(52, 211, 153, .13); }
+.ai-research-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; }
+.ai-research-head > div { display: flex; flex-direction: column; gap: 4px; }
+.ai-research-kicker { color: #34d399; font: 700 8px var(--font-mono); letter-spacing: .13em; }
+.ai-research-head strong { color: var(--text); font-size: 15px; }
+.ai-research-head small { max-width: 650px; color: var(--text2); font-size: 11px; line-height: 1.45; }
+.ai-research-verdict { padding: 5px 8px; border: 1px solid rgba(245, 158, 11, .32); border-radius: 4px; color: #fbbf24; font: 700 8px var(--font-mono); letter-spacing: .08em; white-space: nowrap; }
+.ai-research-controls { display: flex; align-items: end; gap: 10px; margin: 17px 0 14px; }
+.ai-research-controls label { display: flex; flex: 1; flex-direction: column; gap: 5px; color: var(--text3); font: 650 9px var(--font-sans); letter-spacing: .04em; text-transform: uppercase; }
+.ai-research-controls input { width: 100%; padding: 9px 10px; border: 1px solid rgba(255, 255, 255, .09); border-radius: 8px; outline: 0; background: rgba(0, 0, 0, .25); color: var(--text); font: 11px var(--font-mono); }
+.ai-research-controls input:focus { border-color: rgba(52, 211, 153, .5); box-shadow: 0 0 0 3px rgba(52, 211, 153, .08); }
+.ai-research-empty { min-height: 74px; display: grid; grid-template-columns: 38px minmax(0, 1fr); align-items: center; gap: 12px; padding: 14px; border-top: 1px solid rgba(255, 255, 255, .06); }
+.ai-research-empty > span { color: #34d399; font: 600 13px var(--font-mono); }
+.ai-research-empty > div { display: flex; flex-direction: column; gap: 4px; }
+.ai-research-empty strong { color: var(--text2); font-size: 12px; }
+.ai-research-empty small { color: var(--text3); font-size: 10.5px; line-height: 1.45; }
+.ai-research-empty.error > span, .ai-research-empty.error strong { color: #fca5a5; }
+.ai-research-scoreboard { display: grid; grid-template-columns: minmax(0, 1fr) 116px; gap: 14px; padding-top: 4px; }
+.ai-evidence-board { display: flex; flex-direction: column; gap: 11px; }
+.ai-evidence-lane > div { display: flex; justify-content: space-between; margin-bottom: 5px; color: var(--text2); font-size: 10.5px; }
+.ai-evidence-lane strong { color: var(--text); font: 600 11px var(--font-mono); }
+.ai-evidence-lane strong.expense { color: #fca5a5; }
+.ai-evidence-lane > i { display: block; height: 5px; overflow: hidden; border-radius: 1px; background: rgba(255, 255, 255, .055); }
+.ai-evidence-lane > i > b { display: block; height: 100%; background: #64748b; }
+.ai-evidence-lane.leader > i > b { background: #34d399; }
+.ai-evidence-lane.leader > div span { color: #6ee7b7; }
+.ai-research-scoreboard aside { display: grid; grid-template-columns: 1fr auto; gap: 3px 6px; padding-left: 14px; border-left: 1px solid rgba(255, 255, 255, .07); }
+.ai-research-scoreboard aside span { color: var(--text3); font: 650 7px var(--font-mono); letter-spacing: .08em; }
+.ai-research-scoreboard aside strong { color: var(--text); font: 650 14px var(--font-mono); text-align: right; }
+.ai-research-scoreboard aside small { grid-column: 1 / -1; margin-bottom: 7px; color: var(--text3); font-size: 8.5px; }
+.ai-episode-tape { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 5px; margin-top: 16px; }
+.ai-episode { min-width: 0; padding: 8px; border-top: 2px solid #34d399; background: rgba(255, 255, 255, .025); }
+.ai-episode.invalid { border-top-color: #f59e0b; }
+.ai-episode span, .ai-episode strong, .ai-episode small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ai-episode span { color: var(--text3); font: 600 8px var(--font-mono); }
+.ai-episode strong { margin: 3px 0; color: var(--text2); font: 650 8px var(--font-mono); }
+.ai-episode small { color: var(--text3); font-size: 8px; }
+.ai-research-foot { display: flex; justify-content: space-between; gap: 12px; margin-top: 12px; padding-top: 10px; border-top: 1px solid rgba(255, 255, 255, .06); }
+.ai-research-foot span { color: var(--text3); font: 9px var(--font-mono); }
+.ai-research-foot strong { color: var(--text2); font-size: 9.5px; font-weight: 500; text-align: right; }
 .strategy-runner-actions { display: flex; flex-wrap: wrap; gap: 9px; margin-top: 12px; }
 .paper-background-service { margin-top: 14px; overflow: hidden; border-radius: 11px; background: rgba(0, 0, 0, 0.15); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.055); }
 .paper-background-service .settings-toggle-row { padding: 15px 16px 13px; }
@@ -3661,6 +3701,7 @@ html.platform-mac .settings-sidebar {
   .finance-audit-empty-state { padding: 16px; }
   .strategy-result-list { grid-template-columns: minmax(0, 1fr); }
   .strategy-forward-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .ai-episode-tape { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .broker-portfolio-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
@@ -3672,6 +3713,10 @@ html.platform-mac .settings-sidebar {
   .finance-business-kpis > .finance-card:last-child { grid-column: auto; }
   .strategy-card-grid { grid-template-columns: minmax(0, 1fr); }
   .broker-portfolio-grid { grid-template-columns: minmax(0, 1fr); }
+  .ai-research-controls, .ai-research-foot { align-items: stretch; flex-direction: column; }
+  .ai-research-scoreboard { grid-template-columns: minmax(0, 1fr); }
+  .ai-research-scoreboard aside { grid-template-columns: 1fr auto; padding: 12px 0 0; border-top: 1px solid rgba(255, 255, 255, .07); border-left: 0; }
+  .ai-research-foot strong { text-align: left; }
   .finance-panel { padding-left: 12px; padding-right: 12px; }
   .finance-panel-title { align-items: flex-start; flex-direction: column; }
   .finance-inline-btn { align-self: flex-start; }

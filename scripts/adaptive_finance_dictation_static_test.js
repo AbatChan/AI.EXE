@@ -49,14 +49,15 @@ assert.ok(mac.includes('AcquireGuiInstanceLock'), 'Mac must reject duplicate GUI
 assert.ok(mac.includes('com.aiexe.desktop.show-main-window'), 'a second Mac launch must reveal the existing window');
 assert.ok(mac.includes('AI exe logo white'), 'Mac tray must load the monochrome AI.EXE asset');
 assert.ok(mac.includes('setTemplate:(statusIconPath != nil)'), 'Mac tray icon must follow menu-bar contrast');
-assert.ok(mac.includes('for (int attempt = 0; attempt < 5; ++attempt)'), 'Mac launchd bootstrap must retry after removal races');
-assert.ok(mac.includes('attempt * 150000'), 'Mac launchd retry must use bounded backoff');
+assert.ok(mac.includes('paper-background.enabled'), 'Mac background mode must use the app-owned marker');
+assert.ok(mac.includes('marker << "enabled'), 'Mac background preference must persist across app relaunches');
 assert.ok(mac.includes('bool WaitForLaunchdJobRemoval(NSString *target)'), 'Mac background transitions must wait for launchd removal');
 assert.ok(mac.includes('attempt < 160'), 'Mac launchd barrier must outlast the five-second service exit window');
-assert.ok(mac.includes('if (!WaitForLaunchdJobRemoval(target))'), 'Mac disable and enable paths must use the launchd barrier');
-assert.ok(mac.includes('return RunLaunchctl(@[@"print", target], false, nullptr);'), 'Mac background state must reflect the registered launchd job');
+assert.ok(mac.includes('WaitForLaunchdJobRemoval(target);'), 'Mac migration must retire the legacy launchd job');
+assert.ok(mac.includes('FileExists(PaperBackgroundMarkerPath())'), 'Mac background state must reflect the app-owned marker');
+assert.ok(!mac.includes('RunLaunchctl(@[@"bootstrap"'), 'Mac background mode must not recreate the blocked legacy LaunchAgent');
 assert.ok(mac.includes("typeof stopBrokerLiveUpdates === 'function'"), 'menu-bar quit must release the open market stream');
-assert.ok(mac.includes('QOS_CLASS_USER_INITIATED'), 'menu-bar launchd shutdown must not block the UI thread');
+assert.ok(mac.includes('QOS_CLASS_USER_INITIATED'), 'menu-bar shutdown work must not block the UI thread');
 assert.ok(js.includes("backgroundStatus.classList.toggle('error', isError)"), 'background service failures must have a distinct error state');
 const backgroundToggleStart = js.indexOf("backgroundToggle.addEventListener('change'");
 const backgroundToggleHandler = js.slice(

@@ -5,6 +5,7 @@ qwen / OpenAI are all OpenAI-compatible), so the provider is just base_url + mod
 key config. Retries transient errors (429/5xx, network) with backoff; surfaces
 401/402/403 (bad key / out of credits / forbidden) as clear errors.
 """
+import json
 import time
 
 import httpx
@@ -91,3 +92,57 @@ class LLMClient:
             except (KeyError, IndexError, TypeError, ValueError):
                 raise LLMError("Unexpected provider response shape.")
         raise last_err or LLMError("Provider call failed after retries.")
+
+    def complete_json(self, messages, max_tokens: int = 4096) -> dict:
+        """One structured research call. Empty thinking output gets one plain retry."""
+        if not self.base_url:
+            raise LLMError("No LLM provider configured — set AIEXE_LLM_BASE_URL.", 400)
+        if self.kind == "ollama":
+            if not self.api_key:
+                self.api_key = "local"
+            url = f"{self.base_url}/api/chat"
+            payload = {"model": self.model, "messages": messages, "stream": False,
+                       "format": "json", "options": {"temperature": 0, "num_predict": max_tokens}}
+            headers = {"Content-Type": "application/json"}
+        else:
+            if not self.api_key:
+                raise LLMError("No API key set — POST /api/api-key first.", 401)
+            url = f"{self.base_url}/chat/completions"
+            payload = {"model": self.model, "messages": messages, "temperature": 0,
+                       "max_tokens": max_tokens, "response_format": {"type": "json_object"}}
+            if "deepseek.com" in self.base_url:
+                payload["thinking"] = {"type": "enabled"}
+                payload["reasoning_effort"] = "high"
+            headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
+
+        started = time.monotonic()
+        attempts = []
+        for structured_attempt in range(2):
+            try:
+                response = httpx.post(url, json=payload, headers=headers, timeout=self.timeout)
+            except httpx.HTTPError as exc:
+                raise LLMError(f"Network error calling provider: {exc}") from exc
+            if response.status_code in (401, 402, 403):
+                raise LLMError(f"Provider rejected the request ({response.status_code}): {response.text[:200]}",
+                               response.status_code)
+            if response.status_code != 200:
+                raise LLMError(f"Provider error ({response.status_code}): {response.text[:200]}",
+                               response.status_code)
+            try:
+                data = response.json()
+                content = parse_ollama_content(data) if self.kind == "ollama" else parse_openai_content(data)
+            except (KeyError, IndexError, TypeError, ValueError) as exc:
+                raise LLMError("Unexpected provider response shape.") from exc
+            attempts.append({"mode": "plain" if structured_attempt else "structured-thinking",
+                             "empty": not bool(str(content or "").strip())})
+            if str(content or "").strip():
+                try:
+                    parsed = json.loads(content)
+                except (TypeError, ValueError) as exc:
+                    raise LLMError("Provider returned invalid JSON.") from exc
+                return {"data": parsed, "latency_ms": round((time.monotonic() - started) * 1000),
+                        "attempts": attempts, "usage": data.get("usage") or {},
+                        "system_fingerprint": data.get("system_fingerprint") or ""}
+            payload.pop("thinking", None)
+            payload.pop("reasoning_effort", None)
+        raise LLMError("Provider returned empty JSON twice.")

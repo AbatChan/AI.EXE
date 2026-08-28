@@ -60,6 +60,7 @@
     "test:agent-no-progress": "node scripts/agent_no_progress_detector_test.js",
     "test:agent-guard-deadlock": "node scripts/agent_guard_deadlock_replay_test.js",
     "test:operator-network-consent": "node scripts/operator_network_consent_static_test.js",
+    "test:ai-portfolio-research": "node scripts/ai_portfolio_research_static_test.js",
     "test:auto-update-lifecycle": "node scripts/auto_update_lifecycle_test.js"
   },
   "dependencies": {
@@ -87,7 +88,7 @@
     "markdown-it-texmath": "^1.0.0",
     "rollup": "^4.59.0"
   },
-  "version": "10.8.0",
+  "version": "10.8.5",
   "devDependencies": {
     "eslint-linter-browserify": "^10.7.0"
   }

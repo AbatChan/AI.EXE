@@ -47,6 +47,9 @@ jobs:
       - name: Check adaptive finance and dictation UI
         run: node scripts/adaptive_finance_dictation_static_test.js
 
+      - name: Check AI portfolio research boundary
+        run: node scripts/ai_portfolio_research_static_test.js
+
       - name: Build AI.EXE GUI
         shell: cmd
         run: |

@@ -1102,6 +1102,12 @@ std::filesystem::path PaperBackgroundAgentPath() {
          "com.aiexe.paper-background.plist";
 }
 
+std::filesystem::path PaperBackgroundMarkerPath() {
+  const auto state_path = UiStateBackupPath();
+  return state_path.empty() ? std::filesystem::path{}
+                            : state_path.parent_path() / "paper-background.enabled";
+}
+
 bool RunLaunchctl(NSArray<NSString *> *arguments, bool accept_missing,
                   std::string *err) {
   NSTask *task = [[NSTask alloc] init];
@@ -1138,110 +1144,45 @@ bool WaitForLaunchdJobRemoval(NSString *target) {
 }
 
 bool IsPaperBackgroundServiceEnabled() {
-  NSString *domain = [NSString stringWithFormat:@"gui/%u", getuid()];
-  NSString *target = [NSString stringWithFormat:@"%@/%@", domain,
-                                                PaperBackgroundAgentLabel()];
-  return RunLaunchctl(@[@"print", target], false, nullptr);
+  return FileExists(PaperBackgroundMarkerPath()) || FileExists(PaperBackgroundAgentPath());
 }
 
 bool ConfigurePaperBackgroundService(
     const std::filesystem::path &runtime_root, bool enabled, std::string *err) {
   const auto plist_path = PaperBackgroundAgentPath();
-  if (plist_path.empty()) {
-    if (err) *err = "The user LaunchAgents folder is unavailable.";
+  const auto marker_path = PaperBackgroundMarkerPath();
+  if (marker_path.empty()) {
+    if (err) *err = "Application Support is unavailable.";
     return false;
   }
   NSString *domain = [NSString stringWithFormat:@"gui/%u", getuid()];
   NSString *target = [NSString stringWithFormat:@"%@/%@", domain,
                                                 PaperBackgroundAgentLabel()];
+  RunLaunchctl(@[@"bootout", target], true, nullptr);
+  WaitForLaunchdJobRemoval(target);
+  std::error_code ec;
+  std::filesystem::remove(plist_path, ec);
+  ec.clear();
   if (!enabled) {
-    RunLaunchctl(@[@"bootout", target], true, nullptr);
-    if (!WaitForLaunchdJobRemoval(target)) {
-      if (err) *err = "The previous background service is still stopping. Please try again.";
-      return false;
-    }
-    std::error_code ec;
-    std::filesystem::remove(plist_path, ec);
-    if (ec) {
-      if (err) *err = "Could not remove the background service setting.";
-      return false;
-    }
-    return true;
+    std::filesystem::remove(marker_path, ec);
+    return !ec;
   }
-
   const auto backend_dir = runtime_root / "backend";
-  const auto python_path = backend_dir / ".venv" / "bin" / "python";
-  const auto main_path = backend_dir / "app" / "main.py";
-  if (!FileExists(python_path) || !FileExists(main_path)) {
+  if (!FileExists(backend_dir / ".venv" / "bin" / "python") ||
+      !FileExists(backend_dir / "app" / "main.py")) {
     if (err) *err = "The bundled backend is unavailable.";
     return false;
   }
-
-  const auto data_dir = backend_dir / ".data";
-  std::error_code ec;
-  std::filesystem::create_directories(plist_path.parent_path(), ec);
-  std::filesystem::create_directories(data_dir, ec);
-  if (ec) {
-    if (err) *err = "Could not prepare the background service folders.";
+  std::filesystem::create_directories(marker_path.parent_path(), ec);
+  std::ofstream marker(marker_path, std::ios::trunc);
+  marker << "enabled\n";
+  marker.close();
+  chmod(marker_path.c_str(), S_IRUSR | S_IWUSR);
+  if (ec || !FileExists(marker_path)) {
+    if (err) *err = "Could not save the background service setting.";
     return false;
   }
-  NSString *python = [NSString stringWithUTF8String:python_path.c_str()];
-  NSString *backend = [NSString stringWithUTF8String:backend_dir.c_str()];
-  NSString *data = [NSString stringWithUTF8String:data_dir.c_str()];
-  NSString *log = [data stringByAppendingPathComponent:@"backend-background.log"];
-  NSDictionary *plist = @{
-    @"Label": PaperBackgroundAgentLabel(),
-    @"ProgramArguments": @[
-      python, @"-m", @"uvicorn", @"app.main:app", @"--host", @"127.0.0.1",
-      @"--port", @"8765"
-    ],
-    @"WorkingDirectory": backend,
-    @"EnvironmentVariables": @{ @"AIEXE_BACKEND_DATA_DIR": data },
-    @"RunAtLoad": @YES,
-    @"KeepAlive": @YES,
-    @"ThrottleInterval": @10,
-    @"ProcessType": @"Background",
-    @"StandardOutPath": log,
-    @"StandardErrorPath": log,
-  };
-  NSError *plist_error = nil;
-  NSData *plist_data = [NSPropertyListSerialization
-      dataWithPropertyList:plist
-                    format:NSPropertyListXMLFormat_v1_0
-                   options:0
-                     error:&plist_error];
-  NSString *plist_string = [NSString stringWithUTF8String:plist_path.c_str()];
-  if (!plist_data || ![plist_data writeToFile:plist_string
-                                       options:NSDataWritingAtomic
-                                         error:&plist_error]) {
-    if (err) *err = plist_error ? [[plist_error localizedDescription] UTF8String]
-                                : "Could not write the background service.";
-    return false;
-  }
-  chmod(plist_path.c_str(), S_IRUSR | S_IWUSR);
-  RunLaunchctl(@[@"bootout", target], true, nullptr);
-  if (!WaitForLaunchdJobRemoval(target)) {
-    if (err) *err = "The previous background service is still stopping. Please try again.";
-    std::filesystem::remove(plist_path, ec);
-    return false;
-  }
-  for (int attempt = 0; attempt < 5; ++attempt) {
-    if (attempt > 0) {
-      usleep(static_cast<useconds_t>(attempt * 150000));
-    }
-    std::string bootstrap_error;
-    if (RunLaunchctl(@[@"bootstrap", domain, plist_string], false,
-                     &bootstrap_error)) {
-      return true;
-    }
-    if (attempt == 4) {
-      if (err) *err = bootstrap_error;
-      std::filesystem::remove(plist_path, ec);
-      return false;
-    }
-    RunLaunchctl(@[@"bootout", target], true, nullptr);
-  }
-  return false;
+  return true;
 }
 
 NSTask *StartFastApiBackend(const std::filesystem::path &runtime_root) {
@@ -2630,25 +2571,6 @@ static bool IsPreventingIdleSleepOnMac() {
     } else {
       const bool enable = workspace_content == "1" || workspace_content == "true";
       const auto runtime_root = ResolveRuntimeRoot(_loadedHtmlPath);
-      if (enable) {
-        __block NSTask *owned_task = nil;
-        dispatch_sync(dispatch_get_main_queue(), ^{
-          owned_task = _backendTask;
-          _backendTask = nil;
-        });
-        if (owned_task && [owned_task isRunning]) {
-          [owned_task terminate];
-          for (int attempt = 0; attempt < 15 && [owned_task isRunning]; ++attempt) {
-            usleep(50000);
-          }
-          if ([owned_task isRunning]) {
-            kill(owned_task.processIdentifier, SIGKILL);
-            for (int attempt = 0; attempt < 20 && [owned_task isRunning]; ++attempt) {
-              usleep(50000);
-            }
-          }
-        }
-      }
       if (!ConfigurePaperBackgroundService(runtime_root, enable, &op_err)) {
         ok = false;
         message = op_err.empty() ? "Could not change the background service."
@@ -2661,18 +2583,11 @@ static bool IsPreventingIdleSleepOnMac() {
           [self setPaperStatusItemVisible:enable ? YES : NO];
         });
       }
-      if (!enable && ok) {
-        for (int attempt = 0; attempt < 40 && IsBackendReachable(); ++attempt) {
-          usleep(50000);
+      dispatch_sync(dispatch_get_main_queue(), ^{
+        if (!_backendTask || ![_backendTask isRunning]) {
+          _backendTask = StartFastApiBackend(runtime_root);
         }
-      }
-      if (!enable || !ok) {
-        dispatch_sync(dispatch_get_main_queue(), ^{
-          if (!_backendTask || ![_backendTask isRunning]) {
-            _backendTask = StartFastApiBackend(runtime_root);
-          }
-        });
-      }
+      });
     }
   } else if (action == "workspaceList") {
     if (!BuildWorkspaceListOutput(_runtime, workspace_path, &output, &op_err)) {
@@ -3351,8 +3266,12 @@ static bool IsPreventingIdleSleepOnMac() {
   [_window makeKeyAndOrderFront:nil];
   [_window makeFirstResponder:_webView];
   [self loadUiHtml];
+  const auto runtime_root = ResolveRuntimeRoot(_loadedHtmlPath);
+  if (FileExists(PaperBackgroundAgentPath())) {
+    ConfigurePaperBackgroundService(runtime_root, true, nullptr);
+  }
   [self setPaperStatusItemVisible:IsPaperBackgroundServiceEnabled() ? YES : NO];
-  _backendTask = StartFastApiBackend(ResolveRuntimeRoot(_loadedHtmlPath));
+  _backendTask = StartFastApiBackend(runtime_root);
   [self initializeRuntime];
 }
 

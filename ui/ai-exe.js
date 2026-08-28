@@ -2277,6 +2277,53 @@ async function syncPaperTestCloseGuard(active = null) {
   });
 }
 
+function aiResearchPanel() {
+  return `
+    <section class="ai-research-lab" id="aiResearchLab">
+      <div class="ai-research-head">
+        <div><span class="ai-research-kicker">MODEL CHALLENGER · PAPER ONLY</span><strong>Blinded portfolio evidence</strong><small>The model sees factors labeled A–F, never company names, dates, prices, or future returns.</small></div>
+        <span class="ai-research-verdict">NOT PROMOTED</span>
+      </div>
+      <div class="ai-research-controls">
+        <label>Research universe<input id="aiResearchSymbols" value="BAC, AAPL, MSFT, JPM, XOM, JNJ" maxlength="80"></label>
+        <button type="button" class="finance-inline-btn" id="aiResearchRunBtn">Run blinded evaluation</button>
+      </div>
+      <div class="ai-research-empty" id="aiResearchOutput">
+        <span>01</span><div><strong>No model result yet</strong><small>One evaluation uses six historical episodes and compares the configured provider with momentum and equal-weight. It cannot create, stage, or confirm an order.</small></div>
+      </div>
+    </section>`;
+}
+
+function renderAIResearchResult(host, result) {
+  const returns = result.returns_bps || {};
+  const pct = (value) => `${(Number(value || 0) / 100).toFixed(2)}%`;
+  const series = [
+    ['ai', 'AI model'], ['momentum', 'Momentum rule'], ['equal_weight', 'Equal-weight'],
+  ];
+  const max = Math.max(1, ...series.map(([key]) => Math.abs(Number(returns[key] || 0))));
+  const lanes = series.map(([key, label]) => {
+    const value = Number(returns[key] || 0);
+    const width = Math.max(2, Math.abs(value) / max * 100);
+    return `<div class="ai-evidence-lane${result.leader === key ? ' leader' : ''}">
+      <div><span>${label}</span><strong class="${value < 0 ? 'expense' : ''}">${pct(value)}</strong></div>
+      <i><b style="width:${width}%"></b></i>
+    </div>`;
+  }).join('');
+  const episodes = (result.episodes || []).map((episode) => `
+    <div class="ai-episode${episode.valid ? '' : ' invalid'}"><span>E${String(episode.episode).padStart(2, '0')}</span><strong>${episode.valid ? 'VALID' : 'CASH / INVALID'}</strong><small>${escapeHtml(episode.note || 'Schema passed')}</small></div>`).join('');
+  const provider = result.provider || {};
+  const valid = Number(result.valid_decisions || 0);
+  const total = Number(result.total_decisions || 0);
+  const attempts = (provider.attempts || []).map((attempt) => `${attempt.mode}${attempt.empty ? ' empty' : ''}`).join(' → ');
+  host.innerHTML = `
+    <div class="ai-research-scoreboard">
+      <div class="ai-evidence-board">${lanes}</div>
+      <aside><span>RELIABILITY</span><strong>${valid}/${total}</strong><small>schema-valid decisions</small><span>LATENCY</span><strong>${(Number(provider.latency_ms || 0) / 1000).toFixed(1)}s</strong><small>${escapeHtml(provider.local ? 'local model' : 'remote API')}</small></aside>
+    </div>
+    <div class="ai-episode-tape">${episodes}</div>
+    <div class="ai-research-foot"><span>${escapeHtml(provider.model || 'configured model')} · ${escapeHtml(attempts || 'structured')}</span><strong>${valid === total ? 'Research result only — benchmark over more periods before promotion.' : 'Model output was unreliable — invalid decisions were held as cash.'}</strong></div>`;
+}
+
 async function renderStrategyLab(currency = 'USD', requestedSymbol = FINANCE_DEFAULT_ASSETS[0].symbol) {
   const host = document.getElementById('strategyLabSection');
   if (!host) return;
@@ -2376,7 +2423,8 @@ async function renderStrategyLab(currency = 'USD', requestedSymbol = FINANCE_DEF
       </div>
       <details class="strategy-research-details"><summary>Research details · ${(report.candidates || []).length} candidate strategies</summary><div class="strategy-result-list">${rows}</div></details>
       <div class="broker-mark-note" id="strategyLabNote">${escapeHtml(formatFinanceDate(report.from_date, '', true))} – ${escapeHtml(formatFinanceDate(report.to_date, '', true))} · ${report.observations} Nasdaq closes · ${escapeHtml(report.disclaimer || '')}</div>
-      ${forwardPanel}`;
+      ${forwardPanel}
+      ${aiResearchPanel()}`;
 
     const input = document.getElementById('strategyLabSymbol');
     const runButton = document.getElementById('strategyLabRunBtn');
@@ -2391,6 +2439,29 @@ async function renderStrategyLab(currency = 'USD', requestedSymbol = FINANCE_DEF
       if (!runnerResponse.ok) throw new Error(runnerResult.detail || 'Daily test request failed.');
       return runnerResult;
     };
+    const aiResearchButton = document.getElementById('aiResearchRunBtn');
+    const aiResearchSymbols = document.getElementById('aiResearchSymbols');
+    const aiResearchOutput = document.getElementById('aiResearchOutput');
+    if (aiResearchButton && aiResearchSymbols && aiResearchOutput) {
+      aiResearchButton.addEventListener('click', async () => {
+        const symbols = String(aiResearchSymbols.value || '').split(',').map((value) => value.trim().toUpperCase()).filter(Boolean);
+        aiResearchButton.disabled = true;
+        aiResearchButton.textContent = 'Evaluating…';
+        aiResearchOutput.className = 'ai-research-empty loading';
+        aiResearchOutput.innerHTML = '<span>···</span><div><strong>Running six blinded episodes</strong><small>Fetching historical closes, asking the configured model once, then scoring every result locally.</small></div>';
+        try {
+          const result = await runnerPost('/api/broker/ai-research', { symbols, episodes: 6 });
+          aiResearchOutput.className = 'ai-research-output';
+          renderAIResearchResult(aiResearchOutput, result);
+        } catch (error) {
+          aiResearchOutput.className = 'ai-research-empty error';
+          aiResearchOutput.innerHTML = `<span>!</span><div><strong>Evaluation stopped safely</strong><small>${escapeHtml(error.message)}</small></div>`;
+        } finally {
+          aiResearchButton.disabled = false;
+          aiResearchButton.textContent = 'Run blinded evaluation';
+        }
+      });
+    }
     const backgroundToggle = document.getElementById('paperBackgroundToggle');
     const backgroundStatus = document.getElementById('paperBackgroundStatus');
     if (backgroundToggle && backgroundStatus) {

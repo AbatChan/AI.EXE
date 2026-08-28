@@ -15,10 +15,15 @@ from fastapi import APIRouter, HTTPException, Query, WebSocket, WebSocketDisconn
 from pydantic import BaseModel, Field
 
 from ..broker import ConfirmationRequired, LiveTradingBlocked, OrderRejected
+from ..ai_portfolio import DEFAULT_SYMBOLS, build_episodes, research_messages, score_research
 from ..config import settings
+from ..llm import LLMClient, LLMError
 from ..prices import QuoteUnavailable, crypto_id
-from ..services import paper_broker, paper_test_runner, quote_feed
+from ..provider import is_local_provider
+from ..services import (api_key_store, paper_broker, paper_test_runner, provider_store,
+                        quote_feed, usage_manager)
 from ..strategy import analyze_history
+from ..usage import CreditExhausted, RateLimited
 
 router = APIRouter(tags=["broker"])
 BYBIT_SPOT_STREAM = "wss://stream.bybit.com/v5/public/spot"
@@ -58,6 +63,11 @@ class StrategyStageRequest(BaseModel):
 
 class PaperTestStartRequest(BaseModel):
     symbol: str = Field(default="AAPL", min_length=1, max_length=24)
+
+
+class AIResearchRequest(BaseModel):
+    symbols: list[str] = Field(default_factory=lambda: list(DEFAULT_SYMBOLS), min_length=2, max_length=8)
+    episodes: int = Field(default=6, ge=3, le=8)
 
 
 @router.get("/broker/account")
@@ -384,6 +394,49 @@ def broker_strategy_lab(symbol: str = Query(default="AAPL", min_length=1, max_le
         return report
     except (QuoteUnavailable, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post("/broker/ai-research")
+def broker_ai_research(payload: AIResearchRequest):
+    """Blinded model benchmark. It has no broker or order path."""
+    symbols = []
+    for value in payload.symbols:
+        symbol = str(value or "").strip().upper()[:24]
+        if symbol and symbol not in symbols:
+            symbols.append(symbol)
+    if len(symbols) < 2:
+        raise HTTPException(status_code=400, detail="Choose at least two unique symbols.")
+    base_url, model = provider_store.resolve()
+    if not base_url:
+        raise HTTPException(status_code=400, detail="Configure a DeepSeek or local provider first.")
+    local = is_local_provider(base_url)
+    api_key = api_key_store.get_for_internal_use() or ("local" if local else None)
+    if not api_key:
+        raise HTTPException(status_code=400, detail="Set the provider API key first.")
+    try:
+        histories = {symbol: quote_feed.history(symbol)["rows"] for symbol in symbols}
+        episodes = build_episodes(histories, count=payload.episodes)
+        if not local:
+            usage_manager.consume()
+        result = LLMClient(base_url, model, api_key, kind=provider_store.kind(), timeout=180).complete_json(
+            research_messages(episodes), max_tokens=4096)
+        scored = score_research(episodes, result["data"])
+        scored.update({"provider": {"kind": provider_store.kind(), "model": model,
+                                     "local": local, "latency_ms": result["latency_ms"],
+                                     "attempts": result["attempts"], "usage": result["usage"],
+                                     "system_fingerprint": result["system_fingerprint"]},
+                       "universe": symbols, "modeled_round_trip_cost_bps": 10,
+                       "disclaimer": "Blinded historical research only. No order was created or staged."})
+        return scored
+    except RateLimited as exc:
+        raise HTTPException(status_code=429, detail=f"Rate limit reached. Retry in ~{int(exc.retry_after) + 1}s.")
+    except CreditExhausted:
+        raise HTTPException(status_code=402, detail="Monthly credit limit reached.")
+    except (QuoteUnavailable, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except LLMError as exc:
+        status = exc.status if exc.status in (401, 402, 403) else 502
+        raise HTTPException(status_code=status, detail=str(exc))
 
 
 @router.post("/broker/strategy-lab/stage")

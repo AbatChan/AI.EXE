@@ -22,6 +22,7 @@ TESTS = [
     "smoke_finance",    # local finance foundation (was never registered)
     "smoke_broker",     # paper-mode broker adapter + confirmation gate
     "smoke_strategy",   # walk-forward SMA research + risk metrics
+    "smoke_ai_portfolio",  # blinded model challenger + deterministic validation
     "smoke_paper_test", # persistent daily forward-test records + benchmark
     "smoke_prices",     # live quote feed (stubbed fetcher)
     "smoke_market_stream",  # local WebSocket + exchange stream routing
