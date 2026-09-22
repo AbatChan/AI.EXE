@@ -364,9 +364,8 @@
       <section class="finance-dashboard hidden" id="financeDashboard" aria-label="Trading workspace">
         <div class="finance-dashboard-head">
           <div>
-            <div class="finance-eyebrow">Research desk · paper mode</div>
             <h1>Trading</h1>
-            <p>Streaming market data, strategy research, and confirmed paper fills. Live orders remain blocked.</p>
+            <p>Test ideas, follow your portfolio, and compare results. Paper account.</p>
           </div>
           <button class="finance-refresh-btn" id="financeRefreshBtn" type="button">Refresh</button>
         </div>
@@ -840,7 +839,7 @@
                   <path d="M7 17h.01"></path>
                 </svg>
               </span>
-              <span>Workers</span>
+              <span>Connections</span>
             </button>
             <button class="settings-nav-btn" type="button" data-settings-section="personalization">
               <span class="settings-nav-icon">
@@ -885,41 +884,21 @@
               <div class="settings-mode-grid">
                 <label class="settings-mode-card active" id="settingsWorkModeCodingCard">
                   <input id="settingsWorkModeCoding" name="settingsWorkMode" type="radio" value="coding" checked>
-                  <div class="settings-mode-preview settings-mode-preview-coding">
-                    <div class="settings-preview-app">
-                      <div class="settings-preview-sidebar"></div>
-                      <div class="settings-preview-pane">
-                        <span></span><span></span><span></span>
-                      </div>
-                      <div class="settings-preview-chat">
-                        <span></span><span></span><span></span>
-                      </div>
-                    </div>
-                  </div>
+                  <span class="settings-mode-preview" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="8 7 3 12 8 17"/><polyline points="16 7 21 12 16 17"/><line x1="13.5" y1="5" x2="10.5" y2="19"/></svg></span>
                   <div class="settings-mode-title">For coding</div>
                   <div class="settings-mode-copy">More technical responses and tighter control.</div>
                 </label>
                 <label class="settings-mode-card" id="settingsWorkModeEverydayCard">
                   <input id="settingsWorkModeEveryday" name="settingsWorkMode" type="radio" value="everyday">
-                  <div class="settings-mode-preview settings-mode-preview-everyday">
-                    <div class="settings-preview-app everyday">
-                      <div class="settings-preview-sidebar"></div>
-                      <div class="settings-preview-pane soft">
-                        <span></span><span></span><span></span>
-                      </div>
-                      <div class="settings-preview-chat soft">
-                        <span></span><span></span>
-                      </div>
-                    </div>
-                  </div>
+                  <span class="settings-mode-preview" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h16v11H9l-5 4z"/><line x1="8" y1="9.5" x2="16" y2="9.5"/><line x1="8" y1="12.5" x2="13" y2="12.5"/></svg></span>
                   <div class="settings-mode-title">For everyday work</div>
                   <div class="settings-mode-copy">Same power, less technical detail.</div>
                 </label>
               </div>
             </div>
 
-            <div class="settings-section">
-              <div class="settings-section-title">Runtime Overview</div>
+            <div class="settings-section" id="settingsRuntimeSection">
+              <div class="settings-section-title">Local model</div>
               <div class="settings-status-grid">
                 <div class="settings-field settings-field-span">
                   <div class="chat-modal-label">Current Model Path</div>
@@ -939,13 +918,6 @@
             <div class="settings-section">
               <div class="settings-section-title">Defaults</div>
               <div class="settings-toggle-stack">
-                <label class="settings-toggle-row" for="settingsKeepModelChk">
-                  <span class="settings-toggle-copy">
-                    <strong>Keep existing model on update</strong>
-                    <span>Preserve the current local model when refreshing runtime assets.</span>
-                  </span>
-                  <input id="settingsKeepModelChk" type="checkbox">
-                </label>
                 <label class="settings-toggle-row" for="settingsKeepAwakeChk">
                   <span class="settings-toggle-copy">
                     <strong>Keep the computer awake while building</strong>
@@ -997,15 +969,20 @@
                     placeholder="https://example.com/v1/chat/completions">
                 </div>
 
-                <div class="settings-field">
-                  <div class="chat-modal-label">Model Preset</div>
-                  <select class="chat-modal-input" id="settingsApiModelPreset"></select>
+                <div class="settings-field settings-field-span">
+                  <div class="settings-label-row"><div class="chat-modal-label">Model</div><span class="settings-model-source" id="settingsModelSource"></span></div>
+                  <div class="settings-model-row">
+                    <select class="chat-modal-input" id="settingsApiModelPreset"></select>
+                    <button type="button" class="modal-btn settings-model-refresh ui-tooltip-anchor" id="settingsModelRefreshBtn" data-tooltip="Reload the model list from your account" aria-label="Reload models">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><polyline points="21 3 21 9 15 9"/></svg>
+                    </button>
+                  </div>
                 </div>
 
-                <div class="settings-field">
-                  <div class="chat-modal-label">Model ID</div>
+                <div class="settings-field settings-field-span" id="settingsApiModelIdWrap" style="display:none;">
+                  <div class="chat-modal-label">Custom model ID</div>
                   <input class="chat-modal-input" id="settingsApiModelInput" type="text"
-                    placeholder="model-id">
+                    placeholder="model-id" autocomplete="off" spellcheck="false">
                 </div>
 
                 <div class="chat-modal-note visible auth-info settings-help-note settings-field-span" id="settingsProviderHelp"></div>
@@ -1042,15 +1019,10 @@
 
           <div class="settings-pane" data-settings-pane="workers">
             <div class="settings-section">
-              <div class="settings-section-title">Worker Routing</div>
+              <div class="settings-section-title">Connections</div>
+              <div class="settings-section-copy">Every AI provider AI.EXE can use. Test checks the real connection with your saved key.</div>
               <div class="settings-worker-list" id="settingsWorkerList">
                 <div class="settings-note-block">Worker registry is loading.</div>
-              </div>
-            </div>
-            <div class="settings-section">
-              <div class="settings-section-title">Current Direction</div>
-              <div class="settings-note-block">
-                AI.EXE routes jobs through explicit workers with capabilities, health, and fallback. This is distributed task execution, not fake hardware emulation.
               </div>
             </div>
           </div>
@@ -1064,27 +1036,16 @@
                 Used to personalize replies — your name, where you're based, what you work on, how you like answers. Stored only on this device and shared only with the model you chat with. Date, time, and timezone are read from your computer automatically.
               </div>
             </div>
-            <div class="settings-section">
-              <div class="settings-section-title">Style & UI preferences</div>
-              <div class="settings-placeholder-card">
-                <strong>Reserved for response style and UI preferences</strong>
-                <span>Theme, density, reply tone, editor behavior, and similar preferences can land here later without forcing another settings redesign.</span>
-              </div>
-            </div>
           </div>
 
           <div class="settings-pane" data-settings-pane="advanced">
             <div class="settings-section settings-advanced-section">
-              <div class="settings-section-title">Maintenance</div>
+              <div class="settings-section-title settings-title-row">Maintenance<span class="settings-update-pill ui-tooltip-anchor" id="settingsUpdateStatus" data-tooltip="Updates are checked and downloaded automatically. A ready update installs when AI.EXE quits."><i></i><span>Automatic updates on</span></span></div>
               <div class="settings-section-copy">Model tools and diagnostics for the local AI.EXE runtime.</div>
               <div class="settings-action-grid">
                 <button class="modal-btn" id="settingsImportBtn" type="button">Import / Replace Model</button>
                 <button class="modal-btn" id="settingsVerifyBtn" type="button">Verify</button>
                 <button class="modal-btn" id="settingsDebugDumpBtn" type="button">Dump Debug</button>
-              </div>
-              <div class="settings-maintenance-status" id="settingsUpdateStatus">
-                <span class="settings-maintenance-status-dot" aria-hidden="true"></span>
-                <span>Updates are checked and downloaded automatically. A ready update installs when AI.EXE quits.</span>
               </div>
               <div class="settings-maintenance-note">
                 <strong>Advanced tools</strong>

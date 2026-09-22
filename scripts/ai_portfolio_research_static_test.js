@@ -6,10 +6,10 @@ const css = fs.readFileSync('ui/ai-exe.css', 'utf8');
 const broker = fs.readFileSync('backend/app/routers/broker.py', 'utf8');
 const research = fs.readFileSync('backend/app/ai_portfolio.py', 'utf8');
 
-assert.match(ui, /Blinded portfolio evidence/);
+assert.match(ui, /AI portfolio comparison/);
 assert.match(ui, /\/api\/broker\/ai-research/);
 assert.match(ui, /It cannot create, stage, or confirm an order/);
-assert.match(ui, /CASH \/ INVALID/);
+assert.match(ui, /Cash \/ invalid/);
 assert.match(css, /\.ai-research-scoreboard/);
 assert.match(broker, /def broker_ai_research/);
 assert.match(broker, /Blinded model benchmark\. It has no broker or order path/);

@@ -14,13 +14,14 @@ import websockets
 from fastapi import APIRouter, HTTPException, Query, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 
+from .. import access_token
 from ..broker import ConfirmationRequired, LiveTradingBlocked, OrderRejected
 from ..ai_portfolio import DEFAULT_SYMBOLS, build_episodes, research_messages, score_research
 from ..config import settings
 from ..llm import LLMClient, LLMError
 from ..prices import QuoteUnavailable, crypto_id
 from ..provider import is_local_provider
-from ..services import (api_key_store, paper_broker, paper_test_runner, provider_store,
+from ..services import (api_key_store, autopilot, paper_broker, paper_test_runner, provider_store,
                         quote_feed, usage_manager)
 from ..strategy import analyze_history
 from ..usage import CreditExhausted, RateLimited
@@ -63,6 +64,15 @@ class StrategyStageRequest(BaseModel):
 
 class PaperTestStartRequest(BaseModel):
     symbol: str = Field(default="AAPL", min_length=1, max_length=24)
+
+
+class AutopilotStart(BaseModel):
+    budget_cents: int = Field(ge=10_000, le=100_000_000)
+    risk: str = Field(default="careful", max_length=20)
+
+
+class AutopilotStop(BaseModel):
+    close_positions: bool = False
 
 
 class AIResearchRequest(BaseModel):
@@ -263,10 +273,10 @@ def _crypto_base(symbol: str) -> str:
     return value
 
 
-def _stream_origin_allowed(origin: str) -> bool:
-    origin = (origin or "").strip()
+def _stream_origin_allowed(origin: str, presented: str = "") -> bool:
     allowed = {item.strip() for item in settings.allowed_origins if item.strip()}
-    return not origin or origin == "null" or origin.startswith("file://") or origin in allowed
+    token = access_token.load_or_create(settings.data_dir)
+    return access_token.origin_allowed(origin, presented, token, allowed)
 
 
 async def _stream_bybit(websocket: WebSocket, symbol: str) -> None:
@@ -359,10 +369,12 @@ async def _stream_equity(websocket: WebSocket, symbol: str) -> None:
 async def broker_live_stream(websocket: WebSocket, symbol: str = "AAPL"):
     """Push-only local stream. Crypto is exchange WebSocket; equities use the
     approved Nasdaq source until a licensed equity WebSocket is configured."""
-    if not _stream_origin_allowed(websocket.headers.get("origin") or ""):
+    protocol = access_token.from_subprotocols(websocket.headers.get("sec-websocket-protocol") or "")
+    if not _stream_origin_allowed(websocket.headers.get("origin") or "",
+                                  protocol[len(access_token.SUBPROTOCOL_PREFIX):]):
         await websocket.close(code=1008)
         return
-    await websocket.accept()
+    await websocket.accept(subprotocol=protocol or None)
     symbol = (symbol or "AAPL").strip().upper()[:24]
     try:
         if crypto_id(symbol):
@@ -506,6 +518,41 @@ def broker_paper_test_stop():
 @router.get("/broker/paper-test/report")
 def broker_paper_test_report():
     return paper_test_runner.report()
+
+
+@router.get("/broker/autopilot")
+def broker_autopilot_status():
+    return autopilot.status()
+
+
+@router.post("/broker/autopilot/start")
+def broker_autopilot_start(payload: AutopilotStart):
+    try:
+        status = autopilot.start(payload.budget_cents, payload.risk)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    executor = ThreadPoolExecutor(max_workers=1)
+    executor.submit(autopilot.run_cycle)  # first scan now, not in a minute
+    executor.shutdown(wait=False)
+    return status
+
+
+@router.post("/broker/autopilot/stop")
+def broker_autopilot_stop(payload: AutopilotStop):
+    return autopilot.stop(close_positions=payload.close_positions)
+
+
+@router.post("/broker/autopilot/clear-activity")
+def broker_autopilot_clear_activity():
+    return autopilot.clear_activity()
+
+
+@router.post("/broker/autopilot/reset")
+def broker_autopilot_reset():
+    try:
+        return autopilot.reset()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 @router.get("/broker/ledger/verify")

@@ -15,9 +15,13 @@ def run():
     assert routes["/broker/live-stream"].name == "broker_live_stream"
     assert broker.BYBIT_SPOT_STREAM.startswith("wss://")
     assert "*" not in broker.settings.allowed_origins
-    assert broker._stream_origin_allowed("file://")
-    assert broker._stream_origin_allowed("null")
-    assert not broker._stream_origin_allowed("https://malicious.example")
+    token = broker.access_token.load_or_create(broker.settings.data_dir)
+    assert broker._stream_origin_allowed("")  # local process, no browser
+    assert not broker._stream_origin_allowed("null")  # forgeable by any sandboxed iframe
+    assert not broker._stream_origin_allowed("null", "wrong-token")
+    assert broker._stream_origin_allowed("null", token)
+    assert broker._stream_origin_allowed("file://", token)
+    assert not broker._stream_origin_allowed("https://malicious.example", token)
     print("market stream smoke test: ok")
 
 

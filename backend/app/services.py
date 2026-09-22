@@ -5,6 +5,8 @@ from .adapter import AdapterManager
 from .broker import PaperBroker
 from .prices import QuoteFeed
 from .paper_test import PaperTestRunner
+from .autopilot import Autopilot
+from .autopilot_ai import make_reviewer
 from .config import settings
 from .chatstore import ChatStore
 from .finance import FinanceStore
@@ -40,6 +42,10 @@ quote_feed = QuoteFeed()
 
 # Daily forward test. It records and proposes; the broker gate still confirms.
 paper_test_runner = PaperTestRunner(settings.data_dir, paper_broker, quote_feed)
+
+# 24/7 crypto autopilot on its own paper account. Feed + AI are injected.
+autopilot = Autopilot(settings.data_dir, quote_feed.crypto_hourly_candles,
+                      reviewer=make_reviewer(provider_store, api_key_store, usage_manager))
 
 # Durable chat storage — see chatstore.py. Never trimmed to reclaim space.
 chat_store = ChatStore(data_dir=settings.data_dir)

@@ -21,6 +21,15 @@ def parse_openai_content(data: dict) -> str:
     return data["choices"][0]["message"]["content"]
 
 
+def parse_openai_json_payload(data: dict) -> str:
+    message = data["choices"][0]["message"]
+    for call in message.get("tool_calls") or []:
+        function = call.get("function") or {}
+        if function.get("name") == "submit_research_portfolios":
+            return function.get("arguments") or ""
+    return message.get("content") or ""
+
+
 def parse_ollama_content(data: dict) -> str:
     # Native Ollama: /api/chat -> {"message": {"content": ...}}; /api/generate -> {"response": ...}
     if isinstance(data, dict):
@@ -94,7 +103,7 @@ class LLMClient:
         raise last_err or LLMError("Provider call failed after retries.")
 
     def complete_json(self, messages, max_tokens: int = 4096) -> dict:
-        """One structured research call. Empty thinking output gets one plain retry."""
+        """Structured research call with a tool-call fallback."""
         if not self.base_url:
             raise LLMError("No LLM provider configured — set AIEXE_LLM_BASE_URL.", 400)
         if self.kind == "ollama":
@@ -117,7 +126,9 @@ class LLMClient:
 
         started = time.monotonic()
         attempts = []
-        for structured_attempt in range(2):
+        usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        attempt_count = 2 if self.kind == "ollama" else 3
+        for structured_attempt in range(attempt_count):
             try:
                 response = httpx.post(url, json=payload, headers=headers, timeout=self.timeout)
             except httpx.HTTPError as exc:
@@ -130,19 +141,46 @@ class LLMClient:
                                response.status_code)
             try:
                 data = response.json()
-                content = parse_ollama_content(data) if self.kind == "ollama" else parse_openai_content(data)
+                content = (parse_ollama_content(data) if self.kind == "ollama"
+                           else parse_openai_json_payload(data))
             except (KeyError, IndexError, TypeError, ValueError) as exc:
                 raise LLMError("Unexpected provider response shape.") from exc
-            attempts.append({"mode": "plain" if structured_attempt else "structured-thinking",
-                             "empty": not bool(str(content or "").strip())})
+            provider_usage = data.get("usage") or {}
+            for key in usage:
+                usage[key] += int(provider_usage.get(key) or 0)
+            mode = ("structured-thinking" if structured_attempt == 0 else
+                    "structured-plain" if structured_attempt == 1 else "tool-call")
+            attempt = {"mode": mode, "empty": not bool(str(content or "").strip())}
+            attempts.append(attempt)
             if str(content or "").strip():
                 try:
                     parsed = json.loads(content)
-                except (TypeError, ValueError) as exc:
-                    raise LLMError("Provider returned invalid JSON.") from exc
-                return {"data": parsed, "latency_ms": round((time.monotonic() - started) * 1000),
-                        "attempts": attempts, "usage": data.get("usage") or {},
-                        "system_fingerprint": data.get("system_fingerprint") or ""}
-            payload.pop("thinking", None)
-            payload.pop("reasoning_effort", None)
-        raise LLMError("Provider returned empty JSON twice.")
+                except (TypeError, ValueError):
+                    attempt["invalid_json"] = True
+                else:
+                    return {"data": parsed,
+                            "latency_ms": round((time.monotonic() - started) * 1000),
+                            "attempts": attempts, "usage": usage,
+                            "system_fingerprint": data.get("system_fingerprint") or ""}
+            if structured_attempt == 0:
+                if "deepseek.com" in self.base_url:
+                    payload["thinking"] = {"type": "disabled"}
+                else:
+                    payload.pop("thinking", None)
+                payload.pop("reasoning_effort", None)
+            elif structured_attempt == 1 and self.kind != "ollama":
+                payload.pop("response_format", None)
+                payload["tools"] = [{"type": "function", "function": {
+                    "name": "submit_research_portfolios",
+                    "description": "Submit every blinded portfolio decision.",
+                    "parameters": {"type": "object", "properties": {
+                        "episodes": {"type": "array", "items": {"type": "object",
+                            "properties": {"episode": {"type": "integer"},
+                                "allocations": {"type": "object",
+                                    "additionalProperties": {"type": "integer", "enum": [0, 25, 50]}},
+                                "rationale": {"type": "string"}},
+                            "required": ["episode", "allocations", "rationale"]}}},
+                        "required": ["episodes"]}}}]
+                payload["tool_choice"] = {"type": "function", "function": {
+                    "name": "submit_research_portfolios"}}
+        raise LLMError("Provider returned no usable structured result after all fallbacks.")

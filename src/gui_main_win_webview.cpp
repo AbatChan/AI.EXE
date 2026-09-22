@@ -2879,6 +2879,16 @@ private:
       paper_test_active_.store(workspace_content == "1" ||
                                workspace_content == "true");
       output = paper_test_active_.load() ? "1" : "0";
+    } else if (action == "backendToken") {
+      // Owner-only secret the backend writes; a web page cannot read it.
+      const auto token_path =
+          WindowStateIniPath().parent_path() / "backend" / "backend_token";
+      std::ifstream token_file(token_path);
+      std::getline(token_file, output);
+      if (output.empty()) {
+        ok = false;
+        message = "Backend token is not ready yet.";
+      }
     } else if (action == "paperBackgroundService") {
       std::lock_guard<std::mutex> lock(backend_mu_);
       if (workspace_content.empty()) {

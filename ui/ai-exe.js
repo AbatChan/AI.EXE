@@ -197,6 +197,61 @@ const nativeBridge = (() => {
   };
 })();
 
+// Local-backend calls carry the per-install token (read natively from an owner-only
+// file); a web page spoofing `Origin: null` can't. Sent only to the loopback backend.
+const backendAccess = (() => {
+  let token = '';
+  let pending = null;
+  let failedAt = 0;
+  const nativeFetch = window.fetch.bind(window);
+  function isLocalBackend(url) {
+    try {
+      const target = new URL(url, window.location.href);
+      const base = new URL(typeof getAIExeBackendUrl === 'function' ? getAIExeBackendUrl() : 'http://127.0.0.1:8765');
+      return target.origin === base.origin && ['127.0.0.1', 'localhost', '[::1]'].includes(target.hostname);
+    } catch (_) { return false; }
+  }
+  async function load(force = false) {
+    if (force) token = '';
+    if (token || !nativeBridge.available()) return token;
+    if (!force && Date.now() - failedAt < 5000) return '';
+    if (!pending) {
+      pending = (async () => {
+        for (let attempt = 0; attempt < 20 && !token; attempt += 1) {
+          const res = await nativeBridge.invoke('backendToken', { timeoutMs: 3000 });
+          if (res && res.ok && res.output) token = String(res.output).trim();
+          else await new Promise((resolve) => setTimeout(resolve, 500));
+        }
+        if (!token) failedAt = Date.now();
+        pending = null;
+        return token;
+      })();
+    }
+    return pending;
+  }
+  window.fetch = async (input, init = {}) => {
+    const url = typeof input === 'string' ? input : (input && input.url) || String(input || '');
+    if (!isLocalBackend(url)) return nativeFetch(input, init);
+    const send = async (value) => {
+      const headers = new Headers((init && init.headers) || (input instanceof Request ? input.headers : undefined));
+      if (value) headers.set('X-AIEXE-Token', value);
+      return nativeFetch(input, { ...init, headers });
+    };
+    const response = await send(await load());
+    if (response.status !== 403 || !nativeBridge.available()) return response;
+    const fresh = await load(true);  // backend restarted with a new token
+    return fresh ? send(fresh) : response;
+  };
+  return {
+    load,
+    // WebSockets can't set headers; the token rides in the subprotocol, not the URL.
+    socketProtocols(url) {
+      return token && isLocalBackend(String(url).replace(/^ws/, 'http')) ? [`aiexe.${token}`] : [];
+    },
+  };
+})();
+backendAccess.load();
+
 // Mirror AI.EXE's local state into Application Support on macOS. WebKit's
 // file-URL localStorage may be treated as a new origin after a bundle swap;
 // this mirror lets a new build hydrate the same chats, attachments, and tabs.
@@ -814,7 +869,7 @@ function openCodeArtifactsView(btn) {
 
 function openFinanceView(btn) {
   if (btn) setActive(btn);
-  financeActiveTab = 'trading';
+  financeActiveTab = 'autopilot';
   middleViewMode = 'finance';
   artifactDetailKey = '';
   artifactDetailOrigin = 'artifacts';
@@ -946,10 +1001,13 @@ function financeDashboardError(message) {
 }
 
 const FINANCE_TABS = [
-  { id: 'trading', label: 'Trading' },
+  { id: 'autopilot', label: 'Autopilot' },
+  { id: 'trading', label: 'Portfolio' },
+  { id: 'research', label: 'Strategy tests' },
+  { id: 'funding', label: 'Deposits & withdrawals' },
   { id: 'business', label: 'Business records' },
 ];
-let financeActiveTab = 'trading';
+let financeActiveTab = 'autopilot';
 
 // Switch panes in place — re-rendering would drop the user back to Overview
 // after every save.
@@ -1043,28 +1101,22 @@ function strategyLabSkeleton(symbol = '') {
 
 function marketStreamSkeleton(symbol = '', note = '') {
   const watchlist = FINANCE_DEFAULT_ASSETS.map((asset, i) => `
-    <div class="broker-watch-asset"><span><strong>${asset.symbol}</strong><small>${asset.name}</small></span>${skelBar(`skel-line d${i % 4}`, '34px')}</div>`).join('');
+    <div class="broker-watch-asset">${financeAvatar(asset.symbol)}<span class="broker-watch-copy"><strong>${asset.symbol}</strong><small>${asset.name}</small></span>${skelBar(`skel-line d${i % 4}`, '44px')}</div>`).join('');
   const metrics = ['Paper equity', 'Unrealized P&amp;L', 'Position', 'Market value'].map((label, i) => `
     <div><span>${label}</span>${skelBar(`skel-line d${i % 4}`, '72%')}</div>`).join('');
   return `
     <div class="broker-live-shell broker-live-skeleton">
       <div class="finance-panel-title broker-live-title">
         <div><span>Paper research terminal${symbol ? ` · ${escapeHtml(symbol)}` : ''}</span><small>Market feed bridge · display only, never submits orders</small></div>
-        <span class="broker-market-chip"><i></i>CONNECTING</span>
+        <span class="broker-market-chip"><i></i>Connecting</span>
       </div>
-      <div class="broker-terminal-grid">
-        <aside class="broker-watchlist" aria-label="Default markets">
-          <div class="broker-watchlist-head"><strong>Markets</strong><small>Quick picks</small></div>
-          ${watchlist}
-        </aside>
-        <div class="broker-chart-stage">
-          <div class="broker-live-toolbar">
-            <div><strong class="broker-symbol">${escapeHtml(symbol || '')}</strong>${skelBar('skel-line sm', '110px')}</div>
-            <div class="broker-live-price">${skelBar('skel-line lg', '120px')}${skelBar('skel-line sm d1', '80px')}</div>
-          </div>
-          ${skelBar('skel-chart')}
-          <div class="broker-chart-help"><span>Scroll to zoom · drag to pan · crosshair for price</span></div>
+      <div class="broker-watchlist" aria-label="Quick picks">${watchlist}</div>
+      <div class="broker-chart-card">
+        <div class="broker-chart-head">
+          <div class="broker-chart-id">${financeAvatar(symbol || '?', true)}<div><strong class="broker-symbol">${escapeHtml(symbol || '')}</strong>${skelBar('skel-line sm', '110px')}</div></div>
+          <div class="broker-live-price">${skelBar('skel-line lg', '120px')}${skelBar('skel-line sm d1', '80px')}</div>
         </div>
+        ${skelBar('skel-chart')}
       </div>
       <div class="broker-live-metrics">${metrics}</div>
       <div class="broker-live-foot">${note || 'Opening market stream…'}</div>
@@ -1104,17 +1156,14 @@ async function renderFinanceDashboard(force = false) {
             <div><strong>${escapeHtml(tx.source || 'Untitled entry')}</strong><span>${escapeHtml(tx.memo || (tx.is_mock ? 'Mock data' : 'Local entry'))}</span></div>
             <div class="finance-row-amount ${tx.kind === 'expense' ? 'expense' : ''}">${tx.kind === 'expense' ? '−' : '+'}${formatFinanceMoney(tx.amount_cents, tx.currency)}</div>
           </div>`).join('')
-      : '<div class="finance-empty-state"><strong>No records yet</strong><span>Load mock data to test the local income pool, tax reserve, and split calculations.</span><button type="button" id="financeSeedMockBtn">Load mock data</button></div>';
+      : `<div class="finance-empty-box">${financeFallback('records', 'No records yet', 'Load mock data to test the local income pool, tax reserve, and split calculations.', '<button type="button" class="finance-inline-btn" id="financeSeedMockBtn">Load mock data</button>')}</div>`;
     const invoiceRows = invoices.length
       ? invoices.map((invoice) => `
           <div class="finance-row finance-invoice-row">
             <div><strong>${escapeHtml(invoice.invoice_number || 'Draft invoice')} · ${escapeHtml(invoice.client_name || 'Client')}</strong><span>${escapeHtml(invoice.description || 'No description')} · Due ${escapeHtml(formatFinanceDate(invoice.due_date))}</span></div>
             <div class="finance-row-actions"><strong class="finance-row-amount">${formatFinanceMoney(invoice.amount_cents, invoice.currency)}</strong><label class="finance-status-label">Status<select class="finance-invoice-status" data-invoice-id="${escapeHtml(invoice.id)}"><option value="draft" ${invoice.status === 'draft' ? 'selected' : ''}>Draft</option><option value="sent" ${invoice.status === 'sent' ? 'selected' : ''}>Sent</option><option value="paid" ${invoice.status === 'paid' ? 'selected' : ''}>Paid</option><option value="void" ${invoice.status === 'void' ? 'selected' : ''}>Void</option></select></label></div>
           </div>`).join('')
-      : `<div class="finance-empty-state finance-invoice-empty-state">
-          <div class="finance-invoice-empty-mark" aria-hidden="true"><span>0</span></div>
-          <div class="finance-invoice-empty-copy"><strong>Your invoice history starts here</strong><span>Create the first local draft above, then use this space to track whether it is drafted, sent, paid, or void. Nothing is emailed or charged from AI.EXE.</span><button type="button" id="financeInvoiceJumpBtn">Create first draft</button></div>
-        </div>`;
+      : `<div class="finance-empty-box">${financeFallback('invoice', 'No invoices yet', 'Create a local draft above, then track whether it is drafted, sent, paid, or void. Nothing is emailed or charged from AI.EXE.', '<button type="button" class="finance-inline-btn" id="financeInvoiceJumpBtn">Create first draft</button>')}</div>`;
     const currentPeriod = new Date().toISOString().slice(0, 7);
     const pane = (id) => `finance-tabpane${financeActiveTab === id ? ' active' : ''}`;
     financeDashboardContent.innerHTML = `
@@ -1132,7 +1181,7 @@ async function renderFinanceDashboard(force = false) {
       </div>
       <div class="finance-control-grid finance-settings-grid">
         <section class="finance-panel finance-form-panel">
-          <div class="finance-panel-title"><div><span>Local settings</span><small>Applied only to this device</small></div></div>
+          <div class="finance-panel-title"><div><span>Local settings${financeInfo(`Current split: ${Number(settings.developer_split_bps || 0) / 100}% developer / ${100 - Number(settings.developer_split_bps || 0) / 100}% client. Settings are stored only on this device.`)}</span><small>Applied only to this device</small></div></div>
           <form class="finance-form" id="financeSettingsForm">
             <label>Currency<input name="base_currency" maxlength="3" value="${escapeHtml(currency)}"></label>
             <label>Tax reserve %<input name="tax_reserve_percent" type="number" min="0" max="100" step="0.01" value="${Number(settings.tax_reserve_bps || 0) / 100}"></label>
@@ -1142,9 +1191,8 @@ async function renderFinanceDashboard(force = false) {
           </form>
         </section>
       </div>
-      <section class="finance-panel finance-report-panel"><div class="finance-panel-title"><div><span>Monthly report</span><small>Local summary and CSV export. Not tax advice.</small></div></div><div class="finance-report-controls"><label>Report month<input id="financeReportMonth" type="month" value="${currentPeriod}"></label><button type="button" class="finance-inline-btn" id="financeReportBtn">Build report</button><button type="button" class="finance-inline-btn" id="financeExportBtn">Export CSV</button></div><div class="finance-report-summary" id="financeReportSummary">Choose a month to build a local summary.</div></section>
+      <section class="finance-panel finance-report-panel"><div class="finance-panel-title"><div><span>Monthly report</span><small>Local summary and CSV export. Not tax advice.</small></div></div><div class="finance-report-controls"><label>Report month<input id="financeReportMonth" type="month" value="${currentPeriod}"></label><button type="button" class="finance-inline-btn finance-btn-primary" id="financeReportBtn">Build report</button><button type="button" class="finance-inline-btn" id="financeExportBtn">Export CSV</button></div><div class="finance-report-summary" id="financeReportSummary" aria-live="polite"></div></section>
       <section class="finance-panel finance-audit-panel"><div class="finance-panel-title"><div><span>Audit history</span><small>Every local finance change is recorded</small></div><button type="button" class="finance-inline-btn" id="financeAuditBtn">View history</button></div><div class="finance-audit-list hidden" id="financeAuditList"></div></section>
-      <div class="finance-split-note">Current split: ${Number(settings.developer_split_bps || 0) / 100}% developer / ${100 - Number(settings.developer_split_bps || 0) / 100}% client. Settings are stored only on this device.</div>
       <div class="finance-section-divider"><span>Entries and invoices</span></div>
       <div class="finance-control-grid">
         <section class="finance-panel finance-form-panel">
@@ -1163,8 +1211,8 @@ async function renderFinanceDashboard(force = false) {
             <label>Client name<input name="client_name" required maxlength="160" placeholder="Client or company"></label>
             <label>Amount<input name="amount" type="number" min="0.01" step="0.01" required placeholder="0.00"></label>
             <label>Due date<input name="due_date" type="date" required value="${currentPeriod}-28"></label>
-            <label>Description<input name="description" required maxlength="500" placeholder="What the invoice is for"></label>
             <label>Note<input name="note" maxlength="500" placeholder="Optional internal note"></label>
+            <label>Description<input name="description" required maxlength="500" placeholder="What the invoice is for"></label>
             <button type="submit">Create draft</button>
           </form>
         </section>
@@ -1172,9 +1220,20 @@ async function renderFinanceDashboard(force = false) {
       <section class="finance-panel"><div class="finance-panel-title"><div><span>Recent local records</span><small>Mock-data testing only</small></div></div>${transactionRows}</section>
       <section class="finance-panel finance-invoices-panel"><div class="finance-panel-title"><div><span>Local invoice records</span><small>Update status manually after you act outside AI.EXE.</small></div></div>${invoiceRows}</section>
       </div>
+      <div class="${pane('autopilot')}" data-pane="autopilot">
+        <section class="autopilot" id="autopilotSection">${autopilotPanel(null)}</section>
+      </div>
       <div class="${pane('trading')}" data-pane="trading">
         <section class="finance-panel broker-panel" id="brokerSection">${brokerPanelSkeleton()}</section>
+      </div>
+      <div class="${pane('research')}" data-pane="research">
+        <section class="finance-panel strategy-lab-panel" id="strategyLabSection">${strategyLabSkeleton(financeStrategySymbol)}</section>
+      </div>
+      <div class="${pane('funding')}" data-pane="funding">
+        ${fundingPreviewPanel()}
       </div>`;
+    bindFundingPreview();
+    refreshAutopilot();
     financeDashboardContent.querySelectorAll('.finance-tab').forEach((btn) => {
       btn.addEventListener('click', () => setFinanceTab(btn.dataset.tab));
     });
@@ -1642,21 +1701,22 @@ function updateFinanceChart(quote) {
       financeChart = library.createChart(host, {
         width: visibleWidth,
         height: host.clientHeight,
-        layout: { background: { type: library.ColorType.Solid, color: '#111817' }, textColor: '#8f9b98', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace' },
-        grid: { vertLines: { color: 'rgba(255,255,255,.035)' }, horzLines: { color: 'rgba(255,255,255,.045)' } },
-        rightPriceScale: { borderColor: 'rgba(255,255,255,.09)' },
-        timeScale: { borderColor: 'rgba(255,255,255,.09)', timeVisible: true, secondsVisible: financeChartInterval < 60000, rightOffset: 4, barSpacing: 9 },
-        crosshair: { mode: library.CrosshairMode.Normal },
+        layout: { background: { type: library.ColorType.Solid, color: 'transparent' }, textColor: '#8b97a8', fontSize: 11, fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif', attributionLogo: false },
+        grid: { vertLines: { visible: false }, horzLines: { color: 'rgba(255,255,255,.045)' } },
+        rightPriceScale: { borderVisible: false, scaleMargins: { top: 0.12, bottom: 0.08 } },
+        timeScale: { borderVisible: false, timeVisible: true, secondsVisible: financeChartInterval < 60000, rightOffset: 4, barSpacing: 9 },
+        crosshair: { mode: library.CrosshairMode.Normal, vertLine: { color: 'rgba(156,199,227,.35)', labelBackgroundColor: '#283241' }, horzLine: { color: 'rgba(156,199,227,.35)', labelBackgroundColor: '#283241' } },
         handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: false },
         handleScale: { axisPressedMouseMove: true, mouseWheel: true, pinch: true },
       });
       financeChartSeries = financeChart.addSeries(library.CandlestickSeries, {
-        upColor: '#31d07c', downColor: '#f06473', wickUpColor: '#31d07c', wickDownColor: '#f06473', borderVisible: false,
+        upColor: '#5fd99a', downColor: '#ef8585', wickUpColor: '#5fd99a', wickDownColor: '#ef8585', borderVisible: false, priceLineColor: '#9cc7e3',
         priceFormat: { type: 'price', precision: Number(quote.price_cents || 0) > 100000 ? 2 : 3, minMove: Number(quote.price_cents || 0) > 100000 ? 0.01 : 0.001 },
       });
-      financeChartLineSeries = financeChart.addSeries(library.LineSeries, {
-        color: '#54e6b1', lineWidth: 2, crosshairMarkerVisible: true,
-        priceLineVisible: true, lastValueVisible: true,
+      financeChartLineSeries = financeChart.addSeries(library.AreaSeries || library.LineSeries, {
+        lineColor: 'rgba(156,199,227,.9)', color: 'rgba(156,199,227,.9)', lineWidth: 2, crosshairMarkerVisible: true,
+        topColor: 'rgba(156,199,227,.16)', bottomColor: 'rgba(156,199,227,0)',
+        priceLineVisible: false, lastValueVisible: false,
         priceFormat: { type: 'price', precision: Number(quote.price_cents || 0) > 100000 ? 2 : 3, minMove: Number(quote.price_cents || 0) > 100000 ? 0.01 : 0.001 },
       });
       financeChartSymbol = symbol;
@@ -1790,6 +1850,39 @@ async function syncBrokerRecordedSummary(currency = 'USD') {
   } catch (_) {}
 }
 
+const FINANCE_AVATAR_COLORS = { BTC: '#f7931a', ETH: '#8c8cf5', SOL: '#14f195', AAPL: '#a3aab5', MSFT: '#3aa3f0', NVDA: '#76b900', SPY: '#e6b34a', BAC: '#e3485a' };
+
+function financeAvatar(symbol, large = false) {
+  const clean = String(symbol || '?').toUpperCase().replace(/-USD$/, '');
+  let hash = 0;
+  for (const ch of clean) hash = (hash * 31 + ch.charCodeAt(0)) % 360;
+  const color = FINANCE_AVATAR_COLORS[clean] || `hsl(${hash} 55% 62%)`;
+  return `<span class="broker-avatar${large ? ' lg' : ''}" style="--avatar:${color}" aria-hidden="true">${escapeHtml(clean.slice(0, clean.length > 3 ? 1 : 2))}</span>`;
+}
+
+let financeWatchTimer = null;
+async function refreshFinanceWatchQuotes(host, currency) {
+  if (financeWatchTimer) clearTimeout(financeWatchTimer);
+  if (!host || !host.isConnected) return;
+  try {
+    const symbols = FINANCE_DEFAULT_ASSETS.map((asset) => asset.symbol).join(',');
+    const response = await fetch(`${getAIExeBackendUrl()}/api/prices/quote?symbols=${encodeURIComponent(symbols)}`);
+    const data = response.ok ? await response.json() : { quotes: {} };
+    Object.values(data.quotes || {}).forEach((quote) => {
+      const key = String(quote.symbol || '').replace(/[^A-Z0-9]/g, '');
+      const price = host.querySelector(`#brokerWatchPrice-${key}`);
+      if (price) price.textContent = formatFinanceMoney(quote.price_cents, currency);
+      const change = host.querySelector(`#brokerWatchChange-${key}`);
+      if (change && quote.percentage_change_bps != null) {
+        const bps = Number(quote.percentage_change_bps || 0);
+        change.textContent = `${bps >= 0 ? '+' : '−'}${Math.abs(bps / 100).toFixed(2)}%`;
+        change.className = bps >= 0 ? 'gain' : 'expense';
+      }
+    });
+  } catch (_) { /* quick picks stay as dashes */ }
+  financeWatchTimer = setTimeout(() => refreshFinanceWatchQuotes(host, currency), 30000);
+}
+
 function renderBrokerLiveSnapshot(host, data, currency, request) {
   const quote = data.quote || {};
   const portfolio = data.portfolio || {};
@@ -1803,39 +1896,40 @@ function renderBrokerLiveSnapshot(host, data, currency, request) {
   let shellCreated = false;
   if (!host.querySelector('#brokerInteractiveChart')) {
     shellCreated = true;
-    const watchlist = FINANCE_DEFAULT_ASSETS.map((asset) => `
+    const watchlist = FINANCE_DEFAULT_ASSETS.map((asset) => {
+      const key = asset.symbol.replace(/[^A-Z0-9]/g, '');
+      return `
       <button type="button" class="broker-watch-asset" data-symbol="${asset.symbol}">
-        <span><strong>${asset.symbol}</strong><small>${asset.name}</small></span><i id="brokerWatchPrice-${asset.symbol.replace(/[^A-Z0-9]/g, '')}">—</i>
-      </button>`).join('');
+        ${financeAvatar(asset.symbol)}
+        <span class="broker-watch-copy"><strong>${asset.symbol}</strong><small>${asset.name}</small></span>
+        <span class="broker-watch-quote"><i id="brokerWatchPrice-${key}">—</i><em id="brokerWatchChange-${key}"></em></span>
+      </button>`;
+    }).join('');
     host.innerHTML = `
       <div class="broker-live-shell">
         <div class="finance-panel-title broker-live-title">
-          <div><span id="brokerLiveTitle">Paper research terminal</span><small id="brokerLiveSubtitle">Live display feed · simulated portfolio</small></div>
-          <span class="broker-market-chip open" id="brokerLiveStatus"><i></i>CONNECTING</span>
+          <div><span><span id="brokerLiveTitle">Paper research terminal</span>${financeInfo('Portfolio equity marks move with this feed; business records and daily test results change only when an event is recorded.', 'brokerLiveInfo')}</span><small id="brokerLiveSubtitle">Live display feed · simulated portfolio</small></div>
+          <span class="broker-market-chip open" id="brokerLiveStatus"><i></i>Connecting</span>
         </div>
-        <div class="broker-terminal-grid">
-          <aside class="broker-watchlist" aria-label="Default markets">
-            <div class="broker-watchlist-head"><strong>Markets</strong><small>Quick picks</small></div>
-            ${watchlist}
-          </aside>
-          <div class="broker-chart-stage">
-            <div class="broker-market-toolbar">
-              <div class="broker-asset-search-wrap">
-                <input id="brokerAssetSearch" autocomplete="off" placeholder="Search company or symbol" aria-label="Search company or symbol">
-                <div class="broker-asset-results" id="brokerAssetResults" role="listbox"></div>
-              </div>
-              <div class="broker-chart-actions">
-                ${[[60000, '1m'], [300000, '5m'], [900000, '15m'], [3600000, '1h']].map(([value, label]) => `<button type="button" class="broker-interval-btn${financeChartInterval === value ? ' active' : ''}" data-interval="${value}">${label}</button>`).join('')}
-                <button type="button" id="brokerChartFitBtn">Fit</button><button type="button" id="brokerChartExpandBtn" aria-label="Expand chart">Expand</button>
-              </div>
-            </div>
-            <div class="broker-live-toolbar">
-              <div><strong class="broker-symbol" id="brokerLiveSymbolLabel">${escapeHtml(quote.symbol || financeLiveSymbol)}</strong><small id="brokerLiveCompany">${escapeHtml(quote.company || '')}</small></div>
-              <div class="broker-live-price"><strong id="brokerLivePrice" role="status">—</strong><span id="brokerLiveChange">—</span></div>
-            </div>
-            <div class="broker-interactive-chart" id="brokerInteractiveChart" aria-label="Interactive candlestick chart"></div>
-            <div class="broker-chart-help"><span>Scroll to zoom · drag to pan · crosshair for price</span><a href="https://www.tradingview.com/" target="_blank" rel="noopener">Charts by TradingView</a></div>
+        <div class="broker-watchlist" role="group" aria-label="Quick picks">${watchlist}</div>
+        <div class="broker-chart-card">
+          <div class="broker-chart-head">
+            <div class="broker-chart-id"><span id="brokerLiveAvatar">${financeAvatar(quote.symbol || financeLiveSymbol, true)}</span><div><strong class="broker-symbol" id="brokerLiveSymbolLabel">${escapeHtml(quote.symbol || financeLiveSymbol)}</strong><small id="brokerLiveCompany">${escapeHtml(quote.company || '')}</small></div></div>
+            <div class="broker-live-price"><strong id="brokerLivePrice" role="status">—</strong><span id="brokerLiveChange">—</span></div>
           </div>
+          <div class="broker-market-toolbar">
+            <div class="broker-asset-search-wrap">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><line x1="16" y1="16" x2="20" y2="20"/></svg>
+              <input id="brokerAssetSearch" autocomplete="off" placeholder="Search any stock or coin" aria-label="Search company or symbol">
+              <div class="broker-asset-results" id="brokerAssetResults" role="listbox"></div>
+            </div>
+            <div class="broker-chart-actions">
+              <div class="broker-segment" role="group" aria-label="Candle size">${[[60000, '1m'], [300000, '5m'], [900000, '15m'], [3600000, '1h']].map(([value, label]) => `<button type="button" class="broker-interval-btn${financeChartInterval === value ? ' active' : ''}" data-interval="${value}">${label}</button>`).join('')}</div>
+              <button type="button" class="broker-chart-tool" id="brokerChartFitBtn">Fit</button><button type="button" class="broker-chart-tool" id="brokerChartExpandBtn" aria-label="Expand chart">Expand</button>
+            </div>
+          </div>
+          <div class="broker-interactive-chart" id="brokerInteractiveChart" aria-label="Interactive candlestick chart"></div>
+          <div class="broker-chart-help"><span>Scroll to zoom · drag to pan · hover for prices</span><a href="https://www.tradingview.com/" target="_blank" rel="noopener">Charts by TradingView</a></div>
         </div>
         <div class="broker-live-metrics">
           <div><span>Paper equity</span><strong id="brokerLiveEquity">—</strong></div>
@@ -1843,8 +1937,8 @@ function renderBrokerLiveSnapshot(host, data, currency, request) {
           <div><span id="brokerLivePositionLabel">Position</span><strong id="brokerLivePosition">—</strong></div>
           <div><span>Market value</span><strong id="brokerLiveValue">—</strong></div>
         </div>
-        <div class="broker-live-foot" id="brokerLiveFoot"></div>
       </div>`;
+    refreshFinanceWatchQuotes(host, currency);
     bindFinanceMarketControls(host, currency);
   }
   if (request !== financeLiveRequest) return;
@@ -1854,6 +1948,8 @@ function renderBrokerLiveSnapshot(host, data, currency, request) {
   setText('#brokerLiveTitle', `Paper research terminal · ${quote.symbol || financeLiveSymbol}`);
   setText('#brokerLiveSubtitle', `${exchangeStream ? 'Direct exchange stream' : 'Market feed bridge'} · display only, never submits orders`);
   setText('#brokerLiveSymbolLabel', quote.symbol || financeLiveSymbol);
+  const avatarSlot = host.querySelector('#brokerLiveAvatar');
+  if (avatarSlot) avatarSlot.innerHTML = financeAvatar(quote.symbol || financeLiveSymbol, true);
   setText('#brokerLiveCompany', quote.company || quote.symbol || '');
   setText('#brokerLivePrice', money(quote.price_cents));
   setText('#brokerLiveChange', `${change} · ${signedMoney(quote.net_change_cents)}`);
@@ -1865,7 +1961,7 @@ function renderBrokerLiveSnapshot(host, data, currency, request) {
   const status = host.querySelector('#brokerLiveStatus');
   if (status) {
     status.classList.toggle('open', !quote.stale);
-    status.lastChild.textContent = quote.stale ? ' CACHED' : ' STREAMING';
+    status.lastChild.textContent = quote.stale ? ' Cached' : ' Streaming';
   }
   const changeNode = host.querySelector('#brokerLiveChange');
   if (changeNode) changeNode.className = rising ? 'gain' : 'expense';
@@ -1899,7 +1995,12 @@ function renderBrokerLiveSnapshot(host, data, currency, request) {
     summaryReturn.className = liveReturnBps < 0 ? 'expense' : '';
   }
   const source = exchangeStream ? 'Bybit spot WebSocket · event-driven' : 'Nasdaq source · pushed through AI.EXE stream bridge';
-  setText('#brokerLiveFoot', `${source} · ${market} · ${formatFinanceDateTime(quote.as_of || quote.fetched_at, 'time unavailable')}. Portfolio equity marks move with this feed; business records and daily test results change only when an event is recorded.`);
+  const liveInfo = document.getElementById('brokerLiveInfo');
+  if (liveInfo) {
+    const detail = `${source} · ${financeWord(market)} · ${formatFinanceDateTime(quote.as_of || quote.fetched_at, 'time unavailable')}. Portfolio equity marks move with this feed; business records and daily test results change only when an event is recorded.`;
+    liveInfo.dataset.tooltip = detail;
+    liveInfo.setAttribute('aria-label', detail);
+  }
 }
 
 // Symbol switch keeps the terminal mounted; only the value slots go quiet.
@@ -1915,7 +2016,7 @@ function markMarketPanelLoading(host, symbol) {
   const status = host.querySelector('#brokerLiveStatus');
   if (status) {
     status.classList.remove('open');
-    if (status.lastChild) status.lastChild.textContent = ' CONNECTING';
+    if (status.lastChild) status.lastChild.textContent = ' Connecting';
   }
   host.querySelectorAll('.broker-watch-asset').forEach((button) => button.classList.toggle('active', button.dataset.symbol === symbol));
 }
@@ -1947,9 +2048,12 @@ function startBrokerLiveUpdates(currency = 'USD', requestedSymbol = FINANCE_DEFA
   let received = false;
   let feedError = '';
   let retryMs = 1500;
-  const connect = () => {
+  const connect = async () => {
     if (request !== financeLiveRequest) return;
-    const socket = new WebSocket(`${websocketBase}/api/broker/live-stream?symbol=${encodeURIComponent(financeLiveSymbol)}`);
+    await backendAccess.load();
+    if (request !== financeLiveRequest) return;
+    const socketUrl = `${websocketBase}/api/broker/live-stream?symbol=${encodeURIComponent(financeLiveSymbol)}`;
+    const socket = new WebSocket(socketUrl, backendAccess.socketProtocols(socketUrl));
     financeLiveSocket = socket;
     socket.onmessage = (event) => {
       if (request !== financeLiveRequest) return;
@@ -2029,7 +2133,7 @@ async function renderBrokerPanel(currency = 'USD') {
         <div class="finance-row broker-pending-row">
           <div><strong>${escapeHtml(o.side.toUpperCase())} ${o.quantity} ${escapeHtml(o.symbol)} @ ${money(o.price_cents)}</strong><span>${escapeHtml(o.strategy || 'manual')}${o.memo ? ' · ' + escapeHtml(o.memo) : ''} · ${escapeHtml(o.quote_source || 'manual')} quote · staged ${escapeHtml(formatFinanceDateTime(o.created_at, 'time unavailable'))} · <i class="broker-price-age${financePriceAge(o.created_at).stale ? ' stale' : ''}" data-at="${escapeHtml(o.created_at || '')}">${escapeHtml(financePriceAge(o.created_at).text)}</i></span></div>
           <div class="finance-row-actions">
-            <button type="button" class="finance-inline-btn broker-confirm-btn" data-order-id="${escapeHtml(o.id)}" data-token="${escapeHtml(o.confirmation_token)}" data-at="${escapeHtml(o.created_at || '')}">Confirm fill</button>
+            <button type="button" class="finance-inline-btn finance-btn-primary broker-confirm-btn" data-order-id="${escapeHtml(o.id)}" data-token="${escapeHtml(o.confirmation_token)}" data-at="${escapeHtml(o.created_at || '')}">Confirm fill</button>
             <button type="button" class="finance-inline-btn broker-cancel-btn" data-order-id="${escapeHtml(o.id)}">Cancel</button>
           </div>
         </div>`).join('');
@@ -2039,39 +2143,37 @@ async function renderBrokerPanel(currency = 'USD') {
       ${pendingRows}
     </section>` : '';
 
-  const positionRows = positions.map((p) => `
-        <div class="finance-row">
-          <div><strong>${escapeHtml(p.symbol)} · ${p.quantity} unit(s)</strong><span>Avg cost ${money(p.avg_cost_cents)} · realized ${signed(p.realized_pnl_cents)}</span></div>
-        </div>`).join('');
+  const positionRows = positions.map((p) => `<tr><th scope="row">${escapeHtml(p.symbol)}</th><td>${p.quantity}</td><td>${money(p.avg_cost_cents)}</td><td class="${p.realized_pnl_cents < 0 ? 'expense' : ''}">${signed(p.realized_pnl_cents)}</td></tr>`).join('');
   const positionsPanel = positions.length ? `
-    <section class="finance-panel"><div class="finance-panel-title"><div><span>Open positions</span></div></div>${positionRows}</section>` : '';
+    <section class="broker-table-section"><div class="finance-panel-title"><div><span>Open positions</span></div></div>
+      <div class="research-table-wrap"><table class="research-table"><thead><tr><th>Symbol</th><th>Units</th><th>Average cost</th><th>Realized</th></tr></thead><tbody>${positionRows}</tbody></table></div></section>` : '';
 
   const history = orders.filter((o) => o.status !== 'pending_confirmation').slice(0, 8);
-  const historyRows = history.map((o) => `
-        <div class="finance-row">
-          <div><strong>${escapeHtml(o.side.toUpperCase())} ${o.quantity} ${escapeHtml(o.symbol)} · ${escapeHtml(o.status)}</strong><span>${o.status === 'filled' ? `filled ${money(o.fill_price_cents)} vs quote ${money(o.quote_price_cents)} · fee ${money(o.commission_cents)} · by ${escapeHtml(o.confirmed_by || '')}` : escapeHtml(o.resolution_reason || '')}</span></div>
-        </div>`).join('');
+  const historyRows = history.map((o) => {
+    const filled = o.status === 'filled';
+    return `<tr><th scope="row">${escapeHtml(financeWord(o.side))} ${o.quantity} ${escapeHtml(o.symbol)}</th><td><span class="broker-status ${filled ? 'filled' : ''}">${escapeHtml(financeWord(String(o.status || '').replace(/_/g, ' ')))}</span></td><td>${filled ? money(o.fill_price_cents) : '—'}</td><td>${filled ? money(o.quote_price_cents) : '—'}</td><td>${filled ? money(o.commission_cents) : escapeHtml(o.resolution_reason || '—')}</td></tr>`;
+  }).join('');
   const historyPanel = history.length ? `
-    <section class="finance-panel"><div class="finance-panel-title"><div><span>Order history</span><small>Every fill records slippage and commission</small></div></div>${historyRows}</section>` : '';
+    <section class="broker-table-section"><div class="finance-panel-title"><div><span>Order history${financeInfo('Every fill records slippage and commission. Fill vs quote shows the modeled slippage.')}</span></div></div>
+      <div class="research-table-wrap"><table class="research-table"><thead><tr><th>Order</th><th>Status</th><th>Fill</th><th>Quote</th><th>Fee</th></tr></thead><tbody>${historyRows}</tbody></table></div></section>` : '';
   financeLiveSymbol = String(localStorage.getItem(FINANCE_LIVE_SYMBOL_KEY) || (positions.length ? positions[0].symbol : FINANCE_DEFAULT_ASSETS[0].symbol)).toUpperCase();
 
   host.innerHTML = `
-    <div class="finance-panel-title"><div><span>Paper portfolio</span><small>Simulated fills only · every proposal requires confirmation</small></div><span class="broker-mode-chip">${escapeHtml(String(account.mode || 'paper').toUpperCase())}</span></div>
+    <div class="finance-panel-title"><div><span>Paper portfolio</span><small>Simulated fills only · every proposal requires confirmation</small></div><span class="broker-mode-chip">${escapeHtml(financeWord(account.mode || 'paper'))}</span></div>
     <div class="finance-card-grid broker-portfolio-grid">
-      <article class="finance-card broker-live-summary"><span>Portfolio equity <i>LIVE MARK</i></span><strong id="brokerPortfolioEquity">${money(perf.latest_equity_cents)}</strong><small id="brokerPortfolioCash">${money(account.cash_cents)} cash · ${account.open_positions} open position(s)</small></article>
+      <article class="finance-card broker-live-summary"><span>Portfolio equity</span><strong id="brokerPortfolioEquity">${money(perf.latest_equity_cents)}</strong><small id="brokerPortfolioCash">${money(account.cash_cents)} cash · ${account.open_positions} open position(s)</small></article>
       <article class="finance-card"><span>Realized P&amp;L</span><strong id="brokerPortfolioRealized" class="${account.realized_pnl_cents < 0 ? 'expense' : ''}">${signed(account.realized_pnl_cents)}</strong><small>Total return <span id="brokerPortfolioReturn" class="${perf.total_return_bps < 0 ? 'expense' : ''}">${pct(perf.total_return_bps)}</span> · costs ${money(account.fees_cents)}</small></article>
       <article class="finance-card"><span>Measured daily</span><strong id="brokerMeasuredDaily" class="${perf.mean_daily_bps < 0 ? 'expense' : ''}">${pct(perf.mean_daily_bps)}</strong><small>Updates only when a daily snapshot is recorded</small></article>
       <article class="finance-card"><span>Audit ledger</span><strong id="brokerLedgerState">${ledger.ok ? 'Verified' : 'BROKEN'}</strong><small id="brokerLedgerNote">${ledger.ok ? `${ledger.records} record(s), chain intact` : `tampered at #${ledger.broken_at}`}</small></article>
     </div>
     <section class="finance-panel broker-live-panel" id="brokerLivePanel">${marketStreamSkeleton(financeLiveSymbol, 'Connecting to live market data…')}</section>
-    <section class="finance-panel strategy-lab-panel" id="strategyLabSection">${strategyLabSkeleton(financeStrategySymbol)}</section>
     ${pendingPanel}
     <details class="broker-advanced-panel">
-      <summary>Advanced paper controls</summary>
-      <div class="finance-control-grid">
-      <section class="finance-panel finance-form-panel">
-        <div class="finance-panel-title"><div><span>Stage an order</span><small>Staging never moves cash</small></div></div>
-        <form class="finance-form" id="brokerOrderForm">
+      ${financeDisclosure('sliders', 'Advanced paper controls', 'Stage orders by hand and snapshot prices')}
+      <div class="broker-advanced-body">
+      <section class="broker-tool">
+        <div class="finance-panel-title"><div><span>Stage an order${financeInfo('Staging never moves cash: an order fills only after you confirm it. Live quotes cover equities and crypto, such as AAPL, MSFT and BTC-USD.')}</span><small>Nothing fills until you confirm</small></div></div>
+        <form class="finance-form broker-order-form" id="brokerOrderForm">
           <label>Symbol<input name="symbol" required maxlength="24" placeholder="AAPL"></label>
           <label>Side<select name="side"><option value="buy">Buy</option><option value="sell">Sell</option></select></label>
           <label>Quantity<input name="quantity" type="number" min="1" step="1" required placeholder="1"></label>
@@ -2080,22 +2182,22 @@ async function renderBrokerPanel(currency = 'USD') {
           <label>Note<input name="memo" maxlength="500" placeholder="Optional"></label>
           <label>Instruction / rationale<input name="instruction" maxlength="2000" placeholder="Optional operator or AI proposal text"></label>
           <div class="broker-form-actions">
-            <button type="submit">Stage order</button>
+            <button type="submit" class="finance-btn-primary">Stage order</button>
             <button type="button" class="finance-inline-btn" id="brokerQuoteBtn">Use live price</button>
           </div>
         </form>
-        <div class="broker-mark-note" id="brokerQuoteNote">Live quotes cover equities and crypto — AAPL, MSFT, BTC-USD.</div>
+        <div class="broker-mark-note" id="brokerQuoteNote" role="status"></div>
       </section>
-      <section class="finance-panel finance-form-panel">
-        <div class="finance-panel-title"><div><span>Mark to market</span><small>Snapshot equity at today's prices</small></div></div>
-        <form class="finance-form" id="brokerMarkForm">
+      <section class="broker-tool">
+        <div class="finance-panel-title"><div><span>Mark to market${financeInfo("Live prices fill any held symbol you don't override. Snapshots build the daily-return series.")}</span><small>Snapshot equity at today's prices</small></div></div>
+        <form class="finance-form broker-mark-form" id="brokerMarkForm">
           <label>Manual override<input name="marks" maxlength="300" placeholder="AAPL=182.50, BTC-USD=61000"></label>
           <div class="broker-form-actions">
-            <button type="button" id="brokerLiveMarkBtn">Fetch live &amp; snapshot</button>
+            <button type="button" class="finance-btn-primary" id="brokerLiveMarkBtn">Fetch live &amp; snapshot</button>
             <button type="submit" class="finance-inline-btn">Snapshot at cost</button>
           </div>
         </form>
-        <div class="broker-mark-note" id="brokerMarkNote">Live prices fill any held symbol you don't override. Snapshots build the daily-return series above.</div>
+        <div class="broker-mark-note" id="brokerMarkNote" role="status"></div>
       </section>
       </div>
     </details>
@@ -2277,19 +2379,235 @@ async function syncPaperTestCloseGuard(active = null) {
   });
 }
 
+const AUTOPILOT_RISK_HINTS = {
+  careful: 'Small trades, tight stops',
+  balanced: 'Medium trades, room to move',
+  bold: 'Bigger trades, wider stops',
+};
+const FINANCE_FALLBACK_ICONS = {
+  trend: '<polyline points="3 17 9 11 13 15 21 7"/><polyline points="15 7 21 7 21 13"/>',
+  clock: '<circle cx="12" cy="12" r="8.5"/><polyline points="12 7.5 12 12 15 14"/>',
+  compare: '<line x1="6" y1="20" x2="6" y2="11"/><line x1="12" y1="20" x2="12" y2="5"/><line x1="18" y1="20" x2="18" y2="14"/>',
+  records: '<rect x="4" y="4" width="16" height="16" rx="3"/><line x1="8" y1="9" x2="16" y2="9"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="12" y2="17"/>',
+  invoice: '<path d="M7 3h7l4 4v14H7z"/><polyline points="14 3 14 7 18 7"/><line x1="10" y1="12" x2="15" y2="12"/><line x1="10" y1="16" x2="15" y2="16"/>',
+};
+
+function financeInfo(text, id = '') {
+  const safe = escapeHtml(text);
+  return `<button type="button" class="finance-info ui-tooltip-anchor"${id ? ` id="${id}"` : ''} data-tooltip="${safe}" data-tooltip-wide="1" aria-label="${safe}"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><line x1="12" y1="7.5" x2="12" y2="13"/><circle cx="12" cy="16.4" r=".7"/></svg></button>`;
+}
+
+const FINANCE_DISCLOSURE_ICONS = {
+  sliders: '<line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="17" x2="20" y2="17"/><circle cx="9" cy="7" r="2.2"/><circle cx="15" cy="17" r="2.2"/>',
+  list: '<line x1="9" y1="7" x2="20" y2="7"/><line x1="9" y1="12" x2="20" y2="12"/><line x1="9" y1="17" x2="20" y2="17"/><circle cx="5" cy="7" r=".8"/><circle cx="5" cy="12" r=".8"/><circle cx="5" cy="17" r=".8"/>',
+  compare: '<line x1="6" y1="20" x2="6" y2="11"/><line x1="12" y1="20" x2="12" y2="5"/><line x1="18" y1="20" x2="18" y2="14"/>',
+};
+
+function financeDisclosure(icon, title, subtitle) {
+  return `<summary><span class="finance-disclosure-icon"><svg viewBox="0 0 24 24" aria-hidden="true">${FINANCE_DISCLOSURE_ICONS[icon] || ''}</svg></span><span class="finance-disclosure-text"><b>${title}</b><small>${subtitle}</small></span><span class="finance-disclosure-chevron" aria-hidden="true"><svg viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg></span></summary>`;
+}
+
+function financeWord(value) {
+  const text = String(value || '').trim().toLowerCase();
+  return text ? text.charAt(0).toUpperCase() + text.slice(1) : '';
+}
+
+function financeFallback(icon, text, detail = '', action = '') {
+  return `<div class="finance-fallback"><svg viewBox="0 0 24 24" aria-hidden="true">${FINANCE_FALLBACK_ICONS[icon] || ''}</svg><span>${text}</span>${detail ? `<small>${detail}</small>` : ''}${action}</div>`;
+}
+
+let autopilotRisk = 'careful';
+let autopilotTimer = null;
+
+function autopilotAgo(iso) {
+  const seconds = Math.max(0, (Date.now() - Date.parse(iso)) / 1000);
+  if (!Number.isFinite(seconds)) return '';
+  if (seconds < 60) return 'just now';
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
+  return `${Math.floor(seconds / 86400)}d ago`;
+}
+
+function autopilotPrice(value) {
+  const n = Number(value || 0);
+  return `$${n.toLocaleString('en-US', { maximumFractionDigits: n >= 100 ? 2 : n >= 1 ? 3 : 5 })}`;
+}
+
+function autopilotSigned(cents) {
+  const n = Number(cents || 0);
+  return `${n > 0 ? '+' : n < 0 ? '−' : ''}${formatFinanceMoney(Math.abs(n), 'USD')}`;
+}
+
+function autopilotPanel(s) {
+  const running = Boolean(s && s.running);
+  const hasAccount = Boolean(s && s.budget_cents);
+  const tone = (n) => (n > 0 ? 'up' : n < 0 ? 'down' : '');
+  const state = !s ? '<span class="autopilot-state">Connecting…</span>'
+    : running ? `<span class="autopilot-state on"><i></i>${s.paused_today ? 'Paused until tomorrow' : 'Running'}${s.last_cycle_at ? ` · checked ${autopilotAgo(s.last_cycle_at)}` : ''}</span>`
+      : '<span class="autopilot-state">Off</span>';
+  let stats = '';
+  if (hasAccount) {
+    const pnl = Number(s.pnl_cents || 0);
+    const pct = s.budget_cents ? (pnl / s.budget_cents) * 100 : 0;
+    const vs = Number(s.equity_cents || 0) - Number(s.benchmark_cents || 0);
+    stats = `<div class="finance-card-grid autopilot-card-grid">
+      <article class="finance-card"><span>Balance</span><strong>${formatFinanceMoney(s.equity_cents, 'USD')}</strong><small class="${tone(pnl)}">${autopilotSigned(pnl)} (${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%)</small></article>
+      <article class="finance-card"><span>vs. just holding Bitcoin</span><strong class="${tone(vs)}">${autopilotSigned(vs)}</strong><small>${vs >= 0 ? 'Ahead' : 'Behind'} since ${escapeHtml(formatFinanceDate(s.started_at, 'start'))}</small></article>
+      <article class="finance-card"><span>Closed trades</span><strong>${Number(s.closed_trades || 0)}</strong><small>${Number(s.wins || 0)} won · fees ${formatFinanceMoney(s.fees_cents, 'USD')}</small></article>
+    </div>`;
+  }
+  const positions = (s && s.positions) || [];
+  const openRows = positions.length ? positions.map((p) => `
+      <li><b>${escapeHtml(p.symbol)}</b><span>${formatFinanceMoney(p.value_cents, 'USD')} · bought ${autopilotAgo(p.opened_at)}</span><strong class="${tone(p.pnl_cents)}">${autopilotSigned(p.pnl_cents)}</strong></li>`).join('')
+    : `<li class="autopilot-empty">${financeFallback('trend', running ? 'Waiting for a strong trend' : 'No open trades')}</li>`;
+  const verbs = { buy: 'Bought', sell: 'Sold', skipped: 'Skipped', paused: 'Paused', started: 'Started', stopped: 'Stopped' };
+  const events = ((s && s.events) || []).slice(0, 12).map((e) => {
+    const head = e.symbol ? `${verbs[e.kind] || e.kind} ${escapeHtml(e.symbol)}${e.price ? ` at ${autopilotPrice(e.price)}` : ''}` : escapeHtml(e.note || verbs[e.kind] || '');
+    const why = e.symbol ? (e.reason || e.note || '') : '';
+    return `<li class="${escapeHtml(e.kind || '')}"><i></i><div><span>${head}</span>${why ? `<small>${escapeHtml(why)}</small>` : ''}</div><time>${autopilotAgo(e.at)}</time></li>`;
+  }).join('') || `<li class="autopilot-empty">${financeFallback('clock', 'Trades and decisions appear here')}</li>`;
+  const market = ((s && s.watchlist) || []).map((w) => {
+    const change = Number(w.change_1h || 0) * 100;
+    return `<span class="${w.trending ? 'trending' : ''}"${w.trending ? ' data-tooltip="In an uptrend"' : ''}><b>${escapeHtml(w.symbol)}</b>${autopilotPrice(w.price)}<em class="${tone(change)}">${change >= 0 ? '+' : ''}${change.toFixed(2)}%</em></span>`;
+  }).join('');
+  const setup = running ? `
+      <div class="autopilot-actions"><button type="button" class="finance-btn-primary" id="autopilotStopBtn">Stop</button><button type="button" class="finance-inline-btn" id="autopilotSellBtn">Stop and sell everything</button></div>`
+    : `
+      <form class="autopilot-setup" id="autopilotForm">
+        <label>Paper budget<input id="autopilotBudget" type="number" min="100" max="1000000" step="100" required value="${hasAccount ? Math.round(s.budget_cents / 100) : 1000}"></label>
+        <div class="autopilot-risk-field"><div class="autopilot-risk-label"><span id="autopilotRiskLabel">Risk</span><small id="autopilotRiskHint">${AUTOPILOT_RISK_HINTS[autopilotRisk]}</small></div>
+          <div class="autopilot-risk" role="radiogroup" aria-labelledby="autopilotRiskLabel">
+            ${Object.keys(AUTOPILOT_RISK_HINTS).map((id) => `<button type="button" role="radio" aria-checked="${autopilotRisk === id}" data-risk="${id}">${escapeHtml((s && s.presets && s.presets[id]) || id)}</button>`).join('')}
+          </div>
+        </div>
+        <div class="autopilot-go-group">
+          <button type="submit" class="finance-btn-primary autopilot-go">${hasAccount ? 'Turn on again' : 'Start autopilot'}</button>
+          ${hasAccount && !positions.length ? '<button type="button" class="finance-inline-btn" id="autopilotResetBtn">Start fresh</button>' : ''}
+        </div>
+      </form>`;
+  return `
+    <header class="autopilot-head">
+      <div><h2>Autopilot${financeInfo('Paper money. Runs while AI.EXE is open, or with background mode on. On past data it trailed simply holding in rising markets and lost less in falling ones.')}</h2><p>AI watches 8 major coins around the clock and trades the trends it finds.</p></div>
+      ${state}
+    </header>
+    ${stats}
+    ${setup}
+    <div class="autopilot-error" id="autopilotError" role="alert">${s && s.last_error && running ? `Some prices didn’t load: ${escapeHtml(s.last_error)}` : ''}</div>
+    ${hasAccount || running ? `<div class="autopilot-cols">
+      <section><h3>Open trades</h3><ul class="autopilot-open">${openRows}</ul></section>
+      <section><div class="autopilot-section-head"><h3>Activity</h3>${(s && s.events && s.events.length) ? '<button type="button" class="autopilot-link" id="autopilotClearBtn">Clear</button>' : ''}</div><ul class="autopilot-feed">${events}</ul></section>
+    </div>` : ''}
+    ${market ? `<div class="autopilot-market">${market}</div>` : ''}`;
+}
+
+async function refreshAutopilot() {
+  const host = document.getElementById('autopilotSection');
+  if (!host) { clearInterval(autopilotTimer); autopilotTimer = null; return; }
+  if (host.contains(document.activeElement) && document.activeElement.matches('input')) return;
+  try {
+    const response = await fetch(getAIExeBackendUrl() + '/api/broker/autopilot');
+    const status = await response.json();
+    if (!response.ok) throw new Error(status.detail || 'Autopilot is unavailable.');
+    if (!status.running && status.risk) autopilotRisk = status.risk;
+    host.innerHTML = autopilotPanel(status);
+    bindAutopilot(host);
+  } catch (error) {
+    const slot = document.getElementById('autopilotError');
+    if (slot) slot.textContent = error.message || 'Autopilot is unavailable.';
+  }
+}
+
+function bindAutopilot(host) {
+  const post = async (path, body) => {
+    const response = await fetch(getAIExeBackendUrl() + '/api/broker/autopilot/' + path, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}),
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.detail || 'Request failed.');
+    return result;
+  };
+  const act = async (button, path, body) => {
+    button.disabled = true;
+    try {
+      host.innerHTML = autopilotPanel(await post(path, body));
+      bindAutopilot(host);
+      setTimeout(refreshAutopilot, 4000);
+    } catch (error) {
+      button.disabled = false;
+      const slot = document.getElementById('autopilotError');
+      if (slot) slot.textContent = error.message;
+    }
+  };
+  host.querySelectorAll('[data-risk]').forEach((btn) => btn.addEventListener('click', () => {
+    autopilotRisk = btn.dataset.risk;
+    host.querySelectorAll('[data-risk]').forEach((b) => b.setAttribute('aria-checked', String(b === btn)));
+    const hint = document.getElementById('autopilotRiskHint');
+    if (hint) hint.textContent = AUTOPILOT_RISK_HINTS[autopilotRisk];
+  }));
+  const form = document.getElementById('autopilotForm');
+  if (form) form.addEventListener('submit', (event) => {
+    event.preventDefault();
+    const dollars = Number(document.getElementById('autopilotBudget').value);
+    act(form.querySelector('.autopilot-go'), 'start', { budget_cents: Math.round(dollars * 100), risk: autopilotRisk });
+  });
+  const stop = document.getElementById('autopilotStopBtn');
+  if (stop) stop.addEventListener('click', () => act(stop, 'stop', { close_positions: false }));
+  const sell = document.getElementById('autopilotSellBtn');
+  if (sell) sell.addEventListener('click', () => act(sell, 'stop', { close_positions: true }));
+  const clear = document.getElementById('autopilotClearBtn');
+  if (clear) clear.addEventListener('click', () => act(clear, 'clear-activity'));
+  const reset = document.getElementById('autopilotResetBtn');
+  if (reset) reset.addEventListener('click', () => act(reset, 'reset'));
+  if (!autopilotTimer) autopilotTimer = setInterval(refreshAutopilot, 15000);
+}
+
+function fundingPreviewPanel() {
+  return `<section class="funding-workspace">
+    <div class="finance-section-intro"><strong>Deposits &amp; withdrawals</strong><span>Canada · USD. Bank transfers are not connected.</span></div>
+    <div class="funding-layout">
+      <section class="funding-connection"><h2>Your brokerage connection</h2><p>Interactive Brokers Canada is the proposed provider. No account is connected to AI.EXE yet.</p>
+        <dl><div><dt>Account currency</dt><dd>USD</dd></div><div><dt>Bank connection</dt><dd>Not connected</dd></div><div><dt>Available to withdraw</dt><dd>Not available</dd></div></dl>
+        <p>Connect a brokerage account to deposit or withdraw USD. Your paper balance is for testing only.</p>
+      </section>
+      <section class="funding-preview"><h2>Preview a transfer</h2><p>Review an amount without moving money.</p>
+        <form id="fundingPreviewForm" class="finance-form"><label>Transfer type<select name="direction"><option value="deposit">Deposit</option><option value="withdrawal">Withdrawal</option></select></label><label>Amount in USD<input name="amount" type="number" required min="0.01" max="1000000" step="0.01" placeholder="0.00"></label><button type="submit">Review preview</button></form>
+        <div id="fundingPreviewResult" aria-live="polite"></div>
+      </section>
+    </div>
+  </section>`;
+}
+
+function bindFundingPreview() {
+  const form = document.getElementById('fundingPreviewForm');
+  if (!form) return;
+  const output = document.getElementById('fundingPreviewResult');
+  form.addEventListener('input', () => { output.innerHTML = ''; });
+  form.addEventListener('submit', (event) => {
+    event.preventDefault();
+    if (!form.reportValidity()) return;
+    const values = new FormData(form);
+    const amount = Number(values.get('amount'));
+    if (!Number.isFinite(amount) || amount <= 0 || amount > 1000000) return;
+    const deposit = values.get('direction') === 'deposit';
+    output.innerHTML = `<div class="funding-review"><strong>${deposit ? 'Deposit' : 'Withdrawal'} preview: ${formatFinanceMoney(Math.round(amount * 100), 'USD')}</strong><p>${deposit ? 'Your bank → your brokerage account' : 'Your brokerage account → your verified bank'}</p><dl><div><dt>Fees and arrival</dt><dd>Provided by the broker after connection</dd></div><div><dt>Status</dt><dd>Preview only; not submitted</dd></div></dl><p>Connect and verify your brokerage account to continue. No transfer has been created.</p></div>`;
+  });
+}
+
+let lastAIResearchResult = null;
+
 function aiResearchPanel() {
   return `
     <section class="ai-research-lab" id="aiResearchLab">
       <div class="ai-research-head">
-        <div><span class="ai-research-kicker">MODEL CHALLENGER · PAPER ONLY</span><strong>Blinded portfolio evidence</strong><small>The model sees factors labeled A–F, never company names, dates, prices, or future returns.</small></div>
-        <span class="ai-research-verdict">NOT PROMOTED</span>
+        <div><strong>AI portfolio comparison</strong><small>Compare the model with momentum and an evenly spread portfolio over six historical periods.</small></div>
+        <span class="ai-research-verdict">Research only</span>
       </div>
       <div class="ai-research-controls">
-        <label>Research universe<input id="aiResearchSymbols" value="BAC, AAPL, MSFT, JPM, XOM, JNJ" maxlength="80"></label>
-        <button type="button" class="finance-inline-btn" id="aiResearchRunBtn">Run blinded evaluation</button>
+        <label>Stocks to compare<input id="aiResearchSymbols" value="BAC, AAPL, MSFT, JPM, XOM, JNJ" maxlength="80"></label>
+        <button type="button" class="finance-inline-btn finance-btn-primary" id="aiResearchRunBtn">Compare portfolios</button>
       </div>
       <div class="ai-research-empty" id="aiResearchOutput">
-        <span>01</span><div><strong>No model result yet</strong><small>One evaluation uses six historical episodes and compares the configured provider with momentum and equal-weight. It cannot create, stage, or confirm an order.</small></div>
+        ${financeFallback('compare', 'Ready to compare', 'The model sees anonymous price factors, with future returns withheld. It cannot create, stage, or confirm an order.')}
       </div>
     </section>`;
 }
@@ -2303,25 +2621,28 @@ function renderAIResearchResult(host, result) {
   const max = Math.max(1, ...series.map(([key]) => Math.abs(Number(returns[key] || 0))));
   const lanes = series.map(([key, label]) => {
     const value = Number(returns[key] || 0);
-    const width = Math.max(2, Math.abs(value) / max * 100);
+    const width = Math.abs(value) / max * 50;
     return `<div class="ai-evidence-lane${result.leader === key ? ' leader' : ''}">
       <div><span>${label}</span><strong class="${value < 0 ? 'expense' : ''}">${pct(value)}</strong></div>
-      <i><b style="width:${width}%"></b></i>
+      <i><b style="width:${width}%;left:${value < 0 ? 50 - width : 50}%;background:${value < 0 ? '#df9393' : '#7fadc6'}"></b></i>
     </div>`;
   }).join('');
   const episodes = (result.episodes || []).map((episode) => `
-    <div class="ai-episode${episode.valid ? '' : ' invalid'}"><span>E${String(episode.episode).padStart(2, '0')}</span><strong>${episode.valid ? 'VALID' : 'CASH / INVALID'}</strong><small>${escapeHtml(episode.note || 'Schema passed')}</small></div>`).join('');
+    <div class="ai-episode${episode.valid ? '' : ' invalid'}"><span>Period ${episode.episode}</span><strong>${episode.valid ? 'Accepted' : 'Cash / invalid'}</strong><small>${escapeHtml(episode.note || 'Allocation accepted')}</small></div>`).join('');
   const provider = result.provider || {};
   const valid = Number(result.valid_decisions || 0);
   const total = Number(result.total_decisions || 0);
   const attempts = (provider.attempts || []).map((attempt) => `${attempt.mode}${attempt.empty ? ' empty' : ''}`).join(' → ');
+  const gap = Number(returns.ai || 0) - Number(returns.equal_weight || 0);
+  const metricRows = series.map(([key, label]) => `<tr><th scope="row">${label}</th><td>${pct(returns[key])}</td><td>${result.max_drawdown_bps ? pct(result.max_drawdown_bps[key]) : 'Not recorded'}</td><td>${result.positive_periods ? `${result.positive_periods[key]}/${total}` : 'Not recorded'}</td><td>${result.costs_bps_of_initial_equity ? pct(result.costs_bps_of_initial_equity[key]) : 'Not recorded'}</td></tr>`).join('');
   host.innerHTML = `
+    <div class="research-result-head"><span>${escapeHtml(result.from_date || 'Start date not recorded')} to ${escapeHtml(result.to_date || 'End date not recorded')} · ${total} periods</span>${financeInfo(`${gap < 0 ? `AI trails equal-weight by ${pct(-gap).replace('%', '')} percentage points.` : gap > 0 ? `AI leads equal-weight by ${pct(gap).replace('%', '')} percentage points in this sample.` : 'AI matches equal-weight in this sample.'} A historical result does not establish a trading edge. Returns are after modeled costs; positive periods are not a trade win rate.`)}</div>
     <div class="ai-research-scoreboard">
       <div class="ai-evidence-board">${lanes}</div>
-      <aside><span>RELIABILITY</span><strong>${valid}/${total}</strong><small>schema-valid decisions</small><span>LATENCY</span><strong>${(Number(provider.latency_ms || 0) / 1000).toFixed(1)}s</strong><small>${escapeHtml(provider.local ? 'local model' : 'remote API')}</small></aside>
+      <aside><span>Valid responses</span><strong>${valid}/${total}</strong><small>Checks format, not forecast accuracy</small><span>Response time</span><strong>${(Number(provider.latency_ms || 0) / 1000).toFixed(1)}s</strong><small>${escapeHtml(provider.local ? 'Local model' : 'Cloud model')}</small></aside>
     </div>
-    <div class="ai-episode-tape">${episodes}</div>
-    <div class="ai-research-foot"><span>${escapeHtml(provider.model || 'configured model')} · ${escapeHtml(attempts || 'structured')}</span><strong>${valid === total ? 'Research result only — benchmark over more periods before promotion.' : 'Model output was unreliable — invalid decisions were held as cash.'}</strong></div>`;
+    <div class="research-table-wrap"><table class="research-table"><thead><tr><th>Portfolio</th><th>Return</th><th>Drawdown</th><th>Positive periods</th><th>Costs / initial equity</th></tr></thead><tbody>${metricRows}</tbody></table></div>
+    <details class="strategy-research-details">${financeDisclosure('compare', 'Method and model decisions', 'How the comparison was run')}<p>${escapeHtml(result.methodology || 'Cost and drawdown details were not recorded for this older result.')}</p><div class="ai-episode-tape">${episodes}</div><p>${escapeHtml(provider.model || 'Configured model')} · ${escapeHtml(attempts || 'structured')}</p></details>`;
 }
 
 async function renderStrategyLab(currency = 'USD', requestedSymbol = FINANCE_DEFAULT_ASSETS[0].symbol) {
@@ -2363,35 +2684,27 @@ async function renderStrategyLab(currency = 'USD', requestedSymbol = FINANCE_DEF
       ? 'system tray'
       : 'menu bar';
     const backgroundPanel = isDesktopNativeUi() ? `
-      <div class="paper-background-service">
-        <label class="settings-toggle-row" for="paperBackgroundToggle">
-          <span class="settings-toggle-copy">
-            <strong>Keep paper testing active in the background</strong>
-            <span>Shows AI.EXE in your ${backgroundLocation} and keeps daily checks running after this window closes.</span>
-          </span>
-          <input type="checkbox" id="paperBackgroundToggle" aria-label="Keep paper testing active in the background">
-        </label>
-        <ul class="paper-background-notes">
-          <li>Paper simulation only. It cannot place or confirm live orders.</li>
-          <li>Uses a small amount of memory, network data, and battery during scheduled checks.</li>
-          <li>Turning it off stops background checks; reopening AI.EXE will catch up missed market days.</li>
-        </ul>
-        <div class="paper-background-status" id="paperBackgroundStatus">Checking background service…</div>
+      <div class="paper-background-service settings-toggle-row">
+        <span class="paper-background-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z"/></svg></span>
+        <div class="paper-background-copy">
+          <strong>Run in the background${financeInfo(`Shows AI.EXE in your ${backgroundLocation}. Paper simulation only. It cannot place or confirm live orders. Uses a small amount of memory, network data, and battery during scheduled checks. Turning it off stops background checks; reopening AI.EXE will catch up missed market days.`)}</strong>
+          <div class="paper-background-status" id="paperBackgroundStatus">Checking background service…</div>
+        </div>
+        <input type="checkbox" id="paperBackgroundToggle" aria-label="Keep paper testing active in the background">
       </div>` : '';
     const forwardPanel = session.active ? `
       <section class="strategy-forward-panel${trackingThisSymbol ? ' active' : ''}">
-        <div class="finance-panel-title"><div><span>Daily forward test · ${escapeHtml(session.symbol || '')}</span><small>${forward.days || 0} market day(s) recorded · next check ${escapeHtml(formatFinanceDateTime(tracking.next_run_at, 'not scheduled'))}</small></div><span class="broker-mode-chip">${trackingThisSymbol ? 'RUNNING' : 'OTHER SYMBOL'}</span></div>
+        <div class="finance-panel-title"><div><span>Daily forward test · ${escapeHtml(session.symbol || '')}${financeInfo(`Signals: ${Number((forward.signal_counts || {}).long || 0)} long · ${Number((forward.signal_counts || {}).cash || 0)} cash. Buy-and-hold uses the same starting exposure, so its entry cost is $0.00 in this forward comparison.`)}</span><small>${forward.days || 0} market day(s) recorded · next check ${escapeHtml(formatFinanceDateTime(tracking.next_run_at, 'not scheduled'))}</small></div><span class="broker-mode-chip">${trackingThisSymbol ? 'Running' : 'Other symbol'}</span></div>
         <div class="strategy-forward-grid">
           <div><span>Forward return</span><strong>${pct(forward.forward_return_bps)}</strong></div>
           <div><span>Benchmark</span><strong>${pct(forward.benchmark_return_bps)}</strong></div>
           <div><span>Difference</span><strong>${pct(forward.alpha_bps)}</strong></div>
           <div><span>Drawdown</span><strong>${pct(forward.max_drawdown_bps)}</strong></div>
-          <div><span>Latest signal</span><strong>${escapeHtml(String(session.latest_signal || 'waiting').toUpperCase())}</strong></div>
-          <div><span>Action</span><strong>${escapeHtml(String(session.pending_action || 'hold').toUpperCase())}</strong></div>
+          <div><span>Latest signal</span><strong>${escapeHtml(financeWord(session.latest_signal || 'waiting'))}</strong></div>
+          <div><span>Action</span><strong>${escapeHtml(financeWord(session.pending_action || 'hold'))}</strong></div>
           <div><span>Modeled costs</span><strong>${money(forward.strategy_costs_cents)}</strong></div>
           <div><span>Post-start fills</span><strong>${Number((forward.trading_activity || {}).filled_orders || 0)}</strong></div>
         </div>
-        <div class="broker-mark-note">Signals: ${Number((forward.signal_counts || {}).long || 0)} long · ${Number((forward.signal_counts || {}).cash || 0)} cash. Buy-and-hold uses the same starting exposure, so its entry cost is $0.00 in this forward comparison.</div>
         <div class="strategy-runner-actions">
           ${trackingThisSymbol ? '' : '<button type="button" class="finance-inline-btn" id="strategyViewActiveBtn">View active test</button>'}
           <button type="button" class="finance-inline-btn" id="strategyReportBtn">Export test data</button>
@@ -2407,22 +2720,23 @@ async function renderStrategyLab(currency = 'USD', requestedSymbol = FINANCE_DEF
       </section>`;
     host.innerHTML = `
       <div class="finance-panel-title">
-        <div><span>Strategy lab</span><small>Walk-forward paper research · historical data stays separate from live execution</small></div>
-        <span class="broker-mode-chip">RESEARCH</span>
+        <div><span>Rule-based strategy${financeInfo(`${Number(test.total_return_bps || 0) < Number(benchmark.total_return_bps || 0) ? 'The selected strategy trails buy-and-hold in this test.' : 'The selected strategy matches or beats buy-and-hold in this test.'} Compare both return and drawdown before using this signal. Same test period and starting cash: ${formatFinanceDate(report.from_date, '', true)} – ${formatFinanceDate(report.to_date, '', true)}, ${report.observations} Nasdaq closes. ${report.disclaimer || ''}`)}</span><small>Compare a moving-average strategy with buying and holding the same stock.</small></div>
+        <span class="broker-mode-chip">Historical test</span>
       </div>
       <div class="strategy-lab-toolbar">
         <label>Symbol<input id="strategyLabSymbol" maxlength="24" value="${escapeHtml(report.symbol || symbol)}"></label>
-        <button type="button" class="finance-inline-btn" id="strategyLabRunBtn">Run test</button>
+        <button type="button" class="finance-inline-btn finance-btn-primary" id="strategyLabRunBtn">Run test</button>
         <button type="button" class="finance-inline-btn strategy-stage-btn" id="strategyLabStageBtn">Stage paper proposal</button>
       </div>
       <div class="finance-card-grid strategy-card-grid">
         <article class="finance-card"><span>Selected baseline</span><strong>${escapeHtml(selected.name || 'n/a')}</strong><small>${report.test_observations || 0} unseen trading day(s)</small></article>
         <article class="finance-card"><span>Test return</span><strong class="${Number(test.total_return_bps || 0) < 0 ? 'expense' : ''}">${pct(test.total_return_bps)}</strong><small>${test.trades || 0} fills · modeled costs ${money(test.total_costs_cents)}</small></article>
         <article class="finance-card"><span>Maximum drawdown</span><strong class="${Number(test.max_drawdown_bps || 0) > 0 ? 'expense' : ''}">${pct(test.max_drawdown_bps)}</strong><small>Worst peak-to-trough test loss</small></article>
-        <article class="finance-card"><span>Current signal</span><strong>${escapeHtml(String(report.recommendation || 'cash').toUpperCase())}</strong><small>Benchmark ${pct(benchmark.total_return_bps)} · difference ${pct(Number(test.total_return_bps || 0) - Number(benchmark.total_return_bps || 0))}</small></article>
+        <article class="finance-card"><span>Current signal</span><strong>${escapeHtml(financeWord(report.recommendation || 'cash'))}</strong><small>Benchmark ${pct(benchmark.total_return_bps)} · difference ${pct(Number(test.total_return_bps || 0) - Number(benchmark.total_return_bps || 0))}</small></article>
       </div>
-      <details class="strategy-research-details"><summary>Research details · ${(report.candidates || []).length} candidate strategies</summary><div class="strategy-result-list">${rows}</div></details>
-      <div class="broker-mark-note" id="strategyLabNote">${escapeHtml(formatFinanceDate(report.from_date, '', true))} – ${escapeHtml(formatFinanceDate(report.to_date, '', true))} · ${report.observations} Nasdaq closes · ${escapeHtml(report.disclaimer || '')}</div>
+      <div class="research-table-wrap"><table class="research-table"><thead><tr><th>Strategy</th><th>Return</th><th>Drawdown</th><th>Fills</th><th>Modeled costs</th></tr></thead><tbody>${[[selected.name || 'Selected', test], ['Buy-and-hold', benchmark]].map(([name, item]) => `<tr><th scope="row">${escapeHtml(name)}</th><td>${pct(item.total_return_bps)}</td><td>${pct(item.max_drawdown_bps)}</td><td>${Number(item.trades || 0)}</td><td>${money(item.total_costs_cents)}</td></tr>`).join('')}</tbody></table></div>
+      <details class="strategy-research-details">${financeDisclosure('list', `Compare ${(report.candidates || []).length} candidate strategies`, 'Every rule tested on the same data')}<div class="strategy-result-list">${rows}</div></details>
+      <div class="broker-mark-note" id="strategyLabNote" role="status"></div>
       ${forwardPanel}
       ${aiResearchPanel()}`;
 
@@ -2442,23 +2756,29 @@ async function renderStrategyLab(currency = 'USD', requestedSymbol = FINANCE_DEF
     const aiResearchButton = document.getElementById('aiResearchRunBtn');
     const aiResearchSymbols = document.getElementById('aiResearchSymbols');
     const aiResearchOutput = document.getElementById('aiResearchOutput');
+    if (lastAIResearchResult && aiResearchOutput) {
+      aiResearchOutput.className = 'ai-research-output';
+      renderAIResearchResult(aiResearchOutput, lastAIResearchResult);
+      aiResearchSymbols.value = (lastAIResearchResult.universe || []).join(', ');
+    }
     if (aiResearchButton && aiResearchSymbols && aiResearchOutput) {
       aiResearchButton.addEventListener('click', async () => {
         const symbols = String(aiResearchSymbols.value || '').split(',').map((value) => value.trim().toUpperCase()).filter(Boolean);
         aiResearchButton.disabled = true;
         aiResearchButton.textContent = 'Evaluating…';
         aiResearchOutput.className = 'ai-research-empty loading';
-        aiResearchOutput.innerHTML = '<span>···</span><div><strong>Running six blinded episodes</strong><small>Fetching historical closes, asking the configured model once, then scoring every result locally.</small></div>';
+        aiResearchOutput.innerHTML = financeFallback('compare', 'Comparing six historical periods…', 'Loading prices and waiting for the model. This can take a few minutes.');
         try {
           const result = await runnerPost('/api/broker/ai-research', { symbols, episodes: 6 });
+          lastAIResearchResult = result;
           aiResearchOutput.className = 'ai-research-output';
           renderAIResearchResult(aiResearchOutput, result);
         } catch (error) {
           aiResearchOutput.className = 'ai-research-empty error';
-          aiResearchOutput.innerHTML = `<span>!</span><div><strong>Evaluation stopped safely</strong><small>${escapeHtml(error.message)}</small></div>`;
+          aiResearchOutput.innerHTML = financeFallback('compare', 'Could not complete the comparison', `${escapeHtml(error.message)} Check your provider settings, then try again.`);
         } finally {
           aiResearchButton.disabled = false;
-          aiResearchButton.textContent = 'Run blinded evaluation';
+          aiResearchButton.textContent = 'Compare portfolios';
         }
       });
     }
@@ -2469,8 +2789,8 @@ async function renderStrategyLab(currency = 'USD', requestedSymbol = FINANCE_DEF
         backgroundStatus.classList.toggle('enabled', enabled && !isError);
         backgroundStatus.classList.toggle('error', isError);
         backgroundStatus.textContent = message || (enabled
-          ? `On · closing the window keeps AI.EXE in the ${backgroundLocation}.`
-          : 'Off · checks run only while AI.EXE is open, then catch up next time.');
+          ? `On · keeps running after you close the window`
+          : 'Off · checks run only while AI.EXE is open');
       };
       backgroundToggle.disabled = true;
       nativeBridge.invoke('paperBackgroundService', { content: '', timeoutMs: 10000 })
@@ -2578,7 +2898,7 @@ async function renderStrategyLab(currency = 'USD', requestedSymbol = FINANCE_DEF
       } catch (error) { note.textContent = error.message; }
     });
   } catch (error) {
-    host.innerHTML = `<div class="finance-empty-state"><strong>Strategy lab unavailable</strong><span>${escapeHtml(error.message || 'Historical data could not be loaded.')}</span><button type="button" id="strategyLabRetryBtn">Retry</button></div>`;
+    host.innerHTML = `<div class="finance-empty-state"><strong>Strategy lab unavailable</strong><span>${escapeHtml(error.message || 'Historical data could not be loaded.')}</span><button type="button" class="finance-inline-btn" id="strategyLabRetryBtn">Retry</button></div>`;
     const retry = document.getElementById('strategyLabRetryBtn');
     if (retry) retry.addEventListener('click', () => renderStrategyLab(currency, symbol));
   }
@@ -2776,7 +3096,6 @@ const settingsApiModelInput = document.getElementById('settingsApiModelInput');
 const settingsProviderHelp = document.getElementById('settingsProviderHelp');
 const settingsModelUrlWrap = document.getElementById('settingsModelUrlWrap');
 const settingsModelUrlInput = document.getElementById('settingsModelUrlInput');
-const settingsKeepModelChk = document.getElementById('settingsKeepModelChk');
 const settingsKeepAwakeChk = document.getElementById('settingsKeepAwakeChk');
 const settingsDebugTraceChk = document.getElementById('settingsDebugTraceChk');
 const settingsImportBtn = document.getElementById('settingsImportBtn');
@@ -3080,7 +3399,7 @@ let appSettings = {
   geminiApiKey: '',
   geminiModel: 'gemini-2.5-pro',
   deepseekApiKey: '',
-  deepseekModel: 'deepseek-v4-flash',
+  deepseekModel: 'deepseek-flash',
   veniceApiKey: '',
   veniceModel: 'venice-uncensored-1-2',
   modelUrl: '',
@@ -3099,11 +3418,12 @@ const inferenceProviderDefs = {
     modelField: 'huggingFaceModel',
     keyLabel: 'Hugging Face Token',
     keyPlaceholder: 'hf_...',
-    modelPlaceholder: 'Qwen/Qwen2.5-Coder-32B-Instruct:fastest',
-    defaultModel: 'Qwen/Qwen2.5-Coder-32B-Instruct:fastest',
+    modelPlaceholder: 'deepseek-ai/DeepSeek-V4.1-Flash',
+    defaultModel: 'deepseek-ai/DeepSeek-V4.1-Flash',
     helpText: 'Uses Hugging Face Inference Providers via router.huggingface.co. Token stays in local app settings on this machine. You can also enter a custom Hugging Face model ID to A/B test agent prompts without changing the local runtime.',
     endpointUrl: 'https://router.huggingface.co/v1/chat/completions',
     protocol: 'openai',
+    publicModels: true,
   },
   customopenai: {
     label: 'Custom OpenAI-Compatible',
@@ -3127,8 +3447,8 @@ const inferenceProviderDefs = {
     modelField: 'openAiModel',
     keyLabel: 'OpenAI API Key',
     keyPlaceholder: 'sk-...',
-    modelPlaceholder: 'gpt-5.4',
-    defaultModel: 'gpt-5.4',
+    modelPlaceholder: 'gpt-6-sol',
+    defaultModel: 'gpt-6-sol',
     helpText: 'Uses the official OpenAI Chat Completions API. Token stays in local app settings on this machine.',
     endpointUrl: 'https://api.openai.com/v1/chat/completions',
     protocol: 'openai',
@@ -3140,8 +3460,8 @@ const inferenceProviderDefs = {
     modelField: 'anthropicModel',
     keyLabel: 'Anthropic API Key',
     keyPlaceholder: 'sk-ant-...',
-    modelPlaceholder: 'claude-opus-4-8',
-    defaultModel: 'claude-opus-4-8',
+    modelPlaceholder: 'claude-sonnet-5',
+    defaultModel: 'claude-sonnet-5',
     helpText: 'Uses Anthropic Messages API with native tool calling. Token stays in local app settings on this machine.',
     endpointUrl: 'https://api.anthropic.com/v1/messages',
     protocol: 'anthropic',
@@ -3153,8 +3473,8 @@ const inferenceProviderDefs = {
     modelField: 'geminiModel',
     keyLabel: 'Gemini API Key',
     keyPlaceholder: 'AIza...',
-    modelPlaceholder: 'gemini-2.5-pro',
-    defaultModel: 'gemini-2.5-pro',
+    modelPlaceholder: 'gemini-3.8-flash',
+    defaultModel: 'gemini-3.8-flash',
     helpText: 'Uses Gemini\'s OpenAI-compatible endpoint. Key stays in local app settings on this machine.',
     endpointUrl: 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions',
     protocol: 'openai',
@@ -3166,8 +3486,8 @@ const inferenceProviderDefs = {
     modelField: 'deepseekModel',
     keyLabel: 'DeepSeek API Key',
     keyPlaceholder: 'sk-...',
-    modelPlaceholder: 'deepseek-v4-flash',
-    defaultModel: 'deepseek-v4-flash',
+    modelPlaceholder: 'deepseek-flash',
+    defaultModel: 'deepseek-flash',
     helpText: 'Uses DeepSeek\'s OpenAI-compatible chat API. Key stays in local app settings on this machine.',
     endpointUrl: 'https://api.deepseek.com/chat/completions',
     protocol: 'openai',
@@ -3184,6 +3504,7 @@ const inferenceProviderDefs = {
     helpText: 'Uses Venice\'s OpenAI-compatible API. Key stays in local app settings on this machine.',
     endpointUrl: 'https://api.venice.ai/api/v1/chat/completions',
     protocol: 'openai',
+    publicModels: true,
     supportsToolCalling: true,
   },
   veniceadapter: {
@@ -3200,62 +3521,24 @@ const inferenceProviderDefs = {
     protocol: 'ollama',
   },
 };
-const inferenceProviderModelPresets = {
-  huggingface: [
-    'google/gemma-4-E2B-it',
-    'Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8:fastest',
-    'deepseek-ai/DeepSeek-V3-0324:fastest',
-    'moonshotai/Kimi-K2-Instruct:fastest',
-    'Qwen/Qwen2.5-Coder-32B-Instruct:fastest',
-    'meta-llama/Llama-3.3-70B-Instruct:fireworks-ai',
-    'deepseek-ai/DeepSeek-V3-0324:novita',
-  ],
-  customopenai: [
-    'google/gemma-4-E2B-it',
-  ],
-  openai: [
-    'gpt-5.4',
-    'gpt-5-mini',
-    'gpt-5-nano',
-    'gpt-4.1',
-    'gpt-4.1-mini',
-    'gpt-4.1-nano',
-  ],
-  anthropic: [
-    'claude-opus-4-1-20250805',
-    'claude-opus-4-20250514',
-    'claude-sonnet-4-20250514',
-    'claude-3-7-sonnet-latest',
-    'claude-3-5-haiku-latest',
-    'claude-3-haiku-20240307',
-  ],
-  gemini: [
-    'gemini-2.5-pro',
-    'gemini-2.5-flash',
-    'gemini-2.5-flash-lite',
-    'gemini-3-flash-preview',
-  ],
-  deepseek: [
-    'deepseek-v4-flash',
-    'deepseek-v4-pro',
-    'deepseek-chat',
-    'deepseek-reasoner',
-  ],
-  // Fallback only — the live list is fetched from the user's Venice key at runtime
-  // (refreshProviderModelList). These are verified-valid IDs as of 2026-06.
-  venice: [
-    'venice-uncensored-1-2',
-    'qwen3-coder-480b-a35b-instruct-turbo',
-    'deepseek-v4-pro',
-    'deepseek-v4-flash',
-    'qwen3-235b-a22b-instruct-2507',
-    'claude-opus-4-8',
-    'zai-org-glm-5',
-    'gemma-4-uncensored',
-    'qwen3-next-80b',
-    'hermes-3-llama-3.1-405b',
-  ],
+// Fallback only, used when the provider's live /models list can't be loaded.
+// Verified against each provider's docs / public list on 2026-09-23.
+const PROVIDER_FALLBACK_MODELS = {
+  openai: ['gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna'],
+  anthropic: ['claude-opus-5-5', 'claude-sonnet-5', 'claude-haiku-4-5-20251001'],
+  gemini: ['gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-3.5-flash-lite', 'gemini-3.1-pro-preview'],
+  deepseek: ['deepseek-flash', 'deepseek-v4-pro'],
+  venice: ['zai-org-glm-5-2', 'venice-uncensored-1-2', 'qwen-3-8-27b', 'gemini-3-8-flash'],
+  huggingface: ['deepseek-ai/DeepSeek-V4.1-Flash', 'Qwen/Qwen3.8-27B', 'moonshotai/Kimi-K3', 'openai/gpt-oss-120b'],
 };
+const PROVIDER_FALLBACK_DATE = 'Sep 2026';
+
+function getProviderModelOptions(provider) {
+  const live = Array.isArray(liveProviderModels[provider]) ? liveProviderModels[provider] : [];
+  if (live.length) return { list: live, live: true };
+  return { list: PROVIDER_FALLBACK_MODELS[provider] || [], live: false };
+}
+
 let debugTraceEntries = [];
 const debugTraceMaxEntries = 120;
 const maxArtifactContentChars = 12000;
@@ -3356,9 +3639,19 @@ try {
     text.textContent = String(label || '');
     status.dataset.tooltip = String(tooltip || '');
   };
-  const setSettingsStatus = (message) => {
+  // Compact pill: short label shown, full sentence in the tooltip.
+  const setSettingsStatus = (message, short = '', tone = '') => {
     const el = document.getElementById('settingsUpdateStatus');
-    if (el) el.textContent = String(message || '');
+    if (!el) return;
+    const label = typeof el.querySelector === 'function' ? el.querySelector('span') : null;
+    if (label) label.textContent = String(short || message || '');
+    else el.textContent = String(message || '');
+    if (el.dataset) el.dataset.tooltip = String(message || '');
+    if (typeof el.setAttribute === 'function') el.setAttribute('aria-label', String(message || ''));
+    if (el.classList) {
+      el.classList.toggle('busy', tone === 'busy');
+      el.classList.toggle('warn', tone === 'warn');
+    }
   };
   async function checkForUpdate(manual = false) {
     if (checkPromise) return checkPromise;
@@ -3366,7 +3659,7 @@ try {
       lastCheckAt = Date.now();
       const manualBtn = document.getElementById('settingsUpdateCheckBtn');
       if (manualBtn && manual) manualBtn.disabled = true;
-      if (manual) setSettingsStatus('Checking for the latest verified release…');
+      if (manual) setSettingsStatus('Checking for the latest verified release…', 'Checking…', 'busy');
     ulog('update_check_start', { current: AI_EXE_VERSION, repo: REPO });
     try {
       const release = await latestFromReleaseApi();
@@ -3382,13 +3675,13 @@ try {
       });
       if (!latest || newer <= 0) {
         if (!updateStaged) setStatus('', '', { hidden: true });
-        setSettingsStatus(`AI.EXE v${AI_EXE_VERSION} is current. Automatic updates are enabled.`);
+        setSettingsStatus(`AI.EXE v${AI_EXE_VERSION} is current. Automatic updates are enabled.`, `v${AI_EXE_VERSION} · Up to date`);
         if (manual) showAppNotification({ title: 'AI.EXE is up to date', message: `Version ${AI_EXE_VERSION} is the latest release.`, kind: 'success' });
         return false;
       }
       if (!release.url || !validSha256(release.sha256)) {
         ulog('update_unverified_asset', { latest, hasAsset: String(Boolean(release.url)) });
-        setSettingsStatus(`Version ${latest} is available, but its package could not be verified. AI.EXE will retry automatically.`);
+        setSettingsStatus(`Version ${latest} is available, but its package could not be verified. AI.EXE will retry automatically.`, `v${latest} · Verifying`, 'warn');
         if (manual) showAppNotification({ title: 'Update verification pending', message: `Version ${latest} will download after its signed checksum is available.`, kind: 'warning' });
         return false;
       }
@@ -3404,12 +3697,12 @@ try {
         size: Number(release.size) || 0,
         sha256: String(release.sha256 || '').toLowerCase(),
       };
-      setSettingsStatus(`${replacing ? 'A newer' : 'An'} update, v${latest}, is downloading automatically.`);
+      setSettingsStatus(`${replacing ? 'A newer' : 'An'} update, v${latest}, is downloading automatically.`, `Downloading v${latest}`, 'busy');
       startBackgroundStage();
       return true;
     } catch (err) {
       ulog('update_check_error', { error: String(err && err.message ? err.message : err) });
-      setSettingsStatus(`Automatic update check could not connect. AI.EXE will retry; current version: v${AI_EXE_VERSION}.`);
+      setSettingsStatus(`Automatic update check could not connect. AI.EXE will retry; current version: v${AI_EXE_VERSION}.`, `v${AI_EXE_VERSION} · Offline`, 'warn');
       if (manual) showAppNotification({ title: 'Could not check for updates', message: 'AI.EXE will retry automatically when a connection is available.', kind: 'warning' });
       return false;
     } finally {
@@ -3443,7 +3736,7 @@ try {
         if (stagePoll) clearInterval(stagePoll);
         stagePoll = null;
         setStatus('', '', { hidden: true });
-        setSettingsStatus(`Update v${stagedVersion} could not be downloaded. AI.EXE will retry automatically.`);
+        setSettingsStatus(`Update v${stagedVersion} could not be downloaded. AI.EXE will retry automatically.`, `v${stagedVersion} · Retrying`, 'warn');
       }
     }).catch(() => {});
     ulog('update_stage_started', { version: updateInfo.version });
@@ -3466,7 +3759,7 @@ try {
           if (!armed || !armed.ok) throw new Error('could not arm install-on-quit');
           ulog('update_staged', { version: updateInfo.version });
           setStatus('Update ready', `v${updateInfo.version} installs when you quit — click to restart now`);
-          setSettingsStatus(`AI.EXE v${updateInfo.version} is downloaded and verified. It will install when AI.EXE quits.`);
+          setSettingsStatus(`AI.EXE v${updateInfo.version} is downloaded and verified. It will install when AI.EXE quits.`, `v${updateInfo.version} ready · installs on quit`, 'busy');
           showAppNotification({
             title: `AI.EXE v${updateInfo.version} is ready`,
             message: 'It will install when you quit. Click here to restart and update now.',
@@ -3489,7 +3782,7 @@ try {
     const manualBtn = document.getElementById('settingsUpdateCheckBtn');
     if (status) status.addEventListener('click', doApplyUpdate);
     if (manualBtn) manualBtn.addEventListener('click', () => { void checkForUpdate(true); });
-    setSettingsStatus(`AI.EXE v${AI_EXE_VERSION}. Updates are checked and downloaded automatically.`);
+    setSettingsStatus(`AI.EXE v${AI_EXE_VERSION}. Updates are checked and downloaded automatically.`, `v${AI_EXE_VERSION} · Auto-update on`);
     setTimeout(() => { void checkForUpdate(false); }, 8000);
     setInterval(() => { void checkForUpdate(false); }, AUTO_CHECK_INTERVAL_MS);
     document.addEventListener('visibilitychange', () => {
@@ -4468,6 +4761,7 @@ function updateGlobalTooltipPosition(target) {
 function showGlobalTooltip(target) {
   if (!target || !(target instanceof HTMLElement)) return;
   activeTooltipTarget = target;
+  ensureGlobalTooltip().classList.toggle('wide', Boolean(target.dataset.tooltipWide));
   updateGlobalTooltipPosition(target);
 }
 
@@ -8981,7 +9275,7 @@ function loadAppSettings() {
     geminiApiKey: '',
     geminiModel: 'gemini-2.5-pro',
     deepseekApiKey: '',
-    deepseekModel: 'deepseek-chat',
+    deepseekModel: 'deepseek-flash',
     veniceApiKey: '',
     veniceModel: 'venice-uncensored-1-2',
     veniceAdapterEndpoint: '',
@@ -9193,7 +9487,12 @@ function buildAssistantDateTimeContext() {
 }
 
 function getUserProfileContext() {
-  return String((appSettings && appSettings.userProfile) || '').trim();
+  const profile = String((appSettings && appSettings.userProfile) || '').trim();
+  const everyday = String((appSettings && appSettings.workMode) || '').toLowerCase() === 'everyday';
+  const style = everyday
+    ? 'Preferred style: everyday — plain language, skip jargon and internal technical detail unless asked.'
+    : 'Preferred style: coding — technical precision and implementation detail are welcome.';
+  return profile ? `${profile}\n${style}` : style;
 }
 
 function buildAgentUserGuidance(chatId = '') {
@@ -9342,29 +9641,69 @@ function selectWorkerForJob(capability, options = {}) {
 
 function renderSettingsWorkerList() {
   if (!settingsWorkerList) return;
-  const workers = getConfiguredInferenceWorkers();
-  if (workers.length === 0) {
-    settingsWorkerList.innerHTML = '<div class="settings-note-block">No workers are configured.</div>';
+  const active = getSelectedInferenceProvider();
+  const workers = getConfiguredInferenceWorkers()
+    .filter((worker) => worker.provider !== 'local' || nativeBridge.available())
+    .filter((worker) => !HIDDEN_INFERENCE_PROVIDERS.has(worker.provider));  // match the Provider menu
+  if (!workers.length) {
+    settingsWorkerList.innerHTML = '<div class="settings-note-block">No providers are available in this build.</div>';
     return;
   }
-  settingsWorkerList.innerHTML = '';
-  workers.forEach((worker) => {
-    const card = document.createElement('div');
-    card.className = 'settings-worker-card';
-    card.classList.toggle('disabled', !worker.enabled);
-    const statusClass = worker.enabled ? 'ready' : 'offline';
-    const caps = Array.isArray(worker.capabilities)
-      ? worker.capabilities.map((item) => `<span>${escapeHtml(getWorkerCapabilityLabel(item))}</span>`).join('')
-      : '';
-    card.innerHTML = [
-      '<div class="settings-worker-main">',
-      `<div class="settings-worker-title">${escapeHtml(worker.label || worker.id)}</div>`,
-      `<div class="settings-worker-detail">${escapeHtml(worker.detail || '')}</div>`,
-      `<div class="settings-worker-caps">${caps}</div>`,
-      '</div>',
-      `<div class="settings-worker-status ${statusClass}">${escapeHtml(worker.health || '')}</div>`,
-    ].join('');
-    settingsWorkerList.appendChild(card);
+  settingsWorkerList.innerHTML = workers.map((worker) => {
+    const isActive = worker.provider === active;
+    const status = isActive ? 'Active' : (worker.enabled ? 'Ready' : 'Not set up');
+    return `<div class="settings-worker-card${isActive ? ' active' : ''}${worker.enabled ? '' : ' disabled'}" data-provider="${escapeHtml(worker.provider)}">
+      <div class="settings-worker-main">
+        <div class="settings-worker-title">${escapeHtml(worker.label || worker.provider)}<span class="settings-worker-badge ${isActive ? 'active' : worker.enabled ? 'ready' : 'offline'}">${status}</span></div>
+        <div class="settings-worker-detail">${escapeHtml(worker.enabled ? (worker.detail || '') : 'Add an API key and model to use this provider')}</div>
+        <div class="settings-worker-result" role="status"></div>
+      </div>
+      <div class="settings-worker-actions">
+        ${worker.enabled && worker.provider !== 'local' ? '<button type="button" class="modal-btn" data-worker-test>Test</button>' : ''}
+        ${worker.enabled && !isActive ? '<button type="button" class="modal-btn primary" data-worker-use>Use</button>' : ''}
+        ${!worker.enabled ? '<button type="button" class="modal-btn" data-worker-setup>Set up</button>' : ''}
+      </div>
+    </div>`;
+  }).join('');
+  settingsWorkerList.querySelectorAll('.settings-worker-card').forEach((card) => {
+    const provider = card.dataset.provider;
+    const result = card.querySelector('.settings-worker-result');
+    const choose = (openModels) => {
+      appSettings.inferenceProvider = provider;
+      if (settingsProviderSelect) settingsProviderSelect.value = provider;
+      syncSettingsProviderUi();
+      saveSettingsFromUi({ toastChange: `${getInferenceProviderDef(provider).label || provider} selected` });
+      renderSettingsWorkerList();
+      if (openModels) openSettingsSection('models');
+    };
+    const test = card.querySelector('[data-worker-test]');
+    if (test) test.addEventListener('click', async () => {
+      test.disabled = true;
+      result.className = 'settings-worker-result';
+      result.textContent = 'Testing…';
+      const def = getInferenceProviderDef(provider);
+      let ok = false;
+      let detail = '';
+      try {
+        if (def.protocol === 'ollama') {
+          const res = await fetch(getAIExeBackendUrl() + '/api/provider-health');
+          const health = res.ok ? await res.json() : {};
+          ok = Boolean(health.reachable);
+          detail = ok ? `${(health.models || []).length} models` : 'adapter not running';
+        } else {
+          invalidateProviderModelList(provider);
+          ok = await refreshProviderModelList(provider);
+          detail = ok ? `${(liveProviderModels[provider] || []).length} models available` : 'key rejected or provider unreachable';
+        }
+      } catch (_) { detail = 'provider unreachable'; }
+      result.className = `settings-worker-result ${ok ? 'ok' : 'error'}`;
+      result.textContent = ok ? `Connected · ${detail}` : `Not connected · ${detail}`;
+      test.disabled = false;
+    });
+    const use = card.querySelector('[data-worker-use]');
+    if (use) use.addEventListener('click', () => choose(false));
+    const setup = card.querySelector('[data-worker-setup]');
+    if (setup) setup.addEventListener('click', () => choose(true));
   });
 }
 
@@ -9532,10 +9871,9 @@ function shouldUseNativeCustomOpenAiRelay(provider) {
     && document.documentElement.classList.contains('platform-mac');
 }
 
-// Provider picker is trimmed to Local + DeepSeek + Venice (Venice proxies the
-// other companies' models anyway). The other provider defs/code are kept, just
+// Provider picker: Local, OpenAI, Claude, Gemini, DeepSeek, Venice. The other provider defs/code are kept, just
 // hidden — flip a name out of this set to re-enable it.
-const HIDDEN_INFERENCE_PROVIDERS = new Set(['huggingface', 'customopenai', 'openai', 'anthropic', 'gemini']);
+const HIDDEN_INFERENCE_PROVIDERS = new Set(['huggingface', 'customopenai']);
 function syncInferenceProviderOptions() {
   if (!settingsProviderSelect) return;
   // Remove hidden providers outright. A native macOS <select> ignores option.hidden
@@ -9570,9 +9908,8 @@ function getProviderPresetValue(provider, modelId) {
   // Match against the LIVE (scraped) models too — otherwise a real model like
   // "DeepSeek V4 Flash:latest" isn't in the static preset list and the dropdown wrongly
   // falls back to "Custom model ID".
-  const live = Array.isArray(liveProviderModels[provider]) ? liveProviderModels[provider] : [];
-  const presets = Array.isArray(inferenceProviderModelPresets[provider]) ? inferenceProviderModelPresets[provider] : [];
-  return (live.includes(cleanModel) || presets.includes(cleanModel)) ? cleanModel : '__custom__';
+  // Match against the list the dropdown actually shows (live beats built-in).
+  return getProviderModelOptions(provider).list.includes(cleanModel) ? cleanModel : '__custom__';
 }
 
 function getSettingsSectionMeta(section) {
@@ -9585,8 +9922,8 @@ function getSettingsSectionMeta(section) {
   }
   if (key === 'workers') {
     return {
-      title: 'Workers',
-      subtitle: 'Route AI.EXE jobs through local and provider workers with visible capabilities and health.',
+      title: 'Connections',
+      subtitle: 'See which AI providers are set up, test them, and switch with one click.',
     };
   }
   if (key === 'personalization') {
@@ -9637,6 +9974,20 @@ const liveProviderModels = {};
 const liveProviderPricedModels = {};
 const liveProviderUncensoredModels = {};
 const liveProviderCredits = {};
+const liveProviderModelsFetchedAt = {};
+
+// OpenAI's /models also lists embedding, audio, image and moderation models that
+// can't answer a chat request; only its list lacks a capability field to filter on.
+const OPENAI_NON_CHAT_MODEL = /(embedding|tts|whisper|dall-e|transcribe|moderation|realtime|audio|image|search|davinci|babbage|sora|computer-use)/i;
+function isChatModelId(provider, id) {
+  return provider !== 'openai' || !OPENAI_NON_CHAT_MODEL.test(id);
+}
+
+function invalidateProviderModelList(provider) {
+  if (typeof presetFetchTried !== 'undefined') presetFetchTried.delete(provider);
+  delete liveProviderModels[provider];
+  delete liveProviderModelsFetchedAt[provider];
+}
 
 function normalizeProviderModelName(model) {
   return String(model || '').trim().replace(/:latest$/i, '');
@@ -9826,22 +10177,31 @@ let lastPresetProvider = '';
 async function refreshProviderModelList(provider) {
   const def = getInferenceProviderDef(provider);
   const key = getProviderApiKey(provider);
-  if (!def || !key) return false;
-  const chatUrl = getProviderEndpoint(provider) || String(def.endpointUrl || '');
-  const modelsUrl = chatUrl.replace(/\/chat\/completions\/?(\?.*)?$/i, '/models');
-  if (!modelsUrl || modelsUrl === chatUrl) return false; // non-OpenAI shape (e.g. anthropic /messages)
+  if (!def || (!key && !def.publicModels)) return false;
+  let modelsUrl = '';
+  let headers = {};
+  if (def.protocol === 'anthropic') {
+    modelsUrl = 'https://api.anthropic.com/v1/models?limit=100';
+    headers = { 'x-api-key': key, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' };
+  } else {
+    const chatUrl = getProviderEndpoint(provider) || String(def.endpointUrl || '');
+    modelsUrl = chatUrl.replace(/\/chat\/completions\/?(\?.*)?$/i, '/models');
+    if (!modelsUrl || modelsUrl === chatUrl) return false;
+    headers = key ? { Authorization: getOpenAiCompatibleAuthHeader(provider, key, chatUrl) } : {};
+  }
   try {
-    const res = await fetch(modelsUrl, { headers: { Authorization: `Bearer ${key}` } });
+    const res = await fetch(modelsUrl, { headers });
     if (!res || !res.ok) return false;
     const data = await res.json();
     const list = Array.isArray(data && data.data) ? data.data : [];
     const ids = list
-      .filter((m) => !m || m.type == null || String(m.type).toLowerCase() === 'text')
-      .map((m) => String(m && m.id ? m.id : '').trim())
-      .filter(Boolean)
+      .filter((m) => !m || m.type == null || ['text', 'model'].includes(String(m.type).toLowerCase()))
+      .map((m) => String(m && m.id ? m.id : '').trim().replace(/^models\//, ''))
+      .filter((id) => id && isChatModelId(provider, id))
       .sort();
     if (!ids.length) return false;
     liveProviderModels[provider] = ids;
+    liveProviderModelsFetchedAt[provider] = Date.now();
     // Capture the provider-designated uncensored model for the refusal fallback.
     // Prefer the trait the provider itself assigns; refine by coding capability when
     // several carry it, so an agent/code refusal escalates to the most capable one.
@@ -9927,31 +10287,65 @@ function responseIsEscalationSentinel(text) {
     || t.replace(/[`*_>\s]+/g, '') === UNCENSORED_ESCALATE_SENTINEL.replace(/\s+/g, '');
 }
 
+const presetFetchTried = new Set();
 function populateProviderPresetOptions(provider, modelId) {
   if (!settingsApiModelPreset) return;
   lastPresetProvider = provider;
   const live = Array.isArray(liveProviderModels[provider]) ? liveProviderModels[provider] : null;
-  const presets = (live && live.length)
-    ? live
-    : (Array.isArray(inferenceProviderModelPresets[provider]) ? inferenceProviderModelPresets[provider] : []);
+  // Live list from the provider's API first; a short dated fallback only if it can't load.
+  const presets = getProviderModelOptions(provider).list;
   settingsApiModelPreset.innerHTML = '';
-  presets.forEach((preset) => {
+  const current = normalizeProviderModelName(modelId);
+  const options = current && !presets.includes(current) ? [current, ...presets] : presets;
+  options.forEach((preset) => {
     const opt = document.createElement('option');
     opt.value = preset;
-    opt.textContent = preset;
+    opt.textContent = preset === current && !presets.includes(current)
+      ? (live && live.length ? `${preset} (current — not in your account's list)` : `${preset} (current)`)
+      : preset;
     settingsApiModelPreset.appendChild(opt);
   });
   const customOpt = document.createElement('option');
   customOpt.value = '__custom__';
   customOpt.textContent = 'Custom model ID';
   settingsApiModelPreset.appendChild(customOpt);
-  settingsApiModelPreset.value = getProviderPresetValue(provider, modelId);
-  // No live list yet but we have a key — fetch the real models and repopulate.
-  if (!live && getProviderApiKey(provider)) {
+  const selected = current && options.includes(current) ? current : getProviderPresetValue(provider, modelId);
+  // Set the index too: WebKit can leave a rebuilt <select> visually blank otherwise.
+  settingsApiModelPreset.selectedIndex = Math.max(0, Array.from(settingsApiModelPreset.options).findIndex((o) => o.value === selected));
+  syncModelIdVisibility();
+  const source = document.getElementById('settingsModelSource');
+  if (source) {
+    source.textContent = live && live.length
+      ? `${live.length} models from your account`
+      : (presets.length
+        ? `Suggested models (${PROVIDER_FALLBACK_DATE}) — ${getProviderApiKey(provider) ? 'loading your account’s list…' : 'add your key to load yours'}`
+        : (getProviderApiKey(provider) ? 'Loading models from your account…' : 'Add your API key to load models'));
+  }
+  // No live list yet — fetch the real models (public lists need no key) and repopulate.
+  const canFetch = getProviderApiKey(provider) || (getInferenceProviderDef(provider) || {}).publicModels;
+  if (!live && canFetch && !presetFetchTried.has(provider)) {
+    presetFetchTried.add(provider);
     refreshProviderModelList(provider).then((ok) => {
       if (ok && lastPresetProvider === provider) populateProviderPresetOptions(provider, getProviderModel(provider));
     });
   }
+}
+
+function syncModelIdVisibility() {
+  const wrap = document.getElementById('settingsApiModelIdWrap');
+  if (!wrap || !settingsApiModelPreset) return;
+  wrap.style.display = settingsApiModelPreset.value === '__custom__' ? '' : 'none';
+}
+
+// A key must never go over plain http to someone else's machine.
+function isSafeProviderEndpoint(url) {
+  const value = String(url || '').trim();
+  if (!value) return true;
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol === 'https:') return true;
+    return parsed.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]'].includes(parsed.hostname);
+  } catch (_) { return false; }
 }
 
 function populateRemoteProviderFields(provider) {
@@ -10091,8 +10485,10 @@ function syncSettingsProviderUi() {
     settingsModelUrlInput.disabled = Boolean(isRemote);
   }
   if (settingsModelUrlWrap) {
-    settingsModelUrlWrap.style.opacity = isRemote ? '0.55' : '1';
+    settingsModelUrlWrap.style.display = isRemote ? 'none' : '';
   }
+  const runtimeSection = document.getElementById('settingsRuntimeSection');
+  if (runtimeSection) runtimeSection.style.display = isRemote ? 'none' : '';
   if (isRemote) {
     populateRemoteProviderFields(provider);
   } else if (settingsProviderHelp) {
@@ -10447,14 +10843,18 @@ function saveSettingsFromUi(options = {}) {
         : String(providerDef.defaultModel || '');
     }
     if (providerDef.endpointField) {
-      appSettings[providerDef.endpointField] = settingsApiEndpointInput && settingsApiEndpointInput.value.trim()
+      const endpoint = settingsApiEndpointInput && settingsApiEndpointInput.value.trim()
         ? settingsApiEndpointInput.value.trim()
         : String(providerDef.defaultEndpoint || '');
+      if (isSafeProviderEndpoint(endpoint)) {
+        appSettings[providerDef.endpointField] = endpoint;
+      } else {
+        setSettingsNote('Endpoint must use https:// (plain http is only allowed for this computer), so your key is never sent unencrypted.', 'error');
+      }
     }
   }
   if (typeof renderComposerModelPill === 'function') renderComposerModelPill();
   appSettings.modelUrl = settingsModelUrlInput ? settingsModelUrlInput.value.trim() : '';
-  appSettings.keepModelOnUpdate = Boolean(settingsKeepModelChk && settingsKeepModelChk.checked);
   appSettings.keepAwakeDuringRun = Boolean(settingsKeepAwakeChk && settingsKeepAwakeChk.checked);
   appSettings.debugTraceEnabled = Boolean(settingsDebugTraceChk && settingsDebugTraceChk.checked);
   const profileInput = document.getElementById('settingsUserProfile');
@@ -11383,6 +11783,7 @@ async function streamAnthropicChatCompletion(prompt, handlers = {}, options = {}
       headers: {
         'x-api-key': apiKey,
         'anthropic-version': '2023-06-01',
+        'anthropic-dangerous-direct-browser-access': 'true',
         'content-type': 'application/json',
       },
       body: JSON.stringify(req),
@@ -11854,6 +12255,7 @@ async function requestAnthropicTextCompletion(prompt, maxTokens, systemPrompt = 
       headers: {
         'x-api-key': apiKey,
         'anthropic-version': '2023-06-01',
+        'anthropic-dangerous-direct-browser-access': 'true',
         'content-type': 'application/json',
       },
       body: JSON.stringify({
@@ -13695,7 +14097,6 @@ async function openSettingsModal() {
     syncInferenceProviderOptions();
     if (settingsProviderSelect) settingsProviderSelect.value = getSelectedInferenceProvider();
     if (settingsModelUrlInput) settingsModelUrlInput.value = appSettings.modelUrl;
-    if (settingsKeepModelChk) settingsKeepModelChk.checked = appSettings.keepModelOnUpdate;
     if (settingsKeepAwakeChk) settingsKeepAwakeChk.checked = appSettings.keepAwakeDuringRun !== false;
     if (settingsDebugTraceChk) settingsDebugTraceChk.checked = appSettings.debugTraceEnabled;
     const profileInput = document.getElementById('settingsUserProfile');
@@ -18269,6 +18670,7 @@ if (settingsApiModelPreset) {
   settingsApiModelPreset.addEventListener('change', () => {
     if (!settingsApiModelInput || !settingsProviderSelect) return;
     const preset = String(settingsApiModelPreset.value || '').trim();
+    syncModelIdVisibility();
     if (!preset || preset === '__custom__') {
       settingsApiModelInput.focus();
       settingsApiModelInput.select();
@@ -18287,7 +18689,15 @@ if (settingsApiModelInput) {
   });
 }
 if (settingsApiKeyInput) {
-  settingsApiKeyInput.addEventListener('input', () => scheduleSettingsAutosave(420, 'API key'));
+  settingsApiKeyInput.addEventListener('input', () => {
+    scheduleSettingsAutosave(420, 'API key');
+    const provider = settingsProviderSelect ? String(settingsProviderSelect.value || '').trim().toLowerCase() : '';
+    if (provider) invalidateProviderModelList(provider);
+    clearTimeout(settingsApiKeyInput._modelsTimer);
+    settingsApiKeyInput._modelsTimer = setTimeout(() => {
+      if (provider && lastPresetProvider === provider) populateProviderPresetOptions(provider, getProviderModel(provider));
+    }, 900);
+  });
 }
 if (settingsApiKeyToggle && settingsApiKeyInput) {
   const eyeIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>';
@@ -18308,6 +18718,20 @@ if (settingsApiKeyToggle && settingsApiKeyInput) {
 if (settingsApiEndpointInput) {
   settingsApiEndpointInput.addEventListener('input', () => scheduleSettingsAutosave(420, 'Endpoint URL'));
 }
+const settingsModelRefreshBtn = document.getElementById('settingsModelRefreshBtn');
+if (settingsModelRefreshBtn) {
+  settingsModelRefreshBtn.addEventListener('click', async () => {
+    const provider = settingsProviderSelect ? String(settingsProviderSelect.value || '').trim().toLowerCase() : '';
+    if (!provider || provider === 'local') return;
+    settingsModelRefreshBtn.disabled = true;
+    invalidateProviderModelList(provider);
+    const ok = await refreshProviderModelList(provider);
+    populateProviderPresetOptions(provider, getProviderModel(provider));
+    const source = document.getElementById('settingsModelSource');
+    if (source && !ok) source.textContent = getProviderApiKey(provider) ? "Couldn't load models — check the key" : 'Add a key to load your models';
+    settingsModelRefreshBtn.disabled = false;
+  });
+}
 if (settingsModelUrlInput) {
   settingsModelUrlInput.addEventListener('input', () => scheduleSettingsAutosave(420, 'Model download URL'));
 }
@@ -18324,9 +18748,6 @@ if (settingsKeepAwakeChk) {
     // Turning it off mid-run must take effect immediately.
     if (!settingsKeepAwakeChk.checked) void releaseRunKeepAwake('setting_off');
   });
-}
-if (settingsKeepModelChk) {
-  settingsKeepModelChk.addEventListener('change', () => saveSettingsFromUi({ toastChange: settingsKeepModelChk.checked ? 'Keep model on update: on' : 'Keep model on update: off' }));
 }
 if (settingsDebugTraceChk) {
   settingsDebugTraceChk.addEventListener('change', () => saveSettingsFromUi({ toastChange: settingsDebugTraceChk.checked ? 'Debug tracing: on' : 'Debug tracing: off' }));
@@ -18511,13 +18932,23 @@ const composerAdapterStartBtn = document.getElementById('composerAdapterStartBtn
 let veniceAdapterLastKnownStarting = false;
 let composerAdapterStatusPollTimer = 0;
 
+const composerModelFetching = new Set();
 function composerModelChoices() {
   const provider = getSelectedInferenceProvider();
   const def = getInferenceProviderDef(provider);
   if (!def || provider === 'local' || !def.modelField) return null;
   const live = Array.isArray(liveProviderModels[provider]) ? liveProviderModels[provider] : [];
-  const presets = Array.isArray(inferenceProviderModelPresets[provider]) ? inferenceProviderModelPresets[provider] : [];
-  const list = (live.length ? live : presets).filter(Boolean);
+  if (!live.length && def.protocol !== 'ollama' && (getProviderApiKey(provider) || def.publicModels) && !composerModelFetching.has(provider)) {
+    composerModelFetching.add(provider);
+    refreshProviderModelList(provider).then((ok) => {
+      composerModelFetching.delete(provider);
+      if (ok && typeof renderComposerModelPill === 'function') renderComposerModelPill();
+    });
+  }
+  const current = String(getProviderModel(provider) || '');
+  const options = getProviderModelOptions(provider).list;
+  const base = options.length ? options : (current ? [current] : []);
+  const list = (current && !base.includes(current) ? [current, ...base] : base).filter(Boolean);
   return { provider, def, list };
 }
 

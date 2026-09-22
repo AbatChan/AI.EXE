@@ -3,9 +3,9 @@ const js = fs.readFileSync('ui/ai-exe.js', 'utf8');
 const html = fs.readFileSync('ui/ai-exe.html', 'utf8');
 const css = fs.readFileSync('ui/ai-exe.css', 'utf8');
 
-if (!js.includes("new WebSocket(`${websocketBase}/api/broker/live-stream")) throw new Error('market WebSocket missing');
+if (!js.includes("`${websocketBase}/api/broker/live-stream") || !js.includes('new WebSocket(socketUrl, backendAccess.socketProtocols(socketUrl))')) throw new Error('market WebSocket missing or sent without the backend token');
 if (js.includes('refreshing every 10 seconds')) throw new Error('old polling copy remains');
-if (!js.includes("{ id: 'trading', label: 'Trading' }")) throw new Error('Trading tab missing');
+if (!js.includes("{ id: 'trading', label: 'Portfolio' }")) throw new Error('Portfolio tab missing');
 if (!js.includes("{ id: 'business', label: 'Business records' }")) throw new Error('Business records tab missing');
 if (js.includes("{ id: 'mining', label: 'Mining' }")) throw new Error('Mining is still visible');
 if (!js.includes('Advanced paper controls')) throw new Error('advanced controls are not collapsed');
@@ -53,7 +53,7 @@ if (!js.includes("{ symbol: 'BTC-USD', name: 'Bitcoin'")) throw new Error('defau
 if (!html.includes('lightweight-charts.standalone.production.js')) throw new Error('chart library is not loaded');
 const tabSwitch = js.slice(js.indexOf('function setFinanceTab'), js.indexOf('// A staged order'));
 if (tabSwitch.includes('stopBrokerLiveUpdates()')) throw new Error('switching tabs still stops the market stream');
-if (!js.includes("financeActiveTab = 'trading';\n  middleViewMode = 'finance'")) throw new Error('Trading nav does not reset to the trading workspace');
+if (!js.includes("financeActiveTab = 'autopilot';\n  middleViewMode = 'finance'")) throw new Error('Trading nav does not open on the Autopilot tab');
 if (!html.includes('<h1>Trading</h1>')) throw new Error('Trading is not the workspace title');
 // Loading states are skeletons of the real layout, never bare text placeholders.
 if (js.includes('class="finance-loading"')) throw new Error('finance still uses text loading placeholders');
@@ -63,7 +63,7 @@ if (!js.includes("marketStreamSkeleton(financeLiveSymbol, 'Reconnecting market s
 if (!js.includes('financeDashboardSkeleton()')) throw new Error('finance dashboard load has no skeleton');
 if (!js.includes('brokerPanelSkeleton()')) throw new Error('paper portfolio load has no skeleton');
 if (!js.includes('strategyLabSkeleton(symbol)')) throw new Error('strategy test run has no skeleton');
-if (!js.includes('Markets</strong><small>Quick picks')) throw new Error('skeleton drops the static watchlist frame');
+if (!js.includes('<div class="broker-watchlist" aria-label="Quick picks">')) throw new Error('skeleton drops the static watchlist frame');
 if (!css.includes('.skel-chart')) throw new Error('chart skeleton style missing');
 if (!css.includes('animation: workspaceSkeletonSweep')) throw new Error('skeleton shimmer is not shared with the workspace tree');
 // A skeleton that looks like the real shell blocks the real shell from ever being built.

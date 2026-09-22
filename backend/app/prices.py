@@ -36,6 +36,7 @@ EQUITY_HISTORY_URL = (
 ASSET_CLASSES = ("stocks", "etf", "index")
 CRYPTO_URL = "https://api.coingecko.com/api/v3/simple/price?ids={ids}&vs_currencies=usd&include_last_updated_at=true"
 CRYPTO_CHART_URL = "https://api.bybit.com/v5/market/kline?category=spot&symbol={pair}&interval=1&limit=240"
+CRYPTO_HOURLY_URL = "https://api.bybit.com/v5/market/kline?category=spot&symbol={pair}&interval=60&limit=300"
 USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/124 Safari/537.36"
 
 DEFAULT_TTL_SECONDS = 30
@@ -353,6 +354,35 @@ class QuoteFeed:
             raise
         except (urllib.error.URLError, OSError, ValueError, KeyError, TypeError) as exc:
             raise QuoteUnavailable(f"{symbol}: {exc}")
+
+    def crypto_hourly_candles(self, symbol: str) -> List[dict]:
+        """300 hourly Bybit candles, oldest first; the open bar is flagged partial."""
+        base = (symbol or "").strip().upper()
+        for suffix in ("-USD", "/USD", "USD"):
+            if base.endswith(suffix) and len(base) > len(suffix):
+                base = base[:-len(suffix)]
+                break
+        cache_key = f"hourly:{base}"
+        with self._lock:
+            cached = self._intraday_cache.get(cache_key)
+            if cached and (time.time() - cached["_at"]) < 30:
+                return list(cached["data"])
+        try:
+            payload = self._fetch(CRYPTO_HOURLY_URL.format(pair=urllib.parse.quote(f"{base}USDT"))) or {}
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            raise QuoteUnavailable(f"{base}: {exc}")
+        if int(payload.get("retCode") or 0) != 0:
+            raise QuoteUnavailable(f"{base}: hourly candles unavailable")
+        rows = ((payload.get("result") or {}).get("list")) or []
+        now_ms = time.time() * 1000
+        candles = [{"t": int(r[0]), "open": float(r[1]), "high": float(r[2]), "low": float(r[3]),
+                    "close": float(r[4]), "partial": int(r[0]) + 3_600_000 > now_ms}
+                   for r in reversed(rows) if len(r) >= 5]
+        if not candles:
+            raise QuoteUnavailable(f"{base}: no hourly candles returned")
+        with self._lock:
+            self._intraday_cache[cache_key] = {"_at": time.time(), "data": list(candles)}
+        return candles
 
     def intraday(self, symbol: str, allow_stale: bool = True) -> dict:
         """Current Nasdaq session, normalized for the local live display."""

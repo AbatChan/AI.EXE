@@ -1,0 +1,29 @@
+{
+  "mode": "isolated paper simulation; no broker orders",
+  "pair": "BTC/USD",
+  "source": "Kraken public WebSocket v2 ticker, bid/ask",
+  "rules": "SMA3 > SMA8 on ten-second observations; act on next observation; one entry only; 0.3% entry-price stop; sell on crossover or at window end",
+  "initial_usd": 100,
+  "max_exposure_usd": 25.0,
+  "fee_per_side": 0.008,
+  "slippage_per_side": 0.0002,
+  "fee_source": "https://support.kraken.com/articles/cross-platform-fee-tier-changes",
+  "samples": [],
+  "events": [],
+  "errors": [
+    "timed out during opening handshake"
+  ],
+  "status": "incomplete",
+  "strategy": {
+    "cash": 100.0,
+    "qty": 0.0,
+    "fees": 0.0,
+    "gross_pnl": 0.0,
+    "trades": 0
+  },
+  "benchmark": null,
+  "max_drawdown_percent": {
+    "strategy": 0.0,
+    "benchmark": 0.0
+  }
+}

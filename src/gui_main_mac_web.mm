@@ -2561,6 +2561,15 @@ static bool IsPreventingIdleSleepOnMac() {
     _paperTestActive.store(workspace_content == "1" ||
                            workspace_content == "true");
     output = _paperTestActive.load() ? "1" : "0";
+  } else if (action == "backendToken") {
+    // Owner-only secret the backend writes; a web page cannot read it.
+    const auto token_path = ResolveRuntimeRoot(_loadedHtmlPath) / "backend" / ".data" / "backend_token";
+    std::ifstream token_file(token_path);
+    std::getline(token_file, output);
+    if (output.empty()) {
+      ok = false;
+      message = "Backend token is not ready yet.";
+    }
   } else if (action == "paperBackgroundService") {
     if (workspace_content.empty()) {
       const bool enabled = IsPaperBackgroundServiceEnabled();

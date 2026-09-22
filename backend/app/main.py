@@ -23,7 +23,8 @@ from fastapi.responses import JSONResponse
 from .config import settings
 from .routers import (adapter, broker, chats, finance, generate, health, modules, package, pdf, projects,
                       run, status, usage, workshop)
-from .services import adapter_manager, paper_test_runner
+from . import access_token
+from .services import adapter_manager, autopilot, paper_test_runner
 
 
 def _stop_children() -> None:
@@ -102,19 +103,22 @@ app = FastAPI(
 )
 
 _ALLOWED_ORIGINS = {o.strip() for o in settings.allowed_origins if o.strip() and o.strip() != "*"}
+BACKEND_TOKEN = access_token.load_or_create(settings.data_dir)
 
 
 @app.middleware("http")
 async def block_foreign_origins(request, call_next):
     """Reject browser requests from any page that is not our own UI.
 
-    This backend runs on 127.0.0.1 and exposes /api/run-python plus project file
-    read/write/delete. With CORS wildcarding every origin, any website the user visited
-    could drive it and read the responses. The desktop WebView sends no Origin (or
-    "null"); a real site always sends its own, so this blocks pages without blocking us.
+    This backend exposes /api/run-python and project file read/write/delete, so a
+    page must not be able to drive it. `Origin: null` is forgeable (any site's
+    sandboxed iframe sends it), so those requests also need the per-install token.
     """
     origin = (request.headers.get("origin") or "").strip()
-    if origin and origin != "null" and origin not in _ALLOWED_ORIGINS:
+    if request.method == "OPTIONS":
+        return await call_next(request)  # preflight carries no token and does nothing
+    presented = request.headers.get(access_token.HEADER) or ""
+    if not access_token.origin_allowed(origin, presented, BACKEND_TOKEN, _ALLOWED_ORIGINS):
         return JSONResponse(
             {"detail": "Cross-origin request blocked: this API is local-only."},
             status_code=403,
@@ -154,6 +158,7 @@ app.include_router(workshop.router)
 def _on_startup() -> None:
     _watch_parent_and_exit()
     paper_test_runner.start_scheduler()
+    autopilot.start_scheduler()
 
 
 @app.on_event("shutdown")
@@ -161,6 +166,7 @@ def _on_shutdown() -> None:
     # Graceful stop (app quit -> SIGTERM -> uvicorn shutdown): retire the adapter now.
     _stop_children()
     paper_test_runner.stop_scheduler()
+    autopilot.stop_scheduler()
 
 
 @app.get("/")
