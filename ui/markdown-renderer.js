@@ -467,6 +467,13 @@ function replaceDollarMathDelimiters(text, replacements) {
       out += '$';
       continue;
     }
+    // Money, not math: "$999.80 … $-0.20". A $ touching a digit on its outer side
+    // ($9, 5$0) or with whitespace just inside it isn't a math delimiter.
+    if (/\d/.test(src[i + 1] || '') || /\d/.test(src[found + 1] || '')
+      || /\s/.test(src[i + 1] || '') || /\s/.test(src[found - 1] || '')) {
+      out += '$';
+      continue;
+    }
 
     const expr = src.slice(i + 1, found);
     const token = pushInlineToken(expr);

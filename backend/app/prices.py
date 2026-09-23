@@ -16,6 +16,7 @@ sent, so it fails only once packaged, which is the worst time to find out.
 Prices are integer cents — nothing downstream ever sees a float.
 """
 import json
+import re
 import threading
 import time
 import urllib.error
@@ -36,6 +37,12 @@ EQUITY_HISTORY_URL = (
 ASSET_CLASSES = ("stocks", "etf", "index")
 CRYPTO_URL = "https://api.coingecko.com/api/v3/simple/price?ids={ids}&vs_currencies=usd&include_last_updated_at=true"
 CRYPTO_CHART_URL = "https://api.bybit.com/v5/market/kline?category=spot&symbol={pair}&interval=1&limit=240"
+CRYPTO_TICKERS_URL = "https://api.bybit.com/v5/market/tickers?category=spot"
+CRYPTO_KLINE_URL = "https://api.bybit.com/v5/market/kline?category=spot&symbol={pair}&interval={interval}&limit={limit}"
+CRYPTO_TICKER_URL = "https://api.bybit.com/v5/market/tickers?category=spot&symbol={pair}"
+# Chart range -> (Bybit interval, bars, cache seconds).
+CHART_RANGES = {"1D": ("5", 288, 30), "5D": ("30", 240, 60), "1M": ("240", 186, 300),
+                "6M": ("D", 183, 900), "1Y": ("D", 365, 900), "MAX": ("W", 1000, 3600)}
 CRYPTO_HOURLY_URL = "https://api.bybit.com/v5/market/kline?category=spot&symbol={pair}&interval=60&limit=300"
 USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/124 Safari/537.36"
 
@@ -354,6 +361,164 @@ class QuoteFeed:
             raise
         except (urllib.error.URLError, OSError, ValueError, KeyError, TypeError) as exc:
             raise QuoteUnavailable(f"{symbol}: {exc}")
+
+    def crypto_universe(self, limit: int = 20, min_turnover_usd: float = 10_000_000) -> List[str]:
+        """Most-traded Bybit USDT spot coins, pegged assets and leveraged tokens left out."""
+        with self._lock:
+            cached = self._intraday_cache.get("universe")
+            if cached and (time.time() - cached["_at"]) < 3600:
+                return list(cached["data"])
+        try:
+            payload = self._fetch(CRYPTO_TICKERS_URL) or {}
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            raise QuoteUnavailable(f"coin list: {exc}")
+        rows = ((payload.get("result") or {}).get("list")) or []
+        picks = []
+        for row in rows:
+            pair = str(row.get("symbol") or "")
+            if not pair.endswith("USDT"):
+                continue
+            base = pair[:-4]
+            if re.search(r"\d[LS]$", base):  # leveraged tokens (BTC3L, ETH2S…)
+                continue
+            try:
+                price = float(row.get("lastPrice") or 0)
+                span = (float(row.get("highPrice24h") or 0) - float(row.get("lowPrice24h") or 0)) / price
+                turnover = float(row.get("turnover24h") or 0)
+            except (TypeError, ValueError, ZeroDivisionError):
+                continue
+            if turnover < min_turnover_usd or span < 0.004:  # thin, or pegged (stablecoins)
+                continue
+            picks.append((turnover, base))
+        coins = [base for _, base in sorted(picks, reverse=True)[:limit]]
+        if not coins:
+            raise QuoteUnavailable("coin list: no liquid coins returned")
+        with self._lock:
+            self._intraday_cache["universe"] = {"_at": time.time(), "data": list(coins)}
+        return coins
+
+    @staticmethod
+    def _crypto_pair(symbol: str) -> str:
+        base = "".join(ch for ch in str(symbol or "").upper() if ch.isalnum())
+        for quote in ("USDT", "USDC", "USD"):
+            if base.endswith(quote) and len(base) > len(quote):
+                base = base[:-len(quote)]
+                break
+        if not base:
+            raise QuoteUnavailable("symbol is required")
+        return base
+
+    def _cached_fetch(self, key: str, url: str, ttl: float) -> dict:
+        with self._lock:
+            cached = self._intraday_cache.get(key)
+            if cached and (time.time() - cached["_at"]) < ttl:
+                return cached["data"]
+        try:
+            payload = self._fetch(url) or {}
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            raise QuoteUnavailable(str(exc))
+        if int(payload.get("retCode") or 0) != 0:
+            raise QuoteUnavailable(str(payload.get("retMsg") or "exchange error"))
+        with self._lock:
+            self._intraday_cache[key] = {"_at": time.time(), "data": payload}
+        return payload
+
+    def crypto_chart(self, symbol: str, span: str = "1D") -> dict:
+        """Close prices for a chart range plus 24h/1y stats, any Bybit USDT pair."""
+        base = self._crypto_pair(symbol)
+        span = (span or "1D").upper()
+        if span == "YTD":
+            start = datetime(datetime.now(timezone.utc).year, 1, 1, tzinfo=timezone.utc)
+            interval, bars, ttl = "D", max(2, (datetime.now(timezone.utc) - start).days + 1), 900
+        elif span in CHART_RANGES:
+            interval, bars, ttl = CHART_RANGES[span]
+        else:
+            raise QuoteUnavailable("range must be 1D, 5D, 1M, 6M, YTD, 1Y or MAX")
+        pair = urllib.parse.quote(f"{base}USDT")
+        rows = (self._cached_fetch(f"chart:{base}:{span}", CRYPTO_KLINE_URL.format(
+            pair=pair, interval=interval, limit=min(bars, 1000)), ttl).get("result") or {}).get("list") or []
+        points = [{"t": int(r[0]), "open": float(r[1]), "close": float(r[4])} for r in reversed(rows) if len(r) >= 5]
+        if not points:
+            raise QuoteUnavailable(f"{base}: no chart data")
+        ticker = ((self._cached_fetch(f"ticker:{base}", CRYPTO_TICKER_URL.format(pair=pair), 5)
+                   .get("result") or {}).get("list") or [{}])[0]
+        year = (self._cached_fetch(f"chart:{base}:1Y", CRYPTO_KLINE_URL.format(
+            pair=pair, interval="D", limit=365), 3600).get("result") or {}).get("list") or []
+        num = lambda key: float(ticker.get(key) or 0) or None
+        return {
+            "symbol": base, "range": span, "interval": interval,
+            "points": [{"t": p["t"], "close": p["close"]} for p in points],
+            "range_open": points[0]["open"],
+            "price": num("lastPrice") or points[-1]["close"],
+            "stats": {
+                "open_24h": num("prevPrice24h"), "high_24h": num("highPrice24h"), "low_24h": num("lowPrice24h"),
+                "volume_24h_usd": num("turnover24h"),
+                "high_1y": max((float(r[2]) for r in year), default=None),
+                "low_1y": min((float(r[3]) for r in year), default=None),
+            },
+        }
+
+    def stock_chart(self, symbol: str, span: str = "1D") -> dict:
+        """US stock chart from the Nasdaq feed: today's minutes for 1D, daily closes otherwise."""
+        symbol = (symbol or "").strip().upper()
+        if not symbol or crypto_id(symbol):
+            raise QuoteUnavailable("stock charts need a US stock or ETF ticker")
+        span = (span or "1D").upper()
+        days = {"5D": 8, "1M": 31, "6M": 183, "1Y": 366, "5Y": 1830, "MAX": 1830}  # Nasdaq serves ~5 years
+        today = date.today()
+        if span == "YTD":
+            days["YTD"] = (today - date(today.year, 1, 1)).days + 1
+        if span != "1D" and span not in days:
+            raise QuoteUnavailable("range must be 1D, 5D, 1M, 6M, YTD, 1Y, 5Y or MAX")
+        live = self.intraday(symbol)
+        day_points = [{"t": p["ts_ms"], "close": p["price_mills"] / 1000} for p in (live.get("points") or [])]
+        year_rows = self._stock_daily(symbol, 366)
+        if span == "1D":
+            step = max(1, len(day_points) // 390)
+            points = day_points[::step] or [{"t": int(time.time() * 1000), "close": live["price_cents"] / 100}]
+            range_open = (live.get("previous_close_cents") or 0) / 100 or points[0]["close"]
+        else:
+            rows = self._stock_daily(symbol, days[span])
+            cutoff = (today - timedelta(days=days[span])).isoformat()
+            rows = [r for r in rows if r["date"] >= cutoff] or rows
+            step = max(1, len(rows) // 400)
+            points = [{"t": int(datetime.fromisoformat(r["date"]).replace(tzinfo=timezone.utc).timestamp() * 1000),
+                       "close": r["close"]} for r in rows[::step]]
+            range_open = points[0]["close"]
+        closes = [p["close"] for p in day_points] or [live["price_cents"] / 100]
+        return {
+            "symbol": symbol, "company": live.get("company") or symbol, "range": span,
+            "market_status": live.get("market_status"), "points": points, "range_open": range_open,
+            "price": live["price_cents"] / 100,
+            "stats": {"previous_close": (live.get("previous_close_cents") or 0) / 100 or None,
+                      "volume": live.get("volume") or None,
+                      "low_24h": min(closes), "high_24h": max(closes),
+                      "low_1y": min((r["close"] for r in year_rows), default=None),
+                      "high_1y": max((r["close"] for r in year_rows), default=None)},
+        }
+
+    def _stock_daily(self, symbol: str, days: int) -> List[dict]:
+        key = f"stockdaily:{symbol}:{days}"
+        with self._lock:
+            cached = self._intraday_cache.get(key)
+            if cached and (time.time() - cached["_at"]) < 900:
+                return list(cached["data"])
+        to_date = date.today()
+        payload = self._fetch_nasdaq(EQUITY_HISTORY_URL, symbol,
+                                     from_date=(to_date - timedelta(days=days)).isoformat(), to_date=to_date.isoformat())
+        raw = ((((payload.get("data") or {}).get("tradesTable") or {}).get("rows")) or [])
+        rows = []
+        for item in reversed(raw):
+            try:
+                rows.append({"date": datetime.strptime(item["date"], "%m/%d/%Y").date().isoformat(),
+                             "close": _to_cents(item["close"]) / 100})
+            except (KeyError, ValueError, TypeError):
+                continue
+        if not rows:
+            raise QuoteUnavailable(f"{symbol}: no daily prices")
+        with self._lock:
+            self._intraday_cache[key] = {"_at": time.time(), "data": list(rows)}
+        return rows
 
     def crypto_hourly_candles(self, symbol: str) -> List[dict]:
         """300 hourly Bybit candles, oldest first; the open bar is flagged partial."""

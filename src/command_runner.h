@@ -2,6 +2,7 @@
 
 #include "process_runner.h"
 
+#include <cctype>
 #include <cstdlib>
 #include <filesystem>
 #include <string>
@@ -85,6 +86,54 @@ inline void SetHeadlessEnv(bool on) {
 #endif
   }
 }
+
+#ifdef __APPLE__
+inline std::string SbplQuote(const std::string& value) {
+  std::string out = "\"";
+  for (char ch : value) {
+    if (ch == '"' || ch == '\\') out += '\\';
+    out += ch;
+  }
+  return out + "\"";
+}
+
+// Seatbelt profile for agent commands: writes only inside the project, temp dirs
+// and package caches; secrets and AI.EXE's own data are unreadable.
+inline std::string AgentSandboxProfile(const std::filesystem::path& root,
+                                       const std::filesystem::path& home) {
+  std::error_code ec;
+  const std::string proj = std::filesystem::weakly_canonical(root, ec).string();
+  const std::string h = std::filesystem::weakly_canonical(home, ec).string();
+  auto sub = [&](const std::string& rel) { return "(subpath " + SbplQuote(h + "/" + rel) + ")"; };
+  std::string p = "(version 1)\n(allow default)\n";
+  p += "(deny file-write* (subpath " + SbplQuote(h) + "))\n";
+  p += "(allow file-write* (subpath " + SbplQuote(proj) + ") " + sub(".npm") + " " + sub(".cache") + " " +
+       sub("Library/Caches") + " " + sub(".cargo") + " " + sub(".rustup") + " " + sub("go") + " " +
+       sub(".gradle") + " " + sub(".m2") + " " + sub(".nuget") + " " + sub(".dotnet") + " " +
+       sub(".yarn") + " " + sub(".node-gyp") + " " + sub("Library/pnpm") + ")\n";
+  p += "(deny file-read* file-write* " + sub(".ssh") + " " + sub(".aws") + " " + sub(".gnupg") + " " +
+       sub(".kube") + " " + sub(".docker") + " " + sub(".config/gcloud") + " " + sub(".netrc") + " " +
+       sub("Library/Keychains") + " " + sub("Library/Cookies") + " " + sub("Library/WebKit") + " " +
+       sub("Library/Application Support/AI.EXE") + " " + sub("Library/Application Support/Google") + " " +
+       sub("Library/Application Support/Firefox") + " " + sub("Library/Safari") + ")\n";
+  p += "(deny file-read* file-write* (regex #\"/backend/\\.data(/|$)\"))\n";  // AI.EXE keys, token, chats
+  return p;
+}
+#endif
+
+#ifdef _WIN32
+// A .cmd/.bat target is parsed by cmd.exe, so quotes and metacharacters in an
+// argument can chain extra commands (the "BatBadBut" class). Refuse them.
+inline bool HasBatchUnsafeArg(const std::filesystem::path& exe, const std::vector<std::string>& args) {
+  std::string ext = exe.extension().string();
+  for (auto& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  if (ext != ".cmd" && ext != ".bat") return false;
+  for (const auto& arg : args) {
+    if (arg.find_first_of("\"&|<>^%!\r\n") != std::string::npos) return true;
+  }
+  return false;
+}
+#endif
 
 }  // namespace command_runner_detail
 
@@ -183,6 +232,23 @@ inline CommandRunResult RunProjectCommand(const std::filesystem::path& root,
     out.err = "Command not allowed: " + program;
     return out;
   }
+
+#ifdef _WIN32
+  if (HasBatchUnsafeArg(exe, full_args)) {
+    out.err = "Refused: an argument contains characters that cmd.exe would treat as commands (\" & | < > ^ % !).";
+    return out;
+  }
+#endif
+#ifdef __APPLE__
+  // Jail the command (see AgentSandboxProfile); /usr/bin/sandbox-exec ships with macOS.
+  const char* home_env = std::getenv("HOME");
+  if (home_env && std::filesystem::exists("/usr/bin/sandbox-exec", ec)) {
+    std::vector<std::string> jailed = {"-p", AgentSandboxProfile(root, home_env), exe.string()};
+    jailed.insert(jailed.end(), full_args.begin(), full_args.end());
+    full_args = std::move(jailed);
+    exe = "/usr/bin/sandbox-exec";
+  }
+#endif
 
   SetHeadlessEnv(true);
   ProcessResult res;

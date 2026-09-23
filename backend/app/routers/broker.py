@@ -14,7 +14,7 @@ import websockets
 from fastapi import APIRouter, HTTPException, Query, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 
-from .. import access_token
+from .. import access_token, live_data
 from ..broker import ConfirmationRequired, LiveTradingBlocked, OrderRejected
 from ..ai_portfolio import DEFAULT_SYMBOLS, build_episodes, research_messages, score_research
 from ..config import settings
@@ -365,6 +365,84 @@ async def _stream_equity(websocket: WebSocket, symbol: str) -> None:
         await asyncio.sleep(2)
 
 
+@router.get("/prices/crypto-chart")
+def price_crypto_chart(symbol: str = Query(min_length=1, max_length=24),
+                       range: str = Query(default="1D", max_length=4)):
+    try:
+        return quote_feed.crypto_chart(symbol, range)
+    except QuoteUnavailable as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.get("/prices/stock-chart")
+def price_stock_chart(symbol: str = Query(min_length=1, max_length=12),
+                      range: str = Query(default="1D", max_length=4)):
+    try:
+        return quote_feed.stock_chart(symbol, range)
+    except QuoteUnavailable as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.get("/fx")
+def fx_rate(base: str = Query(min_length=3, max_length=3), quote: str = Query(min_length=3, max_length=3),
+            range: str = Query(default="1M", max_length=3)):
+    try:
+        return live_data.fx(base, quote, range)
+    except QuoteUnavailable as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.get("/weather")
+def weather_now(place: str = Query(min_length=1, max_length=80), units: str = Query(default="metric", max_length=8)):
+    try:
+        return live_data.weather(place, units)
+    except QuoteUnavailable as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.websocket("/broker/ticker-stream")
+async def broker_ticker_stream(websocket: WebSocket, symbol: str = "BTC"):
+    """Light live price for chat cards: any Bybit USDT pair, at most 4 updates/s."""
+    protocol = access_token.from_subprotocols(websocket.headers.get("sec-websocket-protocol") or "")
+    if not _stream_origin_allowed(websocket.headers.get("origin") or "",
+                                  protocol[len(access_token.SUBPROTOCOL_PREFIX):]):
+        await websocket.close(code=1008)
+        return
+    await websocket.accept(subprotocol=protocol or None)
+    base = "".join(ch for ch in _crypto_base(symbol) if ch.isalnum())[:20]
+    pair = f"{base}USDT"
+    try:
+        async with websockets.connect(BYBIT_SPOT_STREAM, ping_interval=20, ping_timeout=12,
+                                      close_timeout=2) as upstream:
+            await upstream.send(json.dumps({"op": "subscribe", "args": [f"tickers.{pair}"]}))
+            last_sent = 0.0
+            async for raw in upstream:
+                message = json.loads(raw)
+                if message.get("topic") != f"tickers.{pair}":
+                    continue
+                data = message.get("data") or {}
+                if isinstance(data, list):
+                    data = data[0] if data else {}
+                if not data.get("lastPrice") or time.monotonic() - last_sent < 0.25:
+                    continue
+                last_sent = time.monotonic()
+                await websocket.send_json({
+                    "symbol": base, "ts": int(message.get("ts") or time.time() * 1000),
+                    "price": float(data["lastPrice"]),
+                    "open_24h": float(data.get("prevPrice24h") or 0) or None,
+                    "high_24h": float(data.get("highPrice24h") or 0) or None,
+                    "low_24h": float(data.get("lowPrice24h") or 0) or None,
+                    "volume_24h_usd": float(data.get("turnover24h") or 0) or None,
+                })
+    except (WebSocketDisconnect, websockets.exceptions.WebSocketException, OSError):
+        pass
+    finally:
+        try:
+            await websocket.close()
+        except RuntimeError:
+            pass
+
+
 @router.websocket("/broker/live-stream")
 async def broker_live_stream(websocket: WebSocket, symbol: str = "AAPL"):
     """Push-only local stream. Crypto is exchange WebSocket; equities use the
@@ -545,6 +623,27 @@ def broker_autopilot_stop(payload: AutopilotStop):
 @router.post("/broker/autopilot/clear-activity")
 def broker_autopilot_clear_activity():
     return autopilot.clear_activity()
+
+
+@router.get("/broker/autopilot/coin")
+def broker_autopilot_coin(symbol: str = Query(min_length=1, max_length=24)):
+    try:
+        return autopilot.coin_check(symbol)
+    except (ValueError, QuoteUnavailable) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+class AutopilotWatch(BaseModel):
+    symbol: str = Field(min_length=1, max_length=24)
+    watch: bool = True
+
+
+@router.post("/broker/autopilot/watch")
+def broker_autopilot_watch(payload: AutopilotWatch):
+    try:
+        return autopilot.watch(payload.symbol, payload.watch)
+    except (ValueError, QuoteUnavailable) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 @router.post("/broker/autopilot/reset")

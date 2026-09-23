@@ -27,7 +27,7 @@
   /* Keep the working column readable on ultra-wide displays while preserving
      the shared gutter when either sidebar changes width. */
   --content-max-width: 1120px;
-  --chat-content-max-width: 740px;
+  --chat-content-max-width: 768px;
   --ui-min-w: 1050px;
   --ui-min-h: 760px;
   --window-chrome-h: 0px;
@@ -3929,8 +3929,12 @@ html.platform-mac .settings-sidebar {
 .autopilot-feed time { flex: none; color: var(--trade-muted); font-size: 12px; }
 .autopilot-cols li.autopilot-empty { color: var(--trade-muted); }
 .autopilot-market { display: flex; flex-wrap: wrap; gap: 8px; }
+.autopilot-scan .autopilot-section-head small { color: var(--trade-muted); font-size: 12px; }
+.autopilot-feed li.universe i { background: #9cc7e3; }
+.autopilot-market span.warming { opacity: .6; border-style: dashed; }
 .autopilot-market span { display: inline-flex; align-items: baseline; gap: 8px; padding: 7px 12px; border: 1px solid var(--trade-rule); border-radius: 999px; color: var(--trade-muted); font-size: 12px; font-variant-numeric: tabular-nums; }
 .autopilot-market span.trending { border-color: rgba(110, 231, 160, .4); }
+.autopilot-market span.held { border-color: rgba(156, 199, 227, .6); background: rgba(156, 199, 227, .06); }
 .autopilot-market b { color: var(--trade-ink); font-weight: 600; }
 .autopilot-market em { font-style: normal; }
 .autopilot-note { margin: 0; color: var(--trade-muted); font-size: 12px; line-height: 1.5; }
@@ -10390,3 +10394,183 @@ html.platform-windows *::-webkit-scrollbar-button {
 html.platform-windows *::-webkit-scrollbar-corner {
   background: transparent;
 }
+
+/* Live chat cards ([[card:…]] markers in replies). */
+.chat-card { --card-ink: #e6ebf1; --card-muted: #abb7c7; --card-rule: #343e4c; box-sizing: border-box; width: 100%; max-width: 560px; margin: 12px 0; padding: 18px 20px; border: 1px solid var(--card-rule); border-radius: 14px; background: #171c24; color: var(--card-ink); font-family: var(--font-sans); }
+.chat-card .up { color: #6ee7a0; }
+.chat-card .down { color: #f2a0a0; }
+.chat-card-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--card-muted); font-size: 13px; }
+.chat-card-head > span { display: inline-flex; align-items: center; gap: 8px; color: var(--card-ink); font-weight: 600; }
+.chat-card-head .broker-avatar { width: 24px; height: 24px; font-size: 9px; }
+.chat-card-head em { padding: 3px 9px; border-radius: 999px; background: rgba(255, 255, 255, .06); font-style: normal; font-size: 11.5px; }
+.chat-card-head em.on { background: rgba(110, 231, 160, .12); color: #86efac; }
+.chat-card-value { margin-top: 10px; font-size: 30px; font-weight: 600; letter-spacing: -.5px; font-variant-numeric: tabular-nums; }
+.chat-card-sub { margin-top: 4px; color: var(--card-muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+.chat-card-spark { display: block; width: 100%; height: 96px; margin-top: 14px; }
+.chat-card-axis { display: flex; justify-content: space-between; margin-top: 4px; color: var(--card-muted); font-size: 11px; opacity: .7; }
+.chat-card-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px; margin-top: 14px; overflow: hidden; border: 1px solid var(--card-rule); border-radius: 10px; background: var(--card-rule); }
+.chat-card-grid > div { display: flex; flex-direction: column; gap: 4px; padding: 10px 12px; background: #171c24; }
+.chat-card-grid small { color: var(--card-muted); font-size: 11.5px; }
+.chat-card-grid strong { font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.chat-card-grid i { color: var(--card-muted); font-style: normal; font-weight: 400; }
+.chat-card-list { margin: 12px 0 0; padding: 0; list-style: none; }
+.chat-card-list li { display: flex; justify-content: space-between; padding: 7px 0; border-top: 1px solid var(--card-rule); font-size: 13px; }
+.chat-card-foot { margin-top: 12px; color: var(--card-muted); font-size: 13px; line-height: 1.5; }
+.chat-card-link { margin-top: 12px; padding: 0; border: 0; background: none; color: #9cc7e3; font: 600 13px var(--font-sans); cursor: pointer; }
+.chat-card-link:hover { text-decoration: underline; }
+.chat-card-link:disabled { opacity: .5; }
+.chat-card-error { color: var(--card-muted); font-size: 13px; }
+.chat-card-clock { display: flex; align-items: center; justify-content: space-between; gap: 20px; max-width: 460px; }
+.chat-clock-text { display: flex; flex-direction: column; gap: 4px; color: var(--card-muted); font-size: 14px; }
+.chat-clock-text strong { color: var(--card-ink); font-size: 32px; font-weight: 600; letter-spacing: -.5px; }
+.chat-clock-face { width: 104px; height: 104px; flex: none; }
+.chat-clock-face text { fill: var(--card-ink); font: 600 9px var(--font-sans); text-anchor: middle; }
+.chat-clock-face line { stroke: var(--card-ink); stroke-linecap: round; }
+.chat-clock-face line.hour { stroke-width: 3.2; }
+.chat-clock-face line.minute { stroke-width: 2.2; }
+.chat-clock-face line.second { stroke: #a78bfa; stroke-width: 1.1; }
+.chat-clock-face circle { fill: #a78bfa; }
+@media (max-width: 560px) { .chat-card-grid { grid-template-columns: 1fr 1fr; } .chat-card-clock { flex-direction: column; align-items: flex-start; } }
+
+/* Coin card: range tabs, crosshair chart, stats. */
+.chat-card.chat-card-coin { max-width: 768px; padding: 22px 24px; }
+.chat-card-coin .coin-title { display: inline-flex; align-items: center; gap: 8px; }
+.chat-card-coin .chat-card-value { font-size: 34px; }
+.chat-card-coin.streaming .coin-status::before { content: ''; display: inline-block; width: 6px; height: 6px; margin-right: 6px; border-radius: 50%; background: #4ade80; vertical-align: 1px; animation: autopilot-pulse 2s ease-in-out infinite; }
+.coin-tabs { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 4px; margin: 18px 0 14px; padding-top: 16px; border-top: 1px solid var(--card-rule); }
+.coin-tabs button { height: 34px; border: 0; border-radius: 999px; background: transparent; color: var(--card-muted); font: 600 13px var(--font-sans); cursor: pointer; }
+.coin-tabs button:hover { color: var(--card-ink); }
+.coin-tabs button[aria-selected="true"] { background: rgba(255, 255, 255, .08); color: var(--card-ink); }
+.coin-chart { position: relative; height: 240px; margin-right: 56px; touch-action: none; cursor: crosshair; }
+.coin-svg { display: block; width: 100%; height: 100%; overflow: visible; }
+.coin-grid { stroke: rgba(255, 255, 255, .07); stroke-dasharray: 4 5; vector-effect: non-scaling-stroke; }
+.coin-line { fill: none; stroke: #6ee7a0; stroke-width: 2; vector-effect: non-scaling-stroke; stroke-linejoin: round; }
+.coin-area { fill: rgba(110, 231, 160, .12); }
+.chat-card-coin.down .coin-line { stroke: #f2a0a0; }
+.chat-card-coin.down .coin-area { fill: rgba(242, 160, 160, .1); }
+.coin-ylabels { position: absolute; top: 0; bottom: 0; left: 100%; width: 56px; pointer-events: none; }
+.coin-ylabels span { position: absolute; left: 10px; transform: translateY(-50%); color: var(--card-muted); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+.coin-hover { display: none; position: absolute; inset: 0; pointer-events: none; }
+.coin-vline { position: absolute; top: 0; bottom: 0; left: var(--x); width: 1px; background: rgba(255, 255, 255, .22); }
+.coin-dot { position: absolute; left: var(--x); top: var(--y); width: 9px; height: 9px; margin: -5px 0 0 -5px; border: 2px solid #171c24; border-radius: 50%; background: #6ee7a0; }
+.chat-card-coin.down .coin-dot { background: #f2a0a0; }
+.coin-tip { position: absolute; left: var(--x); top: var(--y); display: flex; flex-direction: column; gap: 2px; margin: -18px 0 0 14px; padding: 7px 11px; border: 1px solid var(--card-rule); border-radius: 9px; background: #232a35; box-shadow: 0 8px 22px rgba(0, 0, 0, .35); white-space: nowrap; font-size: 12px; }
+.coin-tip b { color: var(--card-ink); font-size: 13.5px; font-variant-numeric: tabular-nums; }
+.coin-tip span { color: var(--card-muted); }
+.coin-hover.flip .coin-tip { transform: translateX(calc(-100% - 28px)); }
+.coin-xlabels { display: flex; justify-content: space-between; margin: 8px 56px 0 0; color: var(--card-muted); font-size: 12px; }
+.coin-stats { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 28px; margin-top: 18px; }
+.coin-stats > .coin-stat { display: flex; justify-content: space-between; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--card-rule); font-size: 13.5px; }
+.coin-range { display: grid; gap: 7px; padding: 12px 0; border-bottom: 1px solid var(--card-rule); }
+.coin-range small { color: var(--card-muted); font-size: 13.5px; }
+.coin-range-bar { position: relative; height: 6px; border-radius: 999px; background: linear-gradient(90deg, rgba(242, 160, 160, .45), rgba(255, 255, 255, .12) 50%, rgba(110, 231, 160, .45)); }
+.coin-range-bar i { position: absolute; top: 50%; width: 12px; height: 12px; margin-left: -6px; border: 2px solid #171c24; border-radius: 50%; background: var(--card-ink); transform: translateY(-50%); box-shadow: 0 0 0 1px rgba(255, 255, 255, .25); }
+.coin-range-ends { display: flex; justify-content: space-between; color: var(--card-muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.coin-stats small { color: var(--card-muted); font-size: 13.5px; }
+.coin-stats strong { font-weight: 500; font-variant-numeric: tabular-nums; }
+@media (max-width: 640px) {
+  .chat-card.chat-card-coin { padding: 18px 16px; }
+  .coin-tabs { grid-template-columns: repeat(7, minmax(36px, 1fr)); overflow-x: auto; }
+  .coin-tabs button { font-size: 12px; }
+  .coin-chart { height: 190px; margin-right: 48px; }
+  .coin-ylabels { width: 48px; }
+  .coin-xlabels { margin-right: 48px; }
+  .coin-stats { gap: 0 18px; }
+}
+@media (max-width: 420px) { .coin-stats { grid-template-columns: 1fr; } }
+
+/* Every chat card fills the reading column, aligned with the text. */
+.chat-card, .chat-card.chat-card-coin, .chat-card-clock { width: 100%; max-width: none; margin-left: 0; margin-right: 0; }
+.autopilot-history .autopilot-section-head small { color: var(--trade-muted); font-size: 12px; }
+.autopilot-history h3 { display: inline-flex; align-items: center; }
+.autopilot-history-table td.up { color: #6ee7a0; }
+.autopilot-history-table td.down { color: #f2a0a0; }
+.autopilot-history-table tr.autopilot-lesson-row td { padding-top: 0; text-align: left; white-space: normal; }
+.autopilot-history-table tr:has(+ .autopilot-lesson-row) > * { border-bottom: 0; }
+.autopilot-lesson { display: block; color: var(--trade-muted); font-size: 12.5px; line-height: 1.5; }
+.autopilot-lesson b { margin-right: 6px; padding: 2px 7px; border-radius: 999px; background: rgba(226, 184, 107, .14); color: #e2b86b; font-size: 11px; font-weight: 600; }
+.autopilot-lesson.muted { opacity: .6; }
+
+/* Stock / compare / fx / weather / timer cards. */
+.chat-card .coin-title small { color: var(--card-muted); font-weight: 500; }
+.compare-legend { display: flex; flex-wrap: wrap; gap: 8px 18px; margin-top: 12px; }
+.compare-legend span { display: inline-flex; align-items: center; gap: 7px; font-size: 13.5px; }
+.compare-legend i { width: 10px; height: 10px; border-radius: 3px; }
+.compare-legend em { font-style: normal; font-variant-numeric: tabular-nums; }
+.chat-card-compare .coin-tip { gap: 3px; }
+.chat-card-compare .coin-tip span:not(:last-child) { font-weight: 600; font-variant-numeric: tabular-nums; }
+.chat-card .coin-tabs.compare-tabs, .chat-card .coin-tabs.fx-tabs { grid-template-columns: repeat(auto-fit, minmax(0, 1fr)); }
+.fx-convert { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; gap: 12px; margin-top: 16px; }
+.fx-convert label { display: flex; align-items: center; height: 44px; padding: 0 14px; border-radius: 10px; background: rgba(255, 255, 255, .05); }
+.fx-convert input { flex: 1; min-width: 0; border: 0; background: transparent; color: var(--card-ink); font: 600 16px var(--font-sans); outline: 0; -moz-appearance: textfield; }
+.fx-convert input::-webkit-inner-spin-button { -webkit-appearance: none; }
+.fx-convert label span { color: var(--card-muted); font-size: 13px; font-weight: 600; }
+.fx-convert > b { color: var(--card-muted); }
+.chat-card-fx .fx-rate { font-size: 26px; }
+.weather-now { display: flex; align-items: center; gap: 16px; margin-top: 10px; flex-wrap: wrap; }
+.weather-icon { font-size: 44px; line-height: 1; }
+.weather-now .chat-card-value { margin-top: 0; }
+.weather-extra { display: flex; flex-direction: column; gap: 6px; margin-left: auto; color: var(--card-muted); font-size: 13px; }
+.weather-extra b { color: var(--card-ink); font-weight: 600; }
+.weather-days { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 6px; margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--card-rule); }
+.weather-day { display: flex; flex-direction: column; align-items: center; gap: 4px; font-variant-numeric: tabular-nums; }
+.weather-day small { color: var(--card-muted); font-size: 12px; }
+.weather-day span { font-size: 20px; }
+.weather-day b { font-size: 14px; }
+.weather-day i { color: var(--card-muted); font-style: normal; font-size: 12.5px; }
+.weather-day em { color: #9cc7e3; font-style: normal; font-size: 11px; }
+.timer-body { position: relative; display: grid; place-items: center; width: 180px; height: 180px; margin: 12px auto 4px; }
+.timer-ring { position: absolute; inset: 0; transform: rotate(-90deg); }
+.timer-ring circle { fill: none; stroke: rgba(255, 255, 255, .08); stroke-width: 5; }
+.timer-ring .timer-progress { stroke: #9cc7e3; stroke-linecap: round; transition: stroke-dashoffset .25s linear; }
+.chat-card-timer.running .timer-progress { stroke: #6ee7a0; }
+.timer-time { font: 600 36px var(--font-sans); font-variant-numeric: tabular-nums; letter-spacing: -.5px; }
+.timer-actions { display: flex; justify-content: center; gap: 10px; margin-top: 12px; }
+.timer-actions button { height: 38px; min-width: 96px; padding: 0 16px; border-radius: 10px; border: 1px solid transparent; font: 600 13px var(--font-sans); cursor: pointer; }
+.timer-actions .finance-btn-primary { background: #e6ebf1; color: #0f141b; }
+.timer-actions .finance-inline-btn { background: rgba(255, 255, 255, .07); color: var(--card-ink); }
+@media (max-width: 560px) {
+  .weather-days { grid-template-columns: repeat(4, minmax(0, 1fr)); row-gap: 14px; }
+  .fx-convert { grid-template-columns: 1fr; }
+  .fx-convert > b { display: none; }
+}
+.weather-units { display: inline-flex; gap: 2px; margin-top: 14px; padding: 3px; border-radius: 8px; background: rgba(255, 255, 255, .05); }
+.weather-units button { height: 26px; min-width: 38px; border: 0; border-radius: 6px; background: transparent; color: var(--card-muted); font: 600 12px var(--font-sans); cursor: pointer; }
+.weather-units button[aria-pressed="true"] { background: rgba(255, 255, 255, .12); color: var(--card-ink); }
+.chat-card [hidden] { display: none !important; }
+
+/* Card skeletons, fallbacks, offline flag. */
+.chat-card { position: relative; }
+.chat-card.loading > :not(.card-skel) { display: none !important; }
+.card-skel { display: flex; flex-direction: column; gap: 12px; }
+.card-skel-row { display: flex; justify-content: space-between; gap: 12px; }
+.card-skel-bar { display: block; border-radius: 6px; background: linear-gradient(90deg, rgba(255, 255, 255, .05) 25%, rgba(255, 255, 255, .11) 45%, rgba(255, 255, 255, .05) 65%); background-size: 300% 100%; animation: card-shimmer 1.4s ease-in-out infinite; }
+.card-skel-bar.pill { border-radius: 999px; }
+.card-skel-bar.block { border-radius: 10px; }
+.card-skel-tabs { margin-top: 6px; }
+.card-skel-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.card-skel-days { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 8px; }
+.card-skel-round { width: 150px; height: 150px; margin: 8px auto; border-radius: 50%; border: 8px solid rgba(255, 255, 255, .06); animation: card-shimmer-fade 1.4s ease-in-out infinite; }
+@keyframes card-shimmer { 0% { background-position: 100% 0; } 100% { background-position: -100% 0; } }
+@keyframes card-shimmer-fade { 50% { opacity: .5; } }
+.card-fallback { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 14px; }
+.card-fallback svg { width: 22px; height: 22px; fill: none; stroke: #e2b86b; stroke-width: 1.8; stroke-linejoin: round; stroke-linecap: round; }
+.card-fallback svg circle { fill: #e2b86b; stroke: none; }
+.card-fallback div { display: flex; flex-direction: column; gap: 3px; }
+.card-fallback strong { font-size: 14px; }
+.card-fallback span { color: var(--card-muted); font-size: 13px; line-height: 1.45; }
+.card-fallback .chat-card-link { margin: 0; }
+.card-offline { position: absolute; top: 12px; right: 16px; padding: 3px 9px; border-radius: 999px; background: rgba(226, 184, 107, .14); color: #e2b86b; font-size: 11.5px; font-weight: 600; }
+.chat-card:not(.offline) .card-offline { display: none; }
+@media (prefers-reduced-motion: reduce) { .card-skel-bar, .card-skel-round { animation: none; } }
+@media (max-width: 560px) { .card-fallback { grid-template-columns: auto minmax(0, 1fr); } .card-fallback .chat-card-link { grid-column: 2; justify-self: start; } }
+.autopilot .skel-box { height: 40px; }
+.autopilot .skel-box.pill, .skel.pill { height: 32px; border-radius: 999px; }
+.skel-chip { width: 118px; height: 32px; border-radius: 999px; }
+.autopilot .autopilot-head .skel-line { margin-top: 10px; max-width: 70%; }
+.autopilot .finance-skeleton-rows { border-top: 1px solid var(--trade-rule); padding-top: 12px; }
+/* Range switch: shimmer over the chart while the new range loads. */
+.coin-chart.fetching .coin-svg { opacity: .28; transition: opacity .15s ease; }
+.coin-chart.fetching::after { content: ''; position: absolute; inset: 0; border-radius: 8px; background: linear-gradient(90deg, transparent 20%, rgba(255, 255, 255, .07) 45%, transparent 70%); background-size: 250% 100%; animation: card-shimmer 1.2s ease-in-out infinite; pointer-events: none; }
+.coin-chart.fetching .coin-hover { display: none !important; }
+@media (prefers-reduced-motion: reduce) { .coin-chart.fetching::after { animation: none; background: rgba(255, 255, 255, .04); } }

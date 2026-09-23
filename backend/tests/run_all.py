@@ -26,6 +26,7 @@ TESTS = [
     "smoke_paper_test", # persistent daily forward-test records + benchmark
     "smoke_autopilot",  # 24/7 crypto autopilot: rules, AI veto, stops, ledger
     "smoke_access_token",  # forged Origin: null cannot drive the backend
+    "smoke_live_data",  # chat-card FX fallback + weather parsing
     "smoke_prices",     # live quote feed (stubbed fetcher)
     "smoke_market_stream",  # local WebSocket + exchange stream routing
 ]

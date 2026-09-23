@@ -10,7 +10,8 @@ import threading
 import time
 from datetime import datetime, timezone
 
-WATCHLIST = ["BTC", "ETH", "SOL", "XRP", "DOGE", "ADA", "LINK", "AVAX"]
+WATCHLIST = ["BTC", "ETH", "SOL", "XRP", "DOGE", "ADA", "LINK", "AVAX"]  # used until the live coin list loads
+UNIVERSE_REFRESH_SECONDS = 3600
 FEE_BPS = 10        # exchange taker fee per side
 SLIPPAGE_BPS = 5    # per side
 QTY_SCALE = 10 ** 8  # fractional coins, stored as integers
@@ -31,6 +32,22 @@ RISK_PRESETS = {
 
 def _now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def normalize_coin(symbol: str) -> str:
+    """'sol', 'SOL/USD', 'SOL-USDT', 'solusdt' -> 'SOL'."""
+    base = "".join(ch for ch in str(symbol or "").upper() if ch.isalnum())
+    for quote in ("USDT", "USDC", "USD"):
+        if base.endswith(quote) and len(base) > len(quote):
+            return base[:-len(quote)]
+    return base
+
+
+def _iso_ms(iso: str) -> int:
+    try:
+        return int(datetime.fromisoformat(str(iso).replace("Z", "+00:00")).timestamp() * 1000)
+    except ValueError:
+        return 0
 
 
 def _day(iso: str) -> str:
@@ -128,6 +145,7 @@ class AutopilotAccount:
         self.marks = {}
         self.day_start = {}
         self.fees_cents = 0
+        self.lessons = []
 
     def _replay(self):
         if not os.path.exists(self._path):
@@ -163,6 +181,12 @@ class AutopilotAccount:
             self.config.update(data)
         elif event_type == "fill":
             self._apply_fill(data, at)
+        elif event_type == "lesson":
+            for trade in self.trades:
+                if trade.get("id") == data.get("trade_id"):
+                    trade["lesson"] = data.get("text", "")
+            self.lessons.append({"at": at, **data})
+            self.lessons = self.lessons[-50:]
         elif event_type == "note":
             self.events.append({"at": at, "seq": self.seq, **data})
             self.events = self.events[-200:]
@@ -181,14 +205,19 @@ class AutopilotAccount:
             self.cash_cents -= gross + fee
             self.positions[symbol] = {"qty": qty, "entry_price": price, "peak_price": price,
                                       "atr": fill.get("atr", 0.0), "opened_at": at,
-                                      "cost_cents": gross + fee, "reason": fill.get("reason", "")}
+                                      "cost_cents": gross + fee, "reason": fill.get("reason", ""),
+                                      "setup": dict(fill.get("setup") or {})}
         else:
             pos = self.positions.pop(symbol, None)
             self.cash_cents += gross - fee
             pnl = gross - fee - (pos["cost_cents"] if pos else 0)
-            self.trades.append({"symbol": symbol, "opened_at": pos["opened_at"] if pos else "",
+            self.trades.append({"id": self.seq, "symbol": symbol, "opened_at": pos["opened_at"] if pos else "",
                                 "closed_at": at, "entry": pos["entry_price"] if pos else 0,
-                                "exit": price, "pnl_cents": pnl, "reason": fill.get("reason", "")})
+                                "exit": price, "pnl_cents": pnl, "reason": fill.get("reason", ""),
+                                "entry_reason": pos.get("reason", "") if pos else "",
+                                "setup": pos.get("setup", {}) if pos else {},
+                                "peak": fill.get("peak") or (pos.get("peak_price") if pos else None),
+                                "cost_cents": pos["cost_cents"] if pos else 0})
         self.marks[symbol] = price
         self.events.append({"at": at, "seq": self.seq, "kind": fill["side"], "symbol": symbol, "price": price,
                             "reason": fill.get("reason", ""), "note": fill.get("note", "")})
@@ -230,7 +259,8 @@ class AutopilotAccount:
 class Autopilot:
     """Scans the watchlist every minute, around the clock, while switched on."""
 
-    def __init__(self, data_dir: str, fetch_candles, reviewer=None, clock=time.time):
+    def __init__(self, data_dir: str, fetch_candles, reviewer=None, clock=time.time, fetch_universe=None,
+                 lesson_writer=None):
         self.account = AutopilotAccount(data_dir)
         self._fetch = fetch_candles          # symbol -> list of candle dicts
         self._reviewer = reviewer            # (symbol, signal, context) -> {"approve": bool, "reason": str}
@@ -243,6 +273,14 @@ class Autopilot:
         self.signals = {}
         self._exited_at = {}
         self._verdicts = {}  # one AI review per symbol per closed bar
+        # A restart must not re-ask the AI (or re-log) a veto for the same candle.
+        for event in self.account.events:
+            if event.get("kind") == "skipped" and event.get("bar") is not None:
+                self._verdicts[(event["symbol"], event["bar"])] = {"approve": False, "reason": event.get("note", "")}
+        self._fetch_universe = fetch_universe  # () -> most-traded coins, refreshed hourly
+        self._lesson_writer = lesson_writer    # (losing trade) -> one-line "why it lost"
+        self.universe = list(WATCHLIST)
+        self._universe_at = 0.0
 
     # ----- control -----
 
@@ -278,6 +316,57 @@ class Autopilot:
         """Hide past notes from the feed. The ledger itself is never edited."""
         self.account._append("config", {"activity_cleared_seq": self.account.seq + 1})
         return self.status()
+
+    def watch(self, symbol: str, on: bool = True) -> dict:
+        """Pin a coin so it's always scanned, even outside the most-traded list."""
+        coin = normalize_coin(symbol)
+        if not coin:
+            raise ValueError("Enter a coin symbol, e.g. SOL.")
+        pinned = [c for c in self.account.config.get("pinned", []) if c != coin]
+        if on:
+            candles = self._fetch(coin)  # raises if the exchange has no such market
+            if not candles:
+                raise ValueError(f"{coin} has no USDT market on the exchange.")
+            pinned.append(coin)
+        self.account._append("config", {"pinned": pinned[-20:]})
+        self.account._append("note", {"kind": "universe",
+                                      "note": f"{'Pinned' if on else 'Unpinned'} {coin} {'to' if on else 'from'} the scan list"})
+        return self.status()
+
+    def coin_check(self, symbol: str) -> dict:
+        """What the autopilot sees for one coin right now (read-only)."""
+        coin = normalize_coin(symbol)
+        candles = self._fetch(coin)
+        if not candles:
+            raise ValueError(f"No market data for {coin}.")
+        closed = [c for c in candles if not c.get("partial")]
+        sig = trend_signal(closed)
+        price = candles[-1]["close"]
+        day = [c for c in candles[-25:]]
+        high_24h = max(c["high"] for c in day)
+        low_24h = min(c["low"] for c in day)
+        base = {
+            "symbol": coin, "price": price,
+            "change_24h": price / day[0]["open"] - 1 if day and day[0]["open"] else 0.0,
+            "high_24h": high_24h, "low_24h": low_24h,
+            "closes": [{"t": c.get("t"), "close": c["close"]} for c in candles[-48:]],
+            "scanned": coin in self.universe, "pinned": coin in self.account.config.get("pinned", []),
+            "held": coin in self.account.positions,
+        }
+        if not sig.get("ok"):
+            return {**base, "ready": False, "summary": "Too new — needs about 5 days of hourly prices."}
+        from_high = price / max(c["high"] for c in closed[-25:-1]) - 1
+        if sig["entry"]:
+            summary = "Uptrend and breaking its 24h high — the autopilot would consider buying (the AI still reviews it)."
+        elif sig["uptrend"]:
+            summary = f"In an uptrend, {abs(from_high) * 100:.1f}% below its 24h high — waiting for a breakout."
+        elif sig["trend_broken"]:
+            summary = "Below its 50-hour average — no trend to follow right now."
+        else:
+            summary = "Mixed trend — the averages aren't lined up yet."
+        return {**base, "ready": True, "summary": summary, "uptrend": sig["uptrend"], "breakout": sig["breakout"],
+                "from_24h_high": from_high, "change_1h": sig["change_1h"], "change_6h": sig["change_6h"],
+                "volatility": sig["volatility"]}
 
     def reset(self) -> dict:
         if self.account.config.get("running"):
@@ -329,7 +418,23 @@ class Autopilot:
         acct = self.account
         preset = RISK_PRESETS[acct.config.get("risk", "careful")]
         signals, errors = {}, []
-        for symbol in WATCHLIST:
+        if self._fetch_universe and self._clock() - self._universe_at >= UNIVERSE_REFRESH_SECONDS:
+            try:
+                fresh = list(self._fetch_universe()) or self.universe
+                if self._universe_at:  # log changes after the first load, not the initial list
+                    added = [c for c in fresh if c not in self.universe]
+                    dropped = [c for c in self.universe if c not in fresh]
+                    if added or dropped:
+                        parts = ([f"added {', '.join(added)}"] if added else []) + \
+                                ([f"dropped {', '.join(dropped)}"] if dropped else [])
+                        acct._append("note", {"kind": "universe", "note": f"Coin list updated: {'; '.join(parts)}"})
+                self.universe = fresh
+                self._universe_at = self._clock()
+            except Exception as exc:
+                errors.append(f"coin list: {exc}")
+        # Open positions stay watched until sold, even if they drop out of the list.
+        scan = list(dict.fromkeys(list(self.universe) + list(acct.config.get("pinned", [])) + list(acct.positions)))
+        for symbol in scan:
             try:
                 candles = self._fetch(symbol)
             except Exception as exc:
@@ -343,6 +448,13 @@ class Autopilot:
                 sig["bar"] = closed[-1].get("t") if closed else None
                 acct.marks[symbol] = sig["price"]
             signals[symbol] = sig
+            pos = acct.positions.get(symbol)
+            if pos and not pos.get("peak_restored") and closed:
+                # The peak lives in memory; after a restart rebuild it from candles since entry.
+                opened_ms = _iso_ms(pos.get("opened_at"))
+                highs = [c["high"] for c in closed if c.get("t", 0) >= opened_ms - 3_600_000]
+                pos["peak_price"] = max([pos["peak_price"], *highs])
+                pos["peak_restored"] = True
         self.signals = signals
         self.last_cycle_at = _now()
         self.last_error = "; ".join(errors)[:300]
@@ -358,8 +470,10 @@ class Autopilot:
             pos["peak_price"] = max(pos["peak_price"], price)
             reason = exit_reason(pos, price, sig, preset)
             if reason:
-                self._sell(symbol, price, reason)
+                trade = self._sell(symbol, price, reason)
                 self._exited_at[symbol] = self._clock()
+                if trade and trade["pnl_cents"] < 0:
+                    self._learn_from(trade)
 
         # Daily loss limit pauses new entries until tomorrow (UTC).
         today = _day(_now())
@@ -392,16 +506,35 @@ class Autopilot:
                 self._verdicts = {k: v for k, v in self._verdicts.items() if k[0] != symbol}
                 self._verdicts[key] = verdict
                 if not verdict["approve"]:
-                    acct._append("note", {"kind": "skipped", "symbol": symbol, "note": verdict["reason"]})
+                    acct._append("note", {"kind": "skipped", "symbol": symbol, "note": verdict["reason"],
+                                          "bar": sig.get("bar")})
             if not verdict["approve"]:
                 continue
             self._buy(symbol, sig, size_cents, verdict["reason"])
         return self.status()
 
+    def _learn_from(self, trade):
+        """Ask the AI why a losing trade lost; the lesson feeds future entry reviews."""
+        if not self._lesson_writer:
+            return
+        try:
+            text = str(self._lesson_writer(trade) or "").strip()[:280]
+        except Exception:
+            return  # no lesson this time; trading carries on
+        if text:
+            self.account._append("lesson", {"trade_id": trade["id"], "symbol": trade["symbol"], "text": text})
+
+    def _entry_setup(self, sig) -> dict:
+        ok = [v for v in self.signals.values() if v.get("ok")]
+        return {"change_1h_pct": round(sig["change_1h"] * 100, 2), "change_6h_pct": round(sig["change_6h"] * 100, 2),
+                "volatility_pct": round(sig["volatility"] * 100, 2), "trend_strength": sig["score"],
+                "coins_trending_pct": round(100 * sum(1 for v in ok if v.get("uptrend")) / max(1, len(ok)))}
+
     def _review(self, symbol, sig, preset) -> dict:
         if not self._reviewer:
             return {"approve": True, "reason": "Uptrend and breakout (rules only)"}
         context = {"open_positions": list(self.account.positions), "risk": preset["label"],
+                   "recent_lessons": [f"{l['symbol']}: {l['text']}" for l in self.account.lessons[-6:]],
                    "market": {s: {"change_1h_pct": round(v["change_1h"] * 100, 2),
                                   "change_6h_pct": round(v["change_6h"] * 100, 2)}
                               for s, v in self.signals.items() if v.get("ok")}}
@@ -420,7 +553,8 @@ class Autopilot:
         if qty <= 0:
             return
         self.account._append("fill", {"side": "buy", "symbol": symbol, "qty": qty, "price": price,
-                                      "fee_cents": fee, "atr": sig["atr"], "reason": reason})
+                                      "fee_cents": fee, "atr": sig["atr"], "reason": reason,
+                                      "setup": self._entry_setup(sig)})
 
     def _sell(self, symbol, price, reason):
         pos = self.account.positions.get(symbol)
@@ -430,9 +564,19 @@ class Autopilot:
         gross = round(pos["qty"] * fill_price * 100 / QTY_SCALE)
         fee = round(gross * FEE_BPS / 10_000)
         self.account._append("fill", {"side": "sell", "symbol": symbol, "qty": pos["qty"], "price": fill_price,
-                                      "fee_cents": fee, "reason": reason})
+                                      "fee_cents": fee, "reason": reason, "peak": pos.get("peak_price")})
+        return self.account.trades[-1] if self.account.trades else None
 
     # ----- view -----
+
+    def _watchlist_view(self):
+        """Every scanned coin: held first, then trending, then the biggest movers."""
+        rows = [{"symbol": s, "price": v.get("price"), "change_1h": v.get("change_1h") or 0,
+                 "trending": bool(v.get("uptrend")), "held": s in self.account.positions,
+                 "warming_up": not v.get("ok")}  # too new for a signal yet
+                for s, v in self.signals.items()]
+        rows.sort(key=lambda r: (not r["held"], not r["trending"], -abs(r["change_1h"] or 0)))
+        return rows
 
     def status(self) -> dict:
         acct = self.account
@@ -456,11 +600,12 @@ class Autopilot:
             "benchmark_cents": acct.benchmark_cents(), "fees_cents": acct.fees_cents,
             "started_at": acct.started_at, "positions": positions,
             "trades": acct.trades[-50:][::-1],
+            "lessons": acct.lessons[-5:][::-1],
             "closed_trades": len(acct.trades), "wins": len(wins),
             "events": [e for e in acct.events if e.get("seq", 0) > acct.config.get("activity_cleared_seq", 0)][-40:][::-1],
-            "watchlist": [{"symbol": s, "price": v.get("price"), "change_1h": v.get("change_1h"),
-                           "trending": bool(v.get("uptrend"))}
-                          for s, v in self.signals.items() if v.get("ok")],
+            "watchlist": self._watchlist_view(),
+            "universe_size": len(self.universe),
+            "pinned": list(acct.config.get("pinned", [])),
             "last_cycle_at": self.last_cycle_at, "last_error": self.last_error,
             "ledger": acct.verify(),
         }

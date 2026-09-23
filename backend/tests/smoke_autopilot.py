@@ -67,7 +67,12 @@ def main():
         skipped = sum(e.get("kind") == "skipped" for e in s["events"])
         bot.run_cycle()
         assert sum(e.get("kind") == "skipped" for e in bot.status()["events"]) == skipped
-        ok("AI veto blocks entries and is asked once per bar")
+        asked = []
+        restarted = ap.Autopilot(d, m.fetch, reviewer=lambda *a: asked.append(1) or {"approve": False, "reason": "x"},
+                                 clock=lambda: m.now)
+        restarted.run_cycle()
+        assert not asked and sum(e.get("kind") == "skipped" for e in restarted.status()["events"]) == skipped
+        ok("AI veto blocks entries and is asked once per bar, even across restarts")
 
     with tempfile.TemporaryDirectory() as d:
         m = Market()
@@ -84,12 +89,23 @@ def main():
 
         held = s["positions"][0]["symbol"]
         bot._reviewer = lambda *a: (_ for _ in ()).throw(RuntimeError("provider down"))
+        seen = []
+        bot._lesson_writer = lambda trade: seen.append(trade) or "Bought a thin breakout; avoid when volatility is high."
         m.crash(held, 5)
         bot.run_cycle()
+        assert seen and seen[0]["setup"].get("change_1h_pct") is not None and seen[0]["entry_reason"]
         s = bot.status()
         assert held not in [p["symbol"] for p in s["positions"]]
         assert s["trades"][0]["reason"] == "stop-loss" and s["trades"][0]["pnl_cents"] < 0
         ok("stop-loss exits without asking the AI, even when the AI is down")
+        assert s["trades"][0]["lesson"].startswith("Bought a thin breakout")
+        assert ap.AutopilotAccount(d).trades[-1]["lesson"] == s["trades"][0]["lesson"]  # survives replay
+        contexts = []
+        bot._reviewer = lambda sym, sig, ctx: contexts.append(ctx) or {"approve": False, "reason": "x"}
+        bot._verdicts.clear()
+        bot.run_cycle()  # other coins come up for review and see the lesson
+        assert any("Bought a thin breakout" in l for c in contexts for l in c["recent_lessons"])
+        ok("losing trades get an AI lesson that persists and feeds the next entry reviews")
 
         m.series[held] = rising(151)
         bot._reviewer = lambda *a: {"approve": True, "reason": "again"}
@@ -99,10 +115,19 @@ def main():
         bot._verdicts.clear()
         ok("cooldown blocks an immediate re-buy after an exit")
 
+        held_now = next(iter(bot.account.positions))
+        peak_before = bot.account.positions[held_now]["peak_price"]
+        again = ap.Autopilot(d, m.fetch, clock=lambda: m.now)
+        again.account.positions[held_now]["peak_price"] = again.account.positions[held_now]["entry_price"]
+        again.account.positions[held_now]["opened_at"] = "1970-01-01T00:00:00Z"
+        again.run_cycle()
+        assert again.account.positions[held_now]["peak_price"] >= peak_before
+        ok("trailing-stop peak is rebuilt from candles after a restart")
+
         replay = ap.AutopilotAccount(d)
-        assert replay.cash_cents == bot.account.cash_cents
-        assert set(replay.positions) == set(bot.account.positions)
-        assert len(replay.trades) == len(bot.account.trades)
+        assert replay.cash_cents == again.account.cash_cents  # newest writer to the ledger
+        assert set(replay.positions) == set(again.account.positions)
+        assert len(replay.trades) == len(again.account.trades)
         ok("ledger replay rebuilds cash, positions and trades")
 
         path = Path(d) / "autopilot" / "ledger.jsonl"
@@ -113,6 +138,26 @@ def main():
         path.write_text("\n".join(lines) + "\n")
         assert ap.AutopilotAccount(d).verify()["ok"] is False
         ok("editing a past record breaks the hash chain")
+
+    with tempfile.TemporaryDirectory() as d:
+        m = Market()
+        m.series["NEW"] = rising()
+        lists = [["BTC", "ETH"], ["NEW"]]
+        bot = ap.Autopilot(d, m.fetch, reviewer=lambda *a: {"approve": True, "reason": "ok"},
+                           clock=lambda: m.now, fetch_universe=lambda: lists[0])
+        bot.start(100_000, "careful")
+        bot.run_cycle()
+        assert set(bot.signals) == {"BTC", "ETH"} and set(bot.account.positions) == {"BTC", "ETH"}
+        lists.pop(0)
+        bot.run_cycle()
+        assert set(bot.signals) == {"BTC", "ETH"}  # list refreshes hourly, not every minute
+        m.now += ap.UNIVERSE_REFRESH_SECONDS
+        bot.run_cycle()
+        assert set(bot.signals) == {"BTC", "ETH", "NEW"}  # held coins stay watched after dropping out
+        assert "NEW" in bot.account.positions
+        notes = [e["note"] for e in bot.status()["events"] if e.get("kind") == "universe"]
+        assert notes == ["Coin list updated: added NEW; dropped BTC, ETH"], notes
+        ok("coin list refreshes hourly, adds new coins, keeps held ones until sold")
 
     with tempfile.TemporaryDirectory() as d:
         m = Market()
@@ -135,6 +180,18 @@ def main():
         assert [e["note"] for e in bot.status()["events"]] == ["after clear"]
         ok("clearing activity hides old notes, keeps trades and the hash chain")
 
+        assert ap.normalize_coin("sol/usd") == ap.normalize_coin("SOLUSDT") == "SOL"
+        check = bot.coin_check("btc-usd")
+        assert check["symbol"] == "BTC" and check["ready"] and len(check["closes"]) == 48 and check["summary"]
+        m.series["ZZZ"] = rising()
+        bot.watch("zzz/usdt")
+        assert "ZZZ" in bot.status()["pinned"]
+        bot.run_cycle()
+        assert "ZZZ" in bot.signals
+        bot.watch("ZZZ", False)
+        assert "ZZZ" not in bot.status()["pinned"]
+        ok("coin check reads live signals; pinning adds a coin to the scan")
+
         bot.stop()
         assert bot.status()["running"] is False
         try:
@@ -144,7 +201,7 @@ def main():
             pass
         ok("stop works and budget bounds are enforced")
 
-    print("\n11 checks passed.")
+    print("\n15 checks passed.")
 
 
 if __name__ == "__main__":

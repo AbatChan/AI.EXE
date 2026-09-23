@@ -1070,16 +1070,32 @@ function skelPanelTitle(title, subtitle, chip = '') {
   return `<div class="finance-panel-title"><div><span>${title}</span><small>${subtitle}</small></div>${chip ? `<span class="broker-mode-chip">${chip}</span>` : ''}</div>`;
 }
 
+function autopilotSkeleton() {
+  const chips = Array.from({ length: 12 }, (_, i) => skelBar(`skel-chip d${i % 4}`)).join('');
+  return `
+    <header class="autopilot-head"><div><h2>Autopilot</h2>${skelBar('skel-line sm', '420px')}</div>${skelBar('skel-box pill', '150px')}</header>
+    <div class="finance-card-grid autopilot-card-grid">${['Balance', 'vs. just holding Bitcoin', 'Closed trades'].map((label, i) => `
+      <article class="finance-card"><span>${label}</span>${skelBar(`skel-line lg d${i % 4}`, '58%')}${skelBar(`skel-line sm d${(i + 1) % 4}`, '72%')}</article>`).join('')}</div>
+    <div class="autopilot-actions">${skelBar('skel-box btn', '72px')}${skelBar('skel-box btn d1', '180px')}</div>
+    <div class="autopilot-cols"><section><h3>Open trades</h3>${skelRows(3)}</section><section><h3>Activity</h3>${skelRows(4)}</section></div>
+    <div class="autopilot-market">${chips}</div>`;
+}
+
+// The loading state mirrors whichever tab is opening, not always Business records.
 function financeDashboardSkeleton() {
+  const tab = financeActiveTab;
+  const body = tab === 'autopilot' ? `<section class="autopilot">${autopilotSkeleton()}</section>`
+    : tab === 'trading' ? `<section class="finance-panel broker-panel">${brokerPanelSkeleton()}</section>`
+      : tab === 'research' ? `<section class="finance-panel strategy-lab-panel">${strategyLabSkeleton(financeStrategySymbol)}</section>`
+        : tab === 'funding' ? fundingPreviewPanel()
+          : `<div class="finance-section-intro"><strong>Business records</strong><span>Contract-backed local accounting kept separate from strategy testing.</span></div>
+      ${skelCards(['Income pool', 'Tax reserve', 'Distributable', 'Income target', 'Open invoices'])}
+      <section class="finance-panel">${skelPanelTitle('Recent local records', 'Mock-data testing only')}${skelRows(4)}</section>`;
   return `
     <div class="finance-tabs" role="tablist">
       ${FINANCE_TABS.map((t) => `<button type="button" class="finance-tab${financeActiveTab === t.id ? ' active' : ''}" data-tab="${t.id}" disabled>${t.label}</button>`).join('')}
     </div>
-    <div class="finance-tabpane active">
-      <div class="finance-section-intro"><strong>Business records</strong><span>Contract-backed local accounting kept separate from strategy testing.</span></div>
-      ${skelCards(['Income pool', 'Tax reserve', 'Distributable', 'Income target', 'Open invoices'])}
-      <section class="finance-panel">${skelPanelTitle('Recent local records', 'Mock-data testing only')}${skelRows(4)}</section>
-    </div>`;
+    <div class="finance-tabpane active">${body}</div>`;
 }
 
 function brokerPanelSkeleton() {
@@ -1090,7 +1106,7 @@ function brokerPanelSkeleton() {
 
 function strategyLabSkeleton(symbol = '') {
   return `
-    ${skelPanelTitle('Strategy lab', 'Walk-forward paper research · historical data stays separate from live execution', 'RESEARCH')}
+    ${skelPanelTitle('Rule-based strategy', 'Compare a moving-average strategy with buying and holding the same stock.', 'Historical test')}
     <div class="strategy-lab-toolbar">
       <label>Symbol${skelBar('skel-box', '130px')}</label>
       ${skelBar('skel-box btn d1')}${skelBar('skel-box btn d2', '150px')}
@@ -1221,7 +1237,7 @@ async function renderFinanceDashboard(force = false) {
       <section class="finance-panel finance-invoices-panel"><div class="finance-panel-title"><div><span>Local invoice records</span><small>Update status manually after you act outside AI.EXE.</small></div></div>${invoiceRows}</section>
       </div>
       <div class="${pane('autopilot')}" data-pane="autopilot">
-        <section class="autopilot" id="autopilotSection">${autopilotPanel(null)}</section>
+        <section class="autopilot" id="autopilotSection">${autopilotSkeleton()}</section>
       </div>
       <div class="${pane('trading')}" data-pane="trading">
         <section class="finance-panel broker-panel" id="brokerSection">${brokerPanelSkeleton()}</section>
@@ -2430,6 +2446,7 @@ function autopilotAgo(iso) {
 
 function autopilotPrice(value) {
   const n = Number(value || 0);
+  if (n > 0 && n < 0.01) return `$${n.toPrecision(3)}`;  // meme coins: keep significant digits
   return `$${n.toLocaleString('en-US', { maximumFractionDigits: n >= 100 ? 2 : n >= 1 ? 3 : 5 })}`;
 }
 
@@ -2460,7 +2477,7 @@ function autopilotPanel(s) {
   const openRows = positions.length ? positions.map((p) => `
       <li><b>${escapeHtml(p.symbol)}</b><span>${formatFinanceMoney(p.value_cents, 'USD')} · bought ${autopilotAgo(p.opened_at)}</span><strong class="${tone(p.pnl_cents)}">${autopilotSigned(p.pnl_cents)}</strong></li>`).join('')
     : `<li class="autopilot-empty">${financeFallback('trend', running ? 'Waiting for a strong trend' : 'No open trades')}</li>`;
-  const verbs = { buy: 'Bought', sell: 'Sold', skipped: 'Skipped', paused: 'Paused', started: 'Started', stopped: 'Stopped' };
+  const verbs = { buy: 'Bought', sell: 'Sold', skipped: 'Skipped', paused: 'Paused', started: 'Started', stopped: 'Stopped', universe: 'Coin list updated' };
   const events = ((s && s.events) || []).slice(0, 12).map((e) => {
     const head = e.symbol ? `${verbs[e.kind] || e.kind} ${escapeHtml(e.symbol)}${e.price ? ` at ${autopilotPrice(e.price)}` : ''}` : escapeHtml(e.note || verbs[e.kind] || '');
     const why = e.symbol ? (e.reason || e.note || '') : '';
@@ -2468,7 +2485,10 @@ function autopilotPanel(s) {
   }).join('') || `<li class="autopilot-empty">${financeFallback('clock', 'Trades and decisions appear here')}</li>`;
   const market = ((s && s.watchlist) || []).map((w) => {
     const change = Number(w.change_1h || 0) * 100;
-    return `<span class="${w.trending ? 'trending' : ''}"${w.trending ? ' data-tooltip="In an uptrend"' : ''}><b>${escapeHtml(w.symbol)}</b>${autopilotPrice(w.price)}<em class="${tone(change)}">${change >= 0 ? '+' : ''}${change.toFixed(2)}%</em></span>`;
+    if (w.warming_up) {
+      return `<span class="warming ui-tooltip-anchor" data-tooltip="Listed recently — needs about 5 days of hourly prices before it can trade"><b>${escapeHtml(w.symbol)}</b><em>New</em></span>`;
+    }
+    return `<span class="${w.trending ? 'trending' : ''}${w.held ? ' held' : ''}"${w.trending ? ' data-tooltip="In an uptrend"' : ''}><b>${escapeHtml(w.symbol)}</b>${autopilotPrice(w.price)}<em class="${tone(change)}">${change >= 0 ? '+' : ''}${change.toFixed(2)}%</em></span>`;
   }).join('');
   const setup = running ? `
       <div class="autopilot-actions"><button type="button" class="finance-btn-primary" id="autopilotStopBtn">Stop</button><button type="button" class="finance-inline-btn" id="autopilotSellBtn">Stop and sell everything</button></div>`
@@ -2487,7 +2507,7 @@ function autopilotPanel(s) {
       </form>`;
   return `
     <header class="autopilot-head">
-      <div><h2>Autopilot${financeInfo('Paper money. Runs while AI.EXE is open, or with background mode on. On past data it trailed simply holding in rising markets and lost less in falling ones.')}</h2><p>AI watches 8 major coins around the clock and trades the trends it finds.</p></div>
+      <div><h2>Autopilot${financeInfo('Paper money. Runs while AI.EXE is open, or with background mode on. On past data it trailed simply holding in rising markets and lost less in falling ones.')}</h2><p>AI scans the ${Number((s && s.universe_size) || 20)} most-traded coins around the clock, refreshes that list hourly, and trades the trends it finds.</p></div>
       ${state}
     </header>
     ${stats}
@@ -2497,7 +2517,29 @@ function autopilotPanel(s) {
       <section><h3>Open trades</h3><ul class="autopilot-open">${openRows}</ul></section>
       <section><div class="autopilot-section-head"><h3>Activity</h3>${(s && s.events && s.events.length) ? '<button type="button" class="autopilot-link" id="autopilotClearBtn">Clear</button>' : ''}</div><ul class="autopilot-feed">${events}</ul></section>
     </div>` : ''}
-    ${market ? `<div class="autopilot-market">${market}</div>` : ''}`;
+    ${autopilotHistory(s)}
+    ${market ? `<section class="autopilot-scan"><div class="autopilot-section-head"><h3>Scanning ${Number((s && s.watchlist || []).length)} coins</h3><small>Held and trending first · list refreshes hourly</small></div><div class="autopilot-market">${market}</div></section>` : ''}`;
+}
+
+function autopilotHistory(s) {
+  const trades = (s && s.trades) || [];
+  if (!trades.length) return '';
+  const held = (t) => {
+    const ms = Date.parse(t.closed_at) - Date.parse(t.opened_at);
+    if (!Number.isFinite(ms) || ms <= 0) return '—';
+    const h = ms / 3600000;
+    return h < 1 ? `${Math.round(h * 60)}m` : h < 48 ? `${h.toFixed(1)}h` : `${Math.round(h / 24)}d`;
+  };
+  const rows = trades.slice(0, 20).map((t) => {
+    const pct = t.entry ? (t.exit / t.entry - 1) * 100 : 0;
+    const tone = t.pnl_cents > 0 ? 'up' : t.pnl_cents < 0 ? 'down' : '';
+    const why = t.lesson
+      ? `<span class="autopilot-lesson"><b>Lesson</b> ${escapeHtml(t.lesson)}</span>`
+      : (t.pnl_cents < 0 ? '<span class="autopilot-lesson muted">Lesson pending</span>' : '');
+    return `<tr><th scope="row">${escapeHtml(t.symbol)}</th><td class="${tone}">${autopilotSigned(t.pnl_cents)}</td><td class="${tone}">${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%</td><td>${held(t)}</td><td>${escapeHtml(financeWord(t.reason || ''))}</td><td>${autopilotAgo(t.closed_at)}</td></tr>${why ? `<tr class="autopilot-lesson-row"><td colspan="6">${why}</td></tr>` : ''}`;
+  }).join('');
+  return `<section class="autopilot-history"><div class="autopilot-section-head"><h3>Trade history${financeInfo('Closed paper trades, newest first. When a trade loses, the AI writes a short lesson on why; it reviews those lessons before every new entry so it can avoid repeating the mistake.')}</h3><small>${trades.length} closed · ${trades.filter((t) => t.pnl_cents > 0).length} won</small></div>
+    <div class="research-table-wrap"><table class="research-table autopilot-history-table"><thead><tr><th>Coin</th><th>Result</th><th>Change</th><th>Held</th><th>Exit</th><th>Closed</th></tr></thead><tbody>${rows}</tbody></table></div></section>`;
 }
 
 async function refreshAutopilot() {
@@ -8501,9 +8543,10 @@ function makeUniqueChatName(baseTitle, chatId, sourceText = '') {
 
 function stripInlineChatNameMarkers(text, options = {}) {
   const trimLeading = options && options.trimLeading !== false;
+  // Live-card markers ([[card:…]]) are content, not chat-name markers.
   let out = String(text || '')
-    .replace(/\[\[\s*\*?\*?(?:CHAT_NAME\s*:\s*)?[^\]]+?\*?\*?\s*\]\]\s*\n?/gi, '')
-    .replace(/^\s*\[\[\s*\*?\*?(?:CHAT_NAME\s*:\s*)?[^\]\n]*$/gim, '')
+    .replace(/\[\[(?!\s*card:)\s*\*?\*?(?:CHAT_NAME\s*:\s*)?[^\]]+?\*?\*?\s*\]\]\s*\n?/gi, '')
+    .replace(/^\s*\[\[(?!\s*card:)\s*\*?\*?(?:CHAT_NAME\s*:\s*)?[^\]\n]*$/gim, '')
     .replace(/^\s*\[\[\s*$/gim, '')
     .replace(/\n{3,}/g, '\n\n');
   if (trimLeading) {
@@ -8713,7 +8756,7 @@ function extractInlineChatNameMarker(text) {
   const src = String(text || '');
   if (!src) return { title: '', cleaned: '' };
   // Match [[CHAT_NAME: title]] OR plain [[title]]. Ignore other labeled markers such as [[CHAIN_NAME: ...]].
-  const marker = src.match(/\[\[\s*\*?\*?([^\]]+?)\*?\*?\s*\]\]/i);
+  const marker = src.match(/\[\[(?!\s*card:)\s*\*?\*?([^\]]+?)\*?\*?\s*\]\]/i);
   if (!marker) {
     return { title: '', cleaned: src };
   }
@@ -15404,6 +15447,7 @@ const promptCore = window.AIExePromptCore && typeof window.AIExePromptCore.creat
     getAssistantDateTimeContext: buildAssistantDateTimeContext,
     getUserProfileContext,
     getRecentWorkContext: buildRecentWorkContext,
+    getLiveContext: buildLiveContext,
     getCanvasContextForChat,
   })
   : null;
@@ -20241,6 +20285,778 @@ function attachCodeCopyButtons(container) {
   if (markdownRendererApi.attachCodeCopyButtons) {
     markdownRendererApi.attachCodeCopyButtons(container);
   }
+  hydrateChatCards(container);
+}
+
+// ---------- Live chat cards ----------
+// The model asks for a card by writing [[card:trading]], [[card:coin <SYMBOL>]] or
+// [[card:clock <IANA zone>]] on its own line; we swap that marker for a live
+// component that keeps refreshing while it's on screen.
+
+const CHAT_CARD_ANYWHERE = /\[\[card:(trading|portfolio|coin|stock|compare|fx|weather|timer|clock)(?:\s+([^\]]{1,80}))?\]\]/gi;
+
+function hydrateChatCards(container) {
+  if (!container || !container.querySelectorAll) return;
+  container.querySelectorAll('p, li').forEach((block) => {
+    const text = String(block.textContent || '');
+    const found = [...text.matchAll(CHAT_CARD_ANYWHERE)];
+    if (!found.length) return;
+    // Markers are usually alone on a line, but tolerate one glued to other text.
+    let anchor = block;
+    found.forEach((match) => {
+      const kind = match[1].toLowerCase();
+      const arg = String(match[2] || '').trim();
+      const card = document.createElement('div');
+      card.className = `chat-card chat-card-${kind}`;
+      card.dataset.cardKind = kind;
+      card.dataset.cardArg = arg;
+      anchor.after(card);
+      anchor = card;
+    });
+    const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT);
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      node.nodeValue = node.nodeValue.replace(CHAT_CARD_ANYWHERE, '');
+    }
+    if (!String(block.textContent || '').trim()) block.remove();
+  });
+  mountChatCards(container);
+}
+
+// Cards can be copied into a fresh bubble after rendering (innerHTML moves), so
+// mount whatever card element is actually on screen, once per element.
+const mountedChatCards = new WeakSet();
+function mountChatCards(root = document) {
+  root.querySelectorAll('.chat-card[data-card-kind]').forEach((card) => {
+    if (mountedChatCards.has(card) || !card.isConnected) return;
+    mountedChatCards.add(card);
+    const kind = card.dataset.cardKind;
+    const arg = card.dataset.cardArg || '';
+    const mounts = {
+      trading: () => mountTradingCard(card), portfolio: () => mountPortfolioCard(card),
+      coin: () => mountCoinCard(card, arg || 'BTC'), stock: () => mountCoinCard(card, arg || 'SPY', 'stock'),
+      compare: () => mountCompareCard(card, arg), fx: () => mountFxCard(card, arg),
+      weather: () => mountWeatherCard(card, arg), timer: () => mountTimerCard(card, arg),
+      clock: () => mountClockCard(card, arg),
+    };
+    card._remount = () => {
+      clearTimeout(card._timer);
+      card._loaded = false;
+      card.innerHTML = '';
+      (mounts[kind] || mounts.clock)();
+    };
+    (mounts[kind] || mounts.clock)();
+  });
+}
+new MutationObserver(() => mountChatCards()).observe(document.body, { childList: true, subtree: true });
+
+// Skeleton shaped like the card while its first data loads.
+function cardSkeleton(kind) {
+  const bar = (w, h = 12, extra = '') => `<i class="card-skel-bar${extra}" style="width:${w};height:${h}px"></i>`;
+  const chart = ['coin', 'stock', 'compare', 'fx'].includes(kind);
+  const grid = ['trading', 'portfolio', 'coin', 'stock'].includes(kind);
+  if (kind === 'clock' || kind === 'timer') {
+    return `<div class="card-skel">${bar('30%')}<div class="card-skel-round"></div></div>`;
+  }
+  return `<div class="card-skel" aria-busy="true" aria-label="Loading live data">
+    <div class="card-skel-row">${bar('34%')}${bar('18%', 20, ' pill')}</div>
+    ${bar('42%', 30)}${bar('58%')}
+    ${chart ? `<div class="card-skel-tabs">${bar('100%', 30)}</div>${bar('100%', 180, ' block')}` : ''}
+    ${kind === 'weather' ? `<div class="card-skel-days">${Array.from({ length: 7 }, () => bar('100%', 64, ' block')).join('')}</div>` : ''}
+    ${grid ? `<div class="card-skel-grid">${bar('100%', 44, ' block')}${bar('100%', 44, ' block')}${bar('100%', 44, ' block')}</div>` : ''}
+  </div>`;
+}
+
+function cardLoading(card) {
+  if (card._loaded) return;
+  card.classList.add('loading');
+  if (!card.querySelector(':scope > .card-skel')) card.insertAdjacentHTML('afterbegin', cardSkeleton(card.dataset.cardKind));
+}
+
+function cardLoaded(card) {
+  card._loaded = true;
+  card.classList.remove('loading', 'offline');
+  const skel = card.querySelector(':scope > .card-skel');
+  if (skel) skel.remove();
+}
+
+// First load failed -> friendly fallback with retry. Later failures keep the
+// last good data and only flag it as offline.
+function cardFailed(card, error, retry) {
+  if (card._loaded) {
+    card.classList.add('offline');
+    if (!card.querySelector('.card-offline')) card.insertAdjacentHTML('beforeend', '<div class="card-offline">Offline · retrying</div>');
+    return;
+  }
+  card.classList.remove('loading');
+  card.innerHTML = `<div class="card-fallback">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 2 20h20L12 3z"/><line x1="12" y1="10" x2="12" y2="14"/><circle cx="12" cy="17" r=".6"/></svg>
+    <div><strong>Couldn't load live data</strong><span>${escapeHtml((() => { const m = String((error && error.message) || 'The data source didn\'t respond.'); return m.charAt(0).toUpperCase() + m.slice(1); })())}</span></div>
+    <button type="button" class="chat-card-link">Try again</button></div>`;
+  card.querySelector('.card-fallback button').addEventListener('click', () => {
+    if (card._remount) card._remount();
+    else if (retry) { card.innerHTML = ''; cardLoading(card); retry(); }
+  });
+}
+
+// Card data cache: reopening a chat or range shows the last data at once while
+// scheduled refreshes fetch fresh. Too-old data is refetched, never shown as live.
+const chatCardCache = new Map();
+function cardCacheTtl(url) {
+  if (/weather|\/api\/fx/.test(url)) return 600000;
+  if (/range=1D|\/autopilot(\?|$)|\/account|\/positions|\/quote/.test(url)) return 30000;
+  return 300000;
+}
+async function fetchCardJson(url, force = false) {
+  const hit = chatCardCache.get(url);
+  if (!force && hit && Date.now() - hit.at < cardCacheTtl(url)) return hit.data;
+  const res = await fetch(url);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.detail || 'Live data unavailable');
+  chatCardCache.delete(url);
+  chatCardCache.set(url, { at: Date.now(), data });
+  if (chatCardCache.size > 200) chatCardCache.delete(chatCardCache.keys().next().value);
+  return data;
+}
+function isCardCacheFresh(url) {
+  const hit = chatCardCache.get(url);
+  return Boolean(hit && Date.now() - hit.at < cardCacheTtl(url));
+}
+
+function keepCardFresh(card, render, everyMs) {
+  cardLoading(card);
+  let first = true;
+  const tick = async () => {
+    if (!card.isConnected) return;
+    clearTimeout(card._timer);
+    try {
+      await render(first);
+      first = false;
+      cardLoaded(card);
+    } catch (error) {
+      cardFailed(card, error, tick);
+    }
+    if (card.isConnected) card._timer = setTimeout(tick, everyMs);
+  };
+  tick();
+}
+
+function chatCardMoney(cents) { return formatFinanceMoney(Number(cents || 0), 'USD'); }
+function chatCardSigned(cents) {
+  const n = Number(cents || 0);
+  return `${n > 0 ? '+' : n < 0 ? '−' : ''}${chatCardMoney(Math.abs(n))}`;
+}
+
+function mountTradingCard(card) {
+  keepCardFresh(card, async (first) => {
+    const s = await fetchCardJson(getAIExeBackendUrl() + '/api/broker/autopilot', !first)
+      .catch(() => { throw new Error('Trading data unavailable — is AI.EXE\'s backend running?'); });
+    const vs = Number(s.equity_cents || 0) - Number(s.benchmark_cents || 0);
+    const tone = (n) => (n > 0 ? 'up' : n < 0 ? 'down' : '');
+    const last = (s.events || [])[0];
+    const positions = (s.positions || []).map((p) => `<li><b>${escapeHtml(p.symbol)}</b><span class="${tone(p.pnl_cents)}">${chatCardSigned(p.pnl_cents)}</span></li>`).join('');
+    card.innerHTML = `
+      <div class="chat-card-head"><span>Autopilot · paper</span><em class="${s.running ? 'on' : ''}">${s.running ? (s.paused_today ? 'Paused today' : 'Running') : 'Off'}</em></div>
+      <div class="chat-card-value">${chatCardMoney(s.equity_cents)}</div>
+      <div class="chat-card-sub"><span class="${tone(s.pnl_cents)}">${chatCardSigned(s.pnl_cents)}</span> overall · <span class="${tone(vs)}">${chatCardSigned(vs)}</span> vs holding BTC</div>
+      <div class="chat-card-grid">
+        <div><small>Closed trades</small><strong>${Number(s.closed_trades || 0)} <i>(${Number(s.wins || 0)} won)</i></strong></div>
+        <div><small>Scanning</small><strong>${Number(s.universe_size || 0)} coins</strong></div>
+        <div><small>Open trades</small><strong>${(s.positions || []).length}</strong></div>
+      </div>
+      ${positions ? `<ul class="chat-card-list">${positions}</ul>` : ''}
+      ${last ? `<div class="chat-card-foot">${escapeHtml([last.kind === 'buy' ? 'Bought' : last.kind === 'sell' ? 'Sold' : last.kind === 'skipped' ? 'Skipped' : '', last.symbol || ''].filter(Boolean).join(' '))}${last.symbol ? ' — ' : ''}${escapeHtml(last.reason || last.note || '')} · ${autopilotAgo(last.at)}</div>` : ''}
+      <button type="button" class="chat-card-link" data-open-trading>Open Autopilot</button>`;
+    const open = card.querySelector('[data-open-trading]');
+    if (open) open.addEventListener('click', () => openFinanceView());
+  }, 15000);
+}
+
+const CHAT_CHART_RANGES = ['1D', '5D', '1M', '6M', 'YTD', '1Y', 'MAX'];
+const CHAT_RANGE_WORDS = new Set(['1D', '5D', '1M', '6M', 'YTD', '1Y', '5Y', 'MAX']);
+// "SOL 1Y" / "AAPL,MSFT YTD" -> { items: [...], range }
+function splitCardRange(arg) {
+  const parts = String(arg || '').toUpperCase().split(/[,\s]+/).filter(Boolean);
+  const range = parts.find((p) => CHAT_RANGE_WORDS.has(p)) || '';
+  return { items: parts.filter((p) => !CHAT_RANGE_WORDS.has(p)), range };
+}
+
+function chatChartTime(ts, range) {
+  const d = new Date(ts);
+  if (range === '1D') return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  if (range === '5D') return d.toLocaleString([], { weekday: 'short', hour: 'numeric', minute: '2-digit' });
+  if (range === 'MAX' || range === '1Y') return d.toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' });
+  return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+}
+
+function chatCardCompact(n) {
+  const v = Number(n || 0);
+  if (!v) return '—';
+  if (v >= 1e9) return `$${(v / 1e9).toFixed(2)}B`;
+  if (v >= 1e6) return `$${(v / 1e6).toFixed(2)}M`;
+  return `$${Math.round(v).toLocaleString()}`;
+}
+
+function mountCoinCard(card, symbol, asset = 'crypto') {
+  const stock = asset === 'stock';
+  const ranges = stock ? ['1D', '5D', '1M', '6M', 'YTD', '1Y', '5Y'] : CHAT_CHART_RANGES;
+  const parsed = splitCardRange(symbol);
+  symbol = parsed.items[0] || symbol;
+  const wanted = parsed.range === 'MAX' && stock ? '5Y' : parsed.range === '5Y' && !stock ? 'MAX' : parsed.range;
+  const state = { range: ranges.includes(wanted) ? wanted : '1D', chart: null, check: null, live: null, socket: null, drawAt: 0 };
+  card.innerHTML = `
+    <div class="chat-card-head"><span class="coin-title"></span><em class="coin-status"></em></div>
+    <div class="chat-card-value coin-price">—</div>
+    <div class="chat-card-sub coin-change"></div>
+    <div class="coin-tabs" role="tablist">${ranges.map((r) => `<button type="button" role="tab" data-range="${r}" aria-selected="${r === state.range}">${r}</button>`).join('')}</div>
+    <div class="coin-chart"><svg class="coin-svg" viewBox="0 0 1000 300" preserveAspectRatio="none" aria-hidden="true"></svg>
+      <div class="coin-ylabels"></div><div class="coin-hover"><i class="coin-vline"></i><b class="coin-dot"></b><span class="coin-tip"></span></div></div>
+    <div class="coin-xlabels"><span></span><span></span></div>
+    <div class="coin-stats"></div>
+    <div class="chat-card-foot coin-read"></div>
+    <button type="button" class="chat-card-link coin-pin" hidden></button>`;
+  const $ = (sel) => card.querySelector(sel);
+
+  const paint = () => {
+    const c = state.chart;
+    if (!c) return;
+    const pts = c.points.slice();
+    const live = state.live;
+    if (live && live.price) {
+      if (state.range === '1D' && pts.length) pts[pts.length - 1] = { t: live.ts, close: live.price };
+    }
+    const price = live && live.price ? live.price : c.price;
+    const base = c.range_open || pts[0].close;
+    const diff = price - base;
+    const up = diff >= 0;
+    card.classList.toggle('down', !up);
+    $('.coin-price').textContent = autopilotPrice(price);
+    const places = price >= 1 ? 2 : Math.min(8, 2 - Math.floor(Math.log10(price)) + 1);
+    $('.coin-change').innerHTML = `<span class="${up ? 'up' : 'down'}">${up ? '+' : '−'}$${Math.abs(diff).toFixed(places)} (${up ? '+' : '−'}${Math.abs(diff / base * 100).toFixed(2)}%)</span> · ${state.range === '1D' ? (stock ? 'today' : 'last 24h') : state.range === 'MAX' ? 'all time' : state.range === 'YTD' ? 'this year' : `past ${state.range}`}`;
+    const values = pts.map((p) => p.close);
+    let min = Math.min(...values), max = Math.max(...values);
+    const pad = (max - min) * 0.08 || max * 0.01;
+    min -= pad; max += pad;
+    const x = (i) => (i / Math.max(1, pts.length - 1)) * 1000;
+    const y = (v) => 300 - ((v - min) / (max - min)) * 300;
+    const line = pts.map((p, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${y(p.close).toFixed(1)}`).join(' ');
+    const grid = [0.25, 0.5, 0.75].map((f) => `<line x1="0" x2="1000" y1="${300 * f}" y2="${300 * f}" class="coin-grid"/>`).join('');
+    $('.coin-svg').innerHTML = `${grid}<path d="${line} L1000,300 L0,300 Z" class="coin-area"/><path d="${line}" class="coin-line"/>`;
+    $('.coin-ylabels').innerHTML = [0, 0.25, 0.5, 0.75, 1].map((f) => `<span style="top:${f * 100}%">${autopilotPrice(max - (max - min) * f).replace('$', '')}</span>`).join('');
+    const labels = card.querySelectorAll('.coin-xlabels span');
+    labels[0].textContent = chatChartTime(pts[0].t, state.range);
+    labels[1].textContent = chatChartTime(pts[pts.length - 1].t, state.range);
+    const st = { ...(c.stats || {}), ...(live || {}) };
+    const cell = (label, value) => `<div class="coin-stat"><small>${label}</small><strong>${value}</strong></div>`;
+    // Where today's price sits inside the day / year range.
+    const range = (label, low, high) => {
+      if (!low || !high || high <= low) return cell(label, '—');
+      const at = Math.min(100, Math.max(0, (price - low) / (high - low) * 100));
+      return `<div class="coin-range"><small>${label}</small><span class="coin-range-bar" aria-label="${label}: price is ${at.toFixed(0)}% of the way from low to high"><i style="left:${at}%"></i></span><div class="coin-range-ends"><span>${autopilotPrice(low)}</span><span>${autopilotPrice(high)}</span></div></div>`;
+    };
+    $('.coin-stats').innerHTML = [
+      stock ? cell('Previous close', st.previous_close ? autopilotPrice(st.previous_close) : '—') : cell('Open (24h)', st.open_24h ? autopilotPrice(st.open_24h) : '—'),
+      stock ? cell('Volume', st.volume ? escapeHtml(String(st.volume)) : '—') : cell('Volume (24h)', chatCardCompact(st.volume_24h_usd)),
+      range('Day range', st.low_24h, st.high_24h),
+      range('Year range', st.low_1y, st.high_1y),
+    ].join('');
+    state.pts = pts;
+  };
+
+  // Crosshair: nearest point to the pointer, with price + time.
+  const chartEl = $('.coin-chart');
+  const hover = $('.coin-hover');
+  const showAt = (clientX) => {
+    const pts = state.pts;
+    if (!pts || !pts.length) return;
+    const rect = chartEl.getBoundingClientRect();
+    const frac = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
+    const i = Math.round(frac * (pts.length - 1));
+    const p = pts[i];
+    const values = pts.map((q) => q.close);
+    const pad = (Math.max(...values) - Math.min(...values)) * 0.08 || Math.max(...values) * 0.01;
+    const min = Math.min(...values) - pad, max = Math.max(...values) + pad;
+    const px = (i / Math.max(1, pts.length - 1)) * rect.width;
+    const py = (1 - (p.close - min) / (max - min)) * rect.height;
+    hover.style.display = 'block';
+    hover.style.setProperty('--x', `${px}px`);
+    hover.style.setProperty('--y', `${py}px`);
+    hover.classList.toggle('flip', px > rect.width * 0.7);
+    $('.coin-tip').innerHTML = `<b>${autopilotPrice(p.close)}</b><span>${escapeHtml(chatChartTime(p.t, state.range))}</span>`;
+  };
+  // Mouse + touch events: the app's WebView doesn't deliver pointer events here.
+  ['mousemove', 'mousedown'].forEach((type) => chartEl.addEventListener(type, (e) => showAt(e.clientX)));
+  chartEl.addEventListener('touchmove', (e) => { if (e.touches[0]) showAt(e.touches[0].clientX); }, { passive: true });
+  chartEl.addEventListener('mouseleave', () => { hover.style.display = 'none'; });
+
+  const loadChart = async (force = false) => {
+    const url = `${getAIExeBackendUrl()}/api/prices/${stock ? 'stock' : 'crypto'}-chart?symbol=${encodeURIComponent(symbol)}&range=${state.range}`;
+    const wanted = state.range;
+    const cached = !force && isCardCacheFresh(url);
+    if (!cached) chartEl.classList.add('fetching');
+    let data;
+    try { data = await fetchCardJson(url, force); } finally { if (state.range === wanted) chartEl.classList.remove('fetching'); }
+    if (state.range !== wanted) return;  // a newer tab click won
+    state.chart = data;
+    $('.coin-title').innerHTML = stock
+      ? `${financeAvatar(data.symbol)} ${escapeHtml(data.company || data.symbol)} <small>${escapeHtml(data.symbol)}</small>`
+      : `${financeAvatar(data.symbol)} ${escapeHtml(data.symbol)} / USD`;
+    if (stock) {
+      const status = $('.coin-status');
+      status.textContent = financeWord(String(data.market_status || 'Market').replace(/-/g, ' '));
+      status.classList.toggle('on', /open|regular/i.test(String(data.market_status || '')));
+    }
+    paint();
+  };
+  const loadCheck = async () => {
+    if (stock) return;
+    const c = await fetchCardJson(`${getAIExeBackendUrl()}/api/broker/autopilot/coin?symbol=${encodeURIComponent(symbol)}`).catch(() => null);
+    if (!c) return;
+    state.check = c;
+    const status = c.held ? 'Held by Autopilot' : c.pinned ? 'Pinned — always scanned' : c.scanned ? 'In the scan list' : 'Not scanned';
+    const statusEl = $('.coin-status');
+    statusEl.textContent = status;
+    statusEl.classList.toggle('on', Boolean(c.scanned || c.pinned || c.held));
+    $('.coin-read').textContent = `Autopilot read: ${c.summary || ''}`;
+    const pin = $('.coin-pin');
+    pin.hidden = Boolean(c.held || (c.scanned && !c.pinned));
+    pin.textContent = c.pinned ? 'Stop watching' : 'Watch in Autopilot';
+    pin.dataset.pin = c.pinned ? '0' : '1';
+  };
+  $('.coin-pin').addEventListener('click', async (event) => {
+    const pin = event.currentTarget;
+    pin.disabled = true;
+    await fetch(getAIExeBackendUrl() + '/api/broker/autopilot/watch', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ symbol: (state.check && state.check.symbol) || symbol, watch: pin.dataset.pin === '1' }),
+    });
+    pin.disabled = false;
+    loadCheck();
+  });
+  card.querySelectorAll('.coin-tabs button').forEach((btn) => btn.addEventListener('click', () => {
+    state.range = btn.dataset.range;
+    card.querySelectorAll('.coin-tabs button').forEach((b) => b.setAttribute('aria-selected', String(b === btn)));
+    loadChart().catch((error) => { $('.coin-read').textContent = error.message; });
+  }));
+
+  // Live price over the exchange WebSocket; closes when the card leaves the page.
+  const connect = async () => {
+    if (!card.isConnected || stock) return;  // stocks refresh by polling (no exchange socket)
+    await backendAccess.load();
+    const url = `${getAIExeBackendUrl().replace(/^http/i, 'ws')}/api/broker/ticker-stream?symbol=${encodeURIComponent(symbol)}`;
+    const socket = new WebSocket(url, backendAccess.socketProtocols(url));
+    state.socket = socket;
+    socket.onmessage = (event) => {
+      if (!card.isConnected) { socket.close(); return; }
+      try { state.live = JSON.parse(event.data); } catch (_) { return; }
+      card.classList.add('streaming');
+      if (Date.now() - state.drawAt > 1000) { state.drawAt = Date.now(); paint(); }
+    };
+    socket.onclose = () => { card.classList.remove('streaming'); if (card.isConnected) setTimeout(connect, 5000); };
+  };
+
+  cardLoading(card);
+  loadChart().then(() => { cardLoaded(card); connect(); }).catch((error) => cardFailed(card, error));
+  loadCheck();
+  const refresh = () => {
+    if (!card.isConnected) { if (state.socket) state.socket.close(); return; }
+    loadCheck();
+    loadChart(true).then(() => cardLoaded(card)).catch((error) => { if (card._loaded) cardFailed(card, error); });
+    card._timer = setTimeout(refresh, stock ? 20000 : 60000);
+  };
+  card._timer = setTimeout(refresh, stock ? 20000 : 60000);
+}
+
+// Compare: % change of several coins/stocks from the start of the range.
+const COMPARE_COLORS = ['#9cc7e3', '#6ee7a0', '#e2b86b', '#c4a1f5', '#f2a0a0', '#7dd3c0'];
+async function fetchAnyChart(symbol, range, force = false) {
+  const base = getAIExeBackendUrl();
+  try {
+    return await fetchCardJson(`${base}/api/prices/crypto-chart?symbol=${encodeURIComponent(symbol)}&range=${range}`, force);
+  } catch (_) {
+    return fetchCardJson(`${base}/api/prices/stock-chart?symbol=${encodeURIComponent(symbol)}&range=${range === 'MAX' ? '5Y' : range}`, force);
+  }
+}
+
+function mountCompareCard(card, arg) {
+  const parsed = splitCardRange(arg);
+  const symbols = parsed.items.slice(0, 6);
+  const compareRanges = ['5D', '1M', '6M', 'YTD', '1Y'];
+  const state = { range: compareRanges.includes(parsed.range) ? parsed.range : '1M', series: [] };
+  card.innerHTML = `<div class="chat-card-head"><span>Compare</span><em>% change</em></div>
+    <div class="compare-legend"></div>
+    <div class="coin-tabs compare-tabs">${compareRanges.map((r) => `<button type="button" data-range="${r}" aria-selected="${r === state.range}">${r}</button>`).join('')}</div>
+    <div class="coin-chart"><svg class="coin-svg" viewBox="0 0 1000 300" preserveAspectRatio="none" aria-hidden="true"></svg><div class="coin-ylabels"></div>
+      <div class="coin-hover"><i class="coin-vline"></i><span class="coin-tip"></span></div></div>
+    <div class="coin-xlabels"><span></span><span></span></div>`;
+  const $ = (sel) => card.querySelector(sel);
+  const paint = () => {
+    const series = state.series.filter((x) => x.points.length > 1);
+    if (!series.length) return;
+    const t0 = Math.max(...series.map((x) => x.points[0].t));
+    const t1 = Math.min(...series.map((x) => x.points[x.points.length - 1].t));
+    series.forEach((x) => {
+      const pts = x.points.filter((p) => p.t >= t0 && p.t <= t1);
+      const start = (pts[0] || x.points[0]).close;
+      x.pct = pts.map((p) => ({ t: p.t, v: (p.close / start - 1) * 100 }));
+    });
+    const all = series.flatMap((x) => x.pct.map((p) => p.v));
+    let min = Math.min(0, ...all), max = Math.max(0, ...all);
+    const pad = (max - min) * 0.08 || 1;
+    min -= pad; max += pad;
+    const X = (t) => ((t - t0) / Math.max(1, t1 - t0)) * 1000;
+    const Y = (v) => 300 - ((v - min) / (max - min)) * 300;
+    $('.coin-svg').innerHTML = `<line x1="0" x2="1000" y1="${Y(0)}" y2="${Y(0)}" class="coin-grid"/>` + series.map((x, i) =>
+      `<path d="${x.pct.map((p, j) => `${j ? 'L' : 'M'}${X(p.t).toFixed(1)},${Y(p.v).toFixed(1)}`).join(' ')}" class="coin-line" style="stroke:${COMPARE_COLORS[i]}"/>`).join('');
+    $('.coin-ylabels').innerHTML = [0, 0.5, 1].map((f) => `<span style="top:${f * 100}%">${(max - (max - min) * f).toFixed(1)}%</span>`).join('');
+    $('.compare-legend').innerHTML = series.map((x, i) => {
+      const last = x.pct[x.pct.length - 1]?.v || 0;
+      return `<span><i style="background:${COMPARE_COLORS[i]}"></i><b>${escapeHtml(x.symbol)}</b><em class="${last >= 0 ? 'up' : 'down'}">${last >= 0 ? '+' : ''}${last.toFixed(2)}%</em></span>`;
+    }).join('');
+    const labels = card.querySelectorAll('.coin-xlabels span');
+    labels[0].textContent = chatChartTime(t0, state.range);
+    labels[1].textContent = chatChartTime(t1, state.range);
+    state.view = { series, t0, t1 };
+  };
+  const chartEl = $('.coin-chart');
+  const hover = $('.coin-hover');
+  const showAt = (clientX) => {
+    const v = state.view;
+    if (!v) return;
+    const rect = chartEl.getBoundingClientRect();
+    const frac = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
+    const t = v.t0 + frac * (v.t1 - v.t0);
+    const rows = v.series.map((x, i) => {
+      const p = x.pct.reduce((best, q) => (Math.abs(q.t - t) < Math.abs(best.t - t) ? q : best), x.pct[0]);
+      return `<span style="color:${COMPARE_COLORS[i]}">${escapeHtml(x.symbol)} ${p.v >= 0 ? '+' : ''}${p.v.toFixed(2)}%</span>`;
+    }).join('');
+    hover.style.display = 'block';
+    hover.style.setProperty('--x', `${frac * rect.width}px`);
+    hover.style.setProperty('--y', '40px');
+    hover.classList.toggle('flip', frac > 0.7);
+    $('.coin-tip').innerHTML = `${rows}<span>${escapeHtml(chatChartTime(t, state.range))}</span>`;
+  };
+  ['mousemove', 'mousedown'].forEach((type) => chartEl.addEventListener(type, (e) => showAt(e.clientX)));
+  chartEl.addEventListener('mouseleave', () => { hover.style.display = 'none'; });
+  const load = async (first = true) => {
+    const wanted = state.range;
+    chartEl.classList.add('fetching');
+    const results = await Promise.allSettled(symbols.map((sym) => fetchAnyChart(sym, wanted, !first)));
+    if (state.range !== wanted) return;
+    chartEl.classList.remove('fetching');
+    state.series = results.map((r, i) => (r.status === 'fulfilled' ? { symbol: r.value.symbol, points: r.value.points } : { symbol: symbols[i], points: [] }));
+    paint();
+  };
+  cardLoading(card);
+  card.querySelectorAll('.compare-tabs button').forEach((btn) => btn.addEventListener('click', () => {
+    state.range = btn.dataset.range;
+    card.querySelectorAll('.compare-tabs button').forEach((b) => b.setAttribute('aria-selected', String(b === btn)));
+    load();
+  }));
+  keepCardFresh(card, load, 60000);
+}
+
+function mountPortfolioCard(card) {
+  keepCardFresh(card, async (first) => {
+    const base = getAIExeBackendUrl();
+    const [account, positions] = await Promise.all([
+      fetchCardJson(`${base}/api/broker/account`, !first), fetchCardJson(`${base}/api/broker/positions`, !first),
+    ]);
+    const held = positions.positions || [];
+    const quotes = held.length
+      ? await fetchCardJson(`${base}/api/prices/quote?symbols=${encodeURIComponent(held.map((p) => p.symbol).join(','))}`, !first).catch(() => ({ quotes: {} }))
+      : { quotes: {} };
+    let value = 0;
+    const rows = held.map((p) => {
+      const mark = (quotes.quotes || {})[p.symbol];
+      const price = mark ? mark.price_cents : p.avg_cost_cents;
+      const worth = price * p.quantity;
+      value += worth;
+      const pnl = worth - p.avg_cost_cents * p.quantity;
+      return `<li><b>${escapeHtml(p.symbol)}</b><span>${p.quantity} × ${chatCardMoney(price)}</span><span class="${pnl >= 0 ? 'up' : 'down'}">${chatCardSigned(pnl)}</span></li>`;
+    }).join('');
+    const equity = account.cash_cents + value;
+    const ret = equity - account.starting_cash_cents;
+    card.innerHTML = `<div class="chat-card-head"><span>Paper portfolio</span><em>Manual trades</em></div>
+      <div class="chat-card-value">${chatCardMoney(equity)}</div>
+      <div class="chat-card-sub"><span class="${ret >= 0 ? 'up' : 'down'}">${chatCardSigned(ret)} (${(ret / Math.max(1, account.starting_cash_cents) * 100).toFixed(2)}%)</span> since start</div>
+      <div class="chat-card-grid"><div><small>Cash</small><strong>${chatCardMoney(account.cash_cents)}</strong></div>
+        <div><small>Invested</small><strong>${chatCardMoney(value)}</strong></div>
+        <div><small>Realized P&amp;L</small><strong class="${account.realized_pnl_cents >= 0 ? 'up' : 'down'}">${chatCardSigned(account.realized_pnl_cents)}</strong></div></div>
+      ${rows ? `<ul class="chat-card-list">${rows}</ul>` : '<div class="chat-card-foot">No open positions.</div>'}
+      <button type="button" class="chat-card-link" data-open-portfolio>Open Portfolio</button>`;
+    card.querySelector('[data-open-portfolio]').addEventListener('click', () => { openFinanceView(); setFinanceTab('trading'); });
+  }, 20000);
+}
+
+function mountFxCard(card, arg) {
+  const tokens = String(arg || 'USD EUR').toUpperCase().split(/[\s/,]+/).filter(Boolean);
+  const [from, to] = tokens.filter((t) => /^[A-Z]{3}$/.test(t));
+  const amount = Number((tokens.find((t) => /^\d+(\.\d+)?$/.test(t))) || 1);
+  const state = { range: '1M', amount, data: null };
+  card.innerHTML = `<div class="chat-card-head"><span>${escapeHtml(from || '')} → ${escapeHtml(to || '')}</span><em class="fx-source">Daily rate</em></div>
+    <div class="chat-card-value fx-rate">—</div><div class="chat-card-sub fx-change"></div>
+    <div class="fx-convert"><label><input type="number" min="0" step="any" value="${amount}" data-fx="from"><span>${escapeHtml(from || '')}</span></label><b>=</b>
+      <label><input type="number" min="0" step="any" data-fx="to"><span>${escapeHtml(to || '')}</span></label></div>
+    <div class="coin-tabs fx-tabs">${['1M', '6M', '1Y', '5Y'].map((r) => `<button type="button" data-range="${r}" aria-selected="${r === '1M'}">${r}</button>`).join('')}</div>
+    <div class="coin-chart fx-chart"><svg class="coin-svg" viewBox="0 0 1000 300" preserveAspectRatio="none" aria-hidden="true"></svg><div class="coin-ylabels"></div>
+      <div class="coin-hover"><i class="coin-vline"></i><b class="coin-dot"></b><span class="coin-tip"></span></div></div>
+    <div class="coin-xlabels"><span></span><span></span></div><div class="chat-card-foot fx-note"></div>`;
+  const $ = (sel) => card.querySelector(sel);
+  const inFrom = $('[data-fx="from"]'), inTo = $('[data-fx="to"]');
+  const syncTo = () => { if (state.data) inTo.value = (Number(inFrom.value || 0) * state.data.rate).toFixed(4).replace(/\.?0+$/, ''); };
+  const syncFrom = () => { if (state.data) inFrom.value = (Number(inTo.value || 0) / state.data.rate).toFixed(4).replace(/\.?0+$/, ''); };
+  inFrom.addEventListener('input', syncTo);
+  inTo.addEventListener('input', syncFrom);
+  const paint = () => {
+    const d = state.data;
+    const pts = d.points;
+    $('.fx-rate').textContent = `1 ${d.base} = ${Number(d.rate).toFixed(4)} ${d.quote}`;
+    const first = pts[0] ? pts[0].close : d.rate;  // eslint-disable-line no-unused-vars
+    const diff = (d.rate / first - 1) * 100;
+    card.classList.toggle('down', diff < 0);
+    $('.fx-change').innerHTML = `<span class="${diff >= 0 ? 'up' : 'down'}">${diff >= 0 ? '+' : ''}${diff.toFixed(2)}%</span> · past ${state.range}`;
+    $('.fx-note').textContent = `${d.source || 'Reference rate'} · ${d.date}. Banks and exchangers add their own spread.`;
+    $('.fx-source').textContent = /European Central Bank/.test(d.source || '') ? 'ECB daily rate' : 'Daily rate';
+    const hasChart = pts.length > 1;
+    ['.fx-tabs', '.fx-chart', '.coin-xlabels'].forEach((sel) => { const el = $(sel); if (el) el.hidden = !hasChart; });
+    $('.fx-change').hidden = !hasChart;
+    syncTo();
+    if (!hasChart) return;
+    const values = pts.map((p) => p.close);
+    let min = Math.min(...values), max = Math.max(...values);
+    const pad = (max - min) * 0.08 || max * 0.001; min -= pad; max += pad;
+    const line = pts.map((p, i) => `${i ? 'L' : 'M'}${(i / Math.max(1, pts.length - 1) * 1000).toFixed(1)},${(300 - (p.close - min) / (max - min) * 300).toFixed(1)}`).join(' ');
+    $('.coin-svg').innerHTML = `<path d="${line} L1000,300 L0,300 Z" class="coin-area"/><path d="${line}" class="coin-line"/>`;
+    $('.coin-ylabels').innerHTML = [0, 0.5, 1].map((f) => `<span style="top:${f * 100}%">${(max - (max - min) * f).toFixed(4)}</span>`).join('');
+    const labels = card.querySelectorAll('.coin-xlabels span');
+    labels[0].textContent = pts[0] ? pts[0].t : '';
+    labels[1].textContent = pts.length ? pts[pts.length - 1].t : '';
+    syncTo();
+  };
+  const chartEl = $('.coin-chart');
+  const hover = $('.coin-hover');
+  const showAt = (clientX) => {
+    const pts = state.data && state.data.points;
+    if (!pts || !pts.length) return;
+    const rect = chartEl.getBoundingClientRect();
+    const frac = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
+    const i = Math.round(frac * (pts.length - 1));
+    const values = pts.map((p) => p.close);
+    const pad = (Math.max(...values) - Math.min(...values)) * 0.08 || Math.max(...values) * 0.001;
+    const min = Math.min(...values) - pad, max = Math.max(...values) + pad;
+    hover.style.display = 'block';
+    hover.style.setProperty('--x', `${(i / Math.max(1, pts.length - 1)) * rect.width}px`);
+    hover.style.setProperty('--y', `${(1 - (pts[i].close - min) / (max - min)) * rect.height}px`);
+    hover.classList.toggle('flip', frac > 0.7);
+    $('.coin-tip').innerHTML = `<b>${Number(pts[i].close).toFixed(4)}</b><span>${escapeHtml(pts[i].t)}</span>`;
+  };
+  ['mousemove', 'mousedown'].forEach((type) => chartEl.addEventListener(type, (e) => showAt(e.clientX)));
+  chartEl.addEventListener('mouseleave', () => { hover.style.display = 'none'; });
+  const load = async (first = true) => {
+    const wanted = state.range;
+    const url = `${getAIExeBackendUrl()}/api/fx?base=${encodeURIComponent(from || '')}&quote=${encodeURIComponent(to || '')}&range=${wanted}`;
+    if (!isCardCacheFresh(url)) chartEl.classList.add('fetching');
+    let data;
+    try { data = await fetchCardJson(url, !first); } finally { chartEl.classList.remove('fetching'); }
+    if (state.range !== wanted) return;
+    state.data = data;
+    paint();
+  };
+  cardLoading(card);
+  card.querySelectorAll('.fx-tabs button').forEach((btn) => btn.addEventListener('click', () => {
+    state.range = btn.dataset.range;
+    card.querySelectorAll('.fx-tabs button').forEach((b) => b.setAttribute('aria-selected', String(b === btn)));
+    load().catch(() => {});
+  }));
+  keepCardFresh(card, load, 600000);
+}
+
+// WMO weather codes (Open-Meteo) -> label + icon.
+function weatherLook(code, isDay = 1) {
+  const c = Number(code);
+  if (c === 0) return [isDay ? '☀️' : '🌙', 'Clear'];
+  if (c <= 2) return [isDay ? '🌤️' : '☁️', 'Partly cloudy'];
+  if (c === 3) return ['☁️', 'Overcast'];
+  if (c === 45 || c === 48) return ['🌫️', 'Fog'];
+  if (c >= 51 && c <= 57) return ['🌦️', 'Drizzle'];
+  if (c >= 61 && c <= 67) return ['🌧️', 'Rain'];
+  if (c >= 71 && c <= 77) return ['🌨️', 'Snow'];
+  if (c >= 80 && c <= 82) return ['🌧️', 'Showers'];
+  if (c >= 85 && c <= 86) return ['🌨️', 'Snow showers'];
+  if (c >= 95) return ['⛈️', 'Thunderstorm'];
+  return ['🌡️', 'Weather'];
+}
+
+const US_TIME_ZONE = /^(America\/(New_York|Chicago|Denver|Los_Angeles|Phoenix|Anchorage|Detroit|Boise|Juneau|Sitka|Nome|Adak|Menominee|Metlakatla|Yakutat|Indiana\/|Kentucky\/|North_Dakota\/)|Pacific\/Honolulu)/;
+function weatherUnits() {
+  try {
+    const saved = localStorage.getItem('aiexe_weather_units');
+    if (saved === 'imperial' || saved === 'metric') return saved;
+  } catch (_) { /* no storage */ }
+  const zone = Intl.DateTimeFormat().resolvedOptions().timeZone || '';
+  return US_TIME_ZONE.test(zone) ? 'imperial' : 'metric';
+}
+
+function mountWeatherCard(card, place) {
+  keepCardFresh(card, async (first) => {
+    const imperial = weatherUnits() === 'imperial';
+    const w = await fetchCardJson(`${getAIExeBackendUrl()}/api/weather?place=${encodeURIComponent(place || '')}&units=${imperial ? 'imperial' : 'metric'}`, !first);
+    const cur = w.current || {};
+    const unit = w.units === 'imperial' ? '°F' : '°C';
+    const [icon, label] = weatherLook(cur.weather_code, cur.is_day);
+    const days = (w.days || []).map((d, i) => {
+      const [dIcon, dLabel] = weatherLook(d.code, 1);
+      const name = i === 0 ? 'Today' : new Date(`${d.date}T12:00:00`).toLocaleDateString([], { weekday: 'short' });
+      return `<div class="weather-day" title="${escapeHtml(dLabel)}"><small>${name}</small><span>${dIcon}</span><b>${Math.round(d.high)}°</b><i>${Math.round(d.low)}°</i>${d.rain ? `<em>${d.rain}%</em>` : ''}</div>`;
+    }).join('');
+    const local = w.timezone ? new Date().toLocaleTimeString([], { timeZone: w.timezone, hour: 'numeric', minute: '2-digit' }) : '';
+    card.innerHTML = `<div class="chat-card-head"><span>${escapeHtml([w.place, w.region, w.country].filter(Boolean).join(', '))}</span><em>${escapeHtml(local)}</em></div>
+      <div class="weather-now"><span class="weather-icon">${icon}</span><div><div class="chat-card-value">${Math.round(cur.temperature_2m)}${unit}</div>
+        <div class="chat-card-sub">${escapeHtml(label)} · feels like ${Math.round(cur.apparent_temperature)}${unit}</div></div>
+        <div class="weather-extra"><span>Humidity <b>${cur.relative_humidity_2m}%</b></span><span>Wind <b>${Math.round(cur.wind_speed_10m)} ${w.units === 'imperial' ? 'mph' : 'km/h'}</b></span></div></div>
+      <div class="weather-days">${days}</div>
+      <div class="weather-units" role="group" aria-label="Units"><button type="button" data-units="metric" aria-pressed="${!imperial}">°C</button><button type="button" data-units="imperial" aria-pressed="${imperial}">°F</button></div>`;
+    card.querySelectorAll('[data-units]').forEach((btn) => btn.addEventListener('click', () => {
+      try { localStorage.setItem('aiexe_weather_units', btn.dataset.units); } catch (_) { /* optional */ }
+      clearTimeout(card._timer);
+      mountWeatherCard(card, place);
+    }));
+  }, 600000);
+}
+
+function parseTimerSeconds(text) {
+  const src = String(text || '').toLowerCase();
+  let total = 0;
+  for (const [, n, unit] of src.matchAll(/(\d+(?:\.\d+)?)\s*(h|hr|hrs|hour|hours|m|min|mins|minute|minutes|s|sec|secs|second|seconds)\b/g)) {
+    total += Number(n) * (unit.startsWith('h') ? 3600 : unit.startsWith('m') ? 60 : 1);
+  }
+  if (!total && /^\d+(\.\d+)?$/.test(src.trim())) total = Number(src) * 60;  // bare number = minutes
+  return Math.min(Math.round(total), 24 * 3600);
+}
+
+function mountTimerCard(card, arg) {
+  const total = parseTimerSeconds(arg) || 300;
+  const msg = card.closest('[data-msg-ts]');
+  const msgTs = msg ? Number(msg.dataset.msgTs) : 0;
+  const key = `aiexe_timer_${msgTs}_${total}`;
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem(key) || 'null'); } catch (_) { saved = null; }
+  // Fresh reply -> start now; reopening an old chat resumes the saved state instead.
+  const state = saved || { endsAt: msgTs && Date.now() - msgTs < 120000 ? Date.now() + total * 1000 : 0, left: total, done: false };
+  const persist = () => { try { localStorage.setItem(key, JSON.stringify(state)); } catch (_) { /* optional */ } };
+  persist();
+  const fmt = (sec) => {
+    const s = Math.max(0, Math.round(sec));
+    const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), r = s % 60;
+    return h ? `${h}:${String(m).padStart(2, '0')}:${String(r).padStart(2, '0')}` : `${m}:${String(r).padStart(2, '0')}`;
+  };
+  card.innerHTML = `<div class="chat-card-head"><span>Timer</span><em class="timer-label">${fmt(total)}</em></div>
+    <div class="timer-body"><svg class="timer-ring" viewBox="0 0 100 100" aria-hidden="true"><circle cx="50" cy="50" r="44"/><circle class="timer-progress" cx="50" cy="50" r="44"/></svg>
+      <div class="timer-time">${fmt(total)}</div></div>
+    <div class="timer-actions"><button type="button" class="finance-btn-primary" data-timer="toggle">Start</button><button type="button" class="finance-inline-btn" data-timer="reset">Reset</button></div>`;
+  const $ = (sel) => card.querySelector(sel);
+  const circ = 2 * Math.PI * 44;
+  $('.timer-progress').style.strokeDasharray = `${circ}`;
+  const tick = () => {
+    if (!card.isConnected) return;
+    const left = state.endsAt ? (state.endsAt - Date.now()) / 1000 : state.left;
+    if (state.endsAt && left <= 0 && !state.done) {
+      state.done = true; state.endsAt = 0; state.left = 0; persist();
+      showAppNotification({ title: 'Timer done', message: `${fmt(total)} is up.`, kind: 'success' });
+    }
+    $('.timer-time').textContent = state.done ? 'Done' : fmt(left);
+    $('.timer-progress').style.strokeDashoffset = `${circ * (1 - Math.max(0, left) / total)}`;
+    $('[data-timer="toggle"]').textContent = state.done ? 'Restart' : state.endsAt ? 'Pause' : 'Start';
+    card.classList.toggle('running', Boolean(state.endsAt));
+    card._timer = setTimeout(tick, 250);
+  };
+  $('[data-timer="toggle"]').addEventListener('click', () => {
+    if (state.done) { state.done = false; state.left = total; }
+    if (state.endsAt) { state.left = (state.endsAt - Date.now()) / 1000; state.endsAt = 0; }
+    else state.endsAt = Date.now() + state.left * 1000;
+    persist();
+  });
+  $('[data-timer="reset"]').addEventListener('click', () => { state.endsAt = 0; state.left = total; state.done = false; persist(); });
+  tick();
+}
+
+function mountClockCard(card, zoneArg) {
+  let zone = String(zoneArg || '').trim() || Intl.DateTimeFormat().resolvedOptions().timeZone;
+  try { new Intl.DateTimeFormat('en-US', { timeZone: zone }); } catch (_) { zone = Intl.DateTimeFormat().resolvedOptions().timeZone; }
+  const place = zone.split('/').pop().replace(/_/g, ' ');
+  const ticks = Array.from({ length: 12 }, (_, i) => {
+    const a = (i + 1) * Math.PI / 6;
+    return `<text x="${50 + 38 * Math.sin(a)}" y="${53.5 + -38 * Math.cos(a)}">${i + 1}</text>`;
+  }).join('');
+  const tick = () => {
+    if (!card.isConnected) return;
+    const now = new Date();
+    const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone: zone, hour: 'numeric', minute: 'numeric', second: 'numeric', hour12: false })
+      .formatToParts(now).filter((p) => p.type !== 'literal').map((p) => [p.type, Number(p.value)]));
+    const h = parts.hour % 24, m = parts.minute, sec = parts.second;
+    const hand = (deg, len, cls) => `<line class="${cls}" x1="50" y1="50" x2="${50 + len * Math.sin(deg * Math.PI / 180)}" y2="${50 - len * Math.cos(deg * Math.PI / 180)}"/>`;
+    const there = new Date(now.toLocaleString('en-US', { timeZone: zone }));
+    const diffH = Math.round((there - new Date(now.toLocaleString('en-US'))) / 3600000);
+    const dayWord = there.toDateString() === new Date(now.toLocaleString('en-US')).toDateString() ? 'Today' : (there > now ? 'Tomorrow' : 'Yesterday');
+    card.innerHTML = `
+      <div class="chat-clock-text">
+        <strong>${now.toLocaleTimeString('en-US', { timeZone: zone, hour: 'numeric', minute: '2-digit' })}</strong>
+        <span>${escapeHtml(place)} (${escapeHtml(now.toLocaleTimeString('en-US', { timeZone: zone, timeZoneName: 'short' }).split(' ').pop())})</span>
+        <span>${dayWord}${diffH ? `, ${diffH > 0 ? '+' : ''}${diffH}h from you` : ''}</span>
+      </div>
+      <svg class="chat-clock-face" viewBox="0 0 100 100" aria-hidden="true">${ticks}
+        ${hand(((h % 12) + m / 60) * 30, 22, 'hour')}${hand((m + sec / 60) * 6, 32, 'minute')}${hand(sec * 6, 35, 'second')}<circle cx="50" cy="50" r="2"/></svg>`;
+    card._timer = setTimeout(tick, 1000 - (Date.now() % 1000));
+  };
+  tick();
+}
+
+// Compact, current picture of trading for the chat prompt (refreshed in the background).
+let chatTradingSnapshot = null;
+async function refreshChatTradingSnapshot() {
+  try {
+    const response = await fetch(getAIExeBackendUrl() + '/api/broker/autopilot');
+    if (response.ok) chatTradingSnapshot = { at: Date.now(), autopilot: await response.json() };
+  } catch (_) { /* keep the last one */ }
+  setTimeout(refreshChatTradingSnapshot, 30000);
+}
+setTimeout(refreshChatTradingSnapshot, 3000);
+
+function buildLiveContext() {
+  const lines = [
+    'LIVE_CARDS: the app can render live, auto-updating cards. A marker alone on its own line becomes the card:',
+    '[[card:trading]] — the user\'s autopilot paper-trading status.',
+    '[[card:portfolio]] — the user\'s manual paper portfolio and positions.',
+    '[[card:coin <SYMBOL> [range]]] — live crypto price, range charts and the autopilot\'s trend read.',
+    '[[card:stock <TICKER> [range]]] — US stock or ETF price and range charts.',
+    '[[card:compare <SYMBOL>,<SYMBOL>,… [range]]] — percent change of several coins or stocks on one chart.',
+    'Optional [range] is one of 1D 5D 1M 6M YTD 1Y 5Y MAX.',
+    '[[card:fx <FROM> <TO> [amount]]] — currency exchange rate, converter and history (3-letter codes).',
+    '[[card:weather <place>]] — current weather and 7-day forecast.',
+    '[[card:timer <duration>]] — a countdown timer, e.g. 25m or 1h30m.',
+    '[[card:clock <IANA time zone>]] — a live clock.',
+    'A card appears only where you write its marker. It loads its own live data, so you can add one even when the figures are not in this context.',
+    'Add a card only when it helps your answer. Don\'t state figures you don\'t have.',
+  ];
+  const snap = chatTradingSnapshot && chatTradingSnapshot.autopilot;
+  if (snap && snap.budget_cents) {
+    const money = (c) => `$${(Number(c || 0) / 100).toFixed(2)}`;
+    const held = (snap.positions || []).map((p) => `${p.symbol} (${Number(p.pnl_cents) >= 0 ? '+' : ''}${money(p.pnl_cents)})`).join(', ') || 'none';
+    const recent = (snap.events || []).slice(0, 5).map((e) => `${e.at} ${e.kind}${e.symbol ? ' ' + e.symbol : ''}: ${e.reason || e.note || ''}`).join(' | ');
+    const trending = (snap.watchlist || []).filter((w) => w.trending).slice(0, 8).map((w) => w.symbol).join(', ');
+    const market = (snap.watchlist || []).filter((w) => !w.warming_up && w.price).map((w) =>
+      `${w.symbol} ${Number(w.price).toPrecision(5)} (${(Number(w.change_1h || 0) * 100).toFixed(2)}% 1h${w.trending ? ', uptrend' : ''}${w.held ? ', held' : ''})`).join('; ');
+    lines.push(
+      `TRADING_CONTEXT (paper money only; as of ${new Date(chatTradingSnapshot.at).toLocaleTimeString()}):`,
+      `Autopilot ${snap.running ? 'running' : 'off'}${snap.paused_today ? ' (paused for today by the daily loss limit)' : ''}, risk ${snap.risk}. Budget ${money(snap.budget_cents)}, balance ${money(snap.equity_cents)}, P&L ${money(snap.pnl_cents)}, vs just holding BTC ${money(Number(snap.equity_cents) - Number(snap.benchmark_cents))}. Closed trades ${snap.closed_trades} (${snap.wins} won), fees ${money(snap.fees_cents)}.`,
+      `Open trades: ${held}. Scanning ${snap.universe_size} most-traded coins${(snap.pinned || []).length ? ` plus pinned ${snap.pinned.join(', ')}` : ''}. Trending now: ${trending || 'none'}.`,
+      recent ? `Recent activity: ${recent}` : '',
+      market ? `Scanned coins now (USD price, last-hour change, trend): ${market}` : '',
+      (snap.lessons || []).length ? `Lessons the bot wrote after losing trades (it reviews these before new entries): ${(snap.lessons || []).map((l) => `${l.symbol}: ${l.text}`).join(' | ')}` : '',
+      'How it trades: hourly uptrend + 24h-high breakout, AI may veto entries, trailing stop/stop-loss/trend-end exits, profits compound. It is not financial advice and past results do not predict returns.',
+    );
+  }
+  return lines.filter(Boolean).join('\n');
 }
 
 function buildThinkingState(...args) {
