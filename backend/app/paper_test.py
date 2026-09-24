@@ -5,6 +5,7 @@ import threading
 import uuid
 from datetime import datetime, timedelta, timezone
 
+from .errors import describe_error
 from .strategy import analyze_history
 
 
@@ -284,7 +285,7 @@ class PaperTestRunner:
             self.run_once()
         except Exception as exc:
             with self._lock:
-                self._state["last_error"] = str(exc)[:300]
+                self._state["last_error"] = describe_error(exc, "the price service")[:300]
                 self._state["last_attempt_at"] = _iso()
                 self._save_state()
 

@@ -1,0 +1,7 @@
+order_id,region,amount,status
+A1,West,120,paid
+A2,East,80,paid
+A2,East,80,paid
+A3,North,200,paid
+A4,East,-20,adjustment
+A5,North,,pending

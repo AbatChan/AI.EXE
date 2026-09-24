@@ -125,19 +125,19 @@ assert.ok(!excludedState.includes('CURRENT /index.html'), 'the target file itsel
   ];
   const plan = { doneCriteria: ['Controls and card are laid out horizontally'] };
 
-  const unmetRt = createRuntime('{"unmet":[{"criterion":"Controls and card are laid out horizontally","why":"body has one child; the rule cannot arrange the siblings"}]}');
+  const unmetRt = createRuntime('{"verified":[],"unmet":[{"criterion":"Controls and card are laid out horizontally","why":"body has one child; the rule cannot arrange the siblings"}]}');
   const unmetRes = await unmetRt.verifyAgentDoneCriteria('make it horizontal', editEvents, plan);
   assert.equal(unmetRes.ok, false, 'unmet criterion fails the audit');
   assert.equal(unmetRes.unmet.length, 1, 'one unmet item surfaced');
   assert.ok(unmetRes.unmet[0].why.includes('one child'), 'why is carried through');
 
-  const metRt = createRuntime('{"unmet":[]}');
+  const metRt = createRuntime('{"verified":["Controls and card are laid out horizontally"],"unmet":[]}');
   const metRes = await metRt.verifyAgentDoneCriteria('make it horizontal', editEvents, plan);
-  assert.equal(metRes.ok, true, 'empty unmet passes the audit');
+  assert.equal(metRes.ok, true, 'positive verification passes the audit');
 
   const garbageRt = createRuntime('not json at all');
   const garbageRes = await garbageRt.verifyAgentDoneCriteria('task', editEvents, plan);
-  assert.equal(garbageRes.ok, true, 'unparseable output is treated as skipped, never blocks');
+  assert.equal(garbageRes.ok, false, 'unparseable output cannot establish success');
   assert.equal(garbageRes.skipped, true, 'garbage output marks the audit skipped');
 
   const noCriteriaRes = await metRt.verifyAgentDoneCriteria('task', editEvents, { doneCriteria: [] });

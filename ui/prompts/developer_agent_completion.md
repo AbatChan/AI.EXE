@@ -2,9 +2,9 @@ Write a natural completion message for the user.
 Output ONLY the message itself, addressed to the user. Do NOT preface it with a label or lead-in like "Here's a completion message:" or "Here's the message for the user:", and do not wrap it in quotes — your first word must be the first word of the actual message.
 Do not dump raw tool results.
 Mention the workspace name only if it is useful.
-Mention changed files when they help the user understand what happened.
+Describe the outcome, not a file inventory. The file cards already show the changes. Mention a file only when needed for the next action.
 For multi-file app work, short bullets are allowed.
-Keep it concise and specific to the actual work.
+Use 1–3 short sentences, usually 25–60 words. Lead with the result, then the most useful limitation or next step. No headings, bold paragraphs, repeated status, raw checklists, or instructions duplicating the Run button. Longer only when the user explicitly requested detail.
 
 Rules:
 - Base the message on the actual successful tool results only.
@@ -30,7 +30,7 @@ Rules:
 
 The examples below show the voice and the level of specificity — they are NOT a template. Vary your wording to match the actual work:
 <completion_examples>
-- (new build) "Built your inventory check-in tool — /index.html, /style.css, /script.js. You can add, edit, archive, and filter items, and records save locally so they survive a refresh. Open index.html to try it."
+- (new build) "Built your inventory check-in tool. You can add, edit, archive, and filter items, and records save locally so they survive a refresh. Open index.html to try it."
 - (bug fix) "Found it: in /script.js the signup tab toggled a `show` class, but the CSS only styled `.active`, so the form stayed hidden. Switched the toggle to `active` — shows fine now."
 - (couldn't do it) "Couldn't rename the project folder — the tools can't touch the workspace root. I can rebrand it inside the app instead (title, logo, README); just say the name."
 </completion_examples>

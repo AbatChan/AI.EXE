@@ -32,6 +32,8 @@
     'create_or_build_deliverable', 'modify_existing_workspace', 'debug_existing_workspace',
     // "bet" / "go" / "next" while a phased build waits — an agreement to continue, not chatter.
     'resume_paused_build',
+    // The app's own paper trading (autopilot, trades, portfolio, prices) — not workspace files.
+    'app_trading',
   ];
   function normalizeModelRouteDecision(raw) {
     if (!raw || typeof raw !== 'object') return null;
@@ -43,8 +45,10 @@
     return {
       route: MODEL_ROUTES.includes(route) ? route : '',
       intent: MODEL_INTENTS.includes(intent) ? intent : '',
+      workspaceIntent: ['new', 'current', 'unspecified'].includes(raw.workspace_intent) ? raw.workspace_intent : 'unspecified',
       needsWorkspace: yes(raw.needs_workspace),
       needsFileMutation: yes(raw.needs_file_mutation),
+      hasFileMutationDecision: raw.needs_file_mutation != null,
       confidence: Number.isFinite(confidenceRaw) ? confidenceRaw : null,
       reason: String(raw.reason || '').trim(),
     };
@@ -60,6 +64,8 @@
         : m.intent === 'create_or_build_deliverable' || m.intent === 'modify_existing_workspace' || m.intent === 'debug_existing_workspace' || m.intent === 'resume_paused_build' ? 'agent'
         : 'chat'
     );
+    if (m.workspaceIntent === 'new') features.explicitNewProjectIntent = true;
+    if (m.workspaceIntent === 'current') features.explicitUseCurrentWorkspaceIntent = true;
     features.pureGreeting = false;
     features.asksGeneralKnowledge = false;
     features.likelyInspectRequest = false;
@@ -73,8 +79,10 @@
     } else if (route === 'inspect') {
       features.likelyInspectRequest = true;
     } else if (route === 'agent') {
-      if (m.intent === 'create_or_build_deliverable') {
-        features.likelyProjectCreation = true;
+      if (m.intent === 'app_trading') {
+        // Trading tool only: no files, no project to create.
+      } else if (m.intent === 'create_or_build_deliverable') {
+        features.likelyProjectCreation = !m.hasFileMutationDecision || m.needsFileMutation;
       } else {
         features.likelyFileMutation = true;
         features.referencesCurrentWorkspace = true;
@@ -383,6 +391,13 @@
       : fallbackRoute;
     const validated = validateRoute(initialRoute, features, Boolean(args.agentEnabled));
     const finalDecision = buildDecision(validated.route, advisoryDecision, features);
+    if (usedModelDecision && modelDecision.hasFileMutationDecision && !modelDecision.needsFileMutation) {
+      finalDecision.shouldModifyFiles = false;
+      finalDecision.shouldCreateProject = false;
+      finalDecision.shouldReadFiles = modelDecision.needsWorkspace && ['agent', 'inspect'].includes(finalDecision.route);
+    }
+    // Carry the model's intent so status text can match the task.
+    finalDecision.intent = usedModelDecision ? (modelDecision.intent || '') : '';
     if (validated.overrideReason) {
       finalDecision.reason = validated.overrideReason;
     }

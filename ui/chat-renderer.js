@@ -7,27 +7,37 @@
 
     function buildThinkingState(text) {
       const source = normalizeImplicitThinkingTrace(text);
-      const regex = /<(thinking|think)>([\s\S]*?)(<\/\1>|$)/gi;
+      const tags = /<(\/?)(thinking|think|native_thinking)>/gi;
       const blocks = [];
-      let inProgress = false;
-      let match = null;
-      while ((match = regex.exec(source))) {
-        const body = String(match[2] || '').trim();
-        if (body) blocks.push(body);
-        if (!match[3]) {
-          inProgress = true;
-          break;
+      const visible = [];
+      const stack = [];
+      let cursor = 0, bodyStart = 0, match;
+      while ((match = tags.exec(source))) {
+        const closing = Boolean(match[1]);
+        const name = match[2].toLowerCase();
+        if (stack[0] === 'native_thinking' && name !== 'native_thinking') continue;
+        if (!closing) {
+          if (!stack.length) {
+            visible.push(source.slice(cursor, match.index));
+            bodyStart = tags.lastIndex;
+          }
+          stack.push(name);
+        } else if (stack.length && stack[stack.length - 1] === name) {
+          stack.pop();
+          if (!stack.length) {
+            blocks.push(source.slice(bodyStart, match.index));
+            cursor = tags.lastIndex;
+          }
         }
       }
-      return {
-        text: blocks.join('\n\n').trim(),
-        inProgress,
-      };
+      if (stack.length) blocks.push(source.slice(bodyStart));
+      else visible.push(source.slice(cursor));
+      return { text: blocks.join('\n\n').trim(), inProgress: stack.length > 0, displayText: visible.join('') };
     }
 
     function normalizeImplicitThinkingTrace(text) {
       const source = String(text || '');
-      if (/<(thinking|think)>/i.test(source)) return source;
+      if (/<(thinking|think|native_thinking)>/i.test(source)) return source;
       const closeMatch = source.match(/<\/think>/i);
       if (!closeMatch || typeof closeMatch.index !== 'number') return source;
       const reasoning = source.slice(0, closeMatch.index).trim();
@@ -57,6 +67,7 @@
 
     // Count-up tween for diff stats (+A / -R), animated once per logical row.
     const animatedDiffKeys = new Set();
+    const revealedArtifactKeys = new Set();
     // Live agent messages are rebuilt as each activity arrives. Keep subgroup
     // disclosure outside the DOM so those rebuilds cannot undo a user's click.
     const activitySubgroupDisclosure = new Map();
@@ -198,7 +209,7 @@
     }
 
     function appendCompactActivityText(element, text) {
-      const lines = clipActivityText(text)
+      const lines = stripActivityMarkdown(text)
         .split('\n')
         .map((line) => line.trim())
         .filter(Boolean);
@@ -263,7 +274,7 @@
             .replace(/^Edited$/i, 'Edited')
             .replace(/^Reading$/i, 'Reading')
             .replace(/^Read$/i, 'Read');
-          const detail = clipActivityText(item.detail || '', 640);
+          const detail = String(item.detail || '').trim();
           const meta = clipActivityText(item.meta || '', 140);
           if (!title && !detail && !meta) return null;
           if (String(item.kind || '').trim().toLowerCase() === 'command'
@@ -316,8 +327,11 @@
             kind: String(item.kind || '').trim().toLowerCase(),
             title: title.slice(0, 160),
             detail,
+            startedAt: Number(item.startedAt) || 0,
+            completedAt: Number(item.completedAt) || 0,
             meta,
             inlineMode: item.inlineMode === true,
+            webSearch: item.webSearch && typeof item.webSearch === 'object' ? { query: String(item.webSearch.query || ''), failed: Boolean(item.webSearch.failed), sources: (Array.isArray(item.webSearch.sources) ? item.webSearch.sources : []).filter(s => s && /^https?:\/\//.test(String(s.url || ''))).slice(0, 8).map(s => ({title:String(s.title || ''),url:String(s.url)})) } : null,
             diff: added > 0 || removed > 0 ? { added, removed } : null,
             diffPreview: diffPreview && diffPreview.length ? diffPreview : null,
             streamContent,
@@ -328,7 +342,7 @@
             openEndLine: Math.max(0, Number(item.openEndLine) || 0),
             status: status === 'error'
               ? 'error'
-              : (status === 'pending' ? 'pending' : (status === 'running' ? 'running' : 'done')),
+              : (status === 'paused' ? 'paused' : (status === 'pending' ? 'pending' : (status === 'running' ? 'running' : 'done'))),
             // Structured outcome flag (validate/run cards) — group headers key off it;
             // dropping it here made "Checked files — no issues found" wrap failed checks.
             hasIssues: item.hasIssues === true,
@@ -837,6 +851,7 @@
       const ok = Boolean(toolResult && toolResult.ok);
       const targetInfo = d.describeAgentToolTarget ? d.describeAgentToolTarget(decision) : '';
       const observation = String((toolResult && toolResult.observation) || '').trim();
+      if (tool === 'web_search') return buildInlineAgentActivityBase({ kind: 'web_search', title: ok ? 'Searched the web' : 'Web search failed', detail: String(decision.query || toolResult && toolResult.query || ''), webSearch: { query: String(decision.query || toolResult && toolResult.query || ''), sources: toolResult && toolResult.sources || [], failed: !ok }, status: ok ? 'done' : 'error' });
       // Failed/blocked steps rendered NOTHING, leaving their narration orphaned
       // ("Checking the sidebar..." then silence). Permission holds keep their card.
       if (!ok && !(toolResult && toolResult.permissionRequired)) {
@@ -881,6 +896,18 @@
         });
       }
       if (!ok) return null;
+      if (tool === 'create_canvas') return buildInlineAgentActivityBase({ kind: 'write', title: 'Created Canvas document', detail: String(decision.path || '').replace(/^\/+/, ''), status: 'done' });
+      if (tool === 'trading') {
+        const trading = (toolResult && toolResult.trading) || {};
+        const rows = buildObservationPreviewRows(observation);
+        return buildInlineAgentActivityBase({
+          kind: 'read',
+          title: String(trading.title || 'Checked the autopilot'),
+          detail: String(trading.summary || '').slice(0, 160),
+          diffPreview: rows && rows.length ? rows : null,
+          status: 'done',
+        });
+      }
       if (tool === 'read_project_memory') {
         const itemCount = Number((observation.match(/^Project memory \((\d+) items?\)/i) || [])[1]) || 0;
         return buildInlineAgentActivityBase({
@@ -1201,8 +1228,20 @@
     }
 
     function buildAgentPendingActivity(decision, toolEvents = []) {
+      if (String(decision && decision.tool || '') === 'web_search') return buildInlineAgentActivityBase({ kind: 'search', title: 'Searching the web…', detail: String(decision.query || ''), status: 'pending' });
+      if (String(decision && decision.tool || '') === 'create_canvas') return buildInlineAgentActivityBase({ kind: 'write', title: 'Writing Canvas document…', detail: String(decision.path || '').replace(/^\/+/, ''), status: 'pending' });
       const tool = String(decision && decision.tool ? decision.tool : '').toLowerCase();
       const targetInfo = d.describeAgentToolTarget ? d.describeAgentToolTarget(decision) : '';
+      if (tool === 'trading') {
+        const command = String(decision && decision.command || 'status').trim();
+        const reading = /^(status|coin)\b/i.test(command);
+        return buildInlineAgentActivityBase({
+          kind: 'read',
+          title: reading ? 'Checking the autopilot…' : 'Updating the autopilot…',
+          detail: reading ? '' : command.slice(0, 80),
+          status: 'pending',
+        });
+      }
       if (tool === 'read_project_memory') {
         return buildInlineAgentActivityBase({
           kind: 'read',
@@ -1429,12 +1468,16 @@
     }
 
     function buildAgentActivityRow(chatId, activity, rowOptions = {}) {
+      if (activity && activity.kind === 'web_search' && activity.webSearch) return buildWebSearchRow(activity.webSearch);
       if (activity && activity.kind === 'stream_file' && String(activity.streamContent || '').trim()) {
         return buildAgentStreamingFileView({
           path: activity.openPath || activity.detail || 'partial file',
           content: activity.streamContent,
           mode: activity.streamMode === 'edits' ? 'edits' : 'file',
         });
+      }
+      if (activity && activity.kind === 'reasoning') {
+        return buildThinkingPanel(activity.detail, { existingPanel: activity._existingThoughtPanel, inProgress: activity.status === 'running', startedAt: activity.startedAt, completedAt: activity.completedAt });
       }
       if (activity && activity.kind === 'thought') {
         const item = document.createElement('div');
@@ -1482,7 +1525,7 @@
       const compactGrouped = rowOptions.compactGrouped === true;
       const item = document.createElement(clickable ? 'button' : 'div');
       const activityKind = String(activity && activity.kind || '').toLowerCase().replace(/[^a-z0-9_-]/g, '');
-      item.className = `msg-agent-activity-row${activity && activity.status === 'error' ? ' error' : ''}${activity && activity.hasIssues === true ? ' has-issues' : ''}${clickable ? ' clickable' : ''}${compactGrouped ? ' compact-grouped' : ''}${activityKind ? ` kind-${activityKind}` : ''}`;
+      item.className = `msg-agent-activity-row${activity && activity.status === 'error' ? ' error' : ''}${activity && activity.hasIssues === true ? ' has-issues' : ''}${clickable ? ' clickable' : ''}${compactGrouped ? ' compact-grouped' : ''}${rowOptions.runGrouped === true ? ' run-grouped' : ''}${activityKind ? ` kind-${activityKind}` : ''}`;
       if (item instanceof HTMLButtonElement) item.type = 'button';
       const activityRowPath = normalizeWorkspacePath(activity && activity.openPath ? activity.openPath : '');
       if (activityRowPath && activityRowPath !== '/') item.dataset.activityPath = activityRowPath;
@@ -1492,10 +1535,19 @@
       let metaEl = null;
       let plusEl = null;
       let minusEl = null;
-      if (activity && activity.inlineMode) {
+      // Every tool step and stop notice is a one-line row; only thoughts/plans use the block layout.
+      if (activity && (activity.inlineMode || !['thought', 'plan', 'correction'].includes(String(activity.kind || '')))) {
         inlineRow = document.createElement('div');
         inlineRow.className = 'msg-agent-activity-inline';
 
+        if (!['thought', 'stream_file'].includes(String(activity && activity.kind || '')) && typeof window !== 'undefined' && typeof window.uiIcon === 'function') {
+          const iconName = RUN_ROW_ICONS[String(activity && activity.title || '').trim().toLowerCase()]
+            || RUN_ROW_ICONS[String(activity && activity.kind || '').toLowerCase()] || 'doc';
+          const iconEl = document.createElement('span');
+          iconEl.className = 'msg-agent-activity-run-icon';
+          iconEl.innerHTML = window.uiIcon(iconName);
+          inlineRow.appendChild(iconEl);
+        }
         if (!compactGrouped) {
           titleEl = document.createElement('span');
           titleEl.className = 'msg-agent-activity-inline-title';
@@ -1506,8 +1558,10 @@
         const detail = String(activity && activity.detail ? activity.detail : '').trim();
         if (detail && !multiFile) {
           pathEl = document.createElement('span');
+          // Stop notices keep their full reason, not just the file name.
           const fileLikeTarget = Boolean(
             activity
+            && activity.kind !== 'error'
             && activity.openKind === 'file'
             && activity.openPath
             && normalizeWorkspacePath(activity.openPath) !== '/'
@@ -1517,13 +1571,23 @@
             'project', 'mkdir', 'move', 'delete', 'read', 'write', 'edit', 'search', 'scan', 'skip',
           ].includes(String(activity && activity.kind || '').toLowerCase());
           pathEl.className = `msg-agent-activity-inline-path${fileLikeTarget ? ' file-target' : ''}${commandLikeTarget ? ' command-target' : ''}${targetLikeDetail ? ' activity-target' : ' supporting-detail'}`;
-          pathEl.textContent = detail;
+          // File rows show just the name; the full path lives in the tooltip.
+          if (fileLikeTarget) {
+            const full = normalizeWorkspacePath(activity.openPath).replace(/^\//, '');
+            pathEl.textContent = full.split('/').pop() || detail;
+            if (full && full !== pathEl.textContent) {
+              pathEl.classList.add('ui-tooltip-anchor');
+              pathEl.dataset.tooltip = full;
+            }
+          } else {
+            pathEl.textContent = detail;
+          }
           inlineRow.appendChild(pathEl);
         }
 
         const meta = String(activity && activity.meta ? activity.meta : '').trim();
         const redundantOpenMeta = /^(Open file|Open folder|Open target)$/i.test(meta);
-        if (meta && (!compactGrouped || !redundantOpenMeta)) {
+        if (meta && !redundantOpenMeta) {
           metaEl = document.createElement('span');
           metaEl.className = 'msg-agent-activity-inline-meta';
           metaEl.textContent = meta;
@@ -2084,41 +2148,48 @@
       button.addEventListener('click', () => {
         const panel = button.closest('.msg-thought-panel');
         const nextExpanded = !(panel && panel.dataset.expanded === 'true');
+        if (panel) panel.dataset.userDisclosure = 'true';
         setThoughtPanelExpanded(panel, nextExpanded, true);
       });
       return button;
     }
 
     function buildThinkingPanel(thinkingText = '', options = {}) {
-      const text = String(thinkingText || '').trim();
+      const text = String(thinkingText || '').replace(/^\*\*Thinking summary\*\*\s*/, '').trim();
       const inProgress = Boolean(options.inProgress);
       if (!text && !inProgress) return null;
 
-      const expanded = inProgress;
-      const wrapper = document.createElement('div');
-      wrapper.className = 'msg-agent-panel msg-thought-panel';
-      if (inProgress) wrapper.classList.add('in-progress');
+      const previous = options.existingPanel || null;
+      const expanded = previous ? previous.dataset.expanded === 'true' : inProgress;
+      const wrapper = previous || document.createElement('div');
+      if (!previous) wrapper.className = 'msg-agent-panel msg-thought-panel';
+      wrapper.classList.toggle('in-progress', inProgress);
       wrapper.dataset.expanded = expanded ? 'true' : 'false';
       const label = inProgress
         ? 'Thinking'
         : `Thought for ${formatThoughtDuration(options.startedAt, options.completedAt)}`;
-      wrapper.appendChild(buildThoughtSummaryToggle(label, expanded));
+      if (previous) previous.querySelector('.msg-thought-summary-label-text').textContent = label;
+      else wrapper.appendChild(buildThoughtSummaryToggle(label, expanded));
 
-      const drawer = document.createElement('div');
+      const drawer = previous ? previous.querySelector('.msg-agent-activity-drawer') : document.createElement('div');
       drawer.className = 'msg-agent-activity-drawer';
-      if (text) {
+      if (text && wrapper._thoughtText !== text) {
+        drawer.textContent = '';
         const body = document.createElement('div');
         body.className = 'msg-agent-activity-thought';
         renderActivityMarkdownInto(body, text);
         drawer.appendChild(body);
       }
-      wrapper.appendChild(drawer);
-      setThoughtPanelExpanded(wrapper, expanded, false);
+      wrapper._thoughtText = text;
+      if (!previous) {
+        wrapper.appendChild(drawer);
+        setThoughtPanelExpanded(wrapper, expanded, false);
+      }
       return wrapper;
     }
 
     function classifyActivityPhase(activity) {
-      if (!activity || activity.kind === 'thought' || activity.kind === 'error') return 'other';
+      if (!activity || activity.kind === 'thought' || activity.kind === 'reasoning' || activity.kind === 'error') return 'other';
       if (activity.phase) return String(activity.phase);
       const kind = String(activity.kind || '').toLowerCase();
       const tool = String(activity.tool || '').toLowerCase();
@@ -2137,18 +2208,66 @@
       return 'other';
     }
 
-    function groupActivitiesByPhase(rows) {
+    // Codex-style: every run of tool rows between narration lines is one group.
+    function groupToolRuns(rows) {
       const groups = [];
       for (const activity of rows) {
-        const phase = classifyActivityPhase(activity);
+        const kind = String(activity && activity.kind || '');
+        const standalone = !activity || ['thought', 'reasoning', 'error', 'stream_file', 'plan', 'correction', 'web_search', 'steer'].includes(kind);
+        const phase = standalone ? 'other' : 'run';
         const last = groups[groups.length - 1];
-        if (phase !== 'other' && last && last.phase === phase) {
+        if (phase === 'run' && last && last.phase === 'run' && !last.folded) {
           last.items.push(activity);
         } else {
           groups.push({ phase, items: [activity] });
         }
       }
       return groups;
+    }
+
+    // Preserve narration between consecutive tool runs.
+    function groupActivitiesByPhase(rows) {
+      return groupToolRuns(rows);
+    }
+
+    // "Read files, edited files, ran checks" from the rows' own titles.
+    const RUN_VERB_PHRASES = {
+      'read': 'read files', 'searched': 'searched', 'inspected': 'inspected the workspace',
+      'wrote': 'created files', 'edited': 'edited files', 'moved': 'moved files', 'moved to trash': 'deleted files',
+      'created project': 'created the project', 'created folder': 'made folders',
+      'checked syntax': 'ran checks', 'checked files': 'ran checks', 'checked contracts': 'ran checks',
+      'build passed': 'ran the build', 'build failed': 'ran the build', 'ran the app': 'ran the app',
+      'ran command': 'ran commands', 'command failed': 'ran commands', 'runtime missing': 'ran commands',
+      'dev server ready': 'started the dev server', 'dev server starting': 'started the dev server',
+      'saved to project memory': 'updated memory', 'removed from project memory': 'updated memory',
+      'recalled project memory': 'recalled memory',
+    };
+    const RUN_ROW_ICONS = {
+      interruption: 'pause', read: 'doc', searched: 'search', search: 'search', scan: 'search', inspected: 'folder',
+      wrote: 'filePlus', write: 'filePlus', edited: 'edit', edit: 'edit', moved: 'move', move: 'move',
+      'moved to trash': 'trash', delete: 'trash', 'created project': 'folder', 'created folder': 'folder',
+      project: 'folder', mkdir: 'folder', 'checked syntax': 'shield', 'checked files': 'shield',
+      'checked contracts': 'shield', validate: 'shield', 'ran the app': 'play', 'ran command': 'terminal',
+      'command failed': 'terminal', command: 'terminal', 'build passed': 'terminal', 'build failed': 'terminal', failed: 'alert', 'not found': 'alert', 'runtime missing': 'alert',
+      skipped: 'skip', blocked: 'skip', skip: 'skip', error: 'alert', retrying: 'retry', steer: 'steer', 'recalled project memory': 'book',
+      'saved to project memory': 'book', 'removed from project memory': 'book',
+    };
+    const RUN_SNAG_TITLES = new Set(['skipped', 'blocked', 'failed', 'not found']);
+    function buildRunGroupLabel(items) {
+      const phrases = [];
+      let snags = 0;
+      items.forEach((a) => {
+        const kind = String(a && a.kind || '');
+        const title = String(a && a.title || '').trim().toLowerCase();
+        if (kind === 'thought' || kind === 'plan' || kind === 'correction' || title === 'plan') return;
+        if (kind === 'error' || RUN_SNAG_TITLES.has(title)) { snags += 1; return; }
+        const phrase = RUN_VERB_PHRASES[title] || (title ? title : '');
+        if (phrase && !phrases.includes(phrase)) phrases.push(phrase);
+      });
+      let label = phrases.slice(0, 4).join(', ') || 'worked';
+      label = label.charAt(0).toUpperCase() + label.slice(1);
+      if (snags) label += ` — ${snags} step${snags === 1 ? '' : 's'} retried`;
+      return label;
     }
 
     function buildActivitySubgroup(chatId, group, disclosureOptions = {}) {
@@ -2229,12 +2348,16 @@
           return `Reorganized ${count} item${count !== 1 ? 's' : ''}`;
         })() },
       };
+      if (phase === 'run') {
+        const runLabel = buildRunGroupLabel(items);
+        labelsByPhase.run = { running: runLabel, done: runLabel };
+      }
       const labels = labelsByPhase[phase] || { running: 'Working', done: `${count} steps` };
       const label = groupStatus === 'running' ? labels.running : labels.done;
       const disclosureKey = String(disclosureOptions.key || `${chatId}:${phase}`);
       const expanded = resolveActivitySubgroupDisclosure(disclosureKey, {
         finished: disclosureOptions.finished,
-        hasError: groupStatus === 'error',
+        hasError: groupStatus === 'error' && !disclosureOptions.folded,
         startExpanded: disclosureOptions.startExpanded,
       });
 
@@ -2243,6 +2366,7 @@
       const compactFileGroup = groupFilePaths.length > 1 && ['explore', 'create', 'edit'].includes(phase);
       if (compactFileGroup) subgroup.classList.add('compact-files');
       subgroup.classList.add('compact-summary');
+      if (phase === 'run') subgroup.classList.add('run-group');
       subgroup.dataset.expanded = expanded ? 'true' : 'false';
 
       const toggle = document.createElement('button');
@@ -2253,7 +2377,8 @@
       const labelEl = document.createElement('span');
       labelEl.className = 'msg-agent-subgroup-label';
       const [summaryLabel, outcomeLabel = ''] = label.split(/\s+—\s+/, 2);
-      const summaryMatch = summaryLabel.match(/^(\S+)(?:\s+(.+))?$/);
+      // Run labels are one phrase; don't split off a bold verb.
+      const summaryMatch = phase === 'run' ? [summaryLabel, summaryLabel] : summaryLabel.match(/^(\S+)(?:\s+(.+))?$/);
       const verbEl = document.createElement('span');
       verbEl.className = 'msg-agent-subgroup-verb';
       verbEl.textContent = summaryMatch ? summaryMatch[1] : summaryLabel;
@@ -2273,6 +2398,14 @@
         outcomeEl.className = `msg-agent-subgroup-status ${outcomeKind}`;
         outcomeEl.textContent = outcomeLabel;
         labelEl.appendChild(outcomeEl);
+      }
+      if (phase === 'run' && typeof window.uiIcon === 'function') {
+        const icons = new Set(items.map((a) => RUN_ROW_ICONS[String(a.title || '').trim().toLowerCase()]
+          || RUN_ROW_ICONS[String(a.kind || '').toLowerCase()] || 'doc'));
+        const icon = document.createElement('span');
+        icon.className = 'msg-agent-activity-run-icon';
+        icon.innerHTML = window.uiIcon(icons.size === 1 ? [...icons][0] : 'terminal');
+        toggle.appendChild(icon);
       }
       toggle.appendChild(labelEl);
 
@@ -2303,7 +2436,8 @@
         }
         // The subgroup header already states the action. Children retain the useful
         // target, range, outcome, stats, and diff disclosure without repeating it.
-        drawer.appendChild(buildAgentActivityRow(chatId, activity, { compactGrouped: true }));
+        // Mixed run groups keep each row's verb; single-kind groups drop it.
+        drawer.appendChild(buildAgentActivityRow(chatId, activity, phase === 'run' ? { runGrouped: true } : { compactGrouped: true }));
       });
       subgroup.appendChild(drawer);
       if (!expanded) {
@@ -2373,6 +2507,9 @@
 
     function buildAgentActivityPanel(chatId, activities, options = {}) {
       const normalizedRows = normalizeAgentActivities(activities);
+      const previousThoughts = options.previousPanel ? Array.from(options.previousPanel.querySelectorAll('.msg-thought-panel')) : [];
+      let thoughtIndex = 0;
+      normalizedRows.forEach(row => { if (row.kind === 'reasoning') row._existingThoughtPanel = previousThoughts[thoughtIndex++] || null; });
       const meta = normalizeAgentMeta(options.agentMeta);
       const completed = Boolean(meta && meta.completedAt);
       const expanded = completed ? meta.collapsed === false : true;
@@ -2380,7 +2517,13 @@
       // Pending rows are represented by the live loader/status text. Keep them
       // hidden in the activity list so "Writing file" is not duplicated above
       // the streaming preview and again below it.
-      const baseRows = normalizedRows.filter((activity) => activity && activity.status !== 'pending');
+      // Suppress retired app-generated review notices in saved runs.
+      const retiredReviewNotices = new Set([
+        'All files are in place — reviewing the plan to confirm every item is met.',
+        'Reviewing the plan to confirm every item is met.',
+      ]);
+      const baseRows = normalizedRows.filter((activity) => activity && activity.status !== 'pending'
+        && !(activity.kind === 'thought' && retiredReviewNotices.has(String(activity.detail || '').trim())));
       const rows = buildLiveRowsWithStreamingFile(baseRows, streamingFile, completed);
       const wrapper = document.createElement('div');
       wrapper.className = `msg-agent-panel${completed ? ' completed' : ''}`;
@@ -2404,7 +2547,7 @@
         groups.forEach((group, groupIndex) => {
           const groupHasRunning = group.items.some((a) => a && a.status === 'running');
           const groupHasError = group.items.some((a) => a && a.status === 'error');
-          const groupFinished = completed || (!groupHasRunning && groupIndex !== activeStructuredGroupIndex);
+          const groupFinished = completed || Boolean(group.folded) || (!groupHasRunning && groupIndex !== activeStructuredGroupIndex);
           const firstItem = group.items[0] || {};
           // Do not key on normalized timestamps: legacy rows without a persisted
           // timestamp receive a fresh fallback timestamp on every render.
@@ -2422,7 +2565,8 @@
             list.appendChild(buildActivitySubgroup(chatId, group, {
               key: disclosureKey,
               finished: groupFinished,
-              startExpanded: !completed || groupHasError,
+              startExpanded: group.folded ? false : (!completed || groupHasError),
+              folded: Boolean(group.folded),
             }));
           }
         });
@@ -2433,10 +2577,11 @@
           wrapper.appendChild(drawer);
           setAgentPanelExpanded(wrapper, expanded, false);
         } else {
+          if (statusText) list.appendChild(buildAgentProgressLoader(statusText));
           wrapper.appendChild(list);
         }
       }
-      if (statusText && !completed) wrapper.appendChild(buildAgentProgressLoader(statusText));
+      if (!rows.length && statusText && !completed) wrapper.appendChild(buildAgentProgressLoader(statusText));
       return wrapper;
     }
 
@@ -2531,13 +2676,7 @@
 
       const icon = document.createElement('span');
       icon.className = 'msg-agent-editcard-icon';
-      icon.innerHTML = `
-        <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <rect x="3" y="3" width="14" height="14" rx="4"></rect>
-          <path d="M10 6.8v3.4M8.3 8.5h3.4"></path>
-          <path d="M8.3 12.8h3.4"></path>
-        </svg>
-      `;
+      icon.innerHTML = (typeof window !== 'undefined' && typeof window.uiIcon === 'function' ? window.uiIcon('fileDiff') : '');
       header.appendChild(icon);
 
       const titles = document.createElement('div');
@@ -2577,10 +2716,7 @@
         : `Restore the edited files to their state just before this response${createdCount > 0 ? ` and remove the ${createdCount} new file${createdCount === 1 ? '' : 's'} it created (moved to Trash)` : ''}`;
       undoBtn.innerHTML = `
         <span>${reverted ? 'Redo' : 'Undo'}</span>
-        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <path d="M12.5 6.5h-6a3 3 0 0 0 0 6h4"></path>
-          <path d="M10 3.5l3 3-3 3"></path>
-        </svg>
+        ${(typeof window !== 'undefined' && typeof window.uiIcon === 'function' ? window.uiIcon(reverted ? 'redo' : 'undo') : '')}
       `;
       undoBtn.addEventListener('click', async () => {
         if (undoBtn.disabled) return;
@@ -2658,33 +2794,37 @@
     }
 
     function hasCanvasTokenStarted(text) {
-      const source = String(text || '');
+      const source = buildThinkingState(text).displayText;
       return /<AIcanvas\b/i.test(source)
         || /<AIcanvasJSON\b/i.test(source)
         || /<(?:\/)?canvas>\s*$/i.test(source)
         || /^canvas\s*[>:]/i.test(source.trim());
     }
 
-    function buildCanvasLoader(displayText = '', rawText = '') {
-      const loader = document.createElement('div');
+    function buildCanvasLoader(displayText = '', rawText = '', existingLoader = null) {
+      const loader = existingLoader || document.createElement('div');
       loader.className = 'msg-canvas-loading';
       const intro = String(displayText || '').trim();
+      let introEl = loader.querySelector('.msg-canvas-loading-intro');
       if (intro) {
-        const introEl = document.createElement('div');
+        if (!introEl) introEl = document.createElement('div');
         introEl.className = 'msg-canvas-loading-intro';
-        introEl.textContent = intro;
-        loader.appendChild(introEl);
-      }
+        if (introEl.textContent !== intro) introEl.textContent = intro;
+        if (!introEl.parentNode) loader.prepend(introEl);
+      } else if (introEl) introEl.remove();
+      if (existingLoader) return loader;
       const card = document.createElement('div');
       card.className = 'msg-artifact-card msg-artifact-card-canvas msg-artifact-card-loading';
-      const title = document.createElement('div');
-      title.className = 'msg-artifact-title msg-canvas-loading-title';
-      const titleMatch = String(rawText || '').match(/<AIcanvas[^>]*\btitle="([^"]{1,90})"/i);
-      title.textContent = String(titleMatch && titleMatch[1] ? titleMatch[1] : 'Canvas').trim() || 'Canvas';
-      card.appendChild(title);
+      card.setAttribute('role', 'status');
+      card.setAttribute('aria-label', 'Writing document');
+      const icon = document.createElement('span');
+      icon.className = 'msg-artifact-icon msg-canvas-skeleton-icon';
+      icon.setAttribute('aria-hidden', 'true');
+      card.appendChild(icon);
       const body = document.createElement('div');
-      body.className = 'msg-canvas-loading-body';
-      for (let i = 0; i < 4; i += 1) {
+      body.className = 'msg-artifact-text msg-canvas-loading-body';
+      body.setAttribute('aria-hidden', 'true');
+      for (let i = 0; i < 2; i += 1) {
         const line = document.createElement('span');
         line.className = 'msg-canvas-loading-line';
         body.appendChild(line);
@@ -2696,20 +2836,46 @@
 
     function populateAssistantBubble(bubble, displayText, options = {}) {
       if (!bubble) return;
-      bubble.innerHTML = '';
+      const previousThought = bubble.querySelector(':scope > .msg-thought-panel');
+      const previousReview = options.showPostActionThinkingLoader && bubble.querySelector(':scope > .msg-post-action-thinking');
+      const previousCanvas = options.showCanvasLoader && bubble.querySelector(':scope > .msg-canvas-loading');
+      const keepThought = previousThought && (options.thinkingText || options.showThinkingLoader)
+        && !(Array.isArray(options.agentActivities) && options.agentActivities.length);
+      Array.from(bubble.childNodes).forEach(node => { if (node !== previousReview && node !== previousCanvas && (!keepThought || node !== previousThought)) node.remove(); });
       const shouldShowThinkingLoader = Boolean(options.showThinkingLoader);
       const thinkingPanel = buildThinkingPanel(options.thinkingText || '', {
         inProgress: shouldShowThinkingLoader,
+        existingPanel: keepThought ? previousThought : null,
         startedAt: options.thinkingStartedAt,
         completedAt: options.thinkingCompletedAt,
       });
+      if (thinkingPanel && thinkingPanel.parentNode !== bubble && !(Array.isArray(options.agentActivities) && options.agentActivities.length)) bubble.appendChild(thinkingPanel);
+      if (options.webSearch && !(Array.isArray(options.agentActivities) && options.agentActivities.length)) {
+        bubble.insertBefore(buildWebSearchRow(options.webSearch), previousCanvas || null);
+      }
+      if (options.showPostActionThinkingLoader) {
+        const review = previousReview || buildThinkingLoader();
+        review.classList.add('msg-post-action-thinking');
+        review.querySelector('.msg-thinking-loader-label').textContent = 'Reviewing the response…';
+        bubble.appendChild(review);
+      }
       if (options.showCanvasLoader) {
-        bubble.appendChild(buildCanvasLoader(displayText, options.canvasRawText));
+        const loader = buildCanvasLoader(displayText, options.canvasRawText, previousCanvas);
+        if (loader.parentNode !== bubble) bubble.appendChild(loader);
         return;
       }
-      if (thinkingPanel) bubble.appendChild(thinkingPanel);
       if (Array.isArray(options.agentActivities) && (options.agentActivities.length > 0 || options.agentStatusText)) {
-        bubble.appendChild(buildAgentActivityPanel(options.chatId || '', options.agentActivities, {
+        let activityRows = options.agentActivities.slice();
+        if (options.thinkingText && !activityRows.some(row => row.kind === 'reasoning' && row.detail === options.thinkingText)) {
+          activityRows.unshift({ kind: 'reasoning', detail: options.thinkingText, status: 'done', startedAt: options.thinkingStartedAt, completedAt: options.thinkingCompletedAt });
+        }
+        if (options.webSearch && !activityRows.some(row => row && row.kind === 'web_search')) {
+          activityRows = activityRows.filter(row => !(row && row.title === 'Searched the web'));
+          const intro = activityRows.findIndex(row => row && ['thought', 'plan'].includes(row.kind));
+          const reasoning = activityRows.findIndex(row => row && row.kind === 'reasoning');
+          activityRows.splice(Math.max(intro, reasoning) + 1, 0, { kind: 'web_search', title: 'Searched the web', webSearch: options.webSearch, status: 'done' });
+        }
+        bubble.appendChild(buildAgentActivityPanel(options.chatId || '', activityRows, {
           statusText: options.agentStatusText || '',
           agentMeta: options.agentMeta || null,
           messageTs: Number(options.messageTs) || 0,
@@ -2794,9 +2960,7 @@
         btn.dataset.agentRunProject = '1';
       }
       btn.innerHTML = `
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true">
-          <path d="M7 5l12 7-12 7z"></path>
-        </svg>
+        ${(typeof window !== 'undefined' && typeof window.uiIcon === 'function' ? window.uiIcon(isDevServer ? 'globe' : 'play') : '')}
         <span>${isDevServer ? 'Open' : 'Run'}</span>
       `;
       card.appendChild(label);
@@ -2906,16 +3070,9 @@
     function buildAttachmentFileIcon(itemOrName = {}) {
       const meta = getAttachmentFileIconMeta(itemOrName);
       if (!meta) return buildAttachmentFallbackFileIcon();
-      const label = escapeAttachmentIconValue(meta.label).slice(0, 5);
       const color = escapeAttachmentIconValue(meta.color);
-      return `
-        <svg class="attach-file-type-icon" viewBox="0 0 40 40" aria-hidden="true">
-          <rect x="8" y="5" width="24" height="30" rx="5" fill="rgba(226, 241, 255, 0.96)"></rect>
-          <path d="M25 5v8h7" fill="rgba(148, 163, 184, 0.42)"></path>
-          <rect x="6" y="20" width="28" height="14" rx="4" fill="${color}"></rect>
-          <text x="20" y="29.8" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="7.4" font-weight="800" fill="#ffffff">${label}</text>
-        </svg>
-      `;
+      const doc = typeof window !== 'undefined' && typeof window.uiIcon === 'function' ? window.uiIcon('doc') : buildAttachmentFallbackFileIcon();
+      return `<span class="attach-file-type-icon" style="--ft:${color}">${doc}</span>`;
     }
 
     function buildMessageAttachmentStrip(attachments = []) {
@@ -2994,6 +3151,17 @@
               openPreview();
             }
           });
+        } else {
+          // Files open a preview panel (table, code, text, or "no preview").
+          chip.classList.add('previewable');
+          chip.tabIndex = 0;
+          chip.setAttribute('role', 'button');
+          chip.setAttribute('aria-label', `Preview ${name}`);
+          const openFile = () => { if (typeof window.openAttachmentPreview === 'function') window.openAttachmentPreview(item); };
+          chip.addEventListener('click', openFile);
+          chip.addEventListener('keydown', (evt) => {
+            if (evt.key === 'Enter' || evt.key === ' ') { evt.preventDefault(); openFile(); }
+          });
         }
 
         chip.appendChild(icon);
@@ -3003,7 +3171,58 @@
       return strip;
     }
 
-    function buildMsgNode(role, text, chatId = '', messageTs = 0, loopDetected = false, thinkingText = '', branchAnchorTs = 0, agentActivities = [], agentMeta = null, displayTs = 0, thinkingMeta = null, attachments = []) {
+    // "Searched the web · N sources" — collapsible, with a chip per source.
+    function buildWebSearchRow(info) {
+      const sources = Array.isArray(info.sources) ? info.sources : [];
+      const row = document.createElement('div');
+      row.className = `msg-websearch${info.failed ? ' failed' : ''}`;
+      const toggle = document.createElement('button');
+      toggle.type = 'button';
+      toggle.className = 'msg-websearch-toggle';
+      const icon = typeof window !== 'undefined' && typeof window.uiIcon === 'function' ? window.uiIcon('globe') : '';
+      const label = info.pending ? 'Searching the web…' : info.failed ? 'Web search didn\'t work' : 'Searched the web';
+      toggle.innerHTML = `${icon}<span></span><svg class="msg-websearch-chevron" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 4.5 9.5 8 6 11.5"/></svg>`;
+      toggle.querySelector('span').textContent = label;
+      row.appendChild(toggle);
+      if (!sources.length) {
+        toggle.disabled = true;
+        toggle.querySelector('.msg-websearch-chevron')?.remove();
+        return row;
+      }
+      const list = document.createElement('div');
+      list.className = 'msg-websearch-sources';
+      list.hidden = true;
+      if (info.query) {
+        const q = document.createElement('div');
+        q.className = 'msg-websearch-query';
+        q.innerHTML = `${typeof window !== 'undefined' && typeof window.uiIcon === 'function' ? window.uiIcon('search') : ''}<span></span>`;
+        q.querySelector('span').textContent = `Searched the web for ${info.query}`;
+        list.appendChild(q);
+      }
+      sources.forEach((src) => {
+        let host = '';
+        try { host = new URL(src.url).hostname.replace(/^www\./, ''); } catch (_) { return; }
+        const a = document.createElement('a');
+        a.className = 'msg-websearch-chip ui-tooltip-anchor';
+        a.href = src.url;
+        a.target = '_blank';
+        a.rel = 'noopener noreferrer';
+        a.dataset.tooltip = src.title || src.url;
+        const name = document.createElement('span');
+        name.textContent = `${src.title || host} | ${host}`;
+        a.appendChild(name);
+        list.appendChild(a);
+      });
+      row.appendChild(list);
+      toggle.setAttribute('aria-expanded', 'false');
+      toggle.addEventListener('click', () => {
+        list.hidden = !list.hidden;
+        toggle.setAttribute('aria-expanded', list.hidden ? 'false' : 'true');
+      });
+      return row;
+    }
+
+    function buildMsgNode(role, text, chatId = '', messageTs = 0, loopDetected = false, thinkingText = '', branchAnchorTs = 0, agentActivities = [], agentMeta = null, displayTs = 0, thinkingMeta = null, attachments = [], webSearch = null, interruptionNotice = '') {
       const div = document.createElement('div');
       div.className = `msg ${role}`;
       const editingUserMessage = role === 'user' && d.isEditingUserMessage && d.isEditingUserMessage(chatId, messageTs);
@@ -3016,7 +3235,7 @@
       const bubble = document.createElement('div');
       bubble.className = role === 'error' ? 'msg-error-panel' : 'msg-bubble';
       const followMarker = '<<AIEXE_CANVAS_FOLLOWUP>>';
-      const originalText = String(text || '');
+      const originalText = interruptionNotice ? String(text || '').replace(interruptionNotice, '').trim() : String(text || '');
       let renderText = originalText;
       let canvasFollowUp = '';
       const markerIndex = originalText.indexOf(followMarker);
@@ -3033,6 +3252,7 @@
           thinkingText,
           thinkingStartedAt: Number(thinkingMeta && thinkingMeta.startedAt) || 0,
           thinkingCompletedAt: Number(thinkingMeta && thinkingMeta.completedAt) || 0,
+          webSearch,
         });
       } else if (role === 'error') {
         bubble.textContent = renderText;
@@ -3069,11 +3289,6 @@
 
         const footer = document.createElement('div');
         footer.className = 'msg-edit-footer';
-        const note = document.createElement('div');
-        note.className = 'msg-edit-note';
-        note.textContent = 'Editing this message creates an alternate branch in this chat. Use the branch switcher on this message to move between versions.';
-        footer.appendChild(note);
-
         const actions = document.createElement('div');
         actions.className = 'msg-edit-actions';
 
@@ -3132,7 +3347,22 @@
               ? ' msg-artifact-card-canvas'
               : '';
             card.className = `msg-artifact-card${artifactTypeClass}`;
-            card.innerHTML = `<div class="msg-artifact-title">${d.escapeHtml ? d.escapeHtml(item.name) : item.name}</div><div class="msg-artifact-meta">Open details</div>`;
+            const revealKey = `${chatId}:${messageTs}:${item.name}`;
+            if (!revealedArtifactKeys.has(revealKey) && nowTs() - Number(item.createdAt) < 15000) {
+              card.classList.add('msg-artifact-card-ready');
+              revealedArtifactKeys.add(revealKey);
+            }
+            const esc = (v) => (d.escapeHtml ? d.escapeHtml(v) : String(v));
+            const isCode = String(item && item.type || '') === 'code' || String(item && item.canvasFormat || '').toLowerCase() === 'code';
+            const glyph = isCode
+              ? '<path d="m8.5 8-4 4 4 4"/><path d="m15.5 8 4 4-4 4"/><path d="m13 5.5-2 13"/>'
+              : '<path d="M14 3.5H7.5a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h9a2 2 0 0 0 2-2V8z"/><path d="M14 3.5V8h4.5"/><path d="M9 12.5h6M9 16h4"/>';
+            const svg = (paths) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths}</svg>`;
+            // Document chip: type tile, title, kind · size, open arrow.
+            card.innerHTML = `<span class="msg-artifact-icon ${isCode ? 'is-code' : 'is-doc'}">${svg(glyph)}</span>`
+              + `<span class="msg-artifact-text"><span class="msg-artifact-title">${esc(item.name)}</span>`
+              + `<span class="msg-artifact-meta">${isCode ? 'Code' : 'Document'}${Number(item.revision) > 1 ? ` · Version ${Number(item.revision)}` : ''}</span></span>`
+              + `<span class="msg-artifact-open">${svg('<path d="M7 17 17 7"/><path d="M8 7h9v9"/>')}</span>`;
             card.addEventListener('click', () => {
               if (typeof d.openArtifactDetail === 'function' && typeof d.makeArtifactKey === 'function') {
                 d.openArtifactDetail(d.makeArtifactKey(item), 'chat');
@@ -3155,6 +3385,20 @@
           follow.textContent = canvasFollowUp;
           bubble.appendChild(follow);
         }
+      }
+
+      if (role === 'ai' && interruptionNotice) {
+        const notice = document.createElement('div');
+        notice.className = 'msg-interruption-notice';
+        notice.setAttribute('role', 'status');
+        const icon = document.createElement('span');
+        icon.setAttribute('aria-hidden', 'true');
+        icon.innerHTML = typeof window.uiIcon === 'function' ? window.uiIcon('pause') : 'Ⅱ';
+        const label = document.createElement('span');
+        label.textContent = interruptionNotice;
+        notice.appendChild(icon);
+        notice.appendChild(label);
+        bubble.appendChild(notice);
       }
 
       const userAttachmentStrip = role === 'user' ? buildMessageAttachmentStrip(attachments) : null;
@@ -3259,9 +3503,7 @@
       }
       if (d.isInNewChatMode && d.isInNewChatMode()) {
         if (typeof d.setLastRenderedChatId === 'function') d.setLastRenderedChatId('');
-        if (typeof d.setCanvasMode === 'function') d.setCanvasMode(false);
-        if (typeof d.setThinkMode === 'function') d.setThinkMode(false);
-        if (typeof d.setWebSearchMode === 'function') d.setWebSearchMode(false);
+        // Toggles picked in a new chat must survive re-renders; startNewChat clears them.
         if (typeof d.setPendingAttachments === 'function' && typeof d.normalizePendingAttachmentList === 'function') {
           d.setPendingAttachments(d.normalizePendingAttachmentList(d.getPendingNewChatAttachments ? d.getPendingNewChatAttachments() : []));
         }
@@ -3316,6 +3558,8 @@
           Number(msg.displayTs) || 0,
           msg.thinkingMeta || null,
           Array.isArray(msg.attachments) ? msg.attachments : [],
+          msg.webSearch || null,
+          msg.interruptionNotice || '',
         ));
       });
       if (forceBottom || (d.getChatAutoScrollPinned && d.getChatAutoScrollPinned())) {

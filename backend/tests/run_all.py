@@ -29,6 +29,10 @@ TESTS = [
     "smoke_live_data",  # chat-card FX fallback + weather parsing
     "smoke_prices",     # live quote feed (stubbed fetcher)
     "smoke_market_stream",  # local WebSocket + exchange stream routing
+    "smoke_error_messages",  # price errors in plain words, grouped per reason
+    "smoke_llm_params",  # newer models: max_completion_tokens / no temperature
+    "smoke_archive_extract",  # zip/tar attachments: in-memory, capped, bomb-safe
+    "smoke_autopilot_ai",  # autopilot has its own AI choice; key stays private
 ]
 
 

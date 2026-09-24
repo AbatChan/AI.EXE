@@ -62,9 +62,9 @@ const core = global.AIExePromptCore.createPromptCore({
   assert.match(prompt, /Wrote: index\.html/, 'written file is represented in compact memory');
   assert.match(prompt, /Checked: files \+ app run/, 'validation step is represented');
   assert.doesNotMatch(prompt, new RegExp(rawSecret), 'raw generated file bodies never enter memory');
-  assert.match(prompt, /CURRENT_CANVAS_CONTEXT/, 'latest Canvas is included');
+  assert.match(prompt, /CANVAS_DOCUMENTS \(/, 'chat Canvas documents are included');
   assert.match(prompt, /Spider-Man defeats Doctor Doom/, 'Canvas body is readable');
-  assert.match(prompt, /Live web search is enabled through Venice/, 'model knows web search is enabled');
+  assert.match(prompt, /Live web search is ON/, 'model knows web search is enabled');
   assert.match(prompt, /web_search_context/, 'historical web-enabled response is marked');
 
   const agentHistory = core.buildAgentHistoryTranscript('chat_memory');

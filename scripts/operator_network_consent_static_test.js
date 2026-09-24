@@ -18,7 +18,7 @@ assert.match(update, /armUpdateOnQuit/);
 assert.match(update, /validSha256/);
 assert.doesNotMatch(html, /id="updateBadge"/);
 assert.match(html, /id="updateStatus"[^>]*hidden/);
-assert.match(html, /id="settingsUpdateCheckBtn"/);
+assert.match(html, /id="settingsUpdateStatus"/);
 
 assert.match(windows, /Get-FileHash -Algorithm SHA256/);
 assert.match(windows, /case WM_CLOSE:[\s\S]*LaunchPendingUpdateOnQuit/);
@@ -26,6 +26,6 @@ assert.match(windows, /LaunchUpdater\(pending->url, pending->version, pending->s
 assert.match(releaseWorkflow, /AI\.EXE-Windows\.zip\.sha256/);
 
 const marketHosts = [...prices.matchAll(/https:\/\/([^/"']+)/g)].map((match) => match[1]);
-assert.deepEqual([...new Set(marketHosts)].sort(), ['api.coingecko.com', 'api.nasdaq.com']);
+assert.deepEqual([...new Set(marketHosts)].sort(), ['api.bybit.com', 'api.coingecko.com', 'api.nasdaq.com']);
 
 console.log('PASS: verified automatic updates install on quit and market data hosts are allowlisted');

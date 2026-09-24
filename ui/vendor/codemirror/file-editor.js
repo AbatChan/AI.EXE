@@ -2,7 +2,8 @@ import {EditorState, Compartment, StateField, StateEffect, RangeSetBuilder} from
 import {EditorView, keymap, lineNumbers, highlightActiveLineGutter, drawSelection, highlightActiveLine, Decoration} from "@codemirror/view";
 import {defaultKeymap, history, historyKeymap, indentWithTab} from "@codemirror/commands";
 import {searchKeymap, highlightSelectionMatches} from "@codemirror/search";
-import {defaultHighlightStyle, syntaxHighlighting} from "@codemirror/language";
+import {HighlightStyle, syntaxHighlighting} from "@codemirror/language";
+import {tags as t} from "@lezer/highlight";
 import {javascript} from "@codemirror/lang-javascript";
 import {python} from "@codemirror/lang-python";
 import {json} from "@codemirror/lang-json";
@@ -50,79 +51,54 @@ function languageExtension(lang) {
   }
 }
 
+// App tokens (ai-exe.css) drive every color, so the editor follows light/dark live.
 function createTheme() {
   return EditorView.theme({
     "&": {
       height: "100%",
-      backgroundColor: "#0a0b0e",
-      color: "#e2e8f0",
+      backgroundColor: "var(--bg)",
+      color: "var(--text)",
       fontFamily: '"SFMono-Regular", "Consolas", "Menlo", "Liberation Mono", monospace',
-      fontSize: "14px"
+      fontSize: "13px"
     },
-    ".cm-scroller": {
-      fontFamily: "inherit",
-      lineHeight: "22.4px"
-    },
-    ".cm-content, .cm-gutter": {
-      minHeight: "100%"
-    },
-    ".cm-content": {
-      caretColor: "#e2e8f0"
-    },
-    ".cm-cursor, .cm-dropCursor": {
-      borderLeftColor: "#e2e8f0"
-    },
-    ".cm-gutters": {
-      backgroundColor: "rgba(10, 12, 18, 0.82)",
-      color: "rgba(148, 163, 184, 0.72)",
-      borderRight: "1px solid rgba(37, 43, 61, 0.75)"
-    },
-    ".cm-activeLine": {
-      backgroundColor: "rgba(92, 129, 196, 0.16)"
-    },
-    ".cm-activeLineGutter": {
-      backgroundColor: "rgba(92, 129, 196, 0.14)",
-      color: "rgba(235, 244, 255, 0.98)"
-    },
-    ".cm-selectionBackground, &.cm-focused .cm-selectionBackground, ::selection": {
-      backgroundColor: "rgba(82, 174, 255, 0.24)"
-    },
-    ".cm-panels": {
-      backgroundColor: "#0f1117",
-      color: "#e2e8f0",
-      borderBottom: "1px solid #1e2333"
-    },
-    ".cm-search .cm-textfield": {
-      backgroundColor: "rgba(10, 15, 28, 0.72)",
-      color: "#e2e8f0",
-      border: "1px solid rgba(52, 60, 84, 0.95)",
-      borderRadius: "7px"
-    },
-    ".cm-search .cm-button": {
-      background: "transparent",
-      color: "rgba(226, 232, 240, 0.82)",
-      border: "1px solid rgba(52, 60, 84, 0.95)",
-      borderRadius: "7px"
-    },
-    ".cm-search .cm-button:hover": {
-      background: "rgba(255,255,255,0.06)",
-      color: "#fff"
-    },
-    ".cm-searchMatch": {
-      backgroundColor: "rgba(255, 214, 10, 0.22)"
-    },
-    ".cm-searchMatch.cm-searchMatch-selected": {
-      backgroundColor: "rgba(255, 214, 10, 0.45)"
-    },
+    ".cm-scroller": { fontFamily: "inherit", lineHeight: "21px" },
+    ".cm-content, .cm-gutter": { minHeight: "100%" },
+    ".cm-content": { caretColor: "var(--accent)", padding: "10px 0" },
+    ".cm-cursor, .cm-dropCursor": { borderLeftColor: "var(--accent)", borderLeftWidth: "2px" },
+    ".cm-gutters": { backgroundColor: "var(--bg)", color: "var(--text4)", border: "none", paddingLeft: "6px" },
+    ".cm-lineNumbers .cm-gutterElement": { padding: "0 14px 0 8px" },
+    ".cm-activeLine": { backgroundColor: "var(--ink-04)" },
+    ".cm-activeLineGutter": { backgroundColor: "transparent", color: "var(--text2)" },
+    ".cm-selectionBackground, &.cm-focused .cm-selectionBackground, ::selection": { backgroundColor: "var(--accent-24)" },
+    ".cm-panels": { backgroundColor: "var(--panel)", color: "var(--text)", borderBottom: "1px solid var(--ui-line)" },
+    ".cm-search .cm-textfield": { backgroundColor: "var(--ui-surface)", color: "var(--text)", border: "1px solid var(--ui-line)", borderRadius: "7px" },
+    ".cm-search .cm-button": { background: "transparent", color: "var(--text2)", border: "1px solid var(--ui-line)", borderRadius: "7px" },
+    ".cm-search .cm-button:hover": { background: "var(--ink-06)", color: "var(--text)" },
+    ".cm-searchMatch": { backgroundColor: "color-mix(in srgb, var(--warn) 22%, transparent)" },
+    ".cm-searchMatch.cm-searchMatch-selected": { backgroundColor: "color-mix(in srgb, var(--warn) 45%, transparent)" },
+    ".cm-selectionMatch": { backgroundColor: "var(--ink-08)" },
     // Range highlight for "go to the read/edited region" from the agent work panel.
-    ".cm-range-hl-read": {
-      backgroundColor: "rgba(82, 174, 255, 0.14)"
-    },
-    ".cm-range-hl-edit": {
-      backgroundColor: "rgba(52, 211, 153, 0.14)"
-    }
-  }, {dark: true});
+    ".cm-range-hl-read": { backgroundColor: "color-mix(in srgb, var(--link) 14%, transparent)" },
+    ".cm-range-hl-edit": { backgroundColor: "color-mix(in srgb, var(--good) 14%, transparent)" }
+  });
 }
+
+// Syntax colors from the same semantic tokens.
+const appHighlightStyle = HighlightStyle.define([
+  {tag: [t.keyword, t.controlKeyword, t.operatorKeyword, t.modifier, t.definitionKeyword], color: "var(--violet)"},
+  {tag: [t.string, t.special(t.string), t.regexp], color: "var(--good)"},
+  {tag: [t.number, t.bool, t.null, t.atom], color: "var(--warn)"},
+  {tag: [t.comment, t.lineComment, t.blockComment, t.meta], color: "var(--text4)", fontStyle: "italic"},
+  {tag: [t.tagName, t.angleBracket], color: "var(--bad)"},
+  {tag: [t.attributeName, t.propertyName], color: "var(--link)"},
+  {tag: [t.function(t.variableName), t.function(t.propertyName)], color: "var(--accent)"},
+  {tag: [t.typeName, t.className, t.namespace], color: "var(--warn)"},
+  {tag: [t.heading], color: "var(--text)", fontWeight: "600"},
+  {tag: [t.link, t.url], color: "var(--link)", textDecoration: "underline"},
+  {tag: [t.emphasis], fontStyle: "italic"},
+  {tag: [t.strong], fontWeight: "600"},
+  {tag: [t.invalid], color: "var(--bad)"},
+]);
 
 // Effect + field that paint a contiguous line range (read = blue, edit = green).
 const setRangeHighlight = StateEffect.define();
@@ -175,7 +151,7 @@ export function createFileEditor(host, options = {}) {
           ...searchKeymap,
         ]),
         highlightSelectionMatches(),
-        syntaxHighlighting(defaultHighlightStyle, {fallback: true}),
+        syntaxHighlighting(appHighlightStyle),
         languageCompartment.of(languageExtension(options.language)),
         rangeHighlightField,
         theme,

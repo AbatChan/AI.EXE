@@ -918,12 +918,10 @@ function attachCodeCopyButtons(container) {
     btn.type = 'button';
     btn.setAttribute('aria-label', 'Copy code');
     applyCustomTooltip(btn, 'Copy code');
-    btn.innerHTML = `
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <rect x="9" y="9" width="13" height="13" rx="2"></rect>
-          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-        </svg>
-      `;
+    // Shared app icon set when available (same stroke/shape everywhere).
+    btn.innerHTML = typeof window !== 'undefined' && typeof window.uiIcon === 'function'
+      ? window.uiIcon('copy')
+      : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11.5" height="11.5" rx="2.5"/><path d="M15 9V6.5A2.5 2.5 0 0 0 12.5 4h-6A2.5 2.5 0 0 0 4 6.5v6A2.5 2.5 0 0 0 6.5 15H9"/></svg>';
     btn.addEventListener('click', async (evt) => {
       evt.preventDefault();
       evt.stopPropagation();

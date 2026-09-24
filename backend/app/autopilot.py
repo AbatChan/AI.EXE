@@ -97,10 +97,16 @@ def trend_signal(candles) -> dict:
     breakout = price >= max(c["high"] for c in candles[-25:-1])  # 24h high
     uptrend = fast[-1] > slow[-1] > base[-1] and price > fast[-1]
     score = (change_6h / vol) if vol else 0.0
+    # Research facts for the AI reviewer: weak-volume breakouts and stretched prices fail more often.
+    vols = [c.get("vol") or 0 for c in candles[-21:-1]]
+    avg_vol = sum(vols) / len(vols) if vols else 0
+    volume_ratio = round((candles[-1].get("vol") or 0) / avg_vol, 2) if avg_vol else None
     return {
         "ok": True, "price": price, "uptrend": uptrend, "breakout": breakout,
         "trend_broken": price < slow[-1], "atr": atr(candles), "volatility": vol,
         "change_1h": change_1h, "change_6h": change_6h, "score": round(score, 2),
+        "volume_ratio": volume_ratio, "above_ema20_pct": round((price / fast[-1] - 1) * 100, 2),
+        "change_12d": price / closes[0] - 1,
         "entry": bool(uptrend and breakout and change_6h > 0 and change_1h > 0),
     }
 
@@ -225,10 +231,14 @@ class AutopilotAccount:
 
     # ----- queries -----
 
+    def sale_value_cents(self, symbol: str) -> int:
+        """What an open position would fetch if sold now: slippage and fee included, like _sell."""
+        pos = self.positions[symbol]
+        gross = pos["qty"] * self.marks.get(symbol, pos["entry_price"]) * (1 - SLIPPAGE_BPS / 10_000) * 100 / QTY_SCALE
+        return round(gross * (1 - FEE_BPS / 10_000))
+
     def equity_cents(self) -> int:
-        held = sum(round(p["qty"] * self.marks.get(s, p["entry_price"]) * 100 / QTY_SCALE)
-                   for s, p in self.positions.items())
-        return self.cash_cents + held
+        return self.cash_cents + sum(self.sale_value_cents(s) for s in self.positions)
 
     def benchmark_cents(self) -> int:
         """Buy BTC with the whole budget at start and hold."""
@@ -270,6 +280,7 @@ class Autopilot:
         self._cycle_lock = threading.Lock()
         self.last_cycle_at = ""
         self.last_error = ""
+        self.problems = []
         self.signals = {}
         self._exited_at = {}
         self._verdicts = {}  # one AI review per symbol per closed bar
@@ -281,6 +292,7 @@ class Autopilot:
         self._lesson_writer = lesson_writer    # (losing trade) -> one-line "why it lost"
         self.universe = list(WATCHLIST)
         self._universe_at = 0.0
+        self._btc_mark_at = -1e18
 
     # ----- control -----
 
@@ -331,6 +343,50 @@ class Autopilot:
         self.account._append("config", {"pinned": pinned[-20:]})
         self.account._append("note", {"kind": "universe",
                                       "note": f"{'Pinned' if on else 'Unpinned'} {coin} {'to' if on else 'from'} the scan list"})
+        return self.status()
+
+    def set_risk(self, risk: str) -> dict:
+        if risk not in RISK_PRESETS:
+            raise ValueError("Choose Careful, Balanced or Bold.")
+        self.account._append("config", {"risk": risk})
+        self.account._append("note", {"kind": "started", "note": f"Risk set to {RISK_PRESETS[risk]['label']}"})
+        return self.status()
+
+    def buy_now(self, symbol: str) -> dict:
+        """A buy you asked for: preset size, normal exits, no AI veto."""
+        acct = self.account
+        if not acct.config.get("budget_cents"):
+            raise ValueError("Start the autopilot with a budget first.")
+        coin = normalize_coin(symbol)
+        if coin in acct.positions:
+            raise ValueError(f"Already holding {coin}.")
+        preset = RISK_PRESETS[acct.config.get("risk", "careful")]
+        if len(acct.positions) >= preset["max_open"]:
+            raise ValueError(f"All {preset['max_open']} trade slots are full. Sell one first.")
+        candles = self._fetch(coin)
+        closed = [c for c in candles or [] if not c.get("partial")]
+        sig = trend_signal(closed)
+        if not sig.get("ok"):
+            raise ValueError(f"{coin} is too new: it needs about 5 days of hourly prices.")
+        sig["price"] = candles[-1]["close"]
+        size_cents = min(acct.cash_cents, round(acct.equity_cents() * preset["position_pct"] / 100))
+        if size_cents < 1_000:
+            raise ValueError("Not enough cash for a new trade.")
+        with self._cycle_lock:
+            self._buy(coin, sig, size_cents, "bought by you")
+            acct.marks[coin] = sig["price"]
+        return self.status()
+
+    def sell_now(self, symbol: str) -> dict:
+        coin = normalize_coin(symbol)
+        if coin not in self.account.positions:
+            raise ValueError(f"Not holding {coin}.")
+        price = self._latest_price(coin) or self.account.marks.get(coin)
+        if not price:
+            raise ValueError(f"No live price for {coin} right now.")
+        with self._cycle_lock:
+            self._sell(coin, price, "sold by you")
+            self._exited_at[coin] = self._clock()
         return self.status()
 
     def coin_check(self, symbol: str) -> dict:
@@ -417,7 +473,7 @@ class Autopilot:
     def _run_cycle(self) -> dict:
         acct = self.account
         preset = RISK_PRESETS[acct.config.get("risk", "careful")]
-        signals, errors = {}, []
+        signals, errors, problems = {}, [], {}  # problems: reason -> coins
         if self._fetch_universe and self._clock() - self._universe_at >= UNIVERSE_REFRESH_SECONDS:
             try:
                 fresh = list(self._fetch_universe()) or self.universe
@@ -431,14 +487,17 @@ class Autopilot:
                 self.universe = fresh
                 self._universe_at = self._clock()
             except Exception as exc:
-                errors.append(f"coin list: {exc}")
+                text = str(exc)
+                errors.append(f"couldn't refresh the coin list ({text[len('coin list: '):] if text.startswith('coin list: ') else text})")
         # Open positions stay watched until sold, even if they drop out of the list.
         scan = list(dict.fromkeys(list(self.universe) + list(acct.config.get("pinned", [])) + list(acct.positions)))
         for symbol in scan:
             try:
                 candles = self._fetch(symbol)
             except Exception as exc:
-                errors.append(f"{symbol}: {exc}")
+                text = str(exc) or "price unavailable"
+                reason = text[len(symbol) + 2:] if text.startswith(f"{symbol}: ") else text  # no "ETH: ETH:"
+                problems.setdefault(reason, []).append(symbol)
                 continue
             # Entries judge closed bars; exits and marks use the live price.
             closed = [c for c in candles if not c.get("partial")]
@@ -457,6 +516,8 @@ class Autopilot:
                 pos["peak_restored"] = True
         self.signals = signals
         self.last_cycle_at = _now()
+        self.problems = [{"coins": coins, "reason": reason} for reason, coins in problems.items()]
+        errors += [f"{', '.join(coins)}: {reason}" for reason, coins in problems.items()]
         self.last_error = "; ".join(errors)[:300]
         if not acct.benchmark.get("BTC") and signals.get("BTC", {}).get("ok"):
             acct.benchmark["BTC"] = signals["BTC"]["price"]
@@ -533,7 +594,10 @@ class Autopilot:
     def _review(self, symbol, sig, preset) -> dict:
         if not self._reviewer:
             return {"approve": True, "reason": "Uptrend and breakout (rules only)"}
+        btc = self.signals.get("BTC") or {}
         context = {"open_positions": list(self.account.positions), "risk": preset["label"],
+                   "btc_trend": ({"uptrend": btc.get("uptrend"), "above_50h_avg": not btc.get("trend_broken"),
+                                  "change_12d_pct": round(btc.get("change_12d", 0) * 100, 2)} if btc.get("ok") else None),
                    "recent_lessons": [f"{l['symbol']}: {l['text']}" for l in self.account.lessons[-6:]],
                    "market": {s: {"change_1h_pct": round(v["change_1h"] * 100, 2),
                                   "change_6h_pct": round(v["change_6h"] * 100, 2)}
@@ -578,15 +642,26 @@ class Autopilot:
         rows.sort(key=lambda r: (not r["held"], not r["trending"], -abs(r["change_1h"] or 0)))
         return rows
 
+    def _refresh_btc_mark(self):
+        """The 'vs holding BTC' line needs a live BTC price even when stopped."""
+        if self._clock() - self._btc_mark_at < 60 and self.account.marks.get("BTC"):
+            return
+        self._btc_mark_at = self._clock()
+        price = self._latest_price("BTC")
+        if price:
+            self.account.marks["BTC"] = price
+
     def status(self) -> dict:
         acct = self.account
+        if acct.benchmark.get("BTC"):
+            self._refresh_btc_mark()
         budget = acct.config.get("budget_cents", 0)
         equity = acct.equity_cents()
         wins = [t for t in acct.trades if t["pnl_cents"] > 0]
         positions = []
         for symbol, pos in acct.positions.items():
             mark = acct.marks.get(symbol, pos["entry_price"])
-            value = round(pos["qty"] * mark * 100 / QTY_SCALE)
+            value = acct.sale_value_cents(symbol)  # "if sold now", so closing never looks like a loss
             positions.append({"symbol": symbol, "entry": pos["entry_price"], "price": mark,
                               "value_cents": value, "pnl_cents": value - pos["cost_cents"],
                               "opened_at": pos["opened_at"], "reason": pos.get("reason", "")})
@@ -606,6 +681,6 @@ class Autopilot:
             "watchlist": self._watchlist_view(),
             "universe_size": len(self.universe),
             "pinned": list(acct.config.get("pinned", [])),
-            "last_cycle_at": self.last_cycle_at, "last_error": self.last_error,
+            "last_cycle_at": self.last_cycle_at, "last_error": self.last_error, "problems": self.problems,
             "ledger": acct.verify(),
         }

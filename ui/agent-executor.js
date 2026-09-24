@@ -848,14 +848,17 @@ export default config;
         // false-flags valid files as "truncated" — so if it parses, trust the parser and
         // never let the heuristic override it. (CLAUDE.md: regex/keyword heuristics are a
         // last-resort fallback, not the primary signal.)
-        const isPlainJs = /\.(js|mjs|cjs)$/i.test(normalized) && !/\b(import|export)\b/.test(text);
-        if (isPlainJs) {
+        // Parse first: a comment saying "CSV export" used to route valid files to the heuristic.
+        if (/\.(js|mjs|cjs)$/i.test(normalized)) {
           try {
             // eslint-disable-next-line no-new, no-new-func
             new Function(text);
             return '';
           } catch (err) {
-            return getJsSyntaxIssue(text, err) || `has a JavaScript syntax error: ${String((err && err.message) || err || 'unknown')}`;
+            // Only real module statements excuse a parse failure.
+            if (!/^[ \t]*(?:import|export)\b/m.test(text)) {
+              return getJsSyntaxIssue(text, err) || `has a JavaScript syntax error: ${String((err && err.message) || err || 'unknown')}`;
+            }
           }
         }
         // TS/TSX/JSX or ES-module JS: no safe in-page parser, so fall back to the structural
@@ -1262,7 +1265,7 @@ export default config;
 
     function looksLikeMissingNodeDependencies(output) {
       const text = String(output || '');
-      return /(?:vite|tsc|eslint):\s*(?:command not found|not recognized)|Cannot find module ['"][^'"]*(?:vite|typescript|@vitejs|eslint)|could not determine executable|missing script:\s*build|ENOENT/i.test(text);
+      return /(?:next|nuxt|astro|webpack|react-scripts|vite|tsc|eslint):\s*(?:command not found|not recognized)|Cannot find module ['"][^'"]*(?:next|nuxt|astro|webpack|react-scripts|vite|typescript|@vitejs|eslint)|could not determine executable/i.test(text);
     }
 
     function parseWorkspaceJsonObject(text) {
@@ -1336,7 +1339,7 @@ export default config;
             label: 'Vite build',
             passLabel: 'Vite build passed',
             failLabel: 'Vite build failed',
-            proof: { kind: 'command', command: 'npm run build', installCommand: 'npm install' },
+            proof: { kind: 'command', command: 'npm run build', installCommand: 'npm install --no-audit --no-fund' },
           };
         }
 
@@ -1346,7 +1349,7 @@ export default config;
             label: 'Node build',
             passLabel: 'Node build passed',
             failLabel: 'Node build failed',
-            proof: { kind: 'command', command: 'npm run build', installCommand: 'npm install' },
+            proof: { kind: 'command', command: 'npm run build', installCommand: 'npm install --no-audit --no-fund' },
           };
         }
 
@@ -1356,7 +1359,7 @@ export default config;
             label: 'Node tests',
             passLabel: 'Node tests passed',
             failLabel: 'Node tests failed',
-            proof: { kind: 'command', command: 'npm test', installCommand: 'npm install' },
+            proof: { kind: 'command', command: 'npm test', installCommand: 'npm install --no-audit --no-fund' },
           };
         }
 
@@ -1602,6 +1605,43 @@ export default config;
       return { line, col };
     }
 
+    // A '/' starts a regex (not division) after an operator, opener, or keyword.
+    function jsRegexCanStart(src, index) {
+      let j = index - 1;
+      while (j >= 0 && /\s/.test(src[j])) j -= 1;
+      if (j < 0) return true;
+      const prev = src[j];
+      if (/[(,=:[!&|?{};+\-*%<>~^]/.test(prev)) return true;
+      if (!/[\w$]/.test(prev)) return false;
+      let k = j;
+      while (k >= 0 && /[\w$]/.test(src[k])) k -= 1;
+      return /^(?:return|typeof|case|in|of|delete|void|throw|new|else|do|yield|await)$/.test(src.slice(k + 1, j + 1));
+    }
+
+    // Index of the closing '/' (plus flags), or -1 if this isn't a one-line regex.
+    function jsRegexLiteralEnd(src, start) {
+      let inClass = false;
+      for (let i = start + 1; i < src.length; i += 1) {
+        const ch = src[i];
+        if (ch === '\n') return -1;
+        if (ch === '\\') { i += 1; continue; }
+        if (inClass) { if (ch === ']') inClass = false; continue; }
+        if (ch === '[') { inClass = true; continue; }
+        if (ch === '/') {
+          let end = i;
+          while (/[a-z]/i.test(src[end + 1] || '')) end += 1;
+          return end;
+        }
+      }
+      return -1;
+    }
+
+    // True when the only problem is an unclosed tail (cut off), not a mid-file error.
+    function jsLooksCutOff(jsText) {
+      const issue = getJsSyntaxIssue(jsText, 'x');
+      return /\(unterminated |near end of file/.test(issue);
+    }
+
     function getJsSyntaxIssue(jsText, parseError = null) {
       const src = String(jsText || '');
       const parseMessage = String(parseError && parseError.message ? parseError.message : parseError || '').trim();
@@ -1658,6 +1698,13 @@ export default config;
           inBlockComment = true;
           i += 1;
           continue;
+        }
+        if (ch === '/' && jsRegexCanStart(src, i)) {
+          const end = jsRegexLiteralEnd(src, i);
+          if (end > i) {
+            i = end;
+            continue;
+          }
         }
         if (ch === '"' || ch === "'") {
           quote = ch;
@@ -2210,8 +2257,23 @@ export default config;
     };
     async function executeDeveloperToolCall(chatId, decision, taskText, toolEvents = [], planSpec = null, runOptions = {}) {
       const tool = String(decision && decision.tool ? decision.tool : '').toLowerCase();
+      if (tool === 'web_search') {
+        if (typeof deps.searchAgentWeb !== 'function') return { ok: false, mutated: false, observation: 'Web search is unavailable.' };
+        const context = JSON.stringify({ task: taskText, results: toolEvents.slice(-6).map(event => ({ tool: event.tool, ok: event.ok, observation: String(event.observation || '').slice(0, 1400) })) });
+        return deps.searchAgentWeb(chatId, String(decision.query || decision.content || '').trim(), context);
+      }
+      if (tool === 'create_canvas') {
+        let content = String(decision.content || '').trim();
+        const name = String(decision.path || 'Handoff').trim().replace(/^\/+/, '');
+        if (typeof deps.generateAgentCanvasContent === 'function') {
+          content = String(await deps.generateAgentCanvasContent(taskText, toolEvents, planSpec, content) || '').trim();
+          decision.content = content;
+        }
+        if (!content) return { ok: false, mutated: false, observation: 'create_canvas needs the complete document in content. Use a short document grounded in tool results.' };
+        const ok = typeof deps.createAgentCanvas === 'function' && await deps.createAgentCanvas(chatId, name, content);
+        return { ok: Boolean(ok), mutated: false, observation: ok ? `Canvas document created: ${name}. Word count: ${content.trim().split(/\s+/).length}. Verified saved content:\n${content}` : 'Canvas creation failed; no document was delivered.' };
+      }
       const taskLower = String(taskText || '').toLowerCase();
-      const mustExplicitlyDelete = /\b(delete|remove|trash)\b/.test(taskLower);
       const planExpectedFiles = Array.isArray(planSpec && planSpec.expectedFiles) ? planSpec.expectedFiles : [];
       const projectTask = String(planSpec && planSpec.taskKind || '').toLowerCase() === 'project';
       const phasedProject = Array.isArray(planSpec && planSpec.phases)
@@ -2247,7 +2309,16 @@ export default config;
         : false;
       const rawSeparateIntent = /\b(new project|new workspace|another project|separate project|different project|start from scratch|from scratch)\b/.test(taskLower);
       const isNegatedSeparateIntent = /\b(no\b|not\b|dont\b|don't\b|never\b|instead of\b).{0,25}?(new project|new workspace|another project|start from scratch)/i.test(taskLower);
-      const explicitSeparateWorkspaceIntent = rawSeparateIntent && !isNegatedSeparateIntent;
+      // Planner's structured decision first; phrase match only if it gave none.
+      const plannedWorkspaceIntent = String(planSpec && planSpec.workspaceIntent || '');
+      const explicitSeparateWorkspaceIntent = plannedWorkspaceIntent
+        ? plannedWorkspaceIntent === 'new'
+        : rawSeparateIntent && !isNegatedSeparateIntent;
+      const requiresNewWorkspace = Boolean(runOptions.approvedNewProject || explicitSeparateWorkspaceIntent);
+      if (requiresNewWorkspace && !workspaceCreatedThisTurn
+        && ['write_file', 'write_files', 'generate_project', 'edit_file', 'mkdir', 'move', 'delete', 'run_command', 'run_app'].includes(tool)) {
+        return { ok: false, mutated: false, observation: `${tool} blocked: this task requires a NEW workspace. Call new_project first; the currently open workspace belongs to earlier work.` };
+      }
       const isUnsupportedBinaryAssetPath = (candidatePath) => /\.(?:png|jpe?g|gif|webp|bmp|ico|tiff?)$/i.test(String(candidatePath || ''));
       const planAllowsPath = (candidatePath) => {
         const normalized = deps.normalizeWorkspacePath(candidatePath || '');
@@ -2424,6 +2495,20 @@ export default config;
         return { ok: true, mutated, observation, projectName: deps.getWorkspaceRootName() || projectName || 'new project' };
       }
 
+      // Paper-trading autopilot: read status or make a change the user asked for. No files touched.
+      if (tool === 'trading') {
+        if (typeof deps.runTradingCommand !== 'function') {
+          return { ok: false, mutated, observation: 'Trading is unavailable in this build.' };
+        }
+        try {
+          const result = await deps.runTradingCommand(String(decision.command || decision.content || 'status'));
+          const trading = typeof result === 'string' ? { observation: result } : (result || {});
+          return { ok: true, mutated, observation: String(trading.observation || ''), trading };
+        } catch (error) {
+          return { ok: false, mutated, observation: `trading failed: ${String((error && error.message) || error)}` };
+        }
+      }
+
       if (tool === 'read_project_memory' || tool === 'remember_project' || tool === 'forget_project_memory') {
         const memoryPath = '/.aiexe/MEMORY.md';
         if (!hasOpenWorkspace && !workspaceCreatedThisTurn) {
@@ -2564,10 +2649,11 @@ export default config;
       if (tool === 'search_files') {
         const workspace = deps.getWorkspaceContext();
         const path = deps.normalizeWorkspacePath(decision.path || workspace.currentPath || '/');
-        const query = String(decision.content || decision.message || taskText || '').trim();
+        // Search only what the model asked for; narration or the task text are not queries.
+        const query = String(decision.content || decision.query || '').trim();
         const needles = buildSearchNeedles(query);
         if (!needles.length) {
-          return { ok: false, mutated, observation: 'search_files requires search text in content.' };
+          return { ok: false, mutated, observation: 'search_files needs the exact text to find in content (a symbol, error text, selector or keyword). Nothing was searched.' };
         }
         let files = await collectSearchableWorkspaceFiles(path || '/', 80);
         if (files.length === 0) {
@@ -2874,7 +2960,7 @@ export default config;
             `write_files ok: created ${batchWritten.length} file(s):`,
             ...batchWritten.map((f) => `- ${f.path} (${f.content.length} chars)`),
             batchSkipped.length ? `Skipped (create individually with write_file if still needed):\n- ${batchSkipped.join('\n- ')}` : '',
-            'The saved files match the generated content exactly — do not re-read them to verify.',
+            'The write completed. Read back when requested or needed to verify persistence.',
           ].filter(Boolean).join('\n'),
           writtenPath: batchWritten[0].path,
           writtenContent: batchWritten[0].content,
@@ -3277,7 +3363,9 @@ export default config;
         const savedContentEcho = contentSubstituted && content.length <= 2400
           ? `\nSaved content (this EXACT text is now on disk):\n${content}`
           : '';
-        observation = `write_file ok: ${path} (${content.length} chars)${primaryQualityNote}${docRedirectNote}\n${contentSubstituted ? `The saved file differs from what you supplied (see the note above).${savedContentEcho}` : `The saved file matches the generated content exactly — do not re-read ${path} to verify.`}${newContentStructureIssue ? `\nWARNING: the saved file looks incomplete — it ${newContentStructureIssue}. Continue it from where it ends by APPENDING the rest with edit_file — do NOT rewrite the whole file.` : ''}`;
+        observation = `write_file ok: ${path} (${content.length} chars)${primaryQualityNote}${docRedirectNote}\n${contentSubstituted ? `The saved file differs from what you supplied (see the note above).${savedContentEcho}` : `The write completed. Read back when requested or needed to verify persistence.`}${newContentStructureIssue ? (/\.(js|mjs|cjs)$/i.test(path) && !jsLooksCutOff(content)
+          ? `\nWARNING: the saved file has a syntax error — it ${newContentStructureIssue}. The file is complete; fix that spot with a targeted edit_file — do NOT append to it or rewrite the whole file.`
+          : `\nWARNING: the saved file looks incomplete — it ${newContentStructureIssue}. Continue it from where it ends by APPENDING the rest with edit_file — do NOT rewrite the whole file.`) : ''}`;
         return {
           ok: true,
           mutated,
@@ -3445,7 +3533,7 @@ export default config;
               });
               deps.syncFileTabFromWorkspaceWrite(path, rewritten, deps.workspaceBaseName(path));
               mutated = true;
-              observation = `edit_file ok: ${path} (full-file rewrite fallback, ${rewritten.length} chars)\nThe saved file is exactly the rewrite you just produced — do not re-read ${path} to verify.`;
+              observation = `edit_file ok: ${path} (full-file rewrite fallback, ${rewritten.length} chars)\nThe rewrite completed. Read back when requested or needed to verify persistence.`;
               return {
                 ok: true,
                 mutated,
@@ -3608,7 +3696,7 @@ export default config;
           `edit_file ok: ${path} (${applied.appliedCount} edits)`,
           editRepairNote ? `Note: ${editRepairNote}` : '',
           appliedSummary ? `Applied changes:\n${appliedSummary}` : '',
-          `The saved file reflects exactly these changes — do not re-read ${path} to verify.`,
+          `The edit completed. Read back when requested or needed to verify persistence.`,
           editBeforeIssue && editAfterIssue
             ? `WARNING: ${path} STILL fails to parse — it ${editAfterIssue}. It was broken before this edit and remains broken; fix the remaining error or regenerate the COMPLETE file with write_file.`
             : '',
@@ -3892,7 +3980,7 @@ export default config;
             snap.title ? `- page title: ${snap.title}` : '',
             `- visible text: "${String(snap.text || '(none)')}"`,
             Array.isArray(snap.hiddenButRendered) && snap.hiddenButRendered.length
-              ? `- PROBLEM: marked hidden (hidden/aria-hidden attribute) but still visibly rendered — CSS display rules are overriding the attribute: ${snap.hiddenButRendered.join(', ')}`
+              ? `- PROBLEM: has the hidden attribute but is still visibly rendered — CSS display rules are overriding the attribute: ${snap.hiddenButRendered.join(', ')}`
               : '',
             Array.isArray(snap.bigOverlays) && snap.bigOverlays.length
               ? `- large overlays covering most of the viewport (may block interaction): ${snap.bigOverlays.join(', ')}`
@@ -4036,7 +4124,7 @@ export default config;
         const exitCode = exitMatch ? Number(exitMatch[1]) : (timedOut ? null : 0);
         const terminalProof = buildTerminalProof(rawCommand, res, { timedOut, exitCode });
         if (timedOut) {
-          return { ok: true, mutated, runErrorCount: 0, terminalCommand: rawCommand, terminalProof, observation: `run_command \`${rawCommand}\`: still running at the timeout with no crash — the program started cleanly (a GUI/game loop or server keeps running, which is expected).${tail ? `\nOutput:\n${tail}` : ''}` };
+          return { ok: true, mutated, runErrorCount: 1, terminalCommand: rawCommand, terminalProof, observation: `run_command \`${rawCommand}\`: exceeded the command time limit. Completion is unverified; inspect the output before retrying.${tail ? `\nOutput:\n${tail}` : ''}` };
         }
         if (exitCode === 0) {
           return { ok: true, mutated, runErrorCount: 0, terminalCommand: rawCommand, terminalProof, observation: `run_command \`${rawCommand}\`: finished cleanly (exit 0).${tail ? `\nOutput:\n${tail}` : ''}` };
@@ -4430,30 +4518,7 @@ export default config;
 
       if (tool === 'delete') {
         const path = deps.normalizeWorkspacePath(decision.path || '');
-        // Regenerable build-cache dirs may be deleted without the user having said
-        // "delete" — a stale cache is a legitimate repair step. Still ask-first:
-        // the confirmation card below runs regardless. Conservative list only
-        // (no dist/build — those can be a user's only artifacts).
-        const isRegenerableBuildCache = (() => {
-          const norm = String(path || '').toLowerCase().replace(/\/+$/, '');
-          if (/\/__pycache__$/.test(norm)) return true;
-          return [
-            '/node_modules/.vite',
-            '/node_modules/.cache',
-            '/.next',
-            '/.nuxt',
-            '/.parcel-cache',
-            '/.turbo',
-            '/.pytest_cache',
-          ].includes(norm);
-        })();
-        if (!mustExplicitlyDelete && !isRegenerableBuildCache) {
-          return {
-            ok: false,
-            mutated,
-            observation: 'delete blocked: user did not explicitly request delete/remove/trash. (Exception: regenerable build caches like /node_modules/.vite may be deleted with user approval.)',
-          };
-        }
+        // No keyword gate: every delete waits on the user's confirmation card.
         if (!path || path === '/') {
           return { ok: false, mutated, observation: 'delete requires a valid file/folder path.' };
         }
@@ -4465,7 +4530,7 @@ export default config;
           mutated,
           requiresDeleteConfirmation: true,
           deletePath: path,
-          userFacingMessage: `Delete \`${path}\`? It will be moved to your system Trash (recoverable). Confirm to proceed.`,
+          userFacingMessage: `Delete ${path}? It goes to the Trash, so you can get it back.`,
           observation: `delete of ${path} is paused for user confirmation.`,
         };
       }
@@ -4478,6 +4543,7 @@ export default config;
       const target = String(targetInfo || '').trim();
       const withTarget = (base) => (target ? `${base} ${target}` : base);
       if (phase === 'start') {
+        if (name === 'trading') return 'Checking the autopilot';
         if (name === 'read_project_memory') return 'Recalling project memory';
         if (name === 'remember_project') return 'Saving to project memory';
         if (name === 'forget_project_memory') return 'Updating project memory';
@@ -4501,6 +4567,7 @@ export default config;
         return withTarget(`Running ${name || 'tool'}`);
       }
       if (phase === 'done') {
+        if (name === 'trading') return 'Checked the autopilot';
         if (name === 'read_project_memory') return 'Recalled project memory';
         if (name === 'remember_project') return 'Saved to project memory';
         if (name === 'forget_project_memory') return 'Updated project memory';

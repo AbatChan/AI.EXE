@@ -626,7 +626,7 @@
           <span class="ws-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7.5a2 2 0 0 1 2-2h3.6a1 1 0 0 1 .7.3l1.4 1.4a1 1 0 0 0 .7.3H18a2 2 0 0 1 2 2v6.5a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"></path></svg></span>
           <span class="ws-label">${rootLabel}</span>
           <button type="button" class="ws-root-run ui-tooltip-anchor${window.aiexeRunAppBusy ? ' running' : ''}" data-tooltip="${window.aiexeRunAppBusy ? 'Starting the project...' : 'Run the project'}" aria-label="Run the project"${window.aiexeRunAppBusy ? ' aria-busy="true"' : ''}>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="6 3 20 12 6 21 6 3"></polygon></svg>
+            <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7 4.9v14.2a1 1 0 0 0 1.5.86l11.6-7.1a1 1 0 0 0 0-1.72L8.5 4.04A1 1 0 0 0 7 4.9z"/></svg><span>Run</span>
           </button>
         `;
       const rootRun = rootRow.querySelector('.ws-root-run');
@@ -637,6 +637,8 @@
           if (typeof window.runWorkspaceApp === 'function') window.runWorkspaceApp();
         });
       }
+      // Running server takes Run's place on this row.
+      if (typeof window.renderDevServerStatus === 'function') window.renderDevServerStatus(rootRow);
       const rootChev = rootRow.querySelector('.ws-chevron');
       if (rootChev) {
         if (!rootNode.expanded) rootChev.classList.remove('expanded');

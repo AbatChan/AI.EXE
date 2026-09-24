@@ -42,7 +42,31 @@ const core = global.AIExeAgentCore.createAgentCore({
 
 const opts = { chatId: 'chat_owns_ws' };
 
+const longSummary = 'I’ll audit the imported orders, preserve unknown amounts, apply the requested duplicate rules, and check editing, filtering, export and saved data together so the dashboard reflects the original records throughout the full workflow.';
 const cases = [
+  {
+    name: 'long plan narration keeps the complete sentence',
+    run: () => core.normalizeAgentPlanSpec({ task_kind: 'analysis', summary: longSummary }, 'Audit the orders', opts),
+    expect: (spec) => assert.equal(spec.summary, longSummary),
+  },
+  {
+    name: 'planner workspace:new starts a separate project even when the chat owns one (no phrase needed)',
+    run: () => core.normalizeAgentPlanSpec({ task_kind: 'project', workspace: 'new', expected_files: '/index.html' },
+      'ok now spin up a pomodoro timer on its own', opts),
+    expect: (spec) => { assert.equal(spec.taskKind, 'project'); assert.equal(spec.workspaceIntent, 'new'); },
+  },
+  {
+    name: 'planner workspace:current keeps a "build X" follow-up inside the open project',
+    run: () => core.normalizeAgentPlanSpec({ task_kind: 'project', workspace: 'current', expected_files: '/stats.html' },
+      'build a stats page for this', opts),
+    expect: (spec) => { assert.equal(spec.taskKind, 'edit'); assert.equal(spec.workspaceIntent, 'current'); },
+  },
+  {
+    name: 'planner workspace:current wins over a phrase like "from scratch"',
+    run: () => core.normalizeAgentPlanSpec({ task_kind: 'edit', workspace: 'current', affected_files: '/site.py' },
+      'rewrite site.py from scratch', opts),
+    expect: (spec) => { assert.equal(spec.taskKind, 'edit'); assert.equal(spec.workspaceIntent, 'current'); },
+  },
   {
     name: 'explicit Python desktop stack rejects planner-added HTML preview files',
     run: () => core.normalizeAgentPlanSpec({

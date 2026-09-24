@@ -10,6 +10,8 @@ import time
 
 import httpx
 
+from .errors import describe_error
+
 
 class LLMError(Exception):
     def __init__(self, message: str, status: int = None):
@@ -38,6 +40,43 @@ def parse_ollama_content(data: dict) -> str:
         if "response" in data:
             return data["response"]
     raise LLMError("Unexpected Ollama response shape.")
+
+
+# Newer models reject some classic settings; the API names the bad one in error.param.
+_PARAM_FIXES = {
+    "max_tokens": lambda p: p.__setitem__("max_completion_tokens", p.pop("max_tokens")),
+    "temperature": lambda p: p.pop("temperature", None),
+    "reasoning_effort": lambda p: p.pop("reasoning_effort", None),
+    "thinking": lambda p: p.pop("thinking", None),
+    "response_format": lambda p: p.pop("response_format", None),
+}
+
+
+def _rejected_param(resp, payload):
+    """Which setting we sent did the provider reject? OpenAI names it in error.param;
+    others (e.g. Venice) only mention it in their error details."""
+    try:
+        body = resp.json()
+    except ValueError:
+        return None
+    error = body.get("error") if isinstance(body, dict) else None
+    if isinstance(error, dict) and error.get("param") in _PARAM_FIXES:
+        return error["param"]
+    text = json.dumps(body)
+    return next((name for name in _PARAM_FIXES if name in payload and name in text), None)
+
+
+def _post(url, payload, headers, timeout):
+    """POST, retrying once per unsupported parameter the provider reports."""
+    for _ in range(len(_PARAM_FIXES) + 1):
+        resp = httpx.post(url, json=payload, headers=headers, timeout=timeout)
+        if resp.status_code != 400:
+            return resp
+        param = _rejected_param(resp, payload)
+        if not param:
+            return resp
+        _PARAM_FIXES[param](payload)
+    return resp
 
 
 class LLMClient:
@@ -79,9 +118,9 @@ class LLMClient:
         last_err = None
         for attempt in range(3):
             try:
-                resp = httpx.post(url, json=payload, headers=headers, timeout=self.timeout)
+                resp = _post(url, payload, headers, self.timeout)
             except httpx.HTTPError as exc:
-                last_err = LLMError(f"Network error calling provider: {exc}")
+                last_err = LLMError(f"Couldn't reach the AI provider: {describe_error(exc, 'the AI provider')}")
                 time.sleep(1.0 * (attempt + 1))
                 continue
             if resp.status_code in (401, 402, 403):
@@ -122,6 +161,8 @@ class LLMClient:
             if "deepseek.com" in self.base_url:
                 payload["thinking"] = {"type": "enabled"}
                 payload["reasoning_effort"] = "high"
+            if "venice.ai" in self.base_url:  # our instructions only, not Venice's house prompt
+                payload["venice_parameters"] = {"include_venice_system_prompt": False}
             headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
 
         started = time.monotonic()
@@ -130,9 +171,9 @@ class LLMClient:
         attempt_count = 2 if self.kind == "ollama" else 3
         for structured_attempt in range(attempt_count):
             try:
-                response = httpx.post(url, json=payload, headers=headers, timeout=self.timeout)
+                response = _post(url, payload, headers, self.timeout)
             except httpx.HTTPError as exc:
-                raise LLMError(f"Network error calling provider: {exc}") from exc
+                raise LLMError(f"Couldn't reach the AI provider: {describe_error(exc, 'the AI provider')}") from exc
             if response.status_code in (401, 402, 403):
                 raise LLMError(f"Provider rejected the request ({response.status_code}): {response.text[:200]}",
                                response.status_code)

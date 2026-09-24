@@ -591,7 +591,7 @@
       deps.setWorkspaceRenameFocusId(0);
       deps.getWorkspaceSelectedPaths().clear();
       if (typeof deps.applyWorkspaceStatusSnapshot === 'function') {
-        deps.applyWorkspaceStatusSnapshot({ rootPath: '', rootName: '', currentPath: '/', currentKind: 'folder' });
+        deps.applyWorkspaceStatusSnapshot({ rootPath: '', rootName: '', currentPath: '/', currentKind: 'folder' }, { clearSavedRoot: true });
       } else {
         if (typeof deps.setWorkspaceItems === 'function') deps.setWorkspaceItems([]);
         if (typeof deps.setWorkspaceCurrentPath === 'function') deps.setWorkspaceCurrentPath('/');
@@ -722,6 +722,7 @@
         const row = rows.find((entry) => entry.id === targetId);
         if (!row) return;
         if (row.running) continue;
+        if (window.aiexeUserStoppedDevServers && window.aiexeUserStoppedDevServers.has(targetId)) return; // user pressed Stop
         let tail = '';
         try {
           const status = await deps.invokeWorkspaceAction('devServerStatus', { serverId: targetId });
@@ -764,6 +765,8 @@
         void watchNewDevServerForEarlyExit(preRunIds);
       } finally {
         setRunAppBusy(false);
+        // Show the new server on the project row without waiting for the poll.
+        if (typeof window.syncDevServerChips === 'function') void window.syncDevServerChips();
       }
     }
 

@@ -120,7 +120,8 @@ async def block_foreign_origins(request, call_next):
     presented = request.headers.get(access_token.HEADER) or ""
     if not access_token.origin_allowed(origin, presented, BACKEND_TOKEN, _ALLOWED_ORIGINS):
         return JSONResponse(
-            {"detail": "Cross-origin request blocked: this API is local-only."},
+            {"detail": "AI.EXE couldn't confirm this request came from the app. It refreshes its access key "
+                       "automatically; if this keeps showing, restart AI.EXE.", "code": "access_token"},
             status_code=403,
         )
     return await call_next(request)

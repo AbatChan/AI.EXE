@@ -30,6 +30,73 @@ def _extract_docx(data: bytes) -> str:
     return _re.sub(r"<[^>]+>", "", xml).strip()  # drop remaining tags
 
 
+ARCHIVE_MAX_FILES = 200
+ARCHIVE_MAX_FILE_BYTES = 1_000_000
+ARCHIVE_MAX_TOTAL_BYTES = 20_000_000
+ARCHIVE_MAX_RATIO = 100  # zip-bomb guard (uncompressed / compressed)
+
+
+def _archive_member_text(name: str, data: bytes) -> str:
+    low = name.lower()
+    if low.endswith(".pdf"):
+        return extract_text(data)
+    if low.endswith(".docx"):
+        return _extract_docx(data)
+    if b"\x00" in data[:4096]:
+        return ""  # binary
+    return data.decode("utf-8", "replace")
+
+
+def _extract_archive(name: str, data: bytes) -> tuple[str, list[str]]:
+    """Read text files inside a .zip/.tar(.gz) in memory — never written to disk."""
+    import io as _io
+    import tarfile
+    import zipfile
+    members: list[tuple[str, bytes]] = []
+    skipped: list[str] = []
+    total = 0
+    if name.endswith(".zip"):
+        with zipfile.ZipFile(_io.BytesIO(data)) as z:
+            for info in z.infolist()[: ARCHIVE_MAX_FILES * 2]:
+                path = info.filename
+                if info.is_dir() or path.startswith("__MACOSX/") or "/." in f"/{path}":
+                    continue
+                if len(members) >= ARCHIVE_MAX_FILES or info.file_size > ARCHIVE_MAX_FILE_BYTES \
+                        or (info.compress_size and info.file_size / info.compress_size > ARCHIVE_MAX_RATIO) \
+                        or total + info.file_size > ARCHIVE_MAX_TOTAL_BYTES:
+                    skipped.append(path)
+                    continue
+                total += info.file_size
+                members.append((path, z.read(info)))
+    else:
+        with tarfile.open(fileobj=_io.BytesIO(data), mode="r:*") as t:
+            for info in t.getmembers()[: ARCHIVE_MAX_FILES * 2]:
+                if not info.isfile() or "/." in f"/{info.name}":
+                    continue
+                if len(members) >= ARCHIVE_MAX_FILES or info.size > ARCHIVE_MAX_FILE_BYTES \
+                        or total + info.size > ARCHIVE_MAX_TOTAL_BYTES:
+                    skipped.append(info.name)
+                    continue
+                handle = t.extractfile(info)
+                if handle is None:
+                    continue
+                total += info.size
+                members.append((info.name, handle.read()))
+    parts, listing = [], []
+    for path, blob in members:
+        try:
+            text = _archive_member_text(path, blob).strip()
+        except Exception:
+            text = ""
+        if text:
+            parts.append(f"=== {path} ===\n{text}")
+            listing.append(path)
+        else:
+            skipped.append(path)
+    header = f"Archive {name}: {len(listing)} readable file(s)" + (f", {len(skipped)} skipped (binary or too large)" if skipped else "")
+    return header + "\n\n" + "\n\n".join(parts), listing
+
+
 @router.post("/extract-text")
 async def extract_text_endpoint(file: UploadFile = File(...)) -> dict:
     """Real text extraction for attached documents (PDF via pypdf, docx via zip). The desktop
@@ -43,6 +110,8 @@ async def extract_text_endpoint(file: UploadFile = File(...)) -> dict:
             text = extract_text(data)
         elif name.endswith(".docx"):
             text = _extract_docx(data)
+        elif name.endswith((".zip", ".tar", ".tar.gz", ".tgz")):
+            text, _ = _extract_archive(name, data)
         else:
             text = data.decode("utf-8", "replace")
         text = (text or "").strip()

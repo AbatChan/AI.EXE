@@ -251,8 +251,8 @@
 
       <div class="chat-area" id="chatArea">
         <div class="empty-state" id="emptyState">
-          <div class="empty-logo">AI.EXE</div>
-          <div class="empty-sub">Experimental intelligence framework.<br>State your objective and execute.</div>
+          <div class="empty-logo">What are we building today?</div>
+          <div class="empty-sub">Code, research, trading or just a chat — AI.EXE runs it on your machine.</div>
 
           <div class="model-setup-banner" id="modelSetupBanner" style="display:none;">
             <div class="msb-icon">
@@ -276,11 +276,11 @@
           </div>
 
           <div class="suggestion-chips">
-            <div class="chip" onclick="sendChip(this)">ANALYZE.DATA</div>
-            <div class="chip" onclick="sendChip(this)">BUILD.APP</div>
-            <div class="chip" onclick="sendChip(this)">GEN.MODEL</div>
-            <div class="chip" onclick="sendChip(this)">DEPLOY.API</div>
-            <div class="chip" onclick="sendChip(this)">DEBUG.CODE</div>
+            <button class="chip" type="button" data-prompt="Help me plan and build this app end-to-end. Start with architecture, folder structure, and step-by-step implementation tasks." onclick="sendChip(this)"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m16 18 6-6-6-6"/><path d="m8 6-6 6 6 6"/></svg><span>Build an app</span></button>
+            <button class="chip" type="button" data-prompt="Debug this issue methodically: identify likely root causes, show verification steps, and propose the minimal safe fix." onclick="sendChip(this)"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m8 2 1.88 1.88"/><path d="M14.12 3.88 16 2"/><path d="M9 7.13v-1a3 3 0 1 1 6 0v1"/><path d="M12 20c-3.3 0-6-2.7-6-6v-3a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v3c0 3.3-2.7 6-6 6"/><path d="M12 20v-9"/><path d="M6 13H2"/><path d="M22 13h-4"/></svg><span>Debug my code</span></button>
+            <button class="chip" type="button" data-prompt="Analyze this dataset and return: 1) data quality issues, 2) top trends, 3) anomalies, 4) recommended next actions." onclick="sendChip(this)"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 3v16a2 2 0 0 0 2 2h16"/><path d="m19 9-5 5-4-4-3 3"/></svg><span>Analyze data</span></button>
+            <button class="chip" type="button" data-prompt="How are the markets doing today, and how is my autopilot doing?" onclick="sendChip(this)"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 7h6v6"/><path d="m22 7-8.5 8.5-5-5L2 17"/></svg><span>Check the markets</span></button>
+            <button class="chip" type="button" data-prompt="Create a deployment plan for this API: environment setup, build/run commands, config, health checks, logging, and rollback steps." onclick="sendChip(this)"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91-.09z"/><path d="m12 15-3-3a22 22 0 0 1 2-3.95A12.88 12.88 0 0 1 22 2c0 2.72-.78 7.5-6 11a22.35 22.35 0 0 1-4 2z"/></svg><span>Plan a deploy</span></button>
           </div>
         </div>
       </div>
@@ -331,32 +331,24 @@
       <div class="artifact-browser hidden" id="artifactBrowser">
         <div class="artifact-browser-head">
           <button class="artifact-back-btn hidden" id="artifactBackBtn" type="button" onclick="backToArtifactList()">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <polyline points="15 18 9 12 15 6"></polyline>
-            </svg>
-            Back
+            <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="m14.5 18-6-6 6-6"/></svg>
+            <span id="artifactBackLabel">Artifacts</span>
           </button>
           <div class="artifact-browser-title" id="artifactBrowserTitle">Artifacts</div>
+          <div class="artifact-browser-sub" id="artifactBrowserSub"></div>
         </div>
         <div class="artifact-list" id="artifactListView"></div>
         <div class="artifact-detail hidden" id="artifactDetailView">
-          <div class="artifact-detail-meta" id="artifactDetailMeta"></div>
-          <textarea class="canvas-editor artifact-editor" id="artifactEditor" readonly spellcheck="false"></textarea>
-          <div class="artifact-detail-actions">
-            <button class="canvas-copy-btn" id="artifactOpenChatBtn" type="button" title="Open source chat">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M4 4h11a2 2 0 0 1 2 2v11"></path>
-                <polyline points="10 14 20 4"></polyline>
-                <polyline points="14 4 20 4 20 10"></polyline>
-                <path d="M4 10v10h10"></path>
-              </svg>
-            </button>
-            <button class="canvas-copy-btn" id="artifactCopyBtn" type="button" title="Copy artifact">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <rect x="9" y="9" width="13" height="13" rx="2"></rect>
-                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-              </svg>
-            </button>
+          <div class="artifact-detail-bar">
+            <div class="artifact-detail-meta" id="artifactDetailMeta"></div>
+            <div class="artifact-detail-actions">
+              <button class="artifact-action" id="artifactCopyBtn" type="button"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11.5" height="11.5" rx="2.5"/><path d="M15 9V6.5A2.5 2.5 0 0 0 12.5 4h-6A2.5 2.5 0 0 0 4 6.5v6A2.5 2.5 0 0 0 6.5 15H9"/></svg><span>Copy</span></button>
+              <button class="artifact-action" id="artifactOpenChatBtn" type="button"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13.5V16a2 2 0 0 1-2 2H9.5L5 21.5V6a2 2 0 0 1 2-2h6.5"/><path d="M16 3.5h4.5V8"/><path d="M20.5 3.5 14 10"/></svg><span>Open chat</span></button>
+            </div>
+          </div>
+          <div class="artifact-detail-body">
+            <textarea class="canvas-editor artifact-editor" id="artifactEditor" readonly spellcheck="false"></textarea>
+            <div class="msg-bubble artifact-preview hidden" id="artifactPreview"></div>
           </div>
         </div>
       </div>
@@ -404,6 +396,7 @@
         </button>
         <!--<div class="beta-label">∷ ALWAYS IN BETA ∷</div>-->
         <div class="phase-tracker hidden" id="phaseTracker" aria-hidden="true"></div>
+        <div class="queued-sends hidden" id="queuedSendsList" aria-live="polite"></div>
         <div class="input-row" id="inputRow">
           <div class="dictation-bar hidden" id="dictationBar">
             <button class="dictation-action danger" id="dictationCancelBtn" type="button" aria-label="Cancel dictation">
@@ -439,12 +432,12 @@
               </button>
               <button class="composer-confirm-submit" id="composerConfirmSubmitBtn" type="button">
                 <span>Submit</span>
-                <span class="composer-confirm-keycap enter">↵</span>
+                <span class="composer-confirm-keycap enter" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M19 5v9H5m5-5-5 5 5 5" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
               </button>
             </div>
           </div>
           <div class="input-text-line">
-            <textarea class="chat-textarea" id="mainInput" rows="1" placeholder="Input command or query..."
+            <textarea class="chat-textarea" id="mainInput" rows="1" placeholder="What are we cooking?"
               onkeydown="handleKey(event)" oninput="autoResize(this)"></textarea>
           </div>
           <div class="input-controls-line">
@@ -560,6 +553,14 @@
               <div class="composer-overflow-pop hidden" id="composerOverflowPop"></div>
             </div>
             <div class="input-controls-right">
+              <div class="token-ring ui-tooltip-anchor" id="tokenRing" data-tooltip="Context used" aria-label="Context used" tabindex="0">
+                <svg viewBox="0 0 20 20" width="14" height="14" aria-hidden="true">
+                  <circle class="token-ring-bg" cx="10" cy="10" r="8" fill="none" stroke-width="2.4"></circle>
+                  <circle class="token-ring-fg" id="tokenRingFg" cx="10" cy="10" r="8" fill="none" stroke-width="2.4"
+                    stroke-linecap="round" transform="rotate(-90 10 10)"></circle>
+                </svg>
+                <span class="token-ring-pct" id="tokenRingPct"></span>
+              </div>
               <button class="composer-mic-btn" id="micBtn" type="button" title="Dictate" aria-label="Dictate message">
                 <svg class="mic-idle-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <rect x="9" y="3" width="6" height="11" rx="3"></rect>
@@ -586,65 +587,41 @@
           </div>
         </div>
         <div class="composer-status-line">
-          <div class="dev-server-chips" id="devServerChips"></div>
-          <div class="thinking-status" id="thinkingStatus"></div>
           <div class="composer-status-right">
-            <div class="char-count" id="charCount">0 / ∞</div>
-            <div class="token-ring ui-tooltip-anchor" id="tokenRing" data-tooltip="0 / ∞ tokens" aria-label="0 / ∞ tokens" tabindex="0">
-              <svg viewBox="0 0 20 20" width="15" height="15" aria-hidden="true">
-                <circle class="token-ring-bg" cx="10" cy="10" r="8" fill="none" stroke-width="2.4"></circle>
-                <circle class="token-ring-fg" id="tokenRingFg" cx="10" cy="10" r="8" fill="none" stroke-width="2.4"
-                  stroke-linecap="round" transform="rotate(-90 10 10)"></circle>
-              </svg>
-            </div>
           </div>
         </div>
         <div class="composer-menu" id="composerMenu" aria-hidden="true">
-          <button class="composer-menu-item" id="menuCanvasBtn" type="button">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">
-              <rect x="3" y="4" width="18" height="14" rx="2"></rect>
-              <path d="M7 9h10"></path>
-              <path d="M7 13h6"></path>
-            </svg>
-            <span>Canvas</span>
-          </button>
+          <div class="composer-menu-title">Add</div>
           <button class="composer-menu-item" id="menuAttachBtn" type="button">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">
-              <path
-                d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48">
-              </path>
-            </svg>
-            <span>Attachment</span>
+            <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+            <span class="composer-menu-label">Files and images</span>
+            <span class="composer-menu-desc">Attach anything to this message</span>
           </button>
+          <div class="composer-menu-title">Modes</div>
           <button class="composer-menu-item" id="menuAgentBtn" type="button">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">
-              <polyline points="16 18 22 12 16 6"></polyline>
-              <polyline points="8 6 2 12 8 18"></polyline>
-            </svg>
-            <span>Agent</span>
+            <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m16 18 6-6-6-6"/><path d="m8 6-6 6 6 6"/></svg>
+            <span class="composer-menu-label">Agent</span>
+            <span class="composer-menu-desc">Build and edit projects on your computer</span>
+          </button>
+          <button class="composer-menu-item" id="menuCanvasBtn" type="button">
+            <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M15 3v18"/></svg>
+            <span class="composer-menu-label">Canvas</span>
+            <span class="composer-menu-desc">Write a doc or code side by side</span>
           </button>
           <button class="composer-menu-item" id="menuThinkBtn" type="button">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">
-              <path d="M9.5 18h5"></path>
-              <path d="M10 22h4"></path>
-              <path d="M8 14c-2-1.4-3-3.1-3-5a7 7 0 1 1 14 0c0 1.9-1 3.6-3 5"></path>
-            </svg>
-            <span>Think</span>
+            <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 14c.2-1 .7-1.7 1.5-2.5 1-.9 1.5-2.2 1.5-3.5A6 6 0 0 0 6 8c0 1 .2 2.2 1.5 3.5.7.7 1.3 1.5 1.5 2.5"/><path d="M9 18h6"/><path d="M10 22h4"/></svg>
+            <span class="composer-menu-label">Think</span>
+            <span class="composer-menu-desc">Reason it through before answering</span>
           </button>
           <button class="composer-menu-item" id="menuWebSearchBtn" type="button">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">
-              <circle cx="12" cy="12" r="9"></circle>
-              <path d="M3 12h18M12 3a15 15 0 0 1 0 18M12 3a15 15 0 0 0 0 18"></path>
-            </svg>
-            <span>Web Search</span>
+            <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/></svg>
+            <span class="composer-menu-label">Web search</span>
+            <span class="composer-menu-desc">Look things up live</span>
           </button>
           <button class="composer-menu-item" id="menuContextBtn" type="button">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">
-              <circle cx="12" cy="12" r="10"></circle>
-              <line x1="12" y1="8" x2="12" y2="12"></line>
-              <line x1="12" y1="16" x2="12.01" y2="16"></line>
-            </svg>
-            <span>Context</span>
+            <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 7v14"/><path d="M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/></svg>
+            <span class="composer-menu-label">Context</span>
+            <span class="composer-menu-desc">Add notes or links for this chat</span>
           </button>
         </div>
       </div>
@@ -687,13 +664,12 @@
               </svg>
             </button>
             <div class="exp-menu" id="expMoreMenu">
-              <button class="exp-menu-item" type="button" onclick="refreshWorkspaceTree()">Refresh</button>
-              <button class="exp-menu-item" type="button" onclick="revealWorkspaceInSystem()">Reveal in
-                Finder/Explorer</button>
-              <button class="exp-menu-item" id="expCloseProjectBtn" type="button" onclick="closeWorkspaceProject()">Close Project</button>
-              <button class="exp-menu-item" type="button" onclick="collapseAllFolders()">Collapse All</button>
-              <button class="exp-menu-item danger" id="expDeleteSelectedBtn" type="button" onclick="deleteSelectedWorkspaceItems()">Delete
-                Selected</button>
+              <button class="exp-menu-item" type="button" onclick="refreshWorkspaceTree()"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg><span>Refresh</span></button>
+              <button class="exp-menu-item" type="button" onclick="revealWorkspaceInSystem()"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg><span>Show in folder</span></button>
+              <button class="exp-menu-item" type="button" onclick="collapseAllFolders()"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m7 20 5-5 5 5"/><path d="m7 4 5 5 5-5"/></svg><span>Collapse all</span></button>
+              <div class="exp-menu-sep"></div>
+              <button class="exp-menu-item" id="expCloseProjectBtn" type="button" onclick="closeWorkspaceProject()"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg><span>Close project</span></button>
+              <button class="exp-menu-item danger" id="expDeleteSelectedBtn" type="button" onclick="deleteSelectedWorkspaceItems()"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></svg><span>Delete selected</span></button>
             </div>
           </div>
           <button class="exp-icon-btn rs-collapse-btn" id="rightCollapseBtn" type="button" title="Collapse Explorer"
@@ -750,16 +726,16 @@
           <line x1="6" y1="6" x2="18" y2="18"></line>
         </svg>
       </button>
-      <div class="chat-modal-title">Chat Options</div>
-      <div class="chat-modal-label">Chat Name</div>
+      <div class="chat-modal-title">Chat options</div>
+      <div class="chat-modal-label">Name</div>
       <input class="chat-modal-input" id="chatNameInput" type="text" maxlength="80" placeholder="Chat name">
       <div class="chat-modal-actions">
-        <button class="modal-btn danger" id="chatDeleteBtn" type="button">Delete Chat</button>
+        <button class="modal-btn danger" id="chatDeleteBtn" type="button">Delete chat</button>
         <div class="chat-modal-right">
           <button class="modal-btn primary" id="chatSaveBtn" type="button">Save</button>
         </div>
       </div>
-      <div class="chat-modal-note" id="chatDeleteConfirmNote">Click delete again to confirm permanent removal.</div>
+      <div class="chat-modal-note" id="chatDeleteConfirmNote">This removes the chat and its history. Click again to confirm.</div>
     </div>
   </div>
 
@@ -771,23 +747,23 @@
           <line x1="6" y1="6" x2="18" y2="18"></line>
         </svg>
       </button>
-      <div class="chat-modal-title" id="authTitle">Account Access</div>
+      <div class="chat-modal-title" id="authTitle">Welcome back</div>
       <div class="auth-switch" id="authSwitch">
-        <button class="auth-tab active" id="authLoginTab" type="button">Log In</button>
-        <button class="auth-tab" id="authSignupTab" type="button">Sign Up</button>
+        <button class="auth-tab active" id="authLoginTab" type="button">Log in</button>
+        <button class="auth-tab" id="authSignupTab" type="button">Sign up</button>
       </div>
       <div id="authUserWrap">
         <div class="chat-modal-label">Username</div>
-        <input class="chat-modal-input" id="authUserInput" type="text" maxlength="32" placeholder="username">
+        <input class="chat-modal-input" id="authUserInput" type="text" maxlength="32" placeholder="Your username">
       </div>
       <div id="authPassWrap">
         <div class="chat-modal-label">Password</div>
-        <input class="chat-modal-input" id="authPassInput" type="password" maxlength="128" placeholder="password">
+        <input class="chat-modal-input" id="authPassInput" type="password" maxlength="128" placeholder="Your password">
       </div>
       <div id="authConfirmWrap">
         <div class="chat-modal-label">Confirm Password</div>
         <input class="chat-modal-input" id="authConfirmInput" type="password" maxlength="128"
-          placeholder="confirm password">
+          placeholder="Type it again">
       </div>
       <div class="chat-modal-note" id="authNote"></div>
       <div class="chat-modal-actions">
@@ -870,17 +846,18 @@
           </nav>
         </aside>
 
+        <div class="panel-resizer settings-resizer" id="settingsResizer" data-tooltip="Drag to resize · double-click to reset" aria-hidden="true"></div>
         <section class="settings-main">
           <header class="settings-main-head">
             <div>
               <div class="settings-main-title" id="settingsViewTitle">General</div>
-              <div class="settings-main-subtitle" id="settingsViewSubtitle">Core runtime behavior and day-to-day defaults.</div>
+              <div class="settings-main-subtitle" id="settingsViewSubtitle">How AI.EXE works for you day to day.</div>
             </div>
           </header>
 
           <div class="settings-pane active" data-settings-pane="general">
             <div class="settings-section">
-              <div class="settings-section-title">Work Mode</div>
+              <div class="settings-section-title">Work mode</div>
               <div class="settings-mode-grid">
                 <label class="settings-mode-card active" id="settingsWorkModeCodingCard">
                   <input id="settingsWorkModeCoding" name="settingsWorkMode" type="radio" value="coding" checked>
@@ -897,27 +874,25 @@
               </div>
             </div>
 
+            <div class="settings-section">
+              <div class="settings-section-title">Appearance</div>
+              <div class="settings-card">
+                <div class="settings-row"><div class="settings-row-text"><strong>Theme</strong><span>Dark, light, or follow your computer</span></div><select class="chat-modal-input settings-row-select" id="settingsThemeSelect"><option value="system">System</option><option value="dark">Dark</option><option value="light">Light</option></select></div>
+              </div>
+            </div>
+
             <div class="settings-section" id="settingsRuntimeSection">
               <div class="settings-section-title">Local model</div>
-              <div class="settings-status-grid">
-                <div class="settings-field settings-field-span">
-                  <div class="chat-modal-label">Current Model Path</div>
-                  <div class="settings-kv" id="settingsModelPath">(loading...)</div>
-                </div>
-                <div class="settings-field">
-                  <div class="chat-modal-label">Current Model Checksum</div>
-                  <div class="settings-kv" id="settingsModelHash">not verified</div>
-                </div>
-                <div class="settings-field">
-                  <div class="chat-modal-label">Backend Status</div>
-                  <div class="settings-kv" id="settingsBackendStatus">unknown</div>
-                </div>
+              <div class="settings-card">
+                <div class="settings-row"><div class="settings-row-text"><strong>Model file</strong><span>Where the local model is loaded from</span></div><div class="settings-kv" id="settingsModelPath">(loading...)</div></div>
+                <div class="settings-row"><div class="settings-row-text"><strong>Checksum</strong><span>Proves the model file hasn't changed</span></div><div class="settings-kv" id="settingsModelHash">not verified</div></div>
+                <div class="settings-row"><div class="settings-row-text"><strong>Local service</strong><span>The backend AI.EXE runs on this computer</span></div><div class="settings-kv" id="settingsBackendStatus">unknown</div></div>
               </div>
             </div>
 
             <div class="settings-section">
               <div class="settings-section-title">Defaults</div>
-              <div class="settings-toggle-stack">
+              <div class="settings-toggle-stack settings-card">
                 <label class="settings-toggle-row" for="settingsKeepAwakeChk">
                   <span class="settings-toggle-copy">
                     <strong>Keep the computer awake while building</strong>
@@ -938,11 +913,9 @@
 
           <div class="settings-pane" data-settings-pane="models">
             <div class="settings-section">
-              <div class="settings-section-title">Inference</div>
-              <div class="settings-field">
-                <div class="chat-modal-label">Provider</div>
-                <select class="chat-modal-input" id="settingsProviderSelect">
-                  <option value="local">Local Model</option>
+              <div class="settings-section-title">Chat &amp; agent</div>
+              <div class="settings-card">
+                <div class="settings-row"><div class="settings-row-text"><strong>Provider</strong><span>Which AI answers your chats and runs Agent mode</span></div><select class="chat-modal-input settings-row-select" id="settingsProviderSelect"><option value="local">Local Model</option>
                   <option value="huggingface">Hugging Face Test</option>
                   <option value="customopenai">Custom OpenAI-Compatible</option>
                   <option value="openai">OpenAI API</option>
@@ -951,44 +924,35 @@
                   <option value="deepseek">DeepSeek API</option>
                   <option value="venice">Venice API</option>
                   <option value="veniceadapter">Venice Pro (local adapter)</option>
-                </select>
-              </div>
-
-              <div id="settingsRemoteFieldsWrap" class="settings-remote-grid" style="display:none;">
-                <div class="settings-field settings-field-span" id="settingsApiKeyWrap">
-                  <div class="chat-modal-label" id="settingsApiKeyLabel">API Key</div>
-                  <div class="settings-secret-wrap">
-                    <input class="chat-modal-input settings-secret-input" id="settingsApiKeyInput" type="password" placeholder="sk-...">
-                    <button type="button" class="settings-secret-toggle" id="settingsApiKeyToggle" aria-label="Show API key" aria-pressed="false"></button>
+                </select></div>
+                <div id="settingsRemoteFieldsWrap" class="settings-card-rows" style="display:none;">
+                  <div class="settings-row stack" id="settingsApiKeyWrap">
+                    <div class="settings-row-text"><strong id="settingsApiKeyLabel">API Key</strong><span>Create one in your provider's dashboard, then paste it here</span></div>
+                    <div class="settings-secret-wrap">
+                      <input class="chat-modal-input settings-secret-input" id="settingsApiKeyInput" type="password" placeholder="sk-...">
+                      <button type="button" class="settings-secret-toggle" id="settingsApiKeyToggle" aria-label="Show API key" aria-pressed="false"></button>
+                    </div>
                   </div>
-                </div>
-
-                <div class="settings-field settings-field-span" id="settingsApiEndpointWrap" style="display:none;">
-                  <div class="chat-modal-label" id="settingsApiEndpointLabel">Endpoint URL</div>
-                  <input class="chat-modal-input" id="settingsApiEndpointInput" type="text"
-                    placeholder="https://example.com/v1/chat/completions">
-                </div>
-
-                <div class="settings-field settings-field-span">
-                  <div class="settings-label-row"><div class="chat-modal-label">Model</div><span class="settings-model-source" id="settingsModelSource"></span></div>
-                  <div class="settings-model-row">
-                    <select class="chat-modal-input" id="settingsApiModelPreset"></select>
-                    <button type="button" class="modal-btn settings-model-refresh ui-tooltip-anchor" id="settingsModelRefreshBtn" data-tooltip="Reload the model list from your account" aria-label="Reload models">
-                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><polyline points="21 3 21 9 15 9"/></svg>
-                    </button>
+                  <div class="settings-row stack" id="settingsApiEndpointWrap" style="display:none;">
+                    <div class="settings-row-text"><strong id="settingsApiEndpointLabel">Endpoint URL</strong><span>Your provider's chat-completions address</span></div>
+                    <input class="chat-modal-input" id="settingsApiEndpointInput" type="text" placeholder="https://example.com/v1/chat/completions">
                   </div>
-                </div>
-
-                <div class="settings-field settings-field-span" id="settingsApiModelIdWrap" style="display:none;">
-                  <div class="chat-modal-label">Custom model ID</div>
-                  <input class="chat-modal-input" id="settingsApiModelInput" type="text"
-                    placeholder="model-id" autocomplete="off" spellcheck="false">
-                </div>
-
-                <div class="chat-modal-note visible auth-info settings-help-note settings-field-span" id="settingsProviderHelp"></div>
-
-                <div class="settings-field settings-field-span" id="settingsAdapterControls" style="display:none;">
-                  <div class="chat-modal-label">Venice login — used to start the adapter, stays on this machine</div>
+                  <div class="settings-row">
+                    <div class="settings-row-text"><strong>Model</strong><span class="settings-model-source" id="settingsModelSource"></span></div>
+                    <div class="settings-row-control settings-model-row">
+                      <select class="chat-modal-input settings-row-select" id="settingsApiModelPreset"></select>
+                      <button type="button" class="modal-btn settings-model-refresh ui-tooltip-anchor" id="settingsModelRefreshBtn" data-tooltip="Reload the model list from your account" aria-label="Reload models">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><polyline points="21 3 21 9 15 9"/></svg>
+                      </button>
+                    </div>
+                  </div>
+                  <div class="settings-row stack" id="settingsApiModelIdWrap" style="display:none;">
+                    <div class="settings-row-text"><strong>Custom model ID</strong><span>Any model your account can use</span></div>
+                    <input class="chat-modal-input" id="settingsApiModelInput" type="text" placeholder="model-id" autocomplete="off" spellcheck="false">
+                  </div>
+                  <div class="settings-row-foot"><div class="chat-modal-note visible auth-info settings-help-note" id="settingsProviderHelp"></div></div>
+                  <div class="settings-row stack" id="settingsAdapterControls" style="display:none;">
+                    <div class="chat-modal-label">Venice login — used to start the adapter, stays on this machine</div>
                   <input class="chat-modal-input" id="settingsAdapterUser" type="text" placeholder="Venice username or email" autocomplete="off" spellcheck="false">
                   <div class="settings-secret-wrap" style="margin-top:8px;">
                     <input class="chat-modal-input settings-secret-input" id="settingsAdapterPass" type="password" placeholder="Venice password" autocomplete="off">
@@ -1007,20 +971,28 @@
                     <summary>Adapter diagnostics</summary>
                     <pre id="settingsAdapterDiagnosticsText"></pre>
                   </details>
+                  </div>
+                </div>
+                <div class="settings-row stack" id="settingsModelUrlWrap">
+                  <div class="settings-row-text"><strong>Model download URL</strong><span>Where to fetch a local model file from</span></div>
+                  <input class="chat-modal-input" id="settingsModelUrlInput" type="text" placeholder="https://...">
                 </div>
               </div>
+            </div>
 
-              <div id="settingsModelUrlWrap" class="settings-field">
-                <div class="chat-modal-label">Model Download URL</div>
-                <input class="chat-modal-input" id="settingsModelUrlInput" type="text" placeholder="https://...">
+            <div class="settings-section" id="settingsAutopilotAiSection">
+              <div class="settings-section-title">Autopilot AI</div>
+              <div class="settings-card">
+                <div class="settings-row"><div class="settings-row-text"><strong>Provider</strong><span>Reviews the autopilot's paper buys and writes its lessons. Separate from chat.</span></div><select class="chat-modal-input settings-row-select" id="autopilotAiProvider"></select></div>
+                <div class="settings-row"><div class="settings-row-text"><strong>Model</strong><span>Tested on 348 real buys: DeepSeek Flash best; gpt-5-mini and GLM-5.3 Flash (Venice) are reliable backups</span></div><select class="chat-modal-input settings-row-select" id="autopilotAiModel"></select></div>
+                <div class="settings-row-foot"><div class="chat-modal-note visible auth-info settings-help-note" id="autopilotAiStatus"></div></div>
               </div>
             </div>
           </div>
 
           <div class="settings-pane" data-settings-pane="workers">
             <div class="settings-section">
-              <div class="settings-section-title">Connections</div>
-              <div class="settings-section-copy">Every AI provider AI.EXE can use. Test checks the real connection with your saved key.</div>
+              <div class="settings-section-title">Providers</div>
               <div class="settings-worker-list" id="settingsWorkerList">
                 <div class="settings-note-block">Worker registry is loading.</div>
               </div>
@@ -1030,27 +1002,30 @@
           <div class="settings-pane" data-settings-pane="personalization">
             <div class="settings-section">
               <div class="settings-section-title">About you</div>
-              <label class="chat-modal-label" for="settingsUserProfile">Tell AI.EXE about yourself (optional)</label>
-              <textarea class="chat-modal-input settings-profile-input" id="settingsUserProfile" rows="4" maxlength="2000" placeholder="e.g. I'm Alex from Toronto, Canada. I run a small design business, prefer plain-English explanations, and I'm building income tools."></textarea>
-              <div class="settings-note-block">
-                Used to personalize replies — your name, where you're based, what you work on, how you like answers. Stored only on this device and shared only with the model you chat with. Date, time, and timezone are read from your computer automatically.
+              <div class="settings-card">
+                <div class="settings-row stack">
+                  <div class="settings-row-text"><strong>Tell AI.EXE about yourself</strong><span>Your name, where you're based, what you work on, how you like answers. Stays on this device and goes only to the model you chat with. Date, time and timezone come from your computer.</span></div>
+                  <textarea class="chat-modal-input settings-profile-input" id="settingsUserProfile" rows="4" maxlength="2000" placeholder="e.g. I'm Alex from Toronto, Canada. I run a small design business, prefer plain-English explanations, and I'm building income tools."></textarea>
+                </div>
               </div>
             </div>
           </div>
 
           <div class="settings-pane" data-settings-pane="advanced">
             <div class="settings-section settings-advanced-section">
-              <div class="settings-section-title settings-title-row">Maintenance<span class="settings-update-pill ui-tooltip-anchor" id="settingsUpdateStatus" data-tooltip="Updates are checked and downloaded automatically. A ready update installs when AI.EXE quits."><i></i><span>Automatic updates on</span></span></div>
-              <div class="settings-section-copy">Model tools and diagnostics for the local AI.EXE runtime.</div>
-              <div class="settings-action-grid">
-                <button class="modal-btn" id="settingsImportBtn" type="button">Import / Replace Model</button>
-                <button class="modal-btn" id="settingsVerifyBtn" type="button">Verify</button>
-                <button class="modal-btn" id="settingsDebugDumpBtn" type="button">Dump Debug</button>
+              <div class="settings-section-title settings-title-row">Updates</div>
+              <div class="settings-card">
+                <div class="settings-row"><div class="settings-row-text"><strong>App updates</strong><span>Checked and downloaded automatically; a ready update installs when AI.EXE quits</span></div><div class="settings-row-control"><span class="settings-update-pill ui-tooltip-anchor" id="settingsUpdateStatus" data-tooltip="Updates are checked and downloaded automatically. A ready update installs when AI.EXE quits."><i></i><span>Automatic updates on</span></span></div></div>
               </div>
-              <div class="settings-maintenance-note">
-                <strong>Advanced tools</strong>
-                <span>Verification and diagnostics leave chat content unchanged, but they can affect runtime state and debug visibility.</span>
+            </div>
+            <div class="settings-section">
+              <div class="settings-section-title">Maintenance</div>
+              <div class="settings-card">
+                <div class="settings-row"><div class="settings-row-text"><strong>Import or replace model</strong><span>Load a different local model file</span></div><button class="modal-btn settings-row-btn" id="settingsImportBtn" type="button">Import</button></div>
+                <div class="settings-row"><div class="settings-row-text"><strong>Verify model</strong><span>Check the local model file's checksum</span></div><button class="modal-btn settings-row-btn" id="settingsVerifyBtn" type="button">Verify</button></div>
+                <div class="settings-row"><div class="settings-row-text"><strong>Debug dump</strong><span>Save runtime diagnostics to share when something breaks</span></div><button class="modal-btn settings-row-btn" id="settingsDebugDumpBtn" type="button">Dump</button></div>
               </div>
+              <div class="settings-section-foot">These tools don't touch your chats, but they can change runtime state and debug visibility.</div>
             </div>
           </div>
 

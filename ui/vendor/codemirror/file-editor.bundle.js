@@ -18834,9 +18834,7 @@ var AIExeCodeMirrorBundle = (function (exports) {
               ext.push(EditorView.styleModule.of(highlighter.module));
           themeType = highlighter.themeType;
       }
-      if (options === null || options === void 0 ? void 0 : options.fallback)
-          ext.push(fallbackHighlighter.of(highlighter));
-      else if (themeType)
+      if (themeType)
           ext.push(highlighterFacet.computeN([EditorView.darkTheme], state => {
               return state.facet(EditorView.darkTheme) == (themeType == "dark") ? [highlighter] : [];
           }));
@@ -18880,50 +18878,6 @@ var AIExeCodeMirrorBundle = (function (exports) {
   const treeHighlighter = /*@__PURE__*/Prec.high(/*@__PURE__*/ViewPlugin.fromClass(TreeHighlighter, {
       decorations: v => v.decorations
   }));
-  /**
-  A default highlight style (works well with light themes).
-  */
-  const defaultHighlightStyle = /*@__PURE__*/HighlightStyle.define([
-      { tag: tags$1.meta,
-          color: "#404740" },
-      { tag: tags$1.link,
-          textDecoration: "underline" },
-      { tag: tags$1.heading,
-          textDecoration: "underline",
-          fontWeight: "bold" },
-      { tag: tags$1.emphasis,
-          fontStyle: "italic" },
-      { tag: tags$1.strong,
-          fontWeight: "bold" },
-      { tag: tags$1.strikethrough,
-          textDecoration: "line-through" },
-      { tag: tags$1.keyword,
-          color: "#708" },
-      { tag: [tags$1.atom, tags$1.bool, tags$1.url, tags$1.contentSeparator, tags$1.labelName],
-          color: "#219" },
-      { tag: [tags$1.literal, tags$1.inserted],
-          color: "#164" },
-      { tag: [tags$1.string, tags$1.deleted],
-          color: "#a11" },
-      { tag: [tags$1.regexp, tags$1.escape, /*@__PURE__*/tags$1.special(tags$1.string)],
-          color: "#e40" },
-      { tag: /*@__PURE__*/tags$1.definition(tags$1.variableName),
-          color: "#00f" },
-      { tag: /*@__PURE__*/tags$1.local(tags$1.variableName),
-          color: "#30a" },
-      { tag: [tags$1.typeName, tags$1.namespace],
-          color: "#085" },
-      { tag: tags$1.className,
-          color: "#167" },
-      { tag: [/*@__PURE__*/tags$1.special(tags$1.variableName), tags$1.macroName],
-          color: "#256" },
-      { tag: /*@__PURE__*/tags$1.definition(tags$1.propertyName),
-          color: "#00c" },
-      { tag: tags$1.comment,
-          color: "#940" },
-      { tag: tags$1.invalid,
-          color: "#f00" }
-  ]);
   const DefaultScanDist = 10000, DefaultBrackets = "()[]{}";
   /**
   When larger syntax nodes, such as HTML tags, are marked as
@@ -31531,79 +31485,54 @@ var AIExeCodeMirrorBundle = (function (exports) {
     }
   }
 
+  // App tokens (ai-exe.css) drive every color, so the editor follows light/dark live.
   function createTheme() {
     return EditorView.theme({
       "&": {
         height: "100%",
-        backgroundColor: "#0a0b0e",
-        color: "#e2e8f0",
+        backgroundColor: "var(--bg)",
+        color: "var(--text)",
         fontFamily: '"SFMono-Regular", "Consolas", "Menlo", "Liberation Mono", monospace',
-        fontSize: "14px"
+        fontSize: "13px"
       },
-      ".cm-scroller": {
-        fontFamily: "inherit",
-        lineHeight: "22.4px"
-      },
-      ".cm-content, .cm-gutter": {
-        minHeight: "100%"
-      },
-      ".cm-content": {
-        caretColor: "#e2e8f0"
-      },
-      ".cm-cursor, .cm-dropCursor": {
-        borderLeftColor: "#e2e8f0"
-      },
-      ".cm-gutters": {
-        backgroundColor: "rgba(10, 12, 18, 0.82)",
-        color: "rgba(148, 163, 184, 0.72)",
-        borderRight: "1px solid rgba(37, 43, 61, 0.75)"
-      },
-      ".cm-activeLine": {
-        backgroundColor: "rgba(92, 129, 196, 0.16)"
-      },
-      ".cm-activeLineGutter": {
-        backgroundColor: "rgba(92, 129, 196, 0.14)",
-        color: "rgba(235, 244, 255, 0.98)"
-      },
-      ".cm-selectionBackground, &.cm-focused .cm-selectionBackground, ::selection": {
-        backgroundColor: "rgba(82, 174, 255, 0.24)"
-      },
-      ".cm-panels": {
-        backgroundColor: "#0f1117",
-        color: "#e2e8f0",
-        borderBottom: "1px solid #1e2333"
-      },
-      ".cm-search .cm-textfield": {
-        backgroundColor: "rgba(10, 15, 28, 0.72)",
-        color: "#e2e8f0",
-        border: "1px solid rgba(52, 60, 84, 0.95)",
-        borderRadius: "7px"
-      },
-      ".cm-search .cm-button": {
-        background: "transparent",
-        color: "rgba(226, 232, 240, 0.82)",
-        border: "1px solid rgba(52, 60, 84, 0.95)",
-        borderRadius: "7px"
-      },
-      ".cm-search .cm-button:hover": {
-        background: "rgba(255,255,255,0.06)",
-        color: "#fff"
-      },
-      ".cm-searchMatch": {
-        backgroundColor: "rgba(255, 214, 10, 0.22)"
-      },
-      ".cm-searchMatch.cm-searchMatch-selected": {
-        backgroundColor: "rgba(255, 214, 10, 0.45)"
-      },
+      ".cm-scroller": { fontFamily: "inherit", lineHeight: "21px" },
+      ".cm-content, .cm-gutter": { minHeight: "100%" },
+      ".cm-content": { caretColor: "var(--accent)", padding: "10px 0" },
+      ".cm-cursor, .cm-dropCursor": { borderLeftColor: "var(--accent)", borderLeftWidth: "2px" },
+      ".cm-gutters": { backgroundColor: "var(--bg)", color: "var(--text4)", border: "none", paddingLeft: "6px" },
+      ".cm-lineNumbers .cm-gutterElement": { padding: "0 14px 0 8px" },
+      ".cm-activeLine": { backgroundColor: "var(--ink-04)" },
+      ".cm-activeLineGutter": { backgroundColor: "transparent", color: "var(--text2)" },
+      ".cm-selectionBackground, &.cm-focused .cm-selectionBackground, ::selection": { backgroundColor: "var(--accent-24)" },
+      ".cm-panels": { backgroundColor: "var(--panel)", color: "var(--text)", borderBottom: "1px solid var(--ui-line)" },
+      ".cm-search .cm-textfield": { backgroundColor: "var(--ui-surface)", color: "var(--text)", border: "1px solid var(--ui-line)", borderRadius: "7px" },
+      ".cm-search .cm-button": { background: "transparent", color: "var(--text2)", border: "1px solid var(--ui-line)", borderRadius: "7px" },
+      ".cm-search .cm-button:hover": { background: "var(--ink-06)", color: "var(--text)" },
+      ".cm-searchMatch": { backgroundColor: "color-mix(in srgb, var(--warn) 22%, transparent)" },
+      ".cm-searchMatch.cm-searchMatch-selected": { backgroundColor: "color-mix(in srgb, var(--warn) 45%, transparent)" },
+      ".cm-selectionMatch": { backgroundColor: "var(--ink-08)" },
       // Range highlight for "go to the read/edited region" from the agent work panel.
-      ".cm-range-hl-read": {
-        backgroundColor: "rgba(82, 174, 255, 0.14)"
-      },
-      ".cm-range-hl-edit": {
-        backgroundColor: "rgba(52, 211, 153, 0.14)"
-      }
-    }, {dark: true});
+      ".cm-range-hl-read": { backgroundColor: "color-mix(in srgb, var(--link) 14%, transparent)" },
+      ".cm-range-hl-edit": { backgroundColor: "color-mix(in srgb, var(--good) 14%, transparent)" }
+    });
   }
+
+  // Syntax colors from the same semantic tokens.
+  const appHighlightStyle = HighlightStyle.define([
+    {tag: [tags$1.keyword, tags$1.controlKeyword, tags$1.operatorKeyword, tags$1.modifier, tags$1.definitionKeyword], color: "var(--violet)"},
+    {tag: [tags$1.string, tags$1.special(tags$1.string), tags$1.regexp], color: "var(--good)"},
+    {tag: [tags$1.number, tags$1.bool, tags$1.null, tags$1.atom], color: "var(--warn)"},
+    {tag: [tags$1.comment, tags$1.lineComment, tags$1.blockComment, tags$1.meta], color: "var(--text4)", fontStyle: "italic"},
+    {tag: [tags$1.tagName, tags$1.angleBracket], color: "var(--bad)"},
+    {tag: [tags$1.attributeName, tags$1.propertyName], color: "var(--link)"},
+    {tag: [tags$1.function(tags$1.variableName), tags$1.function(tags$1.propertyName)], color: "var(--accent)"},
+    {tag: [tags$1.typeName, tags$1.className, tags$1.namespace], color: "var(--warn)"},
+    {tag: [tags$1.heading], color: "var(--text)", fontWeight: "600"},
+    {tag: [tags$1.link, tags$1.url], color: "var(--link)", textDecoration: "underline"},
+    {tag: [tags$1.emphasis], fontStyle: "italic"},
+    {tag: [tags$1.strong], fontWeight: "600"},
+    {tag: [tags$1.invalid], color: "var(--bad)"},
+  ]);
 
   // Effect + field that paint a contiguous line range (read = blue, edit = green).
   const setRangeHighlight = StateEffect.define();
@@ -31656,7 +31585,7 @@ var AIExeCodeMirrorBundle = (function (exports) {
             ...searchKeymap,
           ]),
           highlightSelectionMatches(),
-          syntaxHighlighting(defaultHighlightStyle, {fallback: true}),
+          syntaxHighlighting(appHighlightStyle),
           languageCompartment.of(languageExtension(options.language)),
           rangeHighlightField,
           theme,

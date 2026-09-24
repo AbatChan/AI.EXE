@@ -104,3 +104,15 @@ function evaluate(message, modelDecision, overrides = {}) {
 }
 
 console.log('PASS: semantic router uses LLM route as primary, fallback scoring only when model route is low-confidence/missing, and hard gates still apply');
+
+{
+ const result=evaluate('Read the existing file, research online, and create a Canvas document.',
+ {route:'agent',intent:'create_or_build_deliverable',needs_workspace:true,needs_file_mutation:false,confidence:0.95},
+ {workspace:{currentPath:'/',currentKind:'folder',workspaceRootName:'Existing',rootEntryCount:1}});
+ assert.equal(result.decision.route,'agent');
+ assert.equal(result.decision.shouldAskUser,false);
+ assert.equal(result.decision.shouldCreateProject,false);
+ assert.equal(result.decision.shouldModifyFiles,false);
+ assert.equal(result.decision.shouldReadFiles,true);
+ console.log('PASS: read + research + Canvas does not become filesystem project creation');
+}

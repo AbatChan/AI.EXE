@@ -71,9 +71,9 @@ async function testPromptCombinations() {
     messages: baseMessages,
     manualContext: 'Prefer concise sections.',
   });
-  assert.ok(contextPrompt.includes('Priority order:'));
+  assert.ok(contextPrompt.includes('Priority when instructions conflict'));
   assert.ok(contextPrompt.includes(customInstructionsMarker));
-  assertOrder(contextPrompt, 'Priority order:', customInstructionsMarker);
+  assertOrder(contextPrompt, 'Priority when instructions conflict', customInstructionsMarker);
   assertOrder(contextPrompt, customInstructionsMarker, '<|im_start|>user');
 
   const thinkPrompt = await buildPrompt({
@@ -101,7 +101,7 @@ async function testPromptCombinations() {
   assert.ok(combinedPrompt.includes('CRITICAL FORMATTING ORDER FOR COMBINED UI MODES'));
   assert.ok(combinedPrompt.includes('THINK_MODE: ON'));
   assert.ok(combinedPrompt.includes('CANVAS_MODE: ON'));
-  assertOrder(combinedPrompt, customInstructionsMarker, 'UI MODE: Canvas mode is enabled');
+  assertOrder(combinedPrompt, customInstructionsMarker, 'UI MODE: Canvas is on for this reply');
   assertOrder(combinedPrompt, 'CRITICAL FORMATTING ORDER FOR COMBINED UI MODES', 'THINK_MODE: ON');
   assertOrder(combinedPrompt, 'THINK_MODE: ON', 'CANVAS_MODE: ON');
 
@@ -109,7 +109,7 @@ async function testPromptCombinations() {
     messages: baseMessages,
     canvasMode: true,
   }, {}, { canvasModeOverride: false });
-  assert.ok(routedChatPrompt.includes('routed to normal chat'));
+  assert.ok(routedChatPrompt.includes('this reply is conversational, so answer in normal chat'));
   assert.ok(!routedChatPrompt.includes('CANVAS_MODE: ON'));
   assert.ok(!routedChatPrompt.includes('[respond using <AIcanvas'));
 }

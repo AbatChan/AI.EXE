@@ -3200,7 +3200,8 @@ private:
         while (std::getline(iss, token, '\n')) {
           if (!token.empty()) args.push_back(token);
         }
-        const CommandRunResult cr = RunProjectCommand(root, program, args, 60);
+        const CommandRunResult cr = RunProjectCommand(root, program, args,
+          (program == "npm" || program == "npx" || program == "pnpm" || program == "yarn") ? 300 : 60);
         if (!cr.err.empty()) {
           ok = false;
           message = cr.err;
@@ -3266,7 +3267,7 @@ private:
       std::string lines;
       for (const auto& info : DevServerManager::Instance().List()) {
         lines += std::to_string(info.id) + "\t" + (info.running ? "running" : "exited")
-            + "\t" + std::to_string(info.pid) + "\t" + info.command + "\n";
+            + "\t" + std::to_string(info.pid) + "\t" + info.command + "\t" + info.cwd + "\n";
       }
       output = lines;
       message = "ok";

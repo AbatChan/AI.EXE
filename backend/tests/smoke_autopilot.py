@@ -192,6 +192,24 @@ def main():
         assert "ZZZ" not in bot.status()["pinned"]
         ok("coin check reads live signals; pinning adds a coin to the scan")
 
+        for symbol in list(bot.account.positions):
+            bot.sell_now(symbol)
+        bot.set_risk("careful")
+        assert bot.status()["risk"] == "careful"
+        bot.buy_now("sol/usdt")
+        assert "SOL" in bot.account.positions and not bot._verdicts.get(("SOL", None))  # no AI veto asked
+        for bad, call in (("held", lambda: bot.buy_now("SOL")), ("unknown", lambda: bot.sell_now("ZZZ"))):
+            try:
+                call()
+                raise AssertionError(f"{bad} accepted")
+            except ValueError:
+                pass
+        before = bot.account.equity_cents()
+        bot.sell_now("SOL")
+        assert "SOL" not in bot.account.positions and bot.account.trades[-1]["reason"] == "sold by you"
+        assert abs(bot.account.equity_cents() - before) <= 1  # open value already net of exit costs
+        ok("you can buy, sell and change risk; bad requests are refused")
+
         bot.stop()
         assert bot.status()["running"] is False
         try:
@@ -201,7 +219,13 @@ def main():
             pass
         ok("stop works and budget bounds are enforced")
 
-    print("\n15 checks passed.")
+        fresh = ap.Autopilot(d, m.fetch, clock=lambda: m.now)  # stopped + restarted: no marks yet
+        m.crash("BTC", 10)
+        s = fresh.status()
+        assert s["benchmark_cents"] < s["budget_cents"] * 0.95, s["benchmark_cents"]
+        ok("'vs holding BTC' follows the live BTC price even while stopped")
+
+    print("\n17 checks passed.")
 
 
 if __name__ == "__main__":

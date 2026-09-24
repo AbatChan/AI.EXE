@@ -53,7 +53,8 @@ const declaredReasons = Object.keys(JSON.parse(`{${renderer
   .slice(renderer.indexOf('const guardReasonLabels = {') + 27, renderer.indexOf('};', renderer.indexOf('const guardReasonLabels = {')))
   .replace(/(\w+):/g, '"$1":').replace(/'([^']*)'/g, (m, v) => JSON.stringify(v)).replace(/,\s*$/, '')}}`));
 const usedReasons = [...loop.matchAll(/_guardReason: '([a-z_]+)'/g)].map((m) => m[1]);
-assert.ok(usedReasons.length >= 8, `every guard declares a reason (got ${usedReasons.length})`);
+assert.ok(usedReasons.length >= 7, `every guard declares a reason (got ${usedReasons.length})`);
+assert.ok(!usedReasons.includes('just_written'), 'read-back is permitted after saving');
 usedReasons.forEach((r) => assert.ok(declaredReasons.includes(r), `guard reason "${r}" has no label in the renderer`));
 
 // ---- 3. Deadlock escape ----

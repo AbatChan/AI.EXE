@@ -92,8 +92,8 @@ function createExecutor(reads, commandResult) {
   assert.equal(missingDepsResult.permissionRequired, true);
   assert.equal(missingDepsResult.commandPolicy, 'ask_first');
   assert.equal(missingDepsResult.runErrorCount, 1);
-  assert.equal(missingDepsResult.terminalCommand, 'npm install');
-  assert.equal(missingDepsResult.terminalProof.command, 'npm install');
+  assert.equal(missingDepsResult.terminalCommand, 'npm install --no-audit --no-fund');
+  assert.equal(missingDepsResult.terminalProof.command, 'npm install --no-audit --no-fund');
   assert.match(missingDepsResult.observation, /Permission is required/i);
   assert.match(missingDepsResult.observation, /npm install/);
 

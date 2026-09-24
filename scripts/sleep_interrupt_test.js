@@ -86,9 +86,9 @@ assert.match(loop, /const timedOutBySleep = Boolean\(res && res\.timedOut && sle
 // kept its Stop button and ticking timer for that whole window.
 const timeoutBranch = loop.slice(loop.indexOf('if (toolResult && toolResult._toolTimedOut)'),
   loop.indexOf('// Bounded self-correction'));
-assert.ok(timeoutBranch.indexOf('refreshWorkspaceTree') < timeoutBranch.indexOf("title: 'Stopped (timed out)'"),
+assert.ok(timeoutBranch.indexOf('refreshWorkspaceTree') < timeoutBranch.indexOf("title: 'Stopped'"),
   'the workspace refresh happens BEFORE the Stopped card is painted');
-assert.ok(timeoutBranch.indexOf("setAgentProgress('Stopping...')") < timeoutBranch.indexOf("title: 'Stopped (timed out)'"),
+assert.ok(timeoutBranch.indexOf("setAgentProgress('Stopping...')") < timeoutBranch.indexOf("title: 'Stopped'"),
   'the interim state is labelled honestly while it winds down');
 
 // ---- 6. The setting exists in the UI and defaults ON --------------------------

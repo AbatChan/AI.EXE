@@ -144,7 +144,7 @@ ok('app passes createRunEventLog into the loop deps', /createRunEventLog: create
 ok('read-back + :debug runs viewer wired', /readDebugLog/.test(aiExe) && /action === 'runs'/.test(aiExe));
 ok('boot schedules the interrupted-run recovery scan', /scanForInterruptedAgentRuns\(\); \}, 3000\)/.test(aiExe)
   && /function scanForInterruptedAgentRuns/.test(aiExe));
-ok('recovery notice sets Continue and dedupes via note event', /forceNeedsContinue: true \}\)/.test(aiExe)
+ok('recovery notice sets Continue and dedupes via note event', /forceNeedsContinue: true,/.test(aiExe) && /rebuildActivitiesFromRunLog\(entries, run.turnId\)/.test(aiExe)
   && /interrupted_recovery_notice/.test(aiExe));
 ok('html loads agent-events before agent-core', html.indexOf('agent-events.js') !== -1
   && html.indexOf('agent-events.js') < html.indexOf('agent-core.js'));

@@ -1,8 +1,9 @@
 Return exactly one JSON object. No prose. No markdown.
 {{AGENT_ENVIRONMENT}}
 primary_stack must be "python", "web", or "generic".
-Keys: task_kind, project_name, primary_stack, needs_readme, needs_run_instructions, final_requires_real_files, expected_files, affected_files, files_to_inspect, done_criteria, validation, summary, phases
+Keys: task_kind, workspace, project_name, primary_stack, needs_readme, needs_run_instructions, final_requires_real_files, expected_files, affected_files, files_to_inspect, done_criteria, validation, summary, phases
 task_kind: "project" | "edit" | "analysis"
+workspace: "new" when the user wants a separate, brand-new project/workspace (even while another project is open), otherwise "current"
 primary_stack: "python" | "web" | "generic"
 needs_readme: "yes" | "no"
 needs_run_instructions: "yes" | "no"
@@ -26,9 +27,10 @@ Rules:
 - If the user asks to inspect first and then make exactly one grounded improvement, do not force an edit when the available files do not show a clear bug, misleading behavior, or documentation issue. In that case prefer task_kind="analysis".
 - Requests to document, clarify, onboard, or make an existing project easier for another developer to understand usually belong to task_kind="edit", not task_kind="project".
 - If the requested operation targets the workspace root itself and the tools do not support it, do not plan around fake helper files or metadata files. Prefer an explanatory completion instead.
+- Renaming or moving a file is a move of the EXISTING file, not new work: never put the destination in expected_files as something to write, and phrase done_criteria as "<old> is moved to <new>". If the destination name already exists, the plan must say how the two are reconciled (e.g. merge, then remove the duplicate).
 - For project tasks, set project_name from the DISTINCTIVE SUBJECT of the app — what it IS or does — as 2 to 4 meaningful words in kebab-case (e.g. "clinic-scheduler", "inventory-auditor", "training-timer"). Name it the way a developer would name the repo. Skip filler that describes scope/quantity/quality rather than the thing itself (words like "entire", "complete", "full", "whole", "new", "simple", "basic", "modern", "offline"), and never use a single letter, an article ("a"/"an"/"the"), or a bare generic word ("app"/"site"/"project"/"tool"). Example: for "build the entire offline clinic appointment scheduler", the name is "clinic-appointment-scheduler" — NOT "entire" or "offline".
-- Write summary like a professional software agent kickoff sentence, not a label.
-- Keep summary specific about the deliverable and main capabilities.
+- Write summary as one brief, natural first-person sentence explaining what you will do and why.
+- Name the main outcome; avoid feature inventories, canned review announcements, and claims that work is already complete.
 - Decide file scope from the requested outcome. Do not rely on keyword recipes.
 - PLAN ORDER FOR ANY PROJECT: identify the user-visible flows/screens/commands/data first, then choose the file structure that supports them, then assign shared foundations before dependent files. Web: HTML/page structure + shared components/tokens before page-specific styling. Apps/scripts: entry point + data model/core logic before optional UI polish. Never plan styling, decoration, or helper files before the structure and behavior they support.
 - For project tasks, expected_files should list the smallest realistic MVP deliverables: entry point, shared foundations, core behavior files, then only the extra files needed for the requested pages/features.
@@ -57,7 +59,7 @@ Rules:
 - Use final_requires_real_files="yes" whenever creating a project or app from scratch.
 
 Examples for summary style:
-- "A local inventory check-in tool with item entry, status filters, and saved records."
+- "I’ll build the inventory check-in flow and make sure saved records survive a reload."
 - "First check whether the HTML structure and CSS selectors line up, then report the real mismatches."
 - "Bring the existing README in line with the actual runtime and file layout."
 
@@ -80,3 +82,5 @@ CURRENT_SELECTION:
 TASK:
 {{TASK}}
 JSON:
+
+- A rename, move, or deletion request does not authorize editing file contents. Preserve bytes during moves; delete the requested item directly without embellishing or rewriting it. Do only the requested operations.

@@ -380,6 +380,7 @@
       let message = '';
       let srcPath = '';
       let dstPath = '';
+      let query = '';
       let content = '';
       let offset = 0;
       let startLine = 0;
@@ -489,6 +490,7 @@
         if (parsed && typeof parsed === 'object') {
           action = String(parsed.action || '');
           tool = String(parsed.tool || '');
+          query = String(parsed.query || '');
           path = String(parsed.path || '');
           message = String(parsed.message || '');
           planUpdate = Array.isArray(parsed.plan_update)
@@ -522,6 +524,7 @@
         };
         action = readStringValue('action');
         tool = readStringValue('tool');
+        query = readStringValue('query');
         path = readStringValue('path');
         message = readStringValue('message');
         planUpdate = readStringValue('plan_update');
@@ -542,7 +545,7 @@
         return null;
       }
       const normalizedAction = String(action || '').trim().toLowerCase();
-      const validTools = ['none', 'new_project', 'generate_project', 'list_dir', 'search_files', 'read_file', 'read_files', 'write_file', 'write_files', 'edit_file', 'validate_files', 'check_code', 'run_app', 'run_command', 'mkdir', 'move', 'delete', 'remember_project', 'read_project_memory', 'forget_project_memory'];
+      const validTools = ['none', 'web_search', 'create_canvas', 'new_project', 'generate_project', 'list_dir', 'search_files', 'read_file', 'read_files', 'write_file', 'write_files', 'edit_file', 'validate_files', 'check_code', 'run_app', 'run_command', 'mkdir', 'move', 'delete', 'remember_project', 'read_project_memory', 'forget_project_memory', 'trading'];
       let resolvedAction = normalizedAction;
       let resolvedTool = String(tool || '').toLowerCase();
       // Auto-repair: model put tool name in action field (e.g. "action": "read_file")
@@ -564,6 +567,11 @@
           ? 'edit_file'
           : (trimmedContent.length >= 80 ? 'write_file' : 'read_file');
       }
+      // Auto-repair: {"action":"tool","tool":"final"} is a finish.
+      if (resolvedTool === 'final' && (resolvedAction === 'tool' || !resolvedAction)) {
+        resolvedAction = 'final';
+        resolvedTool = 'none';
+      }
       if (!['tool', 'final'].includes(resolvedAction)) {
         return null;
       }
@@ -575,6 +583,7 @@
         message: scrubDecisionNarration(message),
         tool: validTools.includes(resolvedTool) ? resolvedTool : 'none',
         path: String(path || '').trim(),
+        query: String(query || '').trim(),
         content: String(content || ''),
         command: String(command || '').trim(),
         srcPath: String(srcPath || '').trim(),
@@ -604,7 +613,7 @@
         // such as "implement FABRIK from scratch" describe a feature, not project
         // scope. A semantic planner decision can still request new_project and the
         // executor will ask for confirmation when a workspace is already open.
-        if (!hasWorkspace && !projectCreated) {
+        if ((!hasWorkspace || planSpec.workspaceIntent === 'new') && !projectCreated) {
           return {
             action: 'tool',
             tool: 'new_project',
@@ -1402,44 +1411,12 @@
     function computeAgentChecklistProgress(items, toolEvents, planSpec = null) {
       const list = Array.isArray(items) ? items.map((t) => String(t || '').trim()).filter(Boolean) : [];
       const events = Array.isArray(toolEvents) ? toolEvents : [];
-      const mutations = events.filter((e) => e && e.ok
-        && ['write_file', 'edit_file'].includes(String(e.tool || '').toLowerCase()));
-      const anyValidationPassed = events.some((e) => e
-        && String(e.tool || '').toLowerCase() === 'validate_files' && e.validationPassed === true);
-      const haystacks = mutations.map((e) => `${String(e.path || '')} ${String(e.content || '')} ${String(e.observation || '')}`.toLowerCase());
-      // Nothing is "done" until every planned file exists (markup keywords else
-      // falsely credit behavior that lives in an unwritten file).
-      const norm = (p) => `/${String(p || '').replace(/^\/+/, '')}`;
-      const writtenPaths = new Set(mutations.map((e) => norm(e.path)));
-      // For an EDIT task only the affected files must change (siblings are read-only context);
-      // for a project build every expected file must exist. Using expectedFiles for edits left
-      // the plan stuck at 0/N because untouched siblings never get written.
-      const taskKind = String(planSpec && planSpec.taskKind || '').toLowerCase();
-      const affected = Array.isArray(planSpec && planSpec.affectedFiles) ? planSpec.affectedFiles : [];
-      const requiredSource = (taskKind === 'edit' && affected.length)
-        ? affected
-        : (Array.isArray(planSpec && planSpec.expectedFiles) ? planSpec.expectedFiles : []);
-      const plannedFiles = requiredSource.map(norm).filter((p) => p && p !== '/' && p !== '/README.md');
-      // In an edit plan, files_to_inspect may overlap affected_files and the model
-      // can reasonably discover that one inspected sibling needs no change. Do not
-      // zero every completed criterion merely because that sibling stayed untouched.
-      // New projects still require every planned deliverable before criteria tick.
-      const allPlannedWritten = taskKind === 'edit'
-        ? mutations.length > 0
-        : plannedFiles.every((p) => writtenPaths.has(p));
-      return list.map((text) => {
-        const keywords = agentChecklistKeywords(text);
-        let done = false;
-        if (!allPlannedWritten) {
-          done = false;  // project is incomplete — never report a criterion as met yet
-        } else if (keywords.length) {
-          done = haystacks.some((h) => keywords.some((k) => h.includes(k)));
-        } else if (mutations.length > 0 && anyValidationPassed) {
-          // Generic criterion (no distinctive keyword) — credited once work shipped.
-          done = true;
-        }
-        return { text, done };
-      });
+      const mutationCount = events.filter((e) => e && e.ok &&
+        ['write_file', 'edit_file', 'write_files', 'new_project', 'mkdir', 'move', 'delete'].includes(String(e.tool || '').toLowerCase())).length;
+      const evidence = planSpec && planSpec._criteriaEvidence;
+      const verified = evidence && evidence.mutationCount === mutationCount && Array.isArray(evidence.verified)
+        ? new Set(evidence.verified) : new Set();
+      return list.map((text) => ({ text, done: verified.has(text) }));
     }
 
     function renderAgentChecklist(progress) {
@@ -1696,7 +1673,7 @@
 
     function extractPlannedPathFromPhaseTask(task) {
       const text = String((task && task.text) || task || '');
-      const match = text.match(/(?:^|\s)(\/?[a-z0-9._-]+(?:\/[a-z0-9._-]+)*\.(?:html?|css|scss|sass|less|js|mjs|cjs|ts|jsx|tsx|md|txt|json|csv|py))\b/i);
+      const match = text.match(/(?:^|\s)(\/?[a-z0-9._@+()\[\]-]+(?:\/[a-z0-9._@+()\[\]-]+)*\.(?:prisma|example|html?|css|scss|sass|less|js|mjs|cjs|ts|jsx|tsx|md|txt|json|csv|py))\b/i);
       return match ? normalizeWorkspacePath(match[1]) : '';
     }
 
@@ -1709,7 +1686,7 @@
         || expectedFiles.some((path) => /\.html?$/i.test(String(path || '')));
       let list = Array.isArray(phases) ? phases.filter((phase) => phase && phase.title) : [];
       if (!isWeb) return list;
-      const expected = expectedFiles.map((path) => normalizeWorkspacePath(path || '')).filter(Boolean);
+      const expected = [...new Set(expectedFiles.map((path) => normalizeWorkspacePath(path || '')).filter(Boolean))];
       const expectedSet = new Set(expected);
       const nextAppRouter = expected.some((path) => /(?:^|\/)next\.config\.[cm]?[jt]s$/i.test(path))
         || expected.some((path) => /^\/(?:src\/)?app\/(?:layout|page)\.tsx$/i.test(path));
@@ -1745,8 +1722,10 @@
           || /^\/(?:src\/)?app\/globals\.(?:css|scss|sass|less)$/i.test(path)
         ));
         const foundationSet = new Set(foundation);
-        const normalized = [Object.assign({}, list[0], { tasks: foundation.map(phaseTaskForPath) })];
-        const assigned = new Set(foundation);
+        const firstPaths = (list[0].tasks || []).map(extractPlannedPathFromPhaseTask).filter(path => expectedSet.has(path));
+        const firstFiles = [...new Set([...foundation, ...firstPaths])];
+        const normalized = [Object.assign({}, list[0], { tasks: firstFiles.map(phaseTaskForPath) })];
+        const assigned = new Set(firstFiles);
         list.slice(1).forEach((phase) => {
           const tasks = (Array.isArray(phase.tasks) ? phase.tasks : [])
             .map((task) => {
@@ -1973,7 +1952,6 @@
       if (!hasAgentPlanShape && (Object.prototype.hasOwnProperty.call(parsedObj, 'route') || Object.prototype.hasOwnProperty.call(parsedObj, 'intent'))) {
         return buildFallbackAgentPlanSpec(taskText, options);
       }
-      const explicitFreshWorkspaceIntent = /\b(new project|new workspace|fresh workspace|from scratch|start from scratch|separate project|brand new)\b/.test(lower);
       const sameChatWorkspaceFollowup = chatOwnsOpenWorkspace(options && options.chatId);
       const projectLikeFallback = (
         /\b(create|build|make|start|setup|set up|design|develop|generate|craft)\b/.test(lower)
@@ -1985,25 +1963,26 @@
       const openWorkspaceFollowupMutation = isOpenWorkspaceFollowupMutation(taskText);
       const workspaceContext = typeof deps.getWorkspaceContext === 'function' ? deps.getWorkspaceContext() || {} : {};
       const isWorkspaceEmpty = hasOpenWorkspaceContext() && Number(workspaceContext.rootEntryCount) === 0;
-      let taskKind = ['project', 'edit', 'analysis'].includes(String(parsed && parsed.task_kind || '').toLowerCase())
+      const modelTaskKind = ['project', 'edit', 'analysis'].includes(String(parsed && parsed.task_kind || '').toLowerCase())
         ? String(parsed.task_kind).toLowerCase()
-        : (projectLikeFallback ? 'project' : 'edit');
-      if (explicitFreshWorkspaceIntent && projectLikeFallback && !docsOnlyTask) {
-        taskKind = 'project';
-      }
-      if (sameChatWorkspaceFollowup && !explicitFreshWorkspaceIntent && taskKind !== 'analysis') {
-        taskKind = 'edit';
-      }
-      if (openWorkspaceFollowupMutation && !explicitFreshWorkspaceIntent && taskKind !== 'analysis') {
-        taskKind = 'edit';
-      }
-      if (!sameChatWorkspaceFollowup && !workspaceScopedMutation && !openWorkspaceFollowupMutation && projectLikeFallback && taskKind !== 'analysis') {
-        taskKind = 'project';
-      }
-      if ((docsOnlyTask || sameChatWorkspaceFollowup || workspaceScopedMutation || openWorkspaceFollowupMutation) && taskKind === 'project' && !explicitFreshWorkspaceIntent) {
-        if (!isWorkspaceEmpty) {
-          taskKind = 'edit';
-        }
+        : '';
+      const modelWorkspace = ['new', 'current'].includes(String(parsed && parsed.workspace || '').toLowerCase())
+        ? String(parsed.workspace).toLowerCase()
+        : '';
+      // Keyword lists only when the planner said nothing.
+      const explicitFreshWorkspaceIntent = modelWorkspace
+        ? modelWorkspace === 'new'
+        : /\b(new project|new workspace|fresh workspace|another project|different project|from scratch|start from scratch|separate project|brand new)\b/.test(lower);
+      let taskKind;
+      if (modelTaskKind) {
+        // Planner decides; its own workspace field settles new-vs-current.
+        taskKind = modelTaskKind;
+        if (explicitFreshWorkspaceIntent && taskKind !== 'analysis') taskKind = 'project';
+        if (taskKind === 'project' && modelWorkspace === 'current' && hasOpenWorkspaceContext() && !isWorkspaceEmpty) taskKind = 'edit';
+      } else {
+        taskKind = projectLikeFallback ? 'project' : 'edit';
+        if ((sameChatWorkspaceFollowup || openWorkspaceFollowupMutation || workspaceScopedMutation || docsOnlyTask) && !explicitFreshWorkspaceIntent && !isWorkspaceEmpty) taskKind = 'edit';
+        if (explicitFreshWorkspaceIntent && projectLikeFallback && !docsOnlyTask) taskKind = 'project';
       }
       if (taskKind === 'edit' && isWorkspaceEmpty) {
         taskKind = 'project';
@@ -2257,14 +2236,10 @@
         .replace(/\b(the|a|an)\s+(?:the|a|an)\s+/gi, '$1 ')
         .trim();
       doneCriteria = doneCriteria.map(humanizePlanText).filter(Boolean);
-      // Clip at a word boundary with a visible ellipsis — a hard slice ends the
-      // Goal mid-list ("Modal, Avatar,") and reads as a corrupted prompt.
-      const rawParsedSummary = humanizePlanText(String(parsed && parsed.summary ? parsed.summary : '').trim());
-      const parsedSummary = rawParsedSummary.length > 220
-        ? `${rawParsedSummary.slice(0, 220).replace(/\s+\S*$/, '')}…`
-        : rawParsedSummary;
+      const parsedSummary = humanizePlanText(String(parsed && parsed.summary ? parsed.summary : '').trim());
       return {
         taskKind,
+        workspaceIntent: (options.forceProjectScope || explicitFreshWorkspaceIntent) ? 'new' : 'current',
         projectName: projectName || deriveProjectNameFromTask(taskText),
         primaryStack,
         needsReadme,
@@ -2356,7 +2331,7 @@
       const fallbackSummary = (() => {
         const trimmed = String(taskText || '').replace(/\s+/g, ' ').trim();
         if (!trimmed) return projectName ? `Build ${projectName}.` : 'Build the requested project.';
-        return trimmed.length > 220 ? `${trimmed.slice(0, 217).trim()}...` : trimmed;
+        return trimmed;
       })();
       const singleHtmlFileProject = taskKind === 'project' && isSingleHtmlFileRequest(taskText);
       if (singleHtmlFileProject) primaryStack = 'web';

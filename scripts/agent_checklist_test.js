@@ -1,10 +1,4 @@
-// Unit tests for the harness-driven checklist progress tracker (agent-core.js).
-// The planner emits doneCriteria (user-term sub-goals); the harness marks each
-// item done MECHANICALLY once a successful edit/write whose target or content
-// matches the item's distinctive keywords has landed — because our model is too
-// weak to self-tick a task list reliably (unlike Claude Code's model-driven Task
-// tools). These tests pin: keyword->edit matching, generic-item crediting,
-// not-done before work, and the rendered checkbox markdown + count.
+// Checklist progress requires current verification evidence.
 const assert = require('node:assert/strict');
 const path = require('node:path');
 
@@ -29,8 +23,7 @@ const items = ['resize search close icon', 'redesign movie cards', 'no class/id 
   ok('no work -> all items not done', p.length === 3 && p.every((x) => !x.done));
 }
 
-// An edit to style.css whose content addresses the close icon + cards marks
-// those items done via keyword match; the mismatch item stays open.
+// Matching words in source do not prove behavior.
 {
   const events = [
     { tool: 'edit_file', ok: true, path: '/style.css',
@@ -38,8 +31,8 @@ const items = ['resize search close icon', 'redesign movie cards', 'no class/id 
   ];
   const p = computeAgentChecklistProgress(items, events);
   const byText = Object.fromEntries(p.map((x) => [x.text, x.done]));
-  ok('close-icon item marked done by keyword (search) match', byText['resize search close icon'] === true);
-  ok('cards item marked done by keyword (movie/cards) match', byText['redesign movie cards'] === true);
+  ok('close-icon item not verified by keyword (search) match', byText['resize search close icon'] === false);
+  ok('cards item not verified by keyword (movie/cards) match', byText['redesign movie cards'] === false);
   ok('unaddressed mismatch item stays open', byText['no class/id mismatches'] === false);
 }
 
@@ -67,11 +60,10 @@ const items = ['resize search close icon', 'redesign movie cards', 'no class/id 
     events,
     editPlan,
   );
-  ok('an unchanged inspected sibling does not zero valid edit progress', p.every((x) => x.done));
+  ok('changes remain unverified until there is evidence', p.every((x) => !x.done));
 }
 
-// A generic criterion with no distinctive keyword is credited once real work
-// shipped AND validation passed (the all-stopword case).
+// Static validation does not prove visual quality.
 {
   const generic = ['it should look good and work'];
   const noWork = computeAgentChecklistProgress(generic, []);
@@ -81,14 +73,14 @@ const items = ['resize search close icon', 'redesign movie cards', 'no class/id 
     { tool: 'validate_files', ok: true, validationPassed: true },
   ];
   const done = computeAgentChecklistProgress(generic, events);
-  ok('generic item credited after shipped+validated work', done[0].done === true);
+  ok('generic item not verified by generic static checks', done[0].done === false);
 }
 
 // Render: checkbox markdown + accurate count header.
 {
   const p = computeAgentChecklistProgress(items, [
     { tool: 'edit_file', ok: true, path: '/style.css', content: '#search-clear{} .movie-card{}' },
-  ]);
+  ], { _criteriaEvidence: { mutationCount: 1, verified: items.slice(0, 2) } });
   const md = renderAgentChecklist(p);
   ok('render shows the progress count header', md.includes('**Plan (2/3)**'));
   ok('render uses checked + unchecked boxes',

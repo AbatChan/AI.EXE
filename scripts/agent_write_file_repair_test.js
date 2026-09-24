@@ -204,7 +204,9 @@ const repairedScript = [
   assert.equal(calls.length, 1, 'initial generation is not restarted as a second full-file rewrite');
   assert.equal(writes.length, 1, 'the generated prefix is saved once');
   assert.equal(writes[0].content, brokenScript, 'the exact generated prefix remains available for append repair');
-  assert.match(repaired.observation, /Continue it from where it ends by APPENDING the rest with edit_file/i);
+  // Complete file with a stray bad line: fix that spot, never "append the rest".
+  assert.match(repaired.observation, /The file is complete; fix that spot with a targeted edit_file/i);
+  assert.doesNotMatch(repaired.observation, /APPENDING the rest/i);
   assert.equal(repaired.structuralIssue.length > 0, true, 'structural issue is returned to steer the next agent step');
   assert.ok(!traces.some((entry) => entry.kind === 'agent_write_structural_repair_attempt'), 'no redundant full-file repair is launched');
   console.log('PASS: generated JS syntax failure is saved once and delegated to append repair');

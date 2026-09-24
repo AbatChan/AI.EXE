@@ -223,7 +223,6 @@
       const isPythonTask = plan.primaryStack === 'python';
       const isGameTask = isAgentTaskGameLike(lower);
       const isDocsTask = isDocsOnlyTask(text);
-      const isRenameTask = /\brename\b/.test(lower);
       const workspace = typeof getWorkspaceContext === 'function' ? getWorkspaceContext() || {} : {};
       const workspaceAlreadyOpen = Boolean(
         String(workspace.workspaceRootName || '').trim()
@@ -446,9 +445,6 @@
             if (isAnalysisTask) {
               return ['read_file', 'list_dir', 'validate_files', 'read_project_memory'].includes(tool);
             }
-            if (isRenameTask) {
-              return tool === 'move';
-            }
             return ['write_file', 'edit_file', 'mkdir', 'move', 'delete', 'remember_project', 'forget_project_memory'].includes(tool);
           }),
         });
@@ -475,6 +471,10 @@
     function buildImmediateNextAction(taskText, toolEvents = [], planSpec = null, stepIndex = 0) {
       const missing = buildAgentTaskRequirements(taskText, toolEvents, planSpec).filter((item) => !item.met);
       const remainingSteps = Math.max(0, effectiveAgentMaxSteps(planSpec) - Math.max(0, Number(stepIndex) || 0));
+      const lastTerminal = [...toolEvents].reverse().find((event) => event && ['run_app', 'run_command'].includes(event.tool));
+      if (lastTerminal && (lastTerminal.ok === false || Number(lastTerminal.runErrorCount || 0) > 0)) {
+        return `Execution budget: ${remainingSteps} tool steps remain. The latest terminal check failed. Use its error output to choose the relevant source inspection or repair, then verify again. Planned inspection paths are suggestions, not prerequisites; skip unrelated files. If blocked, explain the concrete blocker.`;
+      }
       if (!missing.length) {
         return `Execution budget: ${remainingSteps} tool step${remainingSteps === 1 ? '' : 's'} remain. NOW: return the final result; do not invent optional work.`;
       }
@@ -999,7 +999,9 @@
       const evidence = [String(priorAttempt || ''), ...(toolEvents || []).slice(-8).map((event) => String(event && event.observation || ''))].join('\n');
       const lineMatch = evidence.match(new RegExp(`${normalized.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[^\n]{0,240}?line\\s+(\\d+)`, 'i')) || evidence.match(/line\s+(\d+)/i);
       const line = Number(lineMatch && lineMatch[1]) || 0;
-      if (!line) return source.slice(0, 22000);
+      if (!line) return source.length > 22000
+        ? `Excerpt: first 22000 of ${source.length} characters. The remainder is not shown. Use exact targeted edits; request another read for missing code.\n${source.slice(0, 22000)}`
+        : source;
       const lines = source.split('\n');
       const start = Math.max(0, line - 121);
       const end = Math.min(lines.length, line + 120);
@@ -1203,7 +1205,9 @@
 
     async function buildAgentPlanSpec(chatId, taskText, planOptions = {}) {
       const forceProjectScope = Boolean(planOptions && planOptions.forceProjectScope);
-      const prompt = await buildAgentPlanPrompt(chatId, taskText);
+      const prompt = await buildAgentPlanPrompt(chatId, taskText)
+        + (forceProjectScope ? '\nWORKSPACE SCOPE: The user requested a NEW isolated project. Set workspace=new. The open project is unrelated; do not inspect, reuse or edit it. Initialize the new project first.\n' : '')
+        + '\nCanvas is an artifact, not a project file. When requested, plan a create_canvas step; do not add a README or handoff.md as its substitute.\n';
       // Plan = one-shot JSON; needs room for a reasoning model's hidden tokens too,
       // else it truncates mid-criterion ("...and col"). 768 (decision budget) was far short.
       const planMaxTokens = Math.max(4096, Number(agentDecisionMaxTokens) || 0);

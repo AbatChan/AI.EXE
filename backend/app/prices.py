@@ -26,6 +26,8 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Dict, List
 
+from .errors import network_reason
+
 EQUITY_URL = "https://api.nasdaq.com/api/quote/{symbol}/info?assetclass={assetclass}"
 EQUITY_CHART_URL = "https://api.nasdaq.com/api/quote/{symbol}/chart?assetclass={assetclass}"
 EQUITY_SEARCH_URL = "https://api.nasdaq.com/api/autocomplete/slookup/10?search={query}"
@@ -73,6 +75,16 @@ DEFAULT_ASSETS = [
     {"symbol": "ETH-USD", "name": "Ethereum", "exchange": "Bybit spot", "asset_class": "crypto"},
     {"symbol": "SOL-USD", "name": "Solana", "exchange": "Bybit spot", "asset_class": "crypto"},
 ]
+
+
+def describe_network_error(exc) -> str:
+    """A short, human reason for a failed price request, judged by exception type."""
+    reason = network_reason(exc, "the price service")
+    if reason:
+        return reason
+    if isinstance(exc, (ValueError, KeyError, TypeError)):
+        return "the price service sent an unreadable reply"
+    return "the price service is unavailable"
 
 
 class QuoteUnavailable(RuntimeError):
@@ -229,7 +241,7 @@ class QuoteFeed:
                 stale = dict(cached["quote"])
                 stale["stale"] = True
                 return stale
-            raise QuoteUnavailable(f"{symbol}: {exc}")
+            raise QuoteUnavailable(f"{symbol}: {describe_network_error(exc)}")
         with self._lock:
             self._cache[symbol] = {"_at": time.time(), "quote": parsed}
         return dict(parsed)
@@ -327,7 +339,7 @@ class QuoteFeed:
         except QuoteUnavailable:
             raise
         except (urllib.error.URLError, OSError, ValueError, KeyError, TypeError) as exc:
-            raise QuoteUnavailable(f"{symbol}: {exc}")
+            raise QuoteUnavailable(f"{symbol}: {describe_network_error(exc)}")
 
     def crypto_intraday_points(self, symbol: str) -> List[dict]:
         """Recent one-minute closes to seed the exchange stream chart."""
@@ -360,7 +372,7 @@ class QuoteFeed:
         except QuoteUnavailable:
             raise
         except (urllib.error.URLError, OSError, ValueError, KeyError, TypeError) as exc:
-            raise QuoteUnavailable(f"{symbol}: {exc}")
+            raise QuoteUnavailable(f"{symbol}: {describe_network_error(exc)}")
 
     def crypto_universe(self, limit: int = 20, min_turnover_usd: float = 10_000_000) -> List[str]:
         """Most-traded Bybit USDT spot coins, pegged assets and leveraged tokens left out."""
@@ -371,7 +383,7 @@ class QuoteFeed:
         try:
             payload = self._fetch(CRYPTO_TICKERS_URL) or {}
         except (urllib.error.URLError, OSError, ValueError) as exc:
-            raise QuoteUnavailable(f"coin list: {exc}")
+            raise QuoteUnavailable(f"coin list: {describe_network_error(exc)}")
         rows = ((payload.get("result") or {}).get("list")) or []
         picks = []
         for row in rows:
@@ -416,7 +428,7 @@ class QuoteFeed:
         try:
             payload = self._fetch(url) or {}
         except (urllib.error.URLError, OSError, ValueError) as exc:
-            raise QuoteUnavailable(str(exc))
+            raise QuoteUnavailable(describe_network_error(exc))
         if int(payload.get("retCode") or 0) != 0:
             raise QuoteUnavailable(str(payload.get("retMsg") or "exchange error"))
         with self._lock:
@@ -535,13 +547,14 @@ class QuoteFeed:
         try:
             payload = self._fetch(CRYPTO_HOURLY_URL.format(pair=urllib.parse.quote(f"{base}USDT"))) or {}
         except (urllib.error.URLError, OSError, ValueError) as exc:
-            raise QuoteUnavailable(f"{base}: {exc}")
+            raise QuoteUnavailable(f"{base}: {describe_network_error(exc)}")
         if int(payload.get("retCode") or 0) != 0:
             raise QuoteUnavailable(f"{base}: hourly candles unavailable")
         rows = ((payload.get("result") or {}).get("list")) or []
         now_ms = time.time() * 1000
         candles = [{"t": int(r[0]), "open": float(r[1]), "high": float(r[2]), "low": float(r[3]),
-                    "close": float(r[4]), "partial": int(r[0]) + 3_600_000 > now_ms}
+                    "close": float(r[4]), "vol": float(r[6]) if len(r) > 6 else 0.0,  # USD turnover
+                    "partial": int(r[0]) + 3_600_000 > now_ms}
                    for r in reversed(rows) if len(r) >= 5]
         if not candles:
             raise QuoteUnavailable(f"{base}: no hourly candles returned")
@@ -612,7 +625,7 @@ class QuoteFeed:
                 stale = dict(cached["data"])
                 stale["stale"] = True
                 return stale
-            raise QuoteUnavailable(f"{symbol}: {exc}")
+            raise QuoteUnavailable(f"{symbol}: {describe_network_error(exc)}")
         with self._lock:
             self._intraday_cache[symbol] = {"_at": time.time(), "data": parsed}
         return dict(parsed)

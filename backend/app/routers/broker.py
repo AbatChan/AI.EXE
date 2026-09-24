@@ -21,7 +21,7 @@ from ..config import settings
 from ..llm import LLMClient, LLMError
 from ..prices import QuoteUnavailable, crypto_id
 from ..provider import is_local_provider
-from ..services import (api_key_store, autopilot, paper_broker, paper_test_runner, provider_store,
+from ..services import (api_key_store, autopilot, autopilot_ai_store, paper_broker, paper_test_runner, provider_store,
                         quote_feed, usage_manager)
 from ..strategy import analyze_history
 from ..usage import CreditExhausted, RateLimited
@@ -644,6 +644,69 @@ def broker_autopilot_watch(payload: AutopilotWatch):
         return autopilot.watch(payload.symbol, payload.watch)
     except (ValueError, QuoteUnavailable) as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+
+class AutopilotCoin(BaseModel):
+    symbol: str = Field(min_length=1, max_length=24)
+
+
+class AutopilotRisk(BaseModel):
+    risk: str = Field(max_length=20)
+
+
+@router.post("/broker/autopilot/buy")
+def broker_autopilot_buy(payload: AutopilotCoin):
+    try:
+        return autopilot.buy_now(payload.symbol)
+    except (ValueError, QuoteUnavailable) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post("/broker/autopilot/sell")
+def broker_autopilot_sell(payload: AutopilotCoin):
+    try:
+        return autopilot.sell_now(payload.symbol)
+    except (ValueError, QuoteUnavailable) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post("/broker/autopilot/risk")
+def broker_autopilot_risk(payload: AutopilotRisk):
+    try:
+        return autopilot.set_risk(payload.risk)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+class AutopilotAI(BaseModel):
+    base_url: str = Field(min_length=8, max_length=300)
+    model: str = Field(min_length=1, max_length=120)
+    api_key: str = Field(default="", max_length=500)
+    label: str = Field(default="", max_length=60)
+
+
+@router.get("/broker/autopilot/ai")
+def broker_autopilot_ai():
+    """Which AI reviews autopilot entries. Never returns the key."""
+    own = autopilot_ai_store.get()
+    chat_base, chat_model = provider_store.resolve()
+    return {"custom": bool(own), "base_url": own.get("base_url") or chat_base, "model": own.get("model") or chat_model,
+            "label": own.get("label") or "", "chat_model": chat_model}
+
+
+@router.post("/broker/autopilot/ai")
+def broker_autopilot_ai_set(payload: AutopilotAI):
+    try:
+        autopilot_ai_store.set(payload.base_url, payload.model, payload.api_key, payload.label)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return broker_autopilot_ai()
+
+
+@router.delete("/broker/autopilot/ai")
+def broker_autopilot_ai_clear():
+    autopilot_ai_store.clear()  # back to following the chat model
+    return broker_autopilot_ai()
 
 
 @router.post("/broker/autopilot/reset")

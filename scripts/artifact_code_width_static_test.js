@@ -23,7 +23,7 @@ assert.match(financeChild, /var\(--content-max-width\)/, 'Finance keeps its wide
 assert.match(js, /function getArtifactDisplayName\(item\)/, 'technical artifact names have a friendly display fallback');
 assert.match(js, /return projectName \|\| String\(linkedChat\.name/, 'project name falls back to the source chat name');
 assert.match(js, /if \(!isCodeArtifact\(item\)\) return 'TEXT'/, 'text artifacts use a TEXT type label');
-assert.match(js, /artifact-row-badge[\s\S]*artifact-row-time/, 'file type is left and time is right in the card header');
+assert.match(js, /artifact-row-icon[\s\S]*artifact-row-time/, 'type icon is left and time is right in each row');
 assert.match(css, /\.artifact-row:hover \.artifact-row-time[\s\S]*opacity: 0/, 'time clears space for hover actions');
 assert.match(css, /\.artifact-row:hover \.artifact-row-actions[\s\S]*opacity: 1/, 'hover action icons remain available');
 assert.doesNotMatch(js, /\$\{escapeHtml\(chatName\)\} • \$\{escapeHtml\(formatTimeAgo\(item\.createdAt\)\)\}/, 'time is removed from the metadata under the title');

@@ -1,0 +1,10 @@
+const assert=require('node:assert/strict'),fs=require('fs'),vm=require('vm');
+const src=fs.readFileSync('ui/agent-runtime.js','utf8');
+const ctx={};vm.createContext(ctx);
+for(const name of ['unwrapWholeFence','hasClosedWholeReplyFence']) vm.runInContext(src.match(new RegExp('    function '+name+'\\([^]*?\\n    }'))[0],ctx);
+assert.equal(ctx.unwrapWholeFence('```text\nAUTO-OK\n```\n\nVerified: unrelated narration'),'AUTO-OK');
+assert.equal(ctx.hasClosedWholeReplyFence('```text\nAUTO-OK\n```\n\nVerified narration'),true);
+assert.equal(ctx.unwrapWholeFence('````markdown\n# Doc\n```js\nx()\n```\n````\nOutside'),'# Doc\n```js\nx()\n```');
+assert.equal(ctx.hasClosedWholeReplyFence('```text\nIncomplete'),false);
+assert.equal(ctx.unwrapWholeFence('Plain unfenced text'),'Plain unfenced text');
+console.log('PASS: closing fence bounds file content and preserves nested fences');

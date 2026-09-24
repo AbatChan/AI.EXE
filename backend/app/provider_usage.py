@@ -8,6 +8,8 @@ OpenAI-compatible providers have no standard balance endpoint → the local mete
 """
 import httpx
 
+from .errors import describe_error
+
 _BALANCE_KEYS = {"VCU", "USD", "DIEM", "USD_EXTERNAL"}
 
 
@@ -47,7 +49,7 @@ def read_provider_health(base_url: str, kind: str) -> dict:
     try:
         resp = httpx.get(url, timeout=8)
     except httpx.HTTPError as exc:
-        out["detail"] = f"unreachable: {exc}"
+        out["detail"] = f"unreachable: {describe_error(exc, 'the provider')}"
         return out
     if resp.status_code != 200:
         out["detail"] = f"HTTP {resp.status_code}"
@@ -94,7 +96,7 @@ def read_provider_balance(base_url: str, api_key: str) -> dict:
     try:
         resp = httpx.get(url, headers={"Authorization": f"Bearer {api_key}"}, timeout=15)
     except httpx.HTTPError as exc:
-        return {"available": False, "source": "venice", "balances": {}, "detail": f"network error: {exc}"}
+        return {"available": False, "source": "venice", "balances": {}, "detail": f"network error: {describe_error(exc, 'the provider')}"}
     if resp.status_code != 200:
         return {"available": False, "source": "venice", "balances": {},
                 "detail": f"HTTP {resp.status_code}"}

@@ -1980,6 +1980,8 @@ static bool IsPreventingIdleSleepOnMac() {
   NSWindow *_window;
   WKWebView *_webView;
   NSTask *_backendTask;
+  dispatch_source_t _backendWatchdog;
+  int _backendRestarts;
   NSStatusItem *_paperStatusItem;
   std::atomic<bool> _paperTestActive;
   BOOL _allowTermination;
@@ -2849,7 +2851,8 @@ static bool IsPreventingIdleSleepOnMac() {
       while (std::getline(iss, token, '\n')) {
         if (!token.empty()) args.push_back(token);
       }
-      const CommandRunResult cr = RunProjectCommand(root, program, args, 60);
+      const CommandRunResult cr = RunProjectCommand(root, program, args,
+          (program == "npm" || program == "npx" || program == "pnpm" || program == "yarn") ? 300 : 60);
       if (!cr.err.empty()) {
         ok = false;
         message = cr.err;
@@ -2915,7 +2918,7 @@ static bool IsPreventingIdleSleepOnMac() {
     std::string lines;
     for (const auto& info : DevServerManager::Instance().List()) {
       lines += std::to_string(info.id) + "\t" + (info.running ? "running" : "exited")
-          + "\t" + std::to_string(info.pid) + "\t" + info.command + "\n";
+          + "\t" + std::to_string(info.pid) + "\t" + info.command + "\t" + info.cwd + "\n";
     }
     output = lines;
     message = "ok";
@@ -3056,6 +3059,16 @@ static bool IsPreventingIdleSleepOnMac() {
       didReceiveScriptMessage:(WKScriptMessage *)message {
   (void)userContentController;
   if (![[message name] isEqualToString:@"aiexe"]) {
+    return;
+  }
+
+  // Only the bundled top-level UI may use privileged native actions.
+  NSURL *sourceURL = message.frameInfo.request.URL;
+  NSString *expectedPath = [NSString stringWithUTF8String:_loadedHtmlPath.string().c_str()];
+  NSString *sourcePath = [[sourceURL.path stringByStandardizingPath] stringByResolvingSymlinksInPath];
+  expectedPath = [[expectedPath stringByStandardizingPath] stringByResolvingSymlinksInPath];
+  if (message.webView != _webView || !message.frameInfo.isMainFrame ||
+      !sourceURL.isFileURL || expectedPath.length == 0 || ![sourcePath isEqualToString:expectedPath]) {
     return;
   }
 
@@ -3281,7 +3294,31 @@ static bool IsPreventingIdleSleepOnMac() {
   }
   [self setPaperStatusItemVisible:IsPaperBackgroundServiceEnabled() ? YES : NO];
   _backendTask = StartFastApiBackend(runtime_root);
+  [self startBackendWatchdog:runtime_root];
   [self initializeRuntime];
+}
+
+// An adopted backend (from a previous instance) or a crashed one must come back.
+- (void)startBackendWatchdog:(const std::filesystem::path &)runtime_root {
+  const std::filesystem::path root = runtime_root;
+  dispatch_source_t timer = dispatch_source_create(
+      DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
+  dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, 4 * NSEC_PER_SEC),
+                            3 * NSEC_PER_SEC, NSEC_PER_SEC / 2);
+  __weak AppDelegate *weakSelf = self;
+  dispatch_source_set_event_handler(timer, ^{
+    if (IsBackendReachable()) return;
+    dispatch_async(dispatch_get_main_queue(), ^{
+      AppDelegate *strongSelf = weakSelf;
+      if (!strongSelf) return;
+      if (strongSelf->_backendTask && [strongSelf->_backendTask isRunning]) return;  // still booting
+      if (strongSelf->_backendRestarts >= 20) return;  // crash-loop cap
+      strongSelf->_backendRestarts += 1;
+      strongSelf->_backendTask = StartFastApiBackend(root);
+    });
+  });
+  dispatch_resume(timer);
+  _backendWatchdog = timer;
 }
 
 @end

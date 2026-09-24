@@ -20,7 +20,6 @@ const loop = fs.readFileSync(path.join(root, 'ui', 'agent-loop.js'), 'utf8');
 assert.match(runtime, /function completionAlreadyDisclosesRisk\(text, outcome = null\)/, 'the gate can recognize a compliant message');
 assert.match(runtime, /function openContractIssueLines\(toolEvents, max = 2\)/, 'a replaced message can still name real findings');
 assert.match(runtime, /agent_completion_truth_gate_kept/, 'keeping a message is traced, not silent');
-assert.match(runtime, /Still open: \$\{openIssues\.join\('; '\)\}/, 'the replacement carries the open findings');
 
 // ---- Behaviour: run the real predicate ----
 const start = runtime.indexOf('function completionClaimsSuccess(text)');
@@ -89,15 +88,9 @@ assert.ok(guardFn.indexOf('structuralIssue') < guardFn.indexOf('sawCleanWrite = 
 
 console.log('PASS: a completion that already states it is unverified survives the gate; claims and silence are still replaced, now naming the open findings; regenerating a truncated file is no longer blocked');
 
-// ---- v9.7.8: a wrong VERDICT must not destroy a correct analysis ----
-// Regression: the model opened "Fixed the ReactCurrentOwner crash" (false — no browser run)
-// but the same message carried the correct root cause and the real fix ("upgrade
-// @react-three/fiber to v9"). Replacing wholesale threw the useful half away.
-assert.match(runtime, /const survivingDetail = String\(text \|\| ''\)\.split\('\\n'\)/, 'the message is salvaged line by line');
-assert.match(runtime, /survivingDetail\.length >= 80 \? `\$\{corrected\}/, 'the correction leads, the detail follows');
-const salvage = runtime.slice(runtime.indexOf('const survivingDetail'), runtime.indexOf('// The correction leads'));
-assert.match(salvage, /fixed\|resolved\|solved\|done\|complete/, 'claim lines are the ones dropped');
-assert.match(salvage, /before\|until\|once\|unless\|when\|after\|not\|never/, 'negated/conditional lines are not falsely dropped');
+// Contradictory drafts get a model rewrite, not a duplicated inventory.
+assert.match(runtime, /previous draft contradicted the recorded result/);
+assert.doesNotMatch(runtime, /I changed \$\{changedUniq/);
 
 // ---- v9.7.8: the caret-mangling phantom ----
 // Regression: every view of package.json showed "^1^.17.10" while node reported 8.18.0 —

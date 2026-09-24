@@ -22,8 +22,8 @@ const promptCore = global.AIExePromptCore.createPromptCore({
 
 (async () => {
   const prompt = await promptCore.buildInferencePrompt('chat_test', 'sure', {});
-  assert.ok(prompt.includes('Agent mode is OFF for this turn'), 'prompt states Agent mode is off');
-  assert.ok(prompt.includes('never say you will create/write/place files now'), 'prompt blocks fake file creation promises');
+  assert.ok(prompt.includes('Agent is off for this reply'), 'prompt states Agent mode is off');
+  assert.ok(prompt.includes('never say you will create, write or place files now'), 'prompt blocks fake file creation promises');
   console.log('Passed chat prompt mode tests.');
 })().catch((err) => {
   console.error(err);
