@@ -65,3 +65,25 @@ assert.match(loop, /checklistItems\.push\(criterion\)/);
 assert.match(fn(ui, 'requestSelectedDeveloperAgentReply'), /finally \{\s+requeueLeftoverSteers\(requestToken\);/);
 assert.match(fn(ui, 'requeueLeftoverSteers'), /queuedSends\.unshift\(note\.job\)/);
 console.log('PASS: queue + steer, readable smoke errors mapped to file:line, clean search queries, run timing in chat memory');
+
+// Edit writer saying "nothing to change" is reported as such — no rewrite fallback, no "couldn't parse".
+{
+  const ctx = {};
+  vm.createContext(ctx);
+  vm.runInContext(`${fn(executor, 'isExplicitEmptyEditProgram')}; this.empty = isExplicitEmptyEditProgram;`, ctx);
+  assert.equal(ctx.empty('{"edits":[]}'), true);
+  assert.equal(ctx.empty('```json\n{"edits": []}\n```'), true);
+  assert.equal(ctx.empty('{"edits":[{"find":"a","replace":"b"}]}'), false);
+  assert.equal(ctx.empty('make it green'), false);
+  assert.match(executor, /if \(writerFoundNothing \|\| noOpProgram\) \{[\s\S]{0,400}noChangeNeeded: true/);
+  console.log('PASS: empty or identical edit programs read as "no change needed"');
+}
+
+// Verify before done: code changes need a run after the last change; cards need a standalone, complete marker.
+{
+  const planner = fs.readFileSync(path.join(root, 'ui', 'agent-planner.js'), 'utf8');
+  assert.match(planner, /id: 'run_after_changes'[\s\S]{0,200}met: lastRun > lastMutation/);
+  assert.match(ui, /const midSentence = \/\[A-Za-z0-9\]\/\.test\(text\.slice\(match\.index \+ match\[0\]\.length\)\);/);
+  assert.match(ui, /CHAT_CARD_NEEDS_ARG = new Set\(\['compare', 'fx', 'weather', 'timer', 'action'\]\)/);
+  console.log('PASS: run-after-changes requirement; cards only for standalone complete markers');
+}

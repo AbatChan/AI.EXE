@@ -1642,6 +1642,17 @@ export default config;
       return /\(unterminated |near end of file/.test(issue);
     }
 
+    // The edit writer's explicit "{"edits":[]}" means it found nothing to change.
+    function isExplicitEmptyEditProgram(raw) {
+      const text = String(raw || '').trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
+      try {
+        const parsed = JSON.parse(text);
+        return Boolean(parsed && typeof parsed === 'object' && Array.isArray(parsed.edits) && parsed.edits.length === 0);
+      } catch (_) {
+        return false;
+      }
+    }
+
     function getJsSyntaxIssue(jsText, parseError = null) {
       const src = String(jsText || '');
       const parseMessage = String(parseError && parseError.message ? parseError.message : parseError || '').trim();
@@ -3471,10 +3482,27 @@ export default config;
         deps.setActiveAgentStreamStatus(chatId, `Editing file ${path}...`);
         let program = deps.parseAgentEditProgram(decision.content || '');
         let editProgramSource = program ? 'inline-decision' : '';
+        let writerFoundNothing = false;
         if (!program) {
           const generated = await deps.generateAgentEditFileProgram(taskText, toolEvents, path, originalContent, decision.content || '', planSpec);
           program = deps.parseAgentEditProgram(generated);
           if (program) editProgramSource = 'generated';
+          else writerFoundNothing = isExplicitEmptyEditProgram(generated);
+        }
+        // Nothing to change here is an answer, not a parse failure — never rewrite the file for it.
+        const noOpProgram = Boolean(program && Array.isArray(program.edits) && program.edits.length
+          && program.edits.every((edit) => edit && (!edit.op || edit.op === 'replace') && !edit.text
+            && typeof edit.find === 'string' && edit.find === edit.replace));
+        if (writerFoundNothing || noOpProgram) {
+          if (typeof deps.recordDebugTrace === 'function') {
+            deps.recordDebugTrace('agent_edit_no_change_needed', { path, source: writerFoundNothing ? 'empty_program' : 'identical_replace' }, { path });
+          }
+          return {
+            ok: false,
+            mutated,
+            noChangeNeeded: true,
+            observation: `edit_file made no change to ${path}: it already satisfies this request, so there is nothing to edit here. Do not edit ${path} again for this; make the change in the file that actually needs it (check your plan), or finalize if the work is done.`,
+          };
         }
         if (typeof deps.recordDebugTrace === 'function') {
           deps.recordDebugTrace('agent_edit_mode', {

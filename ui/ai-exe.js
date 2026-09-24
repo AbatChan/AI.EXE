@@ -21287,6 +21287,12 @@ function attachCodeCopyButtons(container) {
 // component that keeps refreshing while it's on screen.
 
 const CHAT_CARD_ANYWHERE = /\[\[card:(trading|portfolio|coin|stock|compare|fx|weather|timer|clock|action)(?:\s+([^\]]{1,80}))?\]\]/gi;
+const CHAT_CARD_NEEDS_ARG = new Set(['compare', 'fx', 'weather', 'timer', 'action']);
+const CHAT_CARD_PLAIN_NAME = {
+  trading: 'autopilot card', portfolio: 'portfolio card', coin: 'price chart', stock: 'stock chart',
+  compare: 'comparison chart', fx: 'exchange-rate card', weather: 'weather card', timer: 'timer',
+  clock: 'clock', action: 'action card',
+};
 
 function hydrateChatCards(container) {
   if (!container || !container.querySelectorAll) return;
@@ -21296,11 +21302,19 @@ function hydrateChatCards(container) {
     const text = String(block.textContent || '');
     const found = [...text.matchAll(CHAT_CARD_ANYWHERE)];
     if (!found.length) return;
-    // Markers are usually alone on a line, but tolerate one glued to other text.
+    // A card needs its marker to end the line and carry its required details; a marker
+    // mentioned mid-sentence ("add a [[card:compare]] of…") reads as plain words instead.
+    const replacements = new Map();
     let anchor = block;
     found.forEach((match) => {
       const kind = match[1].toLowerCase();
       const arg = String(match[2] || '').trim();
+      const midSentence = /[A-Za-z0-9]/.test(text.slice(match.index + match[0].length));
+      if (midSentence || (CHAT_CARD_NEEDS_ARG.has(kind) && !arg)) {
+        replacements.set(match[0], CHAT_CARD_PLAIN_NAME[kind] || 'card');
+        return;
+      }
+      replacements.set(match[0], '');
       if (kind === 'action') {
         const key = arg.toLowerCase().replace(/\s+/g, ' ');
         if (seenActions.has(key)) return;
@@ -21315,7 +21329,7 @@ function hydrateChatCards(container) {
     });
     const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT);
     for (let node = walker.nextNode(); node; node = walker.nextNode()) {
-      node.nodeValue = node.nodeValue.replace(CHAT_CARD_ANYWHERE, '');
+      node.nodeValue = node.nodeValue.replace(CHAT_CARD_ANYWHERE, (marker) => replacements.get(marker) || '');
     }
     if (!String(block.textContent || '').trim()) block.remove();
   });

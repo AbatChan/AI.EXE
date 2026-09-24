@@ -432,6 +432,25 @@
         });
       }
 
+      // Verify like a user before calling it done: after the last code change, run the app once.
+      // Running it is the requirement; its errors are reported honestly, never looped on here.
+      if (codeMutated) {
+        const events = Array.isArray(toolEvents) ? toolEvents : [];
+        let lastMutation = -1;
+        let lastRun = -1;
+        events.forEach((event, index) => {
+          if (!event || !event.ok) return;
+          const tool = String(event.tool || '').toLowerCase();
+          if (['write_file', 'edit_file', 'write_files'].includes(tool)) lastMutation = index;
+          if (tool === 'run_app') lastRun = index;
+        });
+        requirements.push({
+          id: 'run_after_changes',
+          label: 'run the app after the last code change to check it works',
+          met: lastRun > lastMutation,
+        });
+      }
+
       if (!requirements.length) {
         const hasMutation = hasSuccessfulAgentTool(toolEvents, (event) => {
           const tool = String(event.tool || '').toLowerCase();
