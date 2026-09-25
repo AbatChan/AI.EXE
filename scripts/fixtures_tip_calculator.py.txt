@@ -1,0 +1,84 @@
+"""Decimal-based calculations for the Tip Split app."""
+
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP, localcontext
+from typing import Union
+
+NumberInput = Union[str, int, float, Decimal]
+_CENT = Decimal("0.01")
+
+
+def _as_decimal(value: NumberInput, field_name: str) -> Decimal:
+    """Convert an input to a finite Decimal or raise a helpful ValueError."""
+    try:
+        amount = Decimal(str(value).strip())
+    except (InvalidOperation, TypeError, ValueError, AttributeError):
+        raise ValueError(f"Enter a valid {field_name}.") from None
+
+    if not amount.is_finite():
+        raise ValueError(f"Enter a valid {field_name}.")
+    return amount
+
+
+def _round_to_cents(amount: Decimal) -> Decimal:
+    """Round a Decimal to cents using conventional half-up rounding."""
+    try:
+        # Provide enough precision for ordinary large amounts and inputs with
+        # more than two decimal places, without relying on the global context.
+        digits = len(amount.as_tuple().digits)
+        scale = max(0, -amount.as_tuple().exponent)
+        integer_digits = max(1, amount.adjusted() + 1) if amount else 1
+        with localcontext() as context:
+            context.prec = max(context.prec, digits + 4, scale + integer_digits + 4)
+            return amount.quantize(_CENT, rounding=ROUND_HALF_UP)
+    except InvalidOperation:
+        raise ValueError("The amount is too large to calculate.") from None
+
+
+def calculate_split(
+    bill_amount: NumberInput,
+    tip_percent: NumberInput,
+    people: NumberInput,
+) -> tuple[Decimal, Decimal, Decimal]:
+    """Return the tip, total, and per-person share as cent-rounded Decimals.
+
+    ``bill_amount`` must be a non-negative amount. ``tip_percent`` must be a
+    whole number from 0 through 30, and ``people`` must be a positive whole
+    number.
+    """
+    bill = _as_decimal(bill_amount, "bill amount")
+    if bill < 0:
+        raise ValueError("Bill amount cannot be negative.")
+
+    percentage = _as_decimal(tip_percent, "tip percentage")
+    if percentage != percentage.to_integral_value():
+        raise ValueError("Tip percentage must be a whole number.")
+    if not Decimal("0") <= percentage <= Decimal("30"):
+        raise ValueError("Tip percentage must be between 0% and 30%.")
+
+    person_count = _as_decimal(people, "number of people")
+    if person_count != person_count.to_integral_value():
+        raise ValueError("Number of people must be a whole number.")
+    if person_count < 1:
+        raise ValueError("Number of people must be at least 1.")
+
+    try:
+        with localcontext() as context:
+            bill_digits = len(bill.as_tuple().digits)
+            percent_digits = len(percentage.as_tuple().digits)
+            bill_scale = max(0, -bill.as_tuple().exponent)
+            context.prec = max(
+                context.prec,
+                bill_digits + percent_digits + 8,
+                bill_scale + bill_digits + 8,
+            )
+
+            tip = _round_to_cents(bill * percentage / Decimal("100"))
+            total = _round_to_cents(bill + tip)
+            per_person = _round_to_cents(total / person_count)
+    except (InvalidOperation, ArithmeticError):
+        raise ValueError("The amount is too large to calculate.") from None
+
+    return tip, total, per_person
+
+
+__all__ = ["calculate_split"]

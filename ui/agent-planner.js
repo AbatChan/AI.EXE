@@ -160,7 +160,10 @@
         || /\bwhile\s+[^\n:]+:/.test(text)
         || /\bfor\s+\w+\s+in\b/.test(text)
         || /\.mainloop\s*\(|curses\.wrapper\s*\(|\bpygame\b|\binput\s*\(|\bprint\s*\(/.test(text);
-      return hasStructure && hasEntryOrLoop;
+      // A library module (tip_calculator.py) has no entry point or loop; 2+ real
+      // defs/classes make it complete. Placeholders and stubs still fail above.
+      const defCount = (text.match(/^\s*(?:def|class)\s+\w+/gm) || []).length;
+      return hasStructure && (hasEntryOrLoop || defCount >= 2);
     }
 
     function isLikelyCompletePrimarySource(path, content, taskText) {
@@ -513,7 +516,9 @@
         return `Execution budget: ${remainingSteps} tool steps remain. The latest terminal check failed. Use its error output to choose the relevant source inspection or repair, then verify again. Planned inspection paths are suggestions, not prerequisites; skip unrelated files. If blocked, explain the concrete blocker.`;
       }
       if (!missing.length) {
-        return `Execution budget: ${remainingSteps} tool step${remainingSteps === 1 ? '' : 's'} remain. NOW: return the final result; do not invent optional work.`;
+        // Files are done, but the task may still ask to run/build/package something
+        // (Tip Split: "NOW: return the final result" stopped it before PyInstaller).
+        return `Execution budget: ${remainingSteps} tool step${remainingSteps === 1 ? '' : 's'} remain. The planned files are done. NOW: if the task asked you to run, test, build, or package something and TOOL_RESULTS don't show it succeeding yet, do that next; otherwise return the final result. Do not invent optional work.`;
       }
       const label = String(missing[0].label || 'finish the next pending requirement').trim();
       let action = label;

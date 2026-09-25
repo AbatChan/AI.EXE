@@ -19,6 +19,10 @@ assert.equal(planner.isLikelyCompletePrimarySource('/formula-engine.js', engine,
 assert.equal(planner.isLikelyCompletePrimarySource('/app.js', 'function a() {}\n// placeholder for later\n', 'app'), false, 'tiny stubs still flagged');
 assert.equal(planner.isLikelyCompletePrimarySource('/app.js', `const x = 1;\n${'x;\n'.repeat(1600)}\nconst msg = "placeholder code";`, 'app'), false, 'placeholders still flagged at any size');
 
+const tipCalc = fs.readFileSync(path.join(__dirname, 'fixtures_tip_calculator.py.txt'), 'utf8');
+assert.equal(planner.isLikelyCompletePrimarySource('/tip_calculator.py', tipCalc, 'tip split'), true, 'a Python library module without main/loop is not a placeholder');
+assert.equal(planner.isLikelyCompletePrimarySource('/calc.py', `def add(a, b):\n    pass  # placeholder for later\n${' '.repeat(700)}\ndef sub(a, b):\n    pass\n# implement this\n`, 'x'), false, 'placeholder modules still fail');
+
 const executor = fs.readFileSync(path.join(__dirname, '..', 'ui', 'agent-executor.js'), 'utf8');
 const cand = executor.slice(executor.indexOf('const htmlCandidates = normalizeWorkspacePathList(['), executor.indexOf(']);', executor.indexOf('const htmlCandidates')));
 assert.ok(cand.indexOf("'/index.html'") < cand.indexOf('plannedFiles.filter'), 'index.html is tried before planned helper pages');

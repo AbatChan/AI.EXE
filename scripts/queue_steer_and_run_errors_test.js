@@ -213,6 +213,8 @@ console.log('PASS: queue + steer, readable smoke errors mapped to file:line, cle
   assert.doesNotMatch(runner.slice(runner.indexOf('var CODES')), /document\.activeElement/, 'no raw activeElement after the focus shim');
   const md = fs.readFileSync(path.join(root, 'ui', 'prompts', 'developer_agent_decision.md'), 'utf8');
   assert.match(md, /Claim a feature works only when a check for it passed/);
+  assert.match(md, /ask-first: issue them when the task needs them/, 'ask-first is not a ban (Tip Split never built its exe)');
+  assert.match(md, /confirm the output file exists before finishing; report its path/);
   console.log('PASS: run_app user-flow checks wired end to end');
 }
 

@@ -110,7 +110,8 @@ inline std::string AgentSandboxProfile(const std::filesystem::path& root,
   p += "(allow file-write* (subpath " + SbplQuote(proj) + ") " + sub(".npm") + " " + sub(".cache") + " " +
        sub("Library/Caches") + " " + sub(".cargo") + " " + sub(".rustup") + " " + sub("go") + " " +
        sub(".gradle") + " " + sub(".m2") + " " + sub(".nuget") + " " + sub(".dotnet") + " " +
-       sub(".yarn") + " " + sub(".node-gyp") + " " + sub("Library/pnpm") + ")\n";
+       sub(".yarn") + " " + sub(".node-gyp") + " " + sub("Library/pnpm") + " " +
+       sub("Library/Application Support/pyinstaller") + ")\n";  // PyInstaller bincache
   p += "(deny file-read* file-write* " + sub(".ssh") + " " + sub(".aws") + " " + sub(".gnupg") + " " +
        sub(".kube") + " " + sub(".docker") + " " + sub(".config/gcloud") + " " + sub(".netrc") + " " +
        sub("Library/Keychains") + " " + sub("Library/Cookies") + " " + sub("Library/WebKit") + " " +
