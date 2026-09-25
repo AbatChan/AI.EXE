@@ -1874,9 +1874,8 @@ bool LaunchUpdater(const std::string &url, const std::string &version,
     for (wchar_t c : s) { if (c == L'\'') out += L"''"; else out += c; }
     return out;
   };
-  // Shows a small dark "Updating AI.EXE…" window with per-phase status during the
-  // gap while the app is closed (otherwise the user stares at nothing). The phase
-  // label updates as it waits → downloads → installs → restarts.
+  // Small "Updating AI.EXE" window shown while the app is closed for the swap, with
+  // a step line (getting ready, installing, done) so the user never stares at nothing.
   std::wstring ver_label = psq(Utf8ToWide(version));
   const std::wstring staged_zip = StagedUpdateZip(version).wstring();
   const std::wstring staged_verified = StagedUpdateVerifiedMarker(version).wstring();
@@ -1922,14 +1921,14 @@ bool LaunchUpdater(const std::string &url, const std::string &version,
      << L"$logoBmp=$null; $logoPath=Join-Path $app 'ui\\assets\\app-icon.png'; try { if(Test-Path -LiteralPath $logoPath){ $logoBmp=[Drawing.Image]::FromFile($logoPath) } } catch {}\r\n"
      << L"$ic=New-Object Windows.Forms.Panel; $ic.SetBounds(22,22,36,36); $ic.BackColor=$bg; $ic.Tag=$logoBmp; DoubleBuffer $ic\r\n"
      << L"$ic.Add_Paint({ param($s,$e) $g=$e.Graphics; $g.SmoothingMode='AntiAlias'; $g.InterpolationMode='HighQualityBicubic'; try { if($s.Tag -is [Drawing.Image]){ $g.DrawImage($s.Tag,0,0,$s.Width,$s.Height) } } catch {} })\r\n"
-     << L"$title=New-Object Windows.Forms.Label; $title.Text='Getting the update ready'; $title.ForeColor=$text; $title.BackColor=$bg; $title.Font=New-Object Drawing.Font('Segoe UI Semibold',11.5); $title.AutoSize=$false; $title.SetBounds(72,20,326,22)\r\n"
+     << L"$title=New-Object Windows.Forms.Label; $title.Text='Updating AI.EXE'; $title.ForeColor=$text; $title.BackColor=$bg; $title.Font=New-Object Drawing.Font('Segoe UI Semibold',11.5); $title.AutoSize=$false; $title.SetBounds(72,20,326,22)\r\n"
      << L"$sub=New-Object Windows.Forms.Label; $sub.ForeColor=$text2; $sub.BackColor=$bg; $sub.Font=New-Object Drawing.Font('Segoe UI',9); $sub.AutoSize=$false; $sub.SetBounds(72,43,326,18)\r\n"
      << L"$sub.Text= if($ver){ 'Version '+$ver+' - AI.EXE reopens when it is done.' } else { 'AI.EXE reopens when it is done.' }\r\n"
      // Thin progress line: real % when known, a sliding segment while indeterminate;
      // green when finished, red if the update failed.
      << L"$bar=New-Object Windows.Forms.Panel; $bar.SetBounds(22,84,376,4); $bar.BackColor=$bg; DoubleBuffer $bar\r\n"
      << L"$bar.Add_Paint({ param($s,$e) $g=$e.Graphics; $g.SmoothingMode='AntiAlias'; $bw=$s.Width; $bh=$s.Height; $tp=RoundPath 0 0 $bw $bh ($bh/2); $tb=New-Object Drawing.SolidBrush($track); $g.FillPath($tb,$tp); $tb.Dispose(); $g.SetClip($tp); $fc= if($script:phase -eq 'failed'){$fail} elseif($script:phase -eq 'reopen' -or $script:phase -eq 'complete'){$success} else {$acc}; $full=($script:phase -eq 'failed' -or $script:phase -eq 'reopen' -or $script:phase -eq 'complete'); if($full -or $script:pct -ge 0){ $v= if($full){100}else{[Math]::Min($script:pct,100)}; $fw=[int]($bw*$v/100); if($fw -gt 0){ $fp=RoundPath 0 0 ([Math]::Max($fw,$bh)) $bh ($bh/2); $fb=New-Object Drawing.SolidBrush($fc); $g.FillPath($fb,$fp); $fb.Dispose() } } else { $pw=[int]($bw*0.3); $span=$bw+$pw; $x=[int]($script:anim*$span)-$pw; $pp=RoundPath $x 0 $pw $bh ($bh/2); $pb=New-Object Drawing.SolidBrush($fc); $g.FillPath($pb,$pp); $pb.Dispose() }; $g.ResetClip() })\r\n"
-     << L"$phaseLbl=New-Object Windows.Forms.Label; $phaseLbl.Text='Preparing'; $phaseLbl.ForeColor=$muted; $phaseLbl.BackColor=$bg; $phaseLbl.Font=New-Object Drawing.Font('Segoe UI',8.5); $phaseLbl.AutoSize=$false; $phaseLbl.SetBounds(22,96,250,18)\r\n"
+     << L"$phaseLbl=New-Object Windows.Forms.Label; $phaseLbl.Text='Getting ready'; $phaseLbl.ForeColor=$muted; $phaseLbl.BackColor=$bg; $phaseLbl.Font=New-Object Drawing.Font('Segoe UI',8.5); $phaseLbl.AutoSize=$false; $phaseLbl.SetBounds(22,96,250,18)\r\n"
      << L"$pctLbl=New-Object Windows.Forms.Label; $pctLbl.Text=''; $pctLbl.ForeColor=$muted; $pctLbl.BackColor=$bg; $pctLbl.Font=New-Object Drawing.Font('Segoe UI',8.5); $pctLbl.TextAlign='MiddleRight'; $pctLbl.AutoSize=$false; $pctLbl.SetBounds(272,96,126,18)\r\n"
      << L"$f.Controls.AddRange(@($ic,$title,$sub,$bar,$phaseLbl,$pctLbl))\r\n"
 
@@ -2000,7 +1999,7 @@ bool LaunchUpdater(const std::string &url, const std::string &version,
      << L"  if($script:tc % 5 -eq 0){\r\n"
      << L"    $raw=Get-Content -LiteralPath $status -Raw -ErrorAction SilentlyContinue\r\n"
      << L"    if($raw){ $pp=$raw.Trim().Split('|'); $ph=$pp[0]; $pc= if($pp.Length -gt 1){ [int]$pp[1] } else { -1 }\r\n"
-     << L"      if($ph -ne $script:phase){ $script:phase=$ph; switch($ph){ 'prep' { $title.Text='Getting the update ready'; $phaseLbl.Text='Preparing' } 'download' { $title.Text='Downloading the update'; $phaseLbl.Text='Downloading' } 'install' { $title.Text='Installing the update'; $phaseLbl.Text='Installing - this takes a moment' } 'reopen' { $title.Text='Update installed'; $sub.Text='Reopening AI.EXE...'; $phaseLbl.Text='Done'; $pctLbl.Text='' } 'complete' { $title.Text='Update installed'; $sub.Text='It is ready the next time you open AI.EXE.'; $phaseLbl.Text='Done'; $pctLbl.Text='' } 'failed' { $title.Text='The update did not finish'; $sub.Text='Your current version still works. AI.EXE will try again later.'; $phaseLbl.Text='Not installed'; $pctLbl.Text='' } }; $bar.Invalidate() }\r\n"
+     << L"      if($ph -ne $script:phase){ $script:phase=$ph; switch($ph){ 'prep' { $title.Text='Updating AI.EXE'; $phaseLbl.Text='Getting ready' } 'download' { $title.Text='Updating AI.EXE'; $phaseLbl.Text='Getting the update' } 'install' { $title.Text='Updating AI.EXE'; $phaseLbl.Text='Installing - this takes a moment' } 'reopen' { $title.Text='Update installed'; $sub.Text='Reopening AI.EXE...'; $phaseLbl.Text='Done'; $pctLbl.Text='' } 'complete' { $title.Text='Update installed'; $sub.Text='It is ready the next time you open AI.EXE.'; $phaseLbl.Text='Done'; $pctLbl.Text='' } 'failed' { $title.Text='The update did not finish'; $sub.Text='Your current version still works. AI.EXE will try again later.'; $phaseLbl.Text='Not installed'; $pctLbl.Text='' } }; $bar.Invalidate() }\r\n"
      << L"      if($pc -ne $script:pct){ $script:pct=$pc; if($pc -ge 0){ $pctLbl.Text=(''+$pc+'%') } else { $pctLbl.Text='' } }\r\n"
      << L"    }\r\n"
      << L"    if(-not $script:done -and $script:job){ $stt=(Get-Job -Id $script:job.Id).State; if($stt -eq 'Completed' -or $stt -eq 'Failed' -or $stt -eq 'Stopped'){ $script:done=$true; $timer.Stop(); $f.Close() } }\r\n"

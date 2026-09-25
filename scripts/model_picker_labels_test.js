@@ -21,6 +21,8 @@ console.log('PASS: picker shows prices only when known, real vendor names, a pro
   assert.match(script, /Size=New-Object Drawing\.Size\(420,128\)/);
   assert.doesNotMatch(script, /\$si\b|\$left\b|script:spin/, 'old spinner box and logo panel are gone');
   assert.match(ui, /status\.classList\.toggle\('ready', !options\.disabled && !options\.hidden\)/);
-  assert.match(css, /\.update-badge\.ready \{ color: var\(--text\); border-color: var\(--accent-32\)/);
+  assert.match(css, /\.update-badge\.ready \{ background: var\(--accent\); color: var\(--bg\); \}/);
+  assert.match(ui, /status\.dataset\.tooltip = String\(tooltip \|\| label \|\| ''\);/, 'icon-only badge: words live in the tooltip');
+  assert.doesNotMatch(script, /Downloading the update/, 'the updater window says Updating, not Downloading');
   console.log('PASS: updater window + badge follow the graphite design; window text is ASCII');
 }
