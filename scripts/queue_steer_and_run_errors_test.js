@@ -152,7 +152,13 @@ console.log('PASS: queue + steer, readable smoke errors mapped to file:line, cle
   assert.match(sub, /cluster\.phase !== 'other' && cluster\.items\.length > 1[\s\S]{0,120}buildActivitySubgroup\(chatId, cluster/);
   assert.match(sub, /if \(!nestRuns\) items\.forEach/, 'flat rows only when not nested');
   const css = fs.readFileSync(path.join(root, 'ui', 'ai-exe.css'), 'utf8');
-  assert.match(css, /\.run-group > \.msg-agent-subgroup-drawer \{ max-height: 220px/, 'parent cap must not force nested drawers open');
+  assert.match(css, /\.msg-agent-subgroup-drawer:not\(\[hidden\]\) \{ max-height: var\(--drawer-cap\); overflow-y: auto;/, 'every open group scrolls inside its own cap');
+  assert.match(css, /\.msg-agent-subgroup-drawer \.msg-agent-subgroup-drawer \{ --drawer-cap: 180px; \}/, 'nested groups get a shorter cap');
+  assert.doesNotMatch(css, /max-height: 220px !important/, 'no !important cap forcing drawers open mid-collapse');
+  assert.doesNotMatch(css, /msg-agent-subgroup-drawer[^{]*\{[^}]*scrollbar-color/, 'scrollbar-color would make Chromium ignore the custom thumb');
+  assert.match(css, /::-webkit-scrollbar-thumb \{ background: var\(--ink-08\); border-radius: 999px; \}/, 'quiet custom thumb');
+  assert.match(sub, /Math\.min\(drawer\.scrollHeight, cap\)/, 'expand animates to the cap, not full height');
+  assert.match(sub, /const settle = \(\) => \{ drawer\.style\.maxHeight = '';/, 'CSS cap takes over after expanding');
   console.log('PASS: same-kind rows fold into nested groups inside a run');
 }
 

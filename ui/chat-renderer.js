@@ -2482,14 +2482,17 @@
           drawer.hidden = false;
           drawer.style.maxHeight = '0px';
           drawer.style.opacity = '0';
+          // Animate to the CSS cap (not full height); then hand control back to the CSS
+          // cap so a long group scrolls in place instead of pushing later cards away.
+          const cap = parseFloat(getComputedStyle(drawer).getPropertyValue('--drawer-cap')) || 240;
           requestAnimationFrame(() => {
-            drawer.style.maxHeight = `${drawer.scrollHeight}px`;
+            drawer.style.maxHeight = `${Math.min(drawer.scrollHeight, cap)}px`;
             drawer.style.opacity = '1';
           });
-          const settle = () => { drawer.style.maxHeight = 'none'; drawer.removeEventListener('transitionend', settle); };
+          const settle = () => { drawer.style.maxHeight = ''; drawer.removeEventListener('transitionend', settle); };
           drawer.addEventListener('transitionend', settle);
         } else {
-          drawer.style.maxHeight = `${drawer.scrollHeight}px`;
+          drawer.style.maxHeight = `${drawer.offsetHeight}px`;
           drawer.style.opacity = '1';
           requestAnimationFrame(() => {
             drawer.style.maxHeight = '0px';

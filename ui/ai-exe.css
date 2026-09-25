@@ -9931,8 +9931,6 @@ html.platform-windows *::-webkit-scrollbar-corner {
 .msg-agent-subgroup.run-group .msg-agent-subgroup-meta { color: var(--text3); font-weight: 400; }
 .msg-agent-subgroup.run-group .msg-agent-subgroup-toggle:hover .msg-agent-subgroup-verb,
 .msg-agent-subgroup.run-group .msg-agent-subgroup-toggle:hover .msg-agent-subgroup-meta { color: var(--text2); }
-.msg-agent-subgroup.run-group > .msg-agent-subgroup-drawer { max-height: 220px; overflow-y: auto; overscroll-behavior: contain; }
-.msg-agent-subgroup.run-group[data-expanded="true"] > .msg-agent-subgroup-drawer { max-height: 220px !important; }
 .msg-agent-activity-row.run-grouped .msg-agent-activity-inline { align-items: center; gap: 7px; }
 .msg-agent-activity-row.run-grouped .msg-agent-activity-inline-title,
 .msg-agent-activity-row.run-grouped .msg-agent-activity-inline-path,
@@ -10337,3 +10335,18 @@ body::after { background: none; }
   mask: radial-gradient(farthest-side, transparent calc(100% - 2px), var(--bg) calc(100% - 2px));
 }
 @keyframes update-badge-spin { to { transform: rotate(360deg); } }
+
+/* Collapsible cards scroll inside themselves once they have many children, so an
+   open group never pushes the next card out of view. Nested groups get a shorter cap. */
+.msg-agent-subgroup-drawer { --drawer-cap: 240px; }
+.msg-agent-subgroup-drawer .msg-agent-subgroup-drawer { --drawer-cap: 180px; }
+.msg-agent-subgroup-drawer:not([hidden]) { max-height: var(--drawer-cap); overflow-y: auto; overscroll-behavior: contain; }
+.msg-agent-activity-row.files-toggle[aria-expanded="true"] .msg-agent-files-drawer-inner { max-height: 240px; overflow-y: auto; overscroll-behavior: contain; }
+
+/* Quiet custom scrollbar (WebKit on Mac, Chromium/WebView2 on Windows). Only the
+   -webkit- pseudo-elements: Chromium ignores them if scrollbar-color is also set. */
+:is(.msg-agent-subgroup-drawer, .msg-agent-files-drawer-inner)::-webkit-scrollbar { width: 6px; height: 6px; }
+:is(.msg-agent-subgroup-drawer, .msg-agent-files-drawer-inner)::-webkit-scrollbar-track { background: transparent; }
+:is(.msg-agent-subgroup-drawer, .msg-agent-files-drawer-inner)::-webkit-scrollbar-thumb { background: var(--ink-08); border-radius: 999px; }
+:is(.msg-agent-subgroup-drawer, .msg-agent-files-drawer-inner):hover::-webkit-scrollbar-thumb { background: var(--ink-24); }
+:is(.msg-agent-subgroup-drawer, .msg-agent-files-drawer-inner)::-webkit-scrollbar-thumb:active { background: var(--ink-32); }
