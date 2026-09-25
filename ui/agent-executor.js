@@ -2027,7 +2027,9 @@ export default config;
       stringprep struct subprocess sys sysconfig tabnanny tarfile tempfile textwrap threading time
       timeit tkinter token tokenize tomllib trace traceback tracemalloc tty turtle types typing
       unicodedata unittest urllib uuid venv warnings wave weakref webbrowser xml xmlrpc zipapp
-      zipfile zipimport zlib`.split(/\s+/).filter(Boolean));
+      zipfile zipimport zlib __future__ __main__ _thread ast bdb cProfile codeop copyreg curses dbm
+      doctest ensurepip fcntl grp modulefinder msvcrt ntpath optparse posixpath pwd pyclbr pydoc
+      symtable syslog termios winreg winsound zoneinfo`.split(/\s+/).filter(Boolean));
 
     // Third-party imports not in requirements.txt (the venv won't have them).
     function getPythonMissingDependencies(fileContents, requirementsText) {

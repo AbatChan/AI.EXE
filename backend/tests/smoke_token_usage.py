@@ -40,6 +40,15 @@ def main():
     old.record("openai", "model", {"input": 100}, now=sep, chat_id="new")
     assert old.summary("2026-09")["providers"]["openai"]["model"]["input"] == 1000
     assert old.summary("2026-09")["chats"]["new"]["input"] == 100
+    # Tiers: per-tier breakdown kept beside the totals; missing/garbage tier = no bucket.
+    t = TokenUsageLedger(d / "tiers.json")
+    t.record("openai", "gpt-6-luna", {"input": 1000, "output": 10, "tier": "flex"}, now=sep)
+    t.record("openai", "gpt-6-luna", {"input": 500, "output": 5, "tier": "standard"}, now=sep)
+    t.record("openai", "gpt-6-luna", {"input": 100, "output": 1, "tier": "<script>"}, now=sep)
+    lu = t.summary("2026-09")["providers"]["openai"]["gpt-6-luna"]
+    assert lu["input"] == 1600 and lu["calls"] == 3, lu
+    assert lu["tiers"]["flex"] == {"calls": 1, "input": 1000, "cached": 0, "cache_write": 0, "output": 10, "reasoning": 0}, lu
+    assert set(lu["tiers"]) == {"flex", "standard"}, lu
     print("smoke_token_usage: ok")
 
 

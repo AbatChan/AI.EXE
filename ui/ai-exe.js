@@ -3645,6 +3645,7 @@ let appSettings = {
   modelUrl: '',
   keepModelOnUpdate: true,
   keepAwakeDuringRun: true,
+  agentServiceTier: 'standard',
   debugTraceEnabled: false,
   theme: 'dark',
   userProfile: DEFAULT_USER_PROFILE,
@@ -9662,6 +9663,7 @@ function loadAppSettings() {
     modelUrl: '',
     keepModelOnUpdate: true,
     keepAwakeDuringRun: true,
+    agentServiceTier: 'standard',
     debugTraceEnabled: false,
     theme: 'dark',
     userProfile: DEFAULT_USER_PROFILE,
@@ -9721,6 +9723,7 @@ function loadAppSettings() {
     if (typeof parsed.modelUrl === 'string') appSettings.modelUrl = parsed.modelUrl.trim();
     if (typeof parsed.keepModelOnUpdate === 'boolean') appSettings.keepModelOnUpdate = parsed.keepModelOnUpdate;
     if (typeof parsed.keepAwakeDuringRun === 'boolean') appSettings.keepAwakeDuringRun = parsed.keepAwakeDuringRun;
+    if (['flex', 'standard', 'fast'].includes(parsed.agentServiceTier)) appSettings.agentServiceTier = parsed.agentServiceTier;
     if (typeof parsed.debugTraceEnabled === 'boolean') appSettings.debugTraceEnabled = parsed.debugTraceEnabled;
     if (['system', 'dark', 'light'].includes(parsed.theme)) appSettings.theme = parsed.theme;
     // Until someone edits "About you", they get the default (even if an older build saved '').
@@ -11007,6 +11010,13 @@ function syncModelIdVisibility() {
   const wrap = document.getElementById('settingsApiModelIdWrap');
   if (!wrap || !settingsApiModelPreset) return;
   wrap.style.display = settingsApiModelPreset.value === '__custom__' ? '' : 'none';
+  syncServiceTierVisibility();
+}
+
+// OpenAI's processing tiers (Flex = half price, same model) only exist on the OpenAI API.
+function syncServiceTierVisibility() {
+  const row = document.getElementById('settingsServiceTierRow');
+  if (row) row.style.display = getSelectedInferenceProvider() === 'openai' ? '' : 'none';
 }
 
 // A key must never go over plain http to someone else's machine.
@@ -11691,6 +11701,8 @@ function saveSettingsFromUi(options = {}) {
   if (typeof renderComposerModelPill === 'function') renderComposerModelPill();
   appSettings.modelUrl = settingsModelUrlInput ? settingsModelUrlInput.value.trim() : '';
   appSettings.keepAwakeDuringRun = Boolean(settingsKeepAwakeChk && settingsKeepAwakeChk.checked);
+  const tierSelect = document.getElementById('settingsServiceTier');
+  if (tierSelect && tierSelect.value) appSettings.agentServiceTier = ['flex', 'fast'].includes(tierSelect.value) ? tierSelect.value : 'standard';
   appSettings.debugTraceEnabled = Boolean(settingsDebugTraceChk && settingsDebugTraceChk.checked);
   const profileInput = document.getElementById('settingsUserProfile');
   if (profileInput) {
@@ -12532,9 +12544,17 @@ function normalizeProviderUsage(raw) {
   return { input, cached: Math.min(cached, input), cache_write: cacheWrite, output, reasoning: n(cd.reasoning_tokens) };
 }
 
-function recordProviderUsage(provider, model, rawUsage, chatId = '') {
+// OpenAI names the tier that actually served the call; store it so spend is priced right.
+function normalizeServiceTier(tier) {
+  const t = String(tier || '').toLowerCase().trim();
+  if (!t || t === 'auto' || t === 'default' || t === 'standard' || t === 'scale') return 'standard';
+  if (t === 'priority') return 'fast';
+  return /^[a-z_-]{1,20}$/.test(t) ? t : 'standard';
+}
+function recordProviderUsage(provider, model, rawUsage, chatId = '', serviceTier = '') {
   const usage = normalizeProviderUsage(rawUsage);
   if (!usage) return null;
+  usage.tier = normalizeServiceTier(serviceTier);
   providerUsageSession.calls += 1;
   providerUsageSession.input += usage.input;
   providerUsageSession.cached += usage.cached;
@@ -12581,6 +12601,16 @@ function stripOpenAiCacheControl(req) {
   return req;
 }
 const CACHE_FIELD_REJECTION = /stream_options|include_usage|prompt_cache|unrecognized|unknown (?:field|parameter)|additional properties/i;
+
+// OpenAI processing tier for labelled internal/Agent calls (Flex = same model, half price,
+// slower, may 429 when busy -> one retry on Standard). Chat replies stay Standard.
+function openAiServiceTierFor(provider, purpose) {
+  if (provider !== 'openai' || !purpose || purpose === 'unlabeled') return '';
+  if (appSettings.agentServiceTier === 'flex') return 'flex';
+  // Fast mode: same model, ~2x speed, 2x price ('priority' is its accepted API name).
+  if (appSettings.agentServiceTier === 'fast') return 'priority';
+  return '';
+}
 
 // Claude caches only what's marked: the fixed system prompt is the stable prefix.
 function anthropicCachedSystem(system) {
@@ -12647,6 +12677,7 @@ async function streamOpenAiCompatibleChatCompletion(provider, prompt, handlers =
   adaptOpenAiRequest(provider, req);
   applyPromptCacheHints(provider, req);
   if (options.agentCall) applyOpenAiAgentCacheControl(provider, model, req);
+  if (options.serviceTier && provider === 'openai') req.service_tier = options.serviceTier;
   if (STREAM_USAGE_PROVIDERS.has(provider)) req.stream_options = { include_usage: true };
   if (typeof handlers.onStart === 'function') {
     handlers.onStart(`${provider}_${Date.now()}`);
@@ -12662,6 +12693,11 @@ async function streamOpenAiCompatibleChatCompletion(provider, prompt, handlers =
       signal: controller.signal,
     });
     let response = await send();
+    // Flex busy (429 Resource Unavailable, not charged): same call once on Standard.
+    if (!response.ok && response.status === 429 && req.service_tier === 'flex') {
+      delete req.service_tier;
+      response = await send();
+    }
     // A server that rejects the optional usage/cache fields gets one retry without them.
     if (!response.ok && response.status === 400 && (req.stream_options || req.prompt_cache_key || req.prompt_cache_options)) {
       const body400 = await response.clone().text().catch(() => '');
@@ -12694,6 +12730,7 @@ async function streamOpenAiCompatibleChatCompletion(provider, prompt, handlers =
     let reasoningOpen = false;
     let streamFinishReason = '';
     let streamUsage = null;
+    let streamServiceTier = '';
     for await (const frame of readProviderSseFrames(response.body)) {
         const lines = String(frame || '').split('\n');
         for (const line of lines) {
@@ -12708,6 +12745,7 @@ async function streamOpenAiCompatibleChatCompletion(provider, prompt, handlers =
             continue;
           }
           if (parsed && parsed.usage && typeof parsed.usage === 'object') streamUsage = parsed.usage;
+          if (parsed && typeof parsed.service_tier === 'string' && parsed.service_tier) streamServiceTier = parsed.service_tier;
           const finishReason = parsed && Array.isArray(parsed.choices) && parsed.choices[0]
             && parsed.choices[0].finish_reason ? String(parsed.choices[0].finish_reason) : '';
           if (finishReason) streamFinishReason = finishReason;
@@ -12747,7 +12785,7 @@ async function streamOpenAiCompatibleChatCompletion(provider, prompt, handlers =
       output += '</native_thinking>';
       if (typeof handlers.onDelta === 'function') handlers.onDelta('</native_thinking>');
     }
-    const usage = recordProviderUsage(provider, model, streamUsage, usageChatId);
+    const usage = recordProviderUsage(provider, model, streamUsage, usageChatId, streamServiceTier);
     if (!output.trim()) {
       return { ok: false, message: `${def.label} streamed response was empty.` };
     }
@@ -13257,7 +13295,7 @@ function makeThinkingDeltaFilter(onDelta) {
   };
 }
 
-async function requestOpenAiCompatibleTextCompletion(provider, prompt, maxTokens, systemPrompt = '', signal = null, thinkActive = false) {
+async function requestOpenAiCompatibleTextCompletion(provider, prompt, maxTokens, systemPrompt = '', signal = null, thinkActive = false, serviceTier = '') {
   const usageChatId = String((activeInferenceRequest && activeInferenceRequest.chatId) || '');
   if (!remoteProvidersEnabled) return null;
   const def = getInferenceProviderDef(provider);
@@ -13280,6 +13318,7 @@ async function requestOpenAiCompatibleTextCompletion(provider, prompt, maxTokens
       ...(systemPrompt && def && def.supportsToolCalling ? { tools: [agentStepFunctionSchema] } : {}),
     }, Boolean(thinkActive))));
     applyOpenAiAgentCacheControl(provider, model, req, { breakpointOnSystem: Boolean(systemPrompt) });
+    if (serviceTier && provider === 'openai') req.service_tier = serviceTier;
     const send = () => fetch(endpointUrl, {
       method: 'POST',
       ...(signal ? { signal } : {}),
@@ -13290,6 +13329,11 @@ async function requestOpenAiCompatibleTextCompletion(provider, prompt, maxTokens
       body: JSON.stringify(req),
     });
     let response = await send();
+    // Flex busy (429 Resource Unavailable, not charged): same call once on Standard.
+    if (!response.ok && response.status === 429 && req.service_tier === 'flex') {
+      delete req.service_tier;
+      response = await send();
+    }
     if (!response.ok && response.status === 400 && (req.prompt_cache_key || req.prompt_cache_options)) {
       const body400 = await response.clone().text().catch(() => '');
       if (CACHE_FIELD_REJECTION.test(body400)) {
@@ -13317,8 +13361,8 @@ async function requestOpenAiCompatibleTextCompletion(provider, prompt, maxTokens
       : (msg && typeof msg.content === 'string' ? msg.content : '');
     const choice0 = payload && Array.isArray(payload.choices) ? payload.choices[0] : null;
     const truncated = choice0 ? String(choice0.finish_reason || '').toLowerCase() === 'length' : false;
-    const usage = recordProviderUsage(provider, model, payload && payload.usage, usageChatId);
-    return text ? { ok: true, output: text, truncated, usage, model } : null;
+    const usage = recordProviderUsage(provider, model, payload && payload.usage, usageChatId, payload && payload.service_tier);
+    return text ? { ok: true, output: text, truncated, usage, model, serviceTier: String((payload && payload.service_tier) || '') } : null;
   } catch (_) {
     return null;
   }
@@ -13444,7 +13488,8 @@ async function requestSelectedRemoteTextCompletion(prompt, maxTokens, systemProm
   let result = null;
   const startedAtMs = Date.now();
   try {
-    result = await requestRemoteTextCompletionForCapability('agent.writeFile', prompt, maxTokens, { systemPrompt, ...requestExtra, abortController: controller });
+    const serviceTier = openAiServiceTierFor(getSelectedInferenceProvider(), extra && extra.tracePurpose);
+    result = await requestRemoteTextCompletionForCapability('agent.writeFile', prompt, maxTokens, { systemPrompt, ...requestExtra, abortController: controller, ...(serviceTier ? { serviceTier } : {}) });
   } finally {
     inFlightInferenceControllers.delete(controller);
     noteAgentInferenceEnd(result && result.ok ? String(result.output || '').length : 0);
@@ -13550,6 +13595,7 @@ async function requestRemoteTextCompletionForCapability(capability, prompt, maxT
       onDelta: userDelta && agentThink ? makeThinkingDeltaFilter(userDelta) : userDelta,
     }, {
       agentCall: true,
+      ...(completionOptions.serviceTier ? { serviceTier: completionOptions.serviceTier } : {}),
       maxTokens: Math.max(1, Number(maxTokens) || 64),
       thinkActive: agentThink,
       // Wire the registered abortController into the actual stream so a timeout / new run
@@ -13600,7 +13646,7 @@ async function requestRemoteTextCompletionForCapability(capability, prompt, maxT
   const abortSignal = completionOptions && completionOptions.abortController instanceof AbortController
     ? completionOptions.abortController.signal
     : null;
-  const result = await requestOpenAiCompatibleTextCompletion(provider, prompt, maxTokens, completionOptions && completionOptions.systemPrompt ? completionOptions.systemPrompt : '', abortSignal, agentThink);
+  const result = await requestOpenAiCompatibleTextCompletion(provider, prompt, maxTokens, completionOptions && completionOptions.systemPrompt ? completionOptions.systemPrompt : '', abortSignal, agentThink, completionOptions.serviceTier || '');
   return result ? { ...result, workerId: worker.id, provider, model: getProviderModel(provider) } : result;
 }
 
@@ -15374,6 +15420,9 @@ async function openSettingsModal() {
     if (settingsProviderSelect) settingsProviderSelect.value = getSelectedInferenceProvider();
     if (settingsModelUrlInput) settingsModelUrlInput.value = appSettings.modelUrl;
     if (settingsKeepAwakeChk) settingsKeepAwakeChk.checked = appSettings.keepAwakeDuringRun !== false;
+    const tierSelect = document.getElementById('settingsServiceTier');
+    if (tierSelect) tierSelect.value = ['flex', 'fast'].includes(appSettings.agentServiceTier) ? appSettings.agentServiceTier : 'standard';
+    syncServiceTierVisibility();
     if (settingsDebugTraceChk) settingsDebugTraceChk.checked = appSettings.debugTraceEnabled;
     applyTheme();
     const profileInput = document.getElementById('settingsUserProfile');
@@ -16284,8 +16333,11 @@ function showAppNotification(options = {}) {
 function showChatCompletionNotification(chatId, message) {
   const text = String(message || '').trim();
   if (!text) return;
+  // Title the toast with the chat it belongs to, so a background finish is recognisable.
+  const chat = String(chatId || '').trim() ? findChatById(String(chatId).trim()) : null;
+  const chatTitle = String((chat && chat.name) || '').trim();
   showAppNotification({
-    title: 'Ready when you are',
+    title: chatTitle && chatTitle !== 'New Chat' ? chatTitle : 'Reply ready',
     message: text,
     kind: 'success',
     durationMs: 4800,
@@ -19997,6 +20049,10 @@ const CREDIT_PRICE_URLS = {
   anthropic: 'https://platform.claude.com/docs/en/about-claude/pricing',
   gemini: 'https://ai.google.dev/gemini-api/docs/pricing',
 };
+// Tier multipliers vs Standard, used only when the live list lacks that tier's rates.
+const SERVICE_TIER_PRICE_FACTOR = { standard: 1, flex: .5, batch: .5, fast: 2 };
+// Live per-1M rates from the backend's daily price list; the table above is the offline fallback.
+let liveModelPrices = null;
 let creditReferences = null;
 let creditBalanceRows = [];
 let creditBalanceCheckedAt = 0;
@@ -20071,15 +20127,49 @@ function formatCreditAmount(amount, currency) {
 }
 
 function estimateModelUsageCost(provider, model, row, period) {
-  const rates = CREDIT_COST_RATES[provider] || {};
-  const rate = Object.prototype.hasOwnProperty.call(rates, model) ? rates[model] : null;
+  const rate = modelCostRate(provider, model);
   if (!rate || (rate.through && period > rate.through)) return null;
   const count = (value) => Number.isFinite(Number(value)) ? Math.max(0, Number(value)) : 0;
-  const input = count(row.input);
-  const cached = Math.min(input, count(row.cached));
-  const write = Math.min(input - cached, count(row.cache_write));
-  const ordinary = input - cached - write;
-  return (ordinary * rate.input + cached * rate.cached + write * (rate.write ?? rate.input) + count(row.output) * rate.output) / 1000000;
+  const costAt = (r, tierRate) => {
+    const input = count(r.input);
+    const cached = Math.min(input, count(r.cached));
+    const write = Math.min(input - cached, count(r.cache_write));
+    const ordinary = input - cached - write;
+    const cachedRate = tierRate.cached ?? rate.cached ?? tierRate.input;
+    return (ordinary * tierRate.input + cached * cachedRate + write * (tierRate.write ?? rate.write ?? tierRate.input) + count(r.output) * tierRate.output) / 1000000;
+  };
+  // A tier's own published rates when known; otherwise Standard x its multiplier.
+  const tierRate = (tier) => {
+    if (rate.tiers && rate.tiers[tier]) return rate.tiers[tier];
+    const factor = Object.prototype.hasOwnProperty.call(SERVICE_TIER_PRICE_FACTOR, tier) ? SERVICE_TIER_PRICE_FACTOR[tier] : 1;
+    return { input: rate.input * factor, cached: rate.cached != null ? rate.cached * factor : undefined, write: rate.write != null ? rate.write * factor : undefined, output: rate.output * factor };
+  };
+  // Calls recorded before tier tracking (the part no tier bucket covers) count as Standard.
+  const tiers = row && row.tiers && typeof row.tiers === 'object' ? row.tiers : {};
+  const fields = ['input', 'cached', 'cache_write', 'output'];
+  const rest = {};
+  fields.forEach((f) => { rest[f] = count(row[f]); });
+  let cost = 0;
+  Object.entries(tiers).forEach(([tier, t]) => {
+    cost += costAt(t, tier === 'standard' ? rate : tierRate(tier));
+    fields.forEach((f) => { rest[f] = Math.max(0, rest[f] - count(t[f])); });
+  });
+  return cost + costAt(rest, rate);
+}
+// Live rate for this model, else the built-in table.
+function modelCostRate(provider, model) {
+  const live = liveModelPrices && liveModelPrices[provider] && liveModelPrices[provider][String(model || '').toLowerCase()];
+  if (live && Number.isFinite(live.input) && Number.isFinite(live.output)) return live;
+  const rates = CREDIT_COST_RATES[provider] || {};
+  return Object.prototype.hasOwnProperty.call(rates, model) ? rates[model] : null;
+}
+// What Flex saved versus running the same calls on Standard.
+function estimateFlexSavings(provider, model, row) {
+  const flex = row && row.tiers && row.tiers.flex;
+  if (!flex) return 0;
+  const asStandard = estimateModelUsageCost(provider, model, { ...flex, tiers: {} }, '');
+  const asFlex = estimateModelUsageCost(provider, model, { ...flex, tiers: { flex } }, '');
+  return asStandard != null && asFlex != null ? Math.max(0, asStandard - asFlex) : 0;
 }
 
 function renderEstimatedProviderCost(provider) {
@@ -20091,10 +20181,16 @@ function renderEstimatedProviderCost(provider) {
   let cost = 0;
   let pricedCalls = 0;
   let unpricedCalls = 0;
+  let saved = 0;
+  let flexCalls = 0;
   entries.forEach(([model, row]) => {
     const estimate = estimateModelUsageCost(provider, model, row, data.period);
     if (estimate === null) unpricedCalls += Number(row.calls) || 0;
-    else { cost += estimate; pricedCalls += Number(row.calls) || 0; }
+    else {
+      cost += estimate; pricedCalls += Number(row.calls) || 0;
+      saved += estimateFlexSavings(provider, model, row);
+      flexCalls += Number(row.tiers && row.tiers.flex && row.tiers.flex.calls) || 0;
+    }
   });
   if (!pricedCalls) return '<p class="usage-muted">No verified price for the models used here. Check the provider’s billing page for spend.</p>';
   const amount = cost < .01 && cost > 0 ? `$${cost.toFixed(4)}` : `$${cost.toFixed(2)}`;
@@ -20103,8 +20199,10 @@ function renderEstimatedProviderCost(provider) {
   const coverage = unpricedCalls ? ` · ${unpricedCalls.toLocaleString()} calls have no verified price` : '';
   const month = new Date(Number(data.period.slice(0, 4)), Number(data.period.slice(5, 7)) - 1)
     .toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
-  return `<div class="usage-cost-head"><span>Estimated from ${pricedCalls.toLocaleString()} recorded calls</span><strong>${amount}</strong></div>
-    <p class="usage-muted usage-cost-note">${escapeHtml(month)} · Standard text rates checked Sep 2026${coverage}. ${sourceLink} · Your bill may differ.</p>`;
+  const money = (v) => v < .01 && v > 0 ? `$${v.toFixed(4)}` : `$${v.toFixed(2)}`;
+  const flexLine = flexCalls ? `<p class="usage-cost-saving">${flexCalls.toLocaleString()} calls ran on Economy (Flex) · saved about ${money(saved)}</p>` : '';
+  return `<div class="usage-cost-head"><span>Estimated from ${pricedCalls.toLocaleString()} recorded calls</span><strong>${amount}</strong></div>${flexLine}
+    <p class="usage-muted usage-cost-note">${escapeHtml(month)} · ${liveModelPrices ? 'Live rates from the LiteLLM price list' : 'Built-in rates checked Sep 2026'}${coverage}. ${sourceLink} · Your bill may differ.</p>`;
 }
 
 function renderCreditBalances() {
@@ -20231,6 +20329,19 @@ function scheduleCreditBalanceRefresh(delay = 60000) {
 
 let usageDashboardPeriod = '';
 let usageDashboardRequest = 0;
+// Daily price list from the backend; offline = keep the built-in table (liveModelPrices stays null).
+let liveModelPricesLoadedAt = 0;
+async function loadLiveModelPrices() {
+  if (liveModelPrices && Date.now() - liveModelPricesLoadedAt < 3600000) return;
+  try {
+    const res = await fetch(`${getAIExeBackendUrl()}/api/model-prices`);
+    if (!res.ok) return;
+    const data = await res.json();
+    const models = data && data.models && typeof data.models === 'object' ? data.models : null;
+    if (models && Object.keys(models).length) { liveModelPrices = models; liveModelPricesLoadedAt = Date.now(); }
+  } catch (_) { /* built-in rates */ }
+}
+
 async function renderUsageDashboard() {
   const root = document.getElementById('usageDashboard');
   if (!root) return;
@@ -20270,6 +20381,8 @@ async function renderUsageDashboard() {
     return;
   }
   if (request !== usageDashboardRequest) return;
+  await loadLiveModelPrices();
+  if (request !== usageDashboardRequest) return;
   usageDashboardCostData = data;
   renderCreditBalances();
   const models = [];
@@ -20303,7 +20416,13 @@ async function renderUsageDashboard() {
   if (extra) chatEntries.push({id:'', input:extra, output:0, legacy:true});
   chatEntries.sort((a,b) => total(b) - total(a));
   const CHAT_ROWS_SHOWN = 6;
-  const detail = row => `<dl class="usage-detail"><div><dt>Input</dt><dd>${exact(row.input)}</dd></div><div><dt>Output</dt><dd>${exact(row.output)}</dd></div><div><dt>Cache reads</dt><dd>${exact(row.cached)}</dd></div><div><dt>Cache writes</dt><dd>${exact(row.cache_write)}</dd></div><div><dt>Reasoning</dt><dd>${exact(row.reasoning)}</dd></div><div><dt>Calls</dt><dd>${exact(row.calls)}</dd></div></dl>`;
+  const tierCalls = row => {
+    const tiers = row && row.tiers ? Object.entries(row.tiers).filter(([, t]) => n(t.calls)) : [];
+    if (!tiers.some(([tier]) => tier !== 'standard')) return '';
+    const names = { standard: 'Standard', flex: 'Flex', fast: 'Fast', batch: 'Batch' };
+    return tiers.map(([tier, t]) => `<div><dt>${e(names[tier] || tier)} calls</dt><dd>${exact(t.calls)}</dd></div>`).join('');
+  };
+  const detail = row => `<dl class="usage-detail"><div><dt>Input</dt><dd>${exact(row.input)}</dd></div><div><dt>Output</dt><dd>${exact(row.output)}</dd></div><div><dt>Cache reads</dt><dd>${exact(row.cached)}</dd></div><div><dt>Cache writes</dt><dd>${exact(row.cache_write)}</dd></div><div><dt>Reasoning</dt><dd>${exact(row.reasoning)}</dd></div><div><dt>Calls</dt><dd>${exact(row.calls)}</dd></div>${tierCalls(row)}</dl>`;
   const tile = (label, value, sub, extraHtml = '') => `<div class="usage-tile"><span>${label}</span><strong>${value}</strong>${sub ? `<small>${sub}</small>` : ''}${extraHtml}</div>`;
   const chatName = row => {
     if (row.gone) return row.count === 1 ? 'Deleted chat' : `Deleted chats (${row.count})`;
@@ -20755,6 +20874,10 @@ if (settingsModelUrlInput) {
     // Longer debounce: it's free-form prose, don't toast on every keystroke pause.
     settingsUserProfileInput.addEventListener('input', () => scheduleSettingsAutosave(900, 'About you'));
   }
+}
+{
+  const tierSelect = document.getElementById('settingsServiceTier');
+  if (tierSelect) tierSelect.addEventListener('change', () => saveSettingsFromUi({ toastChange: `Agent processing: ${({ flex: 'Economy (Flex)', fast: 'Fast mode' })[tierSelect.value] || 'Standard'}` }));
 }
 if (settingsKeepAwakeChk) {
   settingsKeepAwakeChk.addEventListener('change', () => {

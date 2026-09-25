@@ -958,6 +958,14 @@
                       </button>
                     </div>
                   </div>
+                  <div class="settings-row" id="settingsServiceTierRow" style="display:none;">
+                    <div class="settings-row-text"><strong>Agent processing</strong><span>Same model and quality on every option. Economy (Flex) costs half but runs about twice as slow; Fast mode is quicker at double the price. Chat replies always use Standard.</span></div>
+                    <select class="chat-modal-input settings-row-select" id="settingsServiceTier">
+                      <option value="standard">Standard</option>
+                      <option value="flex">Economy (Flex) · half price, slower</option>
+                      <option value="fast">Fast mode · 2× price</option>
+                    </select>
+                  </div>
                   <div class="settings-row stack" id="settingsApiModelIdWrap" style="display:none;">
                     <div class="settings-row-text"><strong>Custom model ID</strong><span>Any model your account can use</span></div>
                     <input class="chat-modal-input" id="settingsApiModelInput" type="text" placeholder="model-id" autocomplete="off" spellcheck="false">

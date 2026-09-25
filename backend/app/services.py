@@ -13,6 +13,7 @@ from .finance import FinanceStore
 from .modules import ModuleStore
 from .projects import ProjectStore
 from .provider import ProviderStore
+from .model_prices import ModelPriceCache
 from .token_usage import TokenUsageLedger
 from .usage import ApiKeyStore, UsageManager
 
@@ -54,5 +55,6 @@ autopilot = Autopilot(settings.data_dir, quote_feed.crypto_hourly_candles,
 # Durable chat storage — see chatstore.py. Never trimmed to reclaim space.
 chat_store = ChatStore(data_dir=settings.data_dir)
 token_usage_ledger = TokenUsageLedger(os.path.join(settings.data_dir, "token_usage.json"))
+model_price_cache = ModelPriceCache(os.path.join(settings.data_dir, "model_prices.json"))
 
 adapter_manager = AdapterManager(settings.data_dir)

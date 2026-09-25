@@ -19,7 +19,7 @@ from ..models import (ApiKeySetRequest, ApiKeyStatusResponse, ProviderCompleteRe
                       ProviderUsageResponse, UsageResponse)
 from ..provider import is_local_provider
 from ..provider_usage import read_provider_balance, read_provider_health
-from ..services import api_key_store, provider_store, token_usage_ledger, usage_manager
+from ..services import api_key_store, model_price_cache, provider_store, token_usage_ledger, usage_manager
 
 router = APIRouter(tags=["usage"])
 
@@ -227,3 +227,9 @@ def token_usage_record(payload: dict) -> dict:
 @router.get("/token-usage")
 def token_usage_summary(period: str = "") -> dict:
     return token_usage_ledger.summary(period)
+
+
+@router.get("/model-prices")
+def model_prices(force: bool = False) -> dict:
+    """Per-1M-token rates (incl. OpenAI Flex/Fast/Batch tiers), refreshed daily."""
+    return model_price_cache.get(force=force)

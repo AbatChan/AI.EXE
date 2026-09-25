@@ -29,6 +29,11 @@ def _count(value) -> int:
     return n if 0 <= n < 50_000_000 else 0
 
 
+def _tier(value) -> str:
+    t = str(value or "").strip().lower()
+    return t if t.isascii() and t.replace("_", "").replace("-", "").isalpha() and len(t) <= 20 else ""
+
+
 class TokenUsageLedger:
     def __init__(self, path: Path):
         self.path = Path(path)
@@ -57,6 +62,13 @@ class TokenUsageLedger:
             row["calls"] = row.get("calls", 0) + 1
             for field in FIELDS:
                 row[field] = row.get(field, 0) + _count(usage.get(field))
+            # Processing tier (standard/flex/fast...) so spend can be priced per tier.
+            tier = _tier(usage.get("tier"))
+            if tier:
+                bucket = row.setdefault("tiers", {}).setdefault(tier, {"calls": 0})
+                bucket["calls"] = bucket.get("calls", 0) + 1
+                for field in FIELDS:
+                    bucket[field] = bucket.get(field, 0) + _count(usage.get(field))
             day = time.strftime("%Y-%m-%d", time.localtime(now if now is not None else time.time()))
             details = data.setdefault("details", {}).setdefault(_period(now), {"days": {}, "chats": {}})
             daily = details["days"].setdefault(day, {})

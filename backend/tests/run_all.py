@@ -35,6 +35,7 @@ TESTS = [
     "smoke_autopilot_ai",  # autopilot has its own AI choice; key stays private
     "smoke_npm_vet",    # agent imports vetted against the npm registry
     "smoke_token_usage",  # real per-provider token usage, monthly
+    "smoke_model_prices",  # live model prices (LiteLLM list), cached daily
 ]
 
 

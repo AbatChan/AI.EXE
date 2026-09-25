@@ -10493,6 +10493,7 @@ body::after { background: none; }
 .usage-cost-head > span { font-size: 12.5px; }
 .usage-cost-head strong { font-size: 24px; font-weight: 600; letter-spacing: -.02em; }
 .usage-cost-note { margin: 6px 0 0; font-size: 11.5px; line-height: 1.5; }
+.usage-cost-saving { margin: 6px 0 0; color: var(--good, var(--accent)); font-size: 12px; }
 .usage-credit-note { margin: 8px 2px 0; font-size: 11.5px; }
 .usage-footnote { margin: 28px 2px 0; font-size: 11.5px; line-height: 1.55; }
 @media (max-width: 650px) {
