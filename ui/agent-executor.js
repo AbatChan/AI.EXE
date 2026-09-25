@@ -843,21 +843,16 @@ export default config;
         }
       }
       if (/\.(ts|tsx|js|jsx|mjs|cjs)$/i.test(normalized) && text.trim()) {
-        // Plain (non-module) JS: the real JS parser is AUTHORITATIVE. The raw bracket scan
-        // can't tell a regex literal like /[()]/ or /[{}]/ from real brackets and
-        // false-flags valid files as "truncated" — so if it parses, trust the parser and
-        // never let the heuristic override it. (CLAUDE.md: regex/keyword heuristics are a
-        // last-resort fallback, not the primary signal.)
-        // Parse first: a comment saying "CSV export" used to route valid files to the heuristic.
+        // Parse original source; rewriting imports loses bindings and string contents.
         if (/\.(js|mjs|cjs)$/i.test(normalized)) {
+          const parsed = getJsCorrectnessIssues(text);
+          if (parsed) return parsed.syntaxIssue ? `has a JavaScript syntax error: ${parsed.syntaxIssue}` : '';
           try {
-            // eslint-disable-next-line no-new, no-new-func
-            new Function(text);
+            new Function(text); // Parser-unavailable fallback for classic scripts.
             return '';
           } catch (err) {
-            // Only real module statements excuse a parse failure.
             if (!/^[ \t]*(?:import|export)\b/m.test(text)) {
-              return getJsSyntaxIssue(text, err) || `has a JavaScript syntax error: ${String((err && err.message) || err || 'unknown')}`;
+              return getJsSyntaxIssue(text, err) || `has a JavaScript syntax error: ${String(err.message || err)}`;
             }
           }
         }
@@ -3993,11 +3988,48 @@ export default config;
           ? deps.normalizeWorkspacePath(proof.path || '/index.html')
           : (/\.html?$/i.test(requestedHtml) ? requestedHtml : '/index.html');
         deps.setActiveAgentStreamStatus(chatId, `Running ${htmlTarget} in the offline preview...`);
-        const result = await deps.runWorkspaceAppSmokeTest(htmlTarget);
+        // A harness-issued re-run (no checks of its own) repeats the model's latest checks,
+        // so "started cleanly" can't stand in for checks that failed before the last edit.
+        let checks = Array.isArray(decision.checks) ? decision.checks : [];
+        let reusedChecks = false;
+        if (!checks.length && decision._deterministic) {
+          const prior = [...(Array.isArray(toolEvents) ? toolEvents : [])].reverse().find((event) => (
+            event && String(event.tool || '').toLowerCase() === 'run_app' && String(event.checksSig || '[]') !== '[]'
+          ));
+          try { checks = prior ? JSON.parse(prior.checksSig) : []; } catch (_) { checks = []; }
+          reusedChecks = checks.length > 0;
+        }
+        const result = await deps.runWorkspaceAppSmokeTest(htmlTarget, { checks });
         if (!result || !result.ok) {
           return { ok: false, mutated, observation: `run_app failed: ${(result && result.message) || 'could not load the page'}.` };
         }
         const errors = Array.isArray(result.errors) ? result.errors.filter(Boolean) : [];
+        const checkRows = Array.isArray(result.checks) ? result.checks.map(String) : [];
+        const failedChecks = checkRows.filter((row) => row.startsWith('✗')).length;
+        const checksText = checks.length
+          ? (checkRows.length
+            ? `\n${reusedChecks ? 'Your latest checks, run again after the change' : 'Your checks'}: ${checkRows.length - failedChecks}/${checkRows.length} passed\n${checkRows.join('\n')}${failedChecks ? '\nA failed check is evidence of a mismatch in this preview. Check the selector, expected value, load order and app behavior before editing; then rerun the same checks. Do not weaken the assertion just to pass.' : ''}`
+            : '\nYour checks did not run (the page never finished loading them).')
+          : '';
+        // Show the failing lines with each located error, like a stack trace's code frame.
+        const frames = [];
+        const seenFrames = new Set();
+        for (const text of errors) {
+          const at = String(text).match(/ at (\/[^\s:]+):(\d+):\d+/);
+          if (!at || seenFrames.has(`${at[1]}:${at[2]}`) || frames.length >= 2) continue;
+          seenFrames.add(`${at[1]}:${at[2]}`);
+          const file = await deps.invokeWorkspaceAction('workspaceReadFile', { path: deps.normalizeWorkspacePath(at[1]) });
+          if (!file || !file.ok) continue;
+          const lines = String(file.output || '').split('\n');
+          const hit = Number(at[2]);
+          if (!(hit >= 1 && hit <= lines.length)) continue;
+          const from = Math.max(1, hit - 6);
+          const to = Math.min(lines.length, hit + 5);
+          const rows = [];
+          for (let n = from; n <= to; n += 1) rows.push(`${n === hit ? '>' : ' '}${String(n).padStart(4)}| ${lines[n - 1]}`);
+          frames.push(`${at[1]}:${hit}\n${rows.join('\n')}`);
+        }
+        const framesText = frames.length ? `\nCode at the error${frames.length === 1 ? '' : 's'} (current file):\n${frames.join('\n\n')}` : '';
         // Render snapshot: what the page ACTUALLY shows after load (DOM-measured,
         // not phrase-based) — lets the agent verify visual claims itself.
         const snap = result.snapshot && typeof result.snapshot === 'object' ? result.snapshot : null;
@@ -4038,11 +4070,13 @@ export default config;
         return {
           ok: true,
           mutated,
-          runErrorCount: errors.length,
+          runErrorCount: errors.length + failedChecks + (checks.length && !checkRows.length ? 1 : 0),
+          checksRun: checkRows.length,
+          checksFailed: failedChecks,
           renderSnapshot: snap,
           observation: (errors.length
-            ? `run_app ${htmlTarget}: ${errors.length} runtime error${errors.length === 1 ? '' : 's'} during the smoke run:\n- ${errors.join('\n- ')}\nFix these (the file:line references point into the inlined sources; "[during interaction probe]" errors fired when a visible control/point was clicked), then run_app again to verify.`
-            : `run_app ${htmlTarget}: started cleanly — no runtime errors, unhandled rejections, or console.error during startup or the interaction probe.`) + snapshotText + clickedList + afterText,
+            ? `run_app ${htmlTarget}: ${errors.length} runtime error${errors.length === 1 ? '' : 's'} during the smoke run:\n- ${errors.join('\n- ')}${framesText}\nFix these (the file:line references point into the inlined sources; "[during interaction probe]" errors fired when a visible control/point was clicked), then run_app again to verify.`
+            : `run_app ${htmlTarget}: started cleanly — no runtime errors, unhandled rejections, or console.error during startup or the interaction probe.${checks.length ? '' : ' This only proves the page loads; it does not prove any feature works — add `checks` to test them like a user.'}`) + checksText + snapshotText + clickedList + afterText,
         };
       }
 

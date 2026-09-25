@@ -865,34 +865,15 @@
         const failKind = (tool === 'read_file' || tool === 'read_files' || tool === 'search_files') ? 'read'
           : (isMutation ? 'edit' : 'scan');
         const failedPath = normalizeWorkspacePath(targetInfo || (decision && decision.path) || '');
-        // A refused CHANGE is not a skipped look-up: "Skipped — already covered" over a
-        // prevented rewrite hid the reason the model was stuck. Name what was stopped,
-        // from the guard's OWN declared reason rather than guessing from the tool name.
-        const guardStoppedWrite = guardSkip && isMutation;
-        const guardReasonLabels = {
-          no_change_since_last_run: 'nothing changed since the last run',
-          rewrite_would_regenerate: 'full rewrite prevented — targeted edit required',
-          would_overwrite_existing: 'file already exists — targeted edit required',
-          edits_cycling: 'edits were going in circles',
-          just_written: 'just written this run',
-          already_cached: 'already cached',
-          already_read: 'already read',
-          enough_context: 'enough context gathered',
-        };
-        const guardReason = guardReasonLabels[String((toolResult && toolResult._guardReason) || '')] || '';
+        // Guard blocks are the harness steering the model: the model sees the observation, the user sees nothing.
+        if (guardSkip) return null;
         return buildInlineAgentActivityBase({
-          // A guard skip is a neutral outcome, not another read/edit step. Keeping it
-          // out of those phases prevents summaries such as "Read 3 files" counting a
-          // file that was deliberately not read again.
-          kind: guardSkip ? 'skip' : failKind,
-          title: notFound ? 'Not found' : (guardStoppedWrite ? 'Blocked' : (guardSkip ? 'Skipped' : 'Failed')),
+          kind: failKind,
+          title: notFound ? 'Not found' : 'Failed',
           detail: formatAgentActivityPathLabel(failedPath) || 'this step',
-          openPath: guardSkip ? failedPath : '',
           openKind: 'file',
-          meta: guardReason || (guardStoppedWrite
-            ? (tool === 'edit_file' ? 'edit not applied' : 'full rewrite prevented — targeted edit required')
-            : (guardSkip ? 'already covered' : '')),
-          status: guardSkip ? 'done' : 'error',
+          meta: '',
+          status: 'error',
         });
       }
       if (!ok) return null;
@@ -1936,7 +1917,7 @@
         item.addEventListener('click', () => {
           void openAgentActivityTarget(activity).then(() => {
             if (typeof d.updateAssistantAgentMeta === 'function') {
-              d.updateAssistantAgentMeta(chatId, Number(activity && activity.ts) || 0, (current) => current, { rerender: false }).catch(() => {});
+              try { d.updateAssistantAgentMeta(chatId, Number(activity && activity.ts) || 0, (current) => current, { rerender: false }); } catch (_) {} // sync, returns a boolean
             }
           });
         });
@@ -2399,6 +2380,13 @@
         outcomeEl.textContent = outcomeLabel;
         labelEl.appendChild(outcomeEl);
       }
+      const NESTED_PHASE_ICONS = { setup: 'folder', create: 'filePlus', edit: 'edit', validate: 'shield', explore: 'doc', cleanup: 'move' };
+      if (disclosureOptions.nested && NESTED_PHASE_ICONS[phase] && typeof window.uiIcon === 'function') {
+        const icon = document.createElement('span');
+        icon.className = 'msg-agent-activity-run-icon';
+        icon.innerHTML = window.uiIcon(NESTED_PHASE_ICONS[phase]);
+        toggle.appendChild(icon);
+      }
       if (phase === 'run' && typeof window.uiIcon === 'function') {
         const icons = new Set(items.map((a) => RUN_ROW_ICONS[String(a.title || '').trim().toLowerCase()]
           || RUN_ROW_ICONS[String(a.kind || '').toLowerCase()] || 'doc'));
@@ -2417,7 +2405,33 @@
 
       const drawer = document.createElement('div');
       drawer.className = 'msg-agent-subgroup-drawer';
-      items.forEach((activity) => {
+      // Inside a run: 2+ back-to-back rows of one kind (writes, setup, checks) fold into their own group.
+      const nestRuns = phase === 'run' && !disclosureOptions.nested;
+      if (nestRuns) {
+        const clusters = [];
+        items.forEach((activity) => {
+          const kindPhase = classifyActivityPhase(activity);
+          const last = clusters[clusters.length - 1];
+          if (kindPhase !== 'other' && last && last.phase === kindPhase) last.items.push(activity);
+          else clusters.push({ phase: kindPhase, items: [activity] });
+        });
+        clusters.forEach((cluster, index) => {
+          if (cluster.phase !== 'other' && cluster.items.length > 1) {
+            drawer.appendChild(buildActivitySubgroup(chatId, cluster, {
+              key: `${disclosureKey}:${cluster.phase}:${index}`,
+              finished: disclosureOptions.finished,
+              startExpanded: cluster.items.some((a) => a && a.status === 'running'),
+              nested: true,
+            }));
+            return;
+          }
+          cluster.items.forEach((activity) => {
+            drawer.appendChild(buildAgentActivityRow(chatId, activity, { runGrouped: true }));
+          });
+        });
+        subgroup.classList.add('has-nested');
+      }
+      if (!nestRuns) items.forEach((activity) => {
         const paths = activityPaths(activity);
         if (compactFileGroup && paths.length > 1) {
           paths.forEach((filePath) => {
@@ -2522,7 +2536,10 @@
         'All files are in place — reviewing the plan to confirm every item is met.',
         'Reviewing the plan to confirm every item is met.',
       ]);
+      // Internal to the model, not shown: the flat Plan checklist and guard skips/blocks.
       const baseRows = normalizedRows.filter((activity) => activity && activity.status !== 'pending'
+        && activity.kind !== 'checklist'
+        && activity.kind !== 'skip'
         && !(activity.kind === 'thought' && retiredReviewNotices.has(String(activity.detail || '').trim())));
       const rows = buildLiveRowsWithStreamingFile(baseRows, streamingFile, completed);
       const wrapper = document.createElement('div');

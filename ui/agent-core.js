@@ -388,6 +388,7 @@
       let scope = '';
       let command = '';
       let readPathsList = [];
+      let checksList = [];
       let planUpdate = '';
 
       if (typeof DOMParser !== 'undefined' && /<decision>/i.test(candidate)) {
@@ -505,6 +506,7 @@
           if (parsed.start_line != null) startLine = Number(parsed.start_line) || 0;
           if (parsed.end_line != null) endLine = Number(parsed.end_line) || 0;
           if (parsed.scope != null) scope = String(parsed.scope || '');
+          if (Array.isArray(parsed.checks)) checksList = parsed.checks.filter((c) => c && typeof c === 'object').slice(0, 40);
           if (Array.isArray(parsed.paths)) readPathsList = parsed.paths.map((p) => String(p || '').trim()).filter(Boolean);
           else if (typeof parsed.paths === 'string' && parsed.paths.trim()) readPathsList = parsed.paths.split(/[|,\n]+/).map((s) => s.trim()).filter(Boolean);
         }
@@ -594,6 +596,7 @@
         end_line: Math.max(0, Number(endLine) || 0),
         scope: String(scope || '').trim(),
         paths: Array.isArray(readPathsList) ? readPathsList : [],
+        checks: checksList,
         planUpdate: String(planUpdate || '').trim(),
         raw,
       };

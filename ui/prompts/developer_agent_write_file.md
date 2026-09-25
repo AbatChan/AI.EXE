@@ -20,6 +20,7 @@ Rules:
 - If this is a main source file, include the core functionality requested by the task.
 - If this is README.md or another guide file, ground it in the real project files and commands from RECENT_TOOL_RESULTS.
 - Never invent a different stack, entrypoint, main file name, framework, or run command than what the existing files imply.
+- A web page with no build step must work when opened straight from disk (file://), where ES modules do not load: use classic <script src> files loaded in dependency order that share values through one global namespace — no import/export and no type="module".
 - If writing README.md for an existing project, assume the code must be inspected first and keep the instructions aligned to the actual implementation.
 - Do not describe features the existing code does not implement.
 

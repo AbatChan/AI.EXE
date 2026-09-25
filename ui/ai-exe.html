@@ -149,7 +149,16 @@
         <div class="sidebar-divider"></div>
 
         <!-- History -->
-        <div class="sidebar-section-label">Recent</div>
+        <div class="sidebar-section-head">
+          <div class="sidebar-section-label">Recent</div>
+          <button class="hist-select-btn" id="historySelectBtn" type="button" data-tooltip="Select chats to delete (or Cmd/Ctrl-click a chat)">Select</button>
+        </div>
+        <div class="hist-select-bar" id="historySelectBar" hidden>
+          <span class="hsb-count" id="historySelectCount">Select chats</span>
+          <button type="button" class="hsb-btn" id="historySelectAll">All</button>
+          <button type="button" class="hsb-btn danger" id="historyDeleteSelected" disabled>Delete</button>
+          <button type="button" class="hsb-btn" id="historySelectCancel">Cancel</button>
+        </div>
         <div class="history-list" id="historyList">
           <div class="history-empty" id="historyEmpty">
             <svg class="icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">

@@ -88,9 +88,10 @@ assert.match(store, /f"shrink-\{chat_id\}"/, 'any other shrink stays recoverable
 
 // ---- A deleted chat must stay deleted across a relaunch ----
 // Live: delete only cleared memory + cache; the DB row survived and boot hydrated it back.
-const delStart = aiExe.indexOf('function deleteChatFromModal');
+const delStart = aiExe.indexOf('function deleteChatsByIds');
 const del = aiExe.slice(delStart, aiExe.indexOf('\nfunction ', delStart + 1));
-assert.match(del, /recordChatDeletion\(deletedChatId\)/, 'deleting a chat reaches the DB');
+assert.match(del, /recordChatDeletion\(id\)/, 'deleting a chat reaches the DB');
+assert.match(aiExe, /function deleteChatFromModal\(\) \{[\s\S]*?deleteChatsByIds\(\[deletedChatId\]\)/, 'the modal uses the same delete path');
 assert.match(aiExe, /async function deleteChatFromDurableStore\(chatId\)/, 'the DELETE call exists');
 assert.match(aiExe, /res\.ok \|\| res\.status === 404/, 'already-gone counts as deleted');
 // A tombstone covers a backend that is down at delete time.

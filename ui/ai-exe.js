@@ -4089,7 +4089,8 @@ function currentAgentStepTimeoutMs() {
   // 300s for the adapter: Venice reasoning models (reasoning can be FORCED ON, e.g.
   // Claude Sonnet 4.6) legitimately think for minutes before emitting the decision JSON.
   try {
-    return isVeniceAdapterSelected() ? AGENT_STEP_TIMEOUT_ADAPTER_MS : AGENT_STEP_TIMEOUT_MS;
+    // Native reasoning (Think on) also thinks for minutes before a decision.
+    return isVeniceAdapterSelected() || Boolean(inferenceModes().think) ? AGENT_STEP_TIMEOUT_ADAPTER_MS : AGENT_STEP_TIMEOUT_MS;
   } catch (_) { return AGENT_STEP_TIMEOUT_MS; }
 }
 // Tool execution can run its own (slow) content-generation inference; bound it so a
@@ -10276,6 +10277,9 @@ function applyThinkingMode(provider, req, thinkActive) {
   if (p === 'deepseek') {
     // api-docs.deepseek.com/guides/thinking_mode
     req.thinking = { type: thinkActive ? 'enabled' : 'disabled' };
+    // Reasoning shares max_tokens with the answer: give it its own allowance on top
+    // (a 16k file budget came back empty after 69s of reasoning).
+    if (thinkActive && req.max_tokens != null) req.max_tokens = Math.max(8192, Number(req.max_tokens) || 0) + 32768;
   } else if (p === 'venice') {
     // docs.venice.ai — disable_thinking turns reasoning off on supported models AND
     // strips <think> blocks; strip_thinking_response covers legacy <think> output.
@@ -10288,11 +10292,21 @@ function applyThinkingMode(provider, req, thinkActive) {
 }
 
 // Current OpenAI models accept only max_completion_tokens and the default temperature.
+// That cap includes hidden reasoning: a 60-token JSON decision came back empty on
+// gpt-6-luna, so small caps get a floor (only generated tokens are billed).
+const OPENAI_MIN_COMPLETION_TOKENS = 4096;
 function adaptOpenAiRequest(provider, req) {
   if (!req || typeof req !== 'object' || String(provider || '').toLowerCase() !== 'openai') return req;
   if (req.max_tokens != null) {
     req.max_completion_tokens = req.max_tokens;
     delete req.max_tokens;
+  }
+  if (req.max_completion_tokens != null) {
+    req.max_completion_tokens = Math.max(OPENAI_MIN_COMPLETION_TOKENS, Number(req.max_completion_tokens) || 0);
+  }
+  // Reasoning models reject function tools with their default reasoning on /chat/completions (400).
+  if (Array.isArray(req.tools) && req.tools.length && /^(?:gpt-(?:[5-9]|\d{2})|o\d)/i.test(String(req.model || ''))) {
+    req.reasoning_effort = 'none';
   }
   delete req.temperature;
   return req;
@@ -10495,6 +10509,13 @@ function updateAccountUsageSubline(text) {
     accountUsageSub.textContent = 'Provider usage';
     setAccountCreditLine('', false);
   }
+}
+
+// Only a provider that reports which models cost money (the Venice catalog) gets Free/Paid labels;
+// everyone else has no price data, and "no data" must not read as "Free".
+function providerReportsModelPricing(provider) {
+  const priced = liveProviderPricedModels[provider];
+  return Array.isArray(priced) && priced.length > 0;
 }
 
 function isProviderModelPriced(provider, model) {
@@ -10846,6 +10867,12 @@ function mapSmokeStackToSource(html, stack) {
   for (const frame of stack.split('\n')) {
     const hit = frame.match(/^(?:([^@\s(]*)@)?.*?:(\d+):(\d+)\)?\s*$/);
     if (!hit) continue;
+    // Replayed top-level run: sourceURL already names the file, lines are 1:1.
+    const replay = frame.match(/aiexe-replay(\/\S+?):\d+:\d+\)?\s*$/);
+    if (replay) {
+      const fn = String(hit[1] || '').trim();
+      return `${replay[1]}:${hit[2]}:${hit[3]}${fn ? ` in ${fn}()` : ''}`;
+    }
     const srcLine = Number(hit[2]);
     const block = blocks.filter((b) => b.markerLine < srcLine).pop();
     if (!block) continue;
@@ -13042,13 +13069,57 @@ const agentStepFunctionSchema = {
         limit: { type: 'number', description: 'Max characters to read from offset. Defaults to the standard cap.' },
         start_line: { type: 'number', description: 'First line to read (1-based). Use with end_line for targeted code reads.' },
         end_line: { type: 'number', description: 'Last line to read (inclusive). Use with start_line.' },
+        checks: {
+          type: 'array',
+          description: 'For run_app on a web page: user-flow steps run in order, like a user. Each item is ONE of {"click":"<css>"}, {"dblclick":"<css>"}, {"fill":"<css>","text":"<replacement value>"}, {"select":"<css>","value":"<option value>"}, {"type":"<text typed into the focused element>"}, {"key":"Enter|Tab|Escape|Backspace|ArrowDown|..."}, {"expect":"<css>","text":"<exact visible text or input value>"} (add "contains":true for a substring).',
+          items: { type: 'object' },
+        },
       },
       required: ['action', 'tool'],
     },
   },
 };
 
-async function requestOpenAiCompatibleTextCompletion(provider, prompt, maxTokens, systemPrompt = '', signal = null) {
+// Native reasoning arrives wrapped in <native_thinking> inside the stream; Agent calls drop it.
+function stripNativeThinking(text) {
+  return String(text || '').replace(/<native_thinking>[\s\S]*?(?:<\/native_thinking>|$)/g, '');
+}
+function makeThinkingDeltaFilter(onDelta) {
+  const OPEN = '<native_thinking>';
+  const CLOSE = '</native_thinking>';
+  let inside = false;
+  let pending = '';
+  // Longest tail of `text` that could be the start of `tag` (held back until the next chunk).
+  const partialTail = (text, tag) => {
+    for (let n = Math.min(tag.length - 1, text.length); n > 0; n -= 1) {
+      if (tag.startsWith(text.slice(-n))) return n;
+    }
+    return 0;
+  };
+  return (chunk) => {
+    // Silent reasoning is still progress: hiding it must not trip the stall watchdog.
+    if (typeof markAgentToolProgress === 'function') markAgentToolProgress();
+    let rest = pending + String(chunk || '');
+    pending = '';
+    let out = '';
+    while (rest) {
+      const tag = inside ? CLOSE : OPEN;
+      const at = rest.indexOf(tag);
+      if (at === -1) {
+        const hold = partialTail(rest, tag);
+        if (!inside) out += rest.slice(0, rest.length - hold);
+        pending = rest.slice(rest.length - hold);
+        break;
+      }
+      if (!inside) out += rest.slice(0, at);
+      rest = rest.slice(at + tag.length);
+      inside = !inside;
+    }
+    if (out) onDelta(out);
+  };
+}
+
+async function requestOpenAiCompatibleTextCompletion(provider, prompt, maxTokens, systemPrompt = '', signal = null, thinkActive = false) {
   if (!remoteProvidersEnabled) return null;
   const def = getInferenceProviderDef(provider);
   const apiKey = getProviderApiKey(provider);
@@ -13075,7 +13146,7 @@ async function requestOpenAiCompatibleTextCompletion(provider, prompt, maxTokens
           : [{ role: 'user', content: String(prompt || '') }],
         max_tokens: Math.max(1, Number(maxTokens) || agentFileContentMaxTokens),
         ...(systemPrompt && def && def.supportsToolCalling ? { tools: [agentStepFunctionSchema] } : {}),
-      }, false))),
+      }, Boolean(thinkActive)))),
     });
     if (!response.ok) {
       const status = response.status;
@@ -13316,11 +13387,17 @@ async function requestRemoteTextCompletionForCapability(capability, prompt, maxT
   });
   const adapterAttachments = takeAgentAdapterAttachmentsForPrompt(prompt, completionOptions);
   const extraChatName = String((completionOptions && completionOptions.chatName) || '').trim();
+  // Agent work follows the reply's Think mode (it was hard-coded off); an explicit option wins.
+  const agentThink = completionOptions && typeof completionOptions.thinkActive === 'boolean'
+    ? completionOptions.thinkActive
+    : Boolean(activeInferenceRequest && activeInferenceRequest.operationKind === 'agent' && inferenceModes().think);
   if (completionOptions && completionOptions.preferStreaming) {
+    const userDelta = typeof options.onDelta === 'function' ? options.onDelta : undefined;
     const result = await streamRemoteChatCompletion(provider, prompt, {
-      onDelta: typeof options.onDelta === 'function' ? options.onDelta : undefined,
+      onDelta: userDelta && agentThink ? makeThinkingDeltaFilter(userDelta) : userDelta,
     }, {
       maxTokens: Math.max(1, Number(maxTokens) || 64),
+      thinkActive: agentThink,
       // Wire the registered abortController into the actual stream so a timeout / new run
       // can cancel it (was dropped here, leaving file-gen streams un-killable = ghosts).
       abortController: completionOptions.abortController instanceof AbortController ? completionOptions.abortController : undefined,
@@ -13336,6 +13413,8 @@ async function requestRemoteTextCompletionForCapability(capability, prompt, maxT
     if ((!result || !result.ok) && adapterAttachments.length) {
       releaseAgentAdapterForwardedAttachments(activeInferenceRequest && activeInferenceRequest.chatId, adapterAttachments);
     }
+    // Agent output is code/JSON: native reasoning never belongs in it.
+    if (result && agentThink) result.output = stripNativeThinking(result.output);
     return result ? { ...result, workerId: worker.id, provider, model: getProviderModel(provider) } : result;
   }
   if (getInferenceProviderDef(provider).protocol === 'ollama') {
@@ -13367,7 +13446,7 @@ async function requestRemoteTextCompletionForCapability(capability, prompt, maxT
   const abortSignal = completionOptions && completionOptions.abortController instanceof AbortController
     ? completionOptions.abortController.signal
     : null;
-  const result = await requestOpenAiCompatibleTextCompletion(provider, prompt, maxTokens, completionOptions && completionOptions.systemPrompt ? completionOptions.systemPrompt : '', abortSignal);
+  const result = await requestOpenAiCompatibleTextCompletion(provider, prompt, maxTokens, completionOptions && completionOptions.systemPrompt ? completionOptions.systemPrompt : '', abortSignal, agentThink);
   return result ? { ...result, workerId: worker.id, provider, model: getProviderModel(provider) } : result;
 }
 
@@ -14687,7 +14766,149 @@ async function revertAgentMessageEdits(chatId, messageTs) {
 // Offline smoke run: load the generated app in a hidden sandboxed iframe with
 // linked CSS/JS inlined and an injected error hook; return real runtime errors
 // (window.onerror / unhandled rejections / console.error) from startup.
-async function runWorkspaceAppSmokeTest(htmlPath) {
+// User-flow checks for the smoke run, embedded via toString(). Like a browser: typed keys go to
+// whatever has focus after keydown/keypress handlers ran, unless a handler prevented it.
+function aiexeRunSmokeChecks(steps, report, done) {
+  var results = [];
+  var i = 0;
+  var assertionStarted = 0;
+  var CODES = { Enter: 13, Tab: 9, Escape: 27, Backspace: 8, Delete: 46, ArrowLeft: 37, ArrowUp: 38, ArrowRight: 39, ArrowDown: 40, Home: 36, End: 35, ' ': 32 };
+  var name = function (el) {
+    if (!el || el.nodeType !== 1) return 'nothing';
+    var t = el.tagName.toLowerCase();
+    return el.id ? t + '#' + el.id : t + (el.className && typeof el.className === 'string' ? '.' + el.className.trim().split(/\s+/)[0] : '');
+  };
+  var editable = function (el) { return !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable); };
+  var focusTarget = function (el) { return el && el.closest ? el.closest('input,textarea,select,button,a[href],[tabindex],[contenteditable]') : null; };
+  var textOf = function (el) {
+    var v = (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT') ? el.value : (el.innerText != null ? el.innerText : el.textContent);
+    return String(v == null ? '' : v).replace(/\s+/g, ' ').trim();
+  };
+  var keyEvent = function (type, key) {
+    var code = CODES[key] || (key.length === 1 ? key.toUpperCase().charCodeAt(0) : 0);
+    var ev = new KeyboardEvent(type, { key: key, bubbles: true, cancelable: true, charCode: type === 'keypress' ? key.charCodeAt(0) : 0 });
+    try { Object.defineProperty(ev, 'keyCode', { get: function () { return type === 'keypress' ? key.charCodeAt(0) : code; } }); Object.defineProperty(ev, 'which', { get: function () { return type === 'keypress' ? key.charCodeAt(0) : code; } }); } catch (e) {}
+    return ev;
+  };
+  var insertText = function (el, text) {
+    if (el.isContentEditable) { document.execCommand('insertText', false, text); return; }
+    var a = el.selectionStart, b = el.selectionEnd, v = String(el.value || '');
+    if (a == null) { el.value = v + text; } else { el.value = v.slice(0, a) + text + v.slice(b); el.selectionStart = el.selectionEnd = a + text.length; }
+    el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));
+  };
+  var press = function (key) {
+    var t = document.activeElement || document.body;
+    var kd = keyEvent('keydown', key);
+    t.dispatchEvent(kd);
+    if (!kd.defaultPrevented) {
+      if (key.length === 1) {
+        var kp = keyEvent('keypress', key);
+        (document.activeElement || document.body).dispatchEvent(kp);
+        var target = document.activeElement;
+        if (!kp.defaultPrevented && editable(target)) insertText(target, key);
+      } else if (key === 'Backspace' && editable(document.activeElement) && !document.activeElement.isContentEditable) {
+        var el = document.activeElement, a = el.selectionStart, b = el.selectionEnd, v = String(el.value || '');
+        if (a != null) { var from = a === b ? Math.max(0, a - 1) : a; el.value = v.slice(0, from) + v.slice(b); el.selectionStart = el.selectionEnd = from; el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'deleteContentBackward' })); }
+      } else if (key === 'Tab') {
+        var all = Array.prototype.filter.call(document.querySelectorAll('input,textarea,select,button,a[href],[tabindex]'), function (n) { return n.tabIndex >= 0 && !n.disabled && n.getClientRects().length; });
+        var at = all.indexOf(document.activeElement);
+        if (all.length) all[(at + 1) % all.length].focus();
+      } else if (key === 'Enter' && document.activeElement && document.activeElement.form && document.activeElement.tagName === 'INPUT') {
+        var f = document.activeElement.form;
+        if (typeof f.requestSubmit === 'function') f.requestSubmit();
+      }
+    }
+    (document.activeElement || document.body).dispatchEvent(keyEvent('keyup', key));
+  };
+  var mouse = function (el, type, detail) {
+    var r = el.getBoundingClientRect();
+    var init = { bubbles: true, cancelable: true, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2, detail: detail || 1, button: 0 };
+    var ev = /^pointer/.test(type) && typeof PointerEvent === 'function' ? new PointerEvent(type, init) : new MouseEvent(type, init);
+    el.dispatchEvent(ev);
+    return ev;
+  };
+  var click = function (el, twice) {
+    if (el.scrollIntoView) el.scrollIntoView({ block: 'center', inline: 'center' });
+    for (var n = 1; n <= (twice ? 2 : 1); n += 1) {
+      mouse(el, 'pointerdown', n);
+      var md = mouse(el, 'mousedown', n);
+      if (!md.defaultPrevented) {
+        var f = focusTarget(el);
+        if (f && f.focus) f.focus(); else if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+      }
+      mouse(el, 'pointerup', n);
+      mouse(el, 'mouseup', n);
+      mouse(el, 'click', n);
+    }
+    if (twice) mouse(el, 'dblclick', 2);
+  };
+  var step = function () {
+    if (i >= steps.length || i >= 40) { done(results); return; }
+    var s = steps[i] || {};
+    var n = i + 1;
+    try {
+      var actions = ['click', 'dblclick', 'fill', 'select', 'type', 'key', 'expect'].filter(function (key) { return s[key] != null; });
+      if (actions.length !== 1) throw new Error('Each check needs exactly one action; put assertions in their own step');
+      if (s.fill != null || s.select != null) {
+        var selector = String(s.fill != null ? s.fill : s.select);
+        var control = document.querySelector(selector);
+        if (!control) throw new Error('No control matches ' + selector);
+        if (control.disabled || control.readOnly) throw new Error('Control is disabled or read-only: ' + selector);
+        if (s.select != null) {
+          if (control.tagName !== 'SELECT') throw new Error('select requires a select element');
+          var option = Array.prototype.find.call(control.options, function (o) { return o.value === String(s.value); });
+          if (!option || option.disabled) throw new Error('No enabled option with value ' + s.value);
+          control.focus();
+          control.value = option.value;
+        } else {
+          if (!editable(control)) throw new Error('fill requires an editable element');
+          control.focus();
+          if (control.isContentEditable) control.textContent = String(s.text == null ? '' : s.text);
+          else control.value = String(s.text == null ? '' : s.text);
+        }
+        control.dispatchEvent(new Event('input', { bubbles: true }));
+        control.dispatchEvent(new Event('change', { bubbles: true }));
+        results.push('✓ ' + n + '. ' + (s.select != null ? 'selected ' : 'filled ') + selector);
+      } else if (s.click != null || s.dblclick != null) {
+        var sel = String(s.click != null ? s.click : s.dblclick);
+        var el = document.querySelector(sel);
+        if (!el) results.push('✗ ' + n + '. ' + (s.dblclick != null ? 'double-click ' : 'click ') + sel + ' — nothing matches that selector');
+        else if (el.disabled) results.push('✗ ' + n + '. control is disabled: ' + sel);
+        else { click(el, s.dblclick != null); results.push('✓ ' + n + '. ' + (s.dblclick != null ? 'double-clicked ' : 'clicked ') + sel); }
+      } else if (s.type != null) {
+        String(s.type).split('').forEach(press);
+        results.push('✓ ' + n + '. typed "' + s.type + '" into ' + name(document.activeElement));
+      } else if (s.key != null) {
+        press(String(s.key));
+        results.push('✓ ' + n + '. pressed ' + s.key + ' (focus now ' + name(document.activeElement) + ')');
+      } else if (s.expect != null) {
+        var target = document.querySelector(String(s.expect));
+        var want = String(s.text == null ? '' : s.text).replace(/\s+/g, ' ').trim();
+        if (!assertionStarted) assertionStarted = Date.now();
+        var matches = target && (s.contains ? textOf(target).indexOf(want) !== -1 : textOf(target) === want);
+        if (!matches && Date.now() - assertionStarted < 1000) { setTimeout(step, 40); return; }
+        assertionStarted = 0;
+        if (!target) results.push('✗ ' + n + '. expected ' + s.expect + ' — nothing matches that selector');
+        else {
+          var got = textOf(target);
+          var ok = s.contains ? got.indexOf(want) !== -1 : got === want;
+          results.push((ok ? '✓ ' : '✗ ') + n + '. ' + s.expect + ' shows "' + got.slice(0, 120) + '"' + (ok ? '' : ' — expected ' + (s.contains ? 'it to contain ' : '') + '"' + want + '"'));
+        }
+      } else {
+        results.push('✗ ' + n + '. step not understood: ' + JSON.stringify(s).slice(0, 120));
+      }
+    } catch (e) {
+      results.push('✗ ' + n + '. threw ' + (e && e.name ? e.name + ': ' : '') + (e && e.message || e));
+      try { report(e, 'check step ' + n); } catch (x) {}
+    }
+    i += 1;
+    setTimeout(step, 40);
+  };
+  step();
+}
+
+async function runWorkspaceAppSmokeTest(htmlPath, options = {}) {
+  const checks = Array.isArray(options && options.checks) ? options.checks.filter((c) => c && typeof c === 'object').slice(0, 40) : [];
   const normalized = normalizeWorkspacePath(htmlPath || '/index.html');
   const htmlRes = await invokeWorkspaceAction('workspaceReadFile', { path: normalized });
   if (!htmlRes || !htmlRes.ok) return { ok: false, message: `could not read ${normalized}` };
@@ -14715,14 +14936,25 @@ async function runWorkspaceAppSmokeTest(htmlPath) {
   // ES modules don't load when the page is opened from file:// (offline) and become
   // syntax errors once inlined — detect them so we can report a fixable cause instead
   // of a wall of opaque "Script error" entries.
+  const deferredScripts = [];
   let usesEsModules = /<script\b[^>]*type=["']module["']/i.test(html);
   for (const match of [...html.matchAll(/<script\b[^>]*src=["']([^"']+)["'][^>]*>\s*<\/script>/gi)]) {
     const js = await inlineAsset(match[1]);
     if (js != null) {
-      if (/^[ \t]*import\s+[^(]/m.test(js) || /^[ \t]*export\b/m.test(js)) usesEsModules = true;
       const srcLabel = String(match[1] || '').split(/[?#]/)[0].replace(/^\.?\/*/, '/');
-      html = html.replace(match[0], () => `<script>\n//@aiexe-src ${srcLabel}\n${js}\n</script>`);
+      const inlined = `<script>\n//@aiexe-src ${srcLabel}\n${js}\n</script>`;
+      // Inline scripts ignore defer; execute these after the body has been parsed.
+      if (/\sdefer(?:\s|=|>)/i.test(match[0])) {
+        deferredScripts.push(inlined);
+        html = html.replace(match[0], () => '');
+      } else html = html.replace(match[0], () => inlined);
     }
+  }
+  if (deferredScripts.length) {
+    const deferred = deferredScripts.join('\n');
+    html = /<\/body\s*>/i.test(html)
+      ? html.replace(/<\/body\s*>/i, () => `${deferred}\n</body>`)
+      : `${html}\n${deferred}`;
   }
   const hook = `<script>(function(){var phase='startup';var send=function(t){try{parent.postMessage({__aiexeSmoke:true,phase:phase,text:String(t).slice(0,400)},'*');}catch(e){}};
 var lastReal=0,seenErr=[];
@@ -14732,7 +14964,8 @@ var ael=EventTarget.prototype.addEventListener,rel=EventTarget.prototype.removeE
 EventTarget.prototype.addEventListener=function(t,l,o){return ael.call(this,t,wrap(l,t+' handler'),o);};
 EventTarget.prototype.removeEventListener=function(t,l,o){return rel.call(this,t,(l&&l.__aiexeW)||l,o);};
 ['setTimeout','setInterval','requestAnimationFrame'].forEach(function(n){var orig=window[n];if(typeof orig!=='function')return;window[n]=function(f){var a=Array.prototype.slice.call(arguments);a[0]=wrap(f,n==='requestAnimationFrame'?'animation frame':'timer');return orig.apply(window,a);};});
-window.onerror=function(m,s,l,c,e){if(e&&typeof e==='object'&&e.message){report(e,'');return;}if(String(m)==='Script error.'&&Date.now()-lastReal<250)return;send(m+' ('+(s||'inline')+':'+(l||0)+':'+(c||0)+')'+(String(m)==='Script error.'?' — thrown at the top level of a script, so the browser hid its details':''));};
+var replayTop=function(){var sc=document.scripts[document.scripts.length-1],t=sc?String(sc.textContent||''):'',mk=t.match(/\\/\\/@aiexe-src (\\S+)\\n/);if(!mk||document.readyState!=='loading')return false;try{(0,eval)('(function(){'+t.slice(t.indexOf(mk[0])+mk[0].length)+'\\n})()\\n//# sourceURL=aiexe-replay'+mk[1]);}catch(err){report(err,'top level of '+mk[1]);return true;}send('Script error. (top level of '+mk[1]+') — the browser hid its details and a re-run did not reproduce it');return true;};
+window.onerror=function(m,s,l,c,e){if(e&&typeof e==='object'&&e.message){report(e,'');return;}if(String(m)==='Script error.'&&Date.now()-lastReal<250)return;if(String(m)==='Script error.'&&replayTop())return;send(m+' ('+(s||'inline')+':'+(l||0)+':'+(c||0)+')'+(String(m)==='Script error.'?' — thrown at the top level of a script, so the browser hid its details':''));};
 window.addEventListener('unhandledrejection',function(e){send('Unhandled promise rejection: '+((e.reason&&e.reason.message)||e.reason));});
 var ce=console.error;console.error=function(){send(Array.prototype.slice.call(arguments).map(String).join(' '));try{ce.apply(console,arguments);}catch(e){}};
 try{window.localStorage&&window.localStorage.length;}catch(e){var mem={};try{Object.defineProperty(window,'localStorage',{configurable:true,value:{getItem:function(k){return k in mem?mem[k]:null;},setItem:function(k,v){mem[k]=String(v);},removeItem:function(k){delete mem[k];},clear:function(){mem={};},key:function(i){return Object.keys(mem)[i]||null;},get length(){return Object.keys(mem).length;}}});}catch(e2){}}
@@ -14761,11 +14994,16 @@ var pts=[[vw/2,vh/2],[vw/4,vh/4],[3*vw/4,3*vh/4]];
 for(var p=0;p<pts.length;p++){var hit=document.elementFromPoint(pts[p][0],pts[p][1]);if(hit&&rendered(hit))tryClick(hit,'point');}
 }catch(e){send('interaction probe failed: '+(e&&e.message||e));}
 return clicked;};
+var CHECKS=${JSON.stringify(checks).replace(/</g, '\\u003c')};
+var runChecks=${aiexeRunSmokeChecks.toString()};
 window.addEventListener('load',function(){setTimeout(function(){
-var s1=snap();var clicked=probe();
+var s1=snap();
+var finishRun=function(checkResults){var clicked=probe();
 setTimeout(function(){var s2=snap();
-try{parent.postMessage({__aiexeSmokeSnapshot:true,snapshot:s1,after:s2,clicked:clicked},'*');}catch(e){}
-try{parent.postMessage({__aiexeSmokeDone:true},'*');}catch(e){}},500);},400);});
+try{parent.postMessage({__aiexeSmokeSnapshot:true,snapshot:s1,after:s2,clicked:clicked,checks:checkResults},'*');}catch(e){}
+try{parent.postMessage({__aiexeSmokeDone:true},'*');}catch(e){}},500);};
+if(CHECKS.length){phase='checks';try{runChecks(CHECKS,report,function(r){phase='interaction';finishRun(r);});}catch(e){send('checks could not run: '+(e&&e.message||e));finishRun(null);}}else finishRun(null);
+},400);});
 })();</script>`;
   html = /<head[^>]*>/i.test(html) ? html.replace(/<head[^>]*>/i, (m) => `${m}\n${hook}`) : `${hook}\n${html}`;
   return new Promise((resolve) => {
@@ -14773,11 +15011,13 @@ try{parent.postMessage({__aiexeSmokeDone:true},'*');}catch(e){}},500);},400);});
     let renderSnapshot = null;
     let renderSnapshotAfter = null;
     let interactionClicked = null;
+    let checkResults = null;
     const iframe = document.createElement('iframe');
     iframe.setAttribute('sandbox', 'allow-scripts');
     // opacity (not visibility) keeps inner layout/innerText real while invisible
     iframe.style.cssText = 'position:fixed;left:-9999px;top:-9999px;width:800px;height:600px;opacity:0;pointer-events:none;';
     let settled = false;
+    let completed = false;
     const finish = () => {
       if (settled) return;
       settled = true;
@@ -14786,35 +15026,38 @@ try{parent.postMessage({__aiexeSmokeDone:true},'*');}catch(e){}},500);},400);});
       // A module-based page can't even load offline, so surface that single fixable
       // cause instead of the cascade of opaque "Script error" entries it produces.
       const reportedErrors = usesEsModules
-        ? ['Uses ES module import/export, which does NOT load when the page is opened from file:// (offline) — this breaks the whole app. Convert the scripts to classic <script src="..."> files with no import/export (expose shared values on window), then run again.']
+        ? ['The HTML declares a module script. This offline smoke preview does not support module loading; verify it through a local server or use classic scripts for a file:// deliverable.', ...errors.slice(0, 11)]
         : errors.slice(0, 12);
       resolve({
         ok: true,
-        errors: reportedErrors,
+        errors: completed ? reportedErrors : [...reportedErrors, 'Smoke verification did not finish; startup and requested interactions remain unverified.'],
         htmlPath: normalized,
         snapshot: renderSnapshot,
         snapshotAfter: renderSnapshotAfter,
         clicked: interactionClicked,
+        checks: checkResults,
       });
     };
     const onMessage = (event) => {
       const data = event && event.data;
-      if (!data || typeof data !== 'object') return;
+      if (event.source !== iframe.contentWindow || !data || typeof data !== 'object') return;
       if (data.__aiexeSmoke && typeof data.text === 'string') {
         const where = mapSmokeStackToSource(html, String(data.stack || ''));
-        errors.push((data.phase === 'interaction' ? '[during interaction probe] ' : '') + data.text + (where ? ` — at ${where}` : ''));
+        const phaseTag = data.phase === 'interaction' ? '[during interaction probe] ' : (data.phase === 'checks' ? '[during your checks] ' : '');
+        errors.push(phaseTag + data.text + (where ? ` — at ${where}` : ''));
       }
       if (data.__aiexeSmokeSnapshot && data.snapshot && typeof data.snapshot === 'object') {
         renderSnapshot = data.snapshot;
         if (data.after && typeof data.after === 'object') renderSnapshotAfter = data.after;
         if (Array.isArray(data.clicked)) interactionClicked = data.clicked;
+        if (Array.isArray(data.checks)) checkResults = data.checks.map(String);
       }
-      if (data.__aiexeSmokeDone) window.setTimeout(finish, 150);
+      if (data.__aiexeSmokeDone) { completed = true; window.setTimeout(finish, 150); }
     };
     window.addEventListener('message', onMessage);
     document.body.appendChild(iframe);
     iframe.srcdoc = html;
-    window.setTimeout(finish, 4500); // load + snapshot + interaction probe + settle
+    window.setTimeout(finish, 4500 + checks.length * 1100); // load + snapshot + checks + interaction probe + settle
   });
 }
 
@@ -15889,6 +16132,9 @@ const chatShell = window.AIExeChatShell && typeof window.AIExeChatShell.createCh
     financeDashboard,
     canvasDock,
     histList,
+    isHistorySelecting,
+    isChatSelectedInHistory,
+    toggleHistorySelection,
     mainInput,
     currentAuthUser,
     getBrowsableArtifacts,
@@ -19030,35 +19276,48 @@ function deleteChatFromModal() {
     return;
   }
   const deletedChatId = String(modalChatId);
+  closeChatActionModal();
+  deleteChatsByIds([deletedChatId]);
+}
+
+// One delete path for the modal and multi-select: memory, SQLite, artifacts, queue, running reply.
+function deleteChatsByIds(ids) {
+  const doomed = new Set((Array.isArray(ids) ? ids : []).map(String).filter((id) => findChatById(id)));
+  if (!doomed.size) return 0;
   if (
     activeInferenceRequest
-    && String(activeInferenceRequest.chatId || '') === deletedChatId
+    && doomed.has(String(activeInferenceRequest.chatId || ''))
     && !activeInferenceRequest.cancelled
   ) {
     cancelActiveInference();
     clearTypingIndicator();
     setThinkingStatus('');
   }
-  thinkingStartedByChatId.delete(deletedChatId);
-  // Chats live in the DB now: removing it from memory/cache alone left the row in SQLite,
-  // so the next boot hydrated the deleted chat right back into the sidebar.
-  recordChatDeletion(deletedChatId);
-  chats = chats.filter((chat) => chat.id !== modalChatId);
-  artifacts = artifacts.filter((item) => String(item && item.chatId ? item.chatId : '') !== String(modalChatId));
+  doomed.forEach((id) => {
+    thinkingStartedByChatId.delete(id);
+    // Chats live in the DB now: removing it from memory/cache alone left the row in SQLite,
+    // so the next boot hydrated the deleted chat right back into the sidebar.
+    recordChatDeletion(id);
+  });
+  for (let i = queuedSends.length - 1; i >= 0; i -= 1) {
+    if (doomed.has(String(queuedSends[i] && queuedSends[i].chatId))) queuedSends.splice(i, 1);
+  }
+  chats = chats.filter((chat) => !doomed.has(String(chat.id)));
+  artifacts = artifacts.filter((item) => !doomed.has(String(item && item.chatId ? item.chatId : '')));
   debugTraceEntries = debugTraceEntries.filter(
-    (entry) => String(entry && entry.chatId ? entry.chatId : '') !== deletedChatId
+    (entry) => !doomed.has(String(entry && entry.chatId ? entry.chatId : ''))
   );
-  if (activeChatId === modalChatId) {
+  if (doomed.has(String(activeChatId))) {
     activeChatId = chats[0]?.id || null;
   }
   artifactDetailKey = '';
   inNewChatMode = !activeChatId;
-  closeChatActionModal();
   saveChats();
   void flushNativeUiStorageBackup();
   saveArtifacts();
   scheduleAttachmentMediaPrune();
 
+  const deletedLabel = [...doomed].join(',');
   const refreshSteps = [
     ['renderArtifacts', () => renderArtifacts()],
     ['renderHistory', () => renderHistory()],
@@ -19073,11 +19332,11 @@ function deleteChatFromModal() {
     } catch (err) {
       failedRefreshSteps.push(name);
       recordDebugTrace('chat_delete_refresh_step_failed', {
-        chatId: deletedChatId,
+        chatId: deletedLabel,
         step: name,
         message: String(err && err.message ? err.message : err),
       }, {
-        chatId: deletedChatId,
+        chatId: deletedLabel,
         step: name,
         error: String(err && err.stack ? err.stack : err),
         state: buildRuntimeStateSnapshot('chat_delete_refresh_step_failed'),
@@ -19092,8 +19351,84 @@ function deleteChatFromModal() {
       });
     }, 0);
   }
+  return doomed.size;
 }
 
+// Multi-select in the Recent list: Select (or Cmd/Ctrl-click), tick chats, Delete twice to confirm.
+let historySelection = null;
+let historyDeleteArmed = false;
+function isHistorySelecting() {
+  return historySelection instanceof Set;
+}
+function isChatSelectedInHistory(chatId) {
+  return isHistorySelecting() && historySelection.has(String(chatId));
+}
+function startHistorySelection(firstChatId = '') {
+  historySelection = new Set();
+  if (firstChatId && findChatById(firstChatId)) historySelection.add(String(firstChatId));
+  historyDeleteArmed = false;
+  renderHistory();
+  renderHistorySelectBar();
+}
+function endHistorySelection() {
+  if (!isHistorySelecting()) return;
+  historySelection = null;
+  historyDeleteArmed = false;
+  renderHistory();
+  renderHistorySelectBar();
+}
+function toggleHistorySelection(chatId) {
+  if (!isHistorySelecting()) { startHistorySelection(chatId); return; }
+  const id = String(chatId);
+  if (historySelection.has(id)) historySelection.delete(id);
+  else historySelection.add(id);
+  historyDeleteArmed = false;
+  renderHistory();
+  renderHistorySelectBar();
+}
+function selectAllHistory() {
+  if (!isHistorySelecting()) return;
+  const all = chats.map((chat) => String(chat.id));
+  historySelection = new Set(historySelection.size === all.length ? [] : all);
+  historyDeleteArmed = false;
+  renderHistory();
+  renderHistorySelectBar();
+}
+function deleteSelectedHistoryChats() {
+  if (!isHistorySelecting() || !historySelection.size) return;
+  if (!historyDeleteArmed) {
+    historyDeleteArmed = true;
+    renderHistorySelectBar();
+    return;
+  }
+  const ids = [...historySelection];
+  historySelection = null;
+  historyDeleteArmed = false;
+  deleteChatsByIds(ids);
+  renderHistorySelectBar();
+}
+function renderHistorySelectBar() {
+  const bar = document.getElementById('historySelectBar');
+  const selectBtn = document.getElementById('historySelectBtn');
+  const selecting = isHistorySelecting();
+  if (selectBtn) selectBtn.hidden = selecting || !chats.length;
+  if (histList) histList.classList.toggle('selecting', selecting);
+  if (!bar) return;
+  bar.hidden = !selecting;
+  if (!selecting) return;
+  const n = historySelection.size;
+  const count = document.getElementById('historySelectCount');
+  const all = document.getElementById('historySelectAll');
+  const del = document.getElementById('historyDeleteSelected');
+  if (count) count.textContent = n ? `${n} selected` : 'Select chats';
+  if (all) all.textContent = n && n === chats.length ? 'None' : 'All';
+  if (del) {
+    del.disabled = !n;
+    del.textContent = historyDeleteArmed ? `Delete ${n}?` : (n ? `Delete ${n}` : 'Delete');
+    del.setAttribute('data-tooltip', historyDeleteArmed ? 'Click again to delete for good' : 'Delete the selected chats');
+    del.classList.toggle('armed', historyDeleteArmed);
+  }
+}
 
 const consumedAgentCommandApprovals = new Set();
 
@@ -19292,6 +19627,16 @@ document.addEventListener('click', handleDevServerCardClick);
 if (chatSaveBtn) chatSaveBtn.addEventListener('click', saveChatNameFromModal);
 if (chatCancelBtn) chatCancelBtn.addEventListener('click', closeChatActionModal);
 if (chatDeleteBtn) chatDeleteBtn.addEventListener('click', deleteChatFromModal);
+{
+  const bind = (id, fn) => { const el = document.getElementById(id); if (el) el.addEventListener('click', (evt) => { evt.stopPropagation(); fn(); }); };
+  bind('historySelectBtn', () => startHistorySelection());
+  bind('historySelectAll', selectAllHistory);
+  bind('historyDeleteSelected', deleteSelectedHistoryChats);
+  bind('historySelectCancel', endHistorySelection);
+  document.addEventListener('keydown', (evt) => {
+    if (evt.key === 'Escape' && isHistorySelecting()) endHistorySelection();
+  });
+}
 if (chatNameInput) {
   chatNameInput.addEventListener('input', () => setDeleteArmed(false));
   chatNameInput.addEventListener('keydown', (e) => {
@@ -20117,7 +20462,11 @@ function buildComposerModelList(filter) {
       const priced = isProviderModelPriced(c.provider, m);
       const option = parseProviderModelOption(m);
       const uncensored = isProviderModelUncensored(c.provider, m);
-      const providerLabel = composerModelProviderLabel(option.name);
+      // Multi-vendor catalogs name the model's maker; a direct provider is its own vendor.
+      const providerDef = getInferenceProviderDef(c.provider);
+      const providerLabel = /venice|huggingface|customopenai/i.test(String(c.provider || ''))
+        ? composerModelProviderLabel(option.name)
+        : String((providerDef && providerDef.label) || c.provider || '').replace(/\s*(?:API|\(.*\))\s*$/i, '').trim();
       const displayName = option.name || normalizeProviderModelName(m) || m;
       item.className = 'composer-model-item' + (m === cur ? ' active' : '') + (priced ? ' priced' : '');
       item.setAttribute('role', 'option');
@@ -20143,11 +20492,13 @@ function buildComposerModelList(filter) {
         privacyBadge.textContent = option.privacy || 'Uncensored';
         meta.appendChild(privacyBadge);
       }
-      const priceBadge = document.createElement('span');
-      priceBadge.className = `composer-model-badge ${priced ? 'paid' : 'free'}`;
-      priceBadge.textContent = priced ? 'Pay-per-use' : 'Free';
       meta.prepend(providerBadge);
-      meta.append(priceBadge);
+      if (providerReportsModelPricing(c.provider)) {
+        const priceBadge = document.createElement('span');
+        priceBadge.className = `composer-model-badge ${priced ? 'paid' : 'free'}`;
+        priceBadge.textContent = priced ? 'Pay-per-use' : 'Free';
+        meta.append(priceBadge);
+      }
       main.append(nameEl, meta);
 
       const check = document.createElement('span');
@@ -21038,7 +21389,12 @@ if (folderArea) {
 
 function renderHistory() {
   if (chatShell && typeof chatShell.renderHistory === 'function') {
-    return chatShell.renderHistory();
+    if (isHistorySelecting()) {
+      historySelection.forEach((id) => { if (!findChatById(id)) historySelection.delete(id); });
+    }
+    const result = chatShell.renderHistory();
+    renderHistorySelectBar();
+    return result;
   }
   return undefined;
 }

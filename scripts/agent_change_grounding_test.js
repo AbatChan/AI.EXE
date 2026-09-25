@@ -16,10 +16,11 @@ function normalizeWorkspacePath(p) {
   return s.replace(/\/+/g, '/').replace(/\/$/, '') || '/';
 }
 
+let lastRemotePrompt = '';
 function createRuntime(remoteOutput) {
   return global.AIExeAgentRuntime.createAgentRuntime({
     normalizeWorkspacePath,
-    requestSelectedRemoteTextCompletion: async () => (
+    requestSelectedRemoteTextCompletion: async (prompt) => (lastRemotePrompt = JSON.stringify(prompt), 0) || (
       remoteOutput == null ? null : { ok: true, output: remoteOutput }
     ),
     nativeBridge: { available: () => false, invoke: async () => null },
@@ -144,13 +145,25 @@ assert.ok(!excludedState.includes('CURRENT /index.html'), 'the target file itsel
   assert.equal(noCriteriaRes.skipped, true, 'no criteria skips the audit');
 
   // --- reviewAgentProjectCoherence ---
-  const reviewRt = createRuntime('{"issues":["/script.js: slider card-scale is 50-150 but the script default is 1"]}');
+  const reviewRt = createRuntime(JSON.stringify({ issues: [
+    { issue: '/script.js: slider card-scale is 50-150 but the script default is 1', evidence: 'const DEFAULTS = {  cardScale: 1 };' },
+    { issue: '/app.js: reads Engine.ERROR but the engine exports ERROR_TOKENS', evidence: 'module.exports = { ERROR_TOKENS }' },
+    { issue: '/style.css: checked the grid, no defect', evidence: '' },
+  ] }));
   const issues = await reviewRt.reviewAgentProjectCoherence({
     '/index.html': '<input id="card-scale" min="50" max="150" value="100">',
     '/script.js': 'const DEFAULTS = { cardScale: 1 };',
   }, 'playing card');
-  assert.equal(issues.length, 1, 'coherence review returns advisory issues');
+  assert.equal(issues.length, 1, 'only issues whose evidence is really in the code survive');
   assert.ok(issues[0].includes('card-scale'), 'issue text passes through');
+
+  // A long file keeps its tail (exports) in view and says the middle is hidden.
+  const tailRt = createRuntime('{"issues":[]}');
+  const longEngine = `var ERROR_TOKENS = {};\n${'// filler line\n'.repeat(900)}global.Engine = { ERROR: ERROR_TOKENS };\n`;
+  await tailRt.reviewAgentProjectCoherence({ '/js/engine.js': longEngine, '/js/sheet.js': 'var ERR = Engine.ERROR;' }, 'sheet');
+  const seenPrompt = JSON.parse(lastRemotePrompt);
+  assert.ok(String(seenPrompt).includes('global.Engine = { ERROR: ERROR_TOKENS }'), 'tail with the exports is shown');
+  assert.ok(/never report a name as missing/.test(String(seenPrompt)), 'partial files are labelled');
 
   const single = await reviewRt.reviewAgentProjectCoherence({ '/only.js': 'x' }, 'task');
   assert.deepEqual(single, [], 'fewer than two files skips the review');

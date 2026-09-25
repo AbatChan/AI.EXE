@@ -259,7 +259,7 @@
   function readEventWasTruncated(ev) {
     return /\[file continues/i.test(String((ev && ev.observation) || ''));
   }
-  function evaluateRepeatedRead(toolEvents, readPath, currentSig, hardCap = 6) {
+  function evaluateRepeatedRead(toolEvents, readPath, currentSig, hardCap = 6, visibleRanges = null) {
     const events = Array.isArray(toolEvents) ? toolEvents : [];
     // Only count reads AFTER the last edit/write — re-reading to verify a change is legit.
     let lastMutationIndex = -1;
@@ -273,7 +273,35 @@
       && !e._fromBatchRead
       && String(e.path || '') === readPath);
     if (priorReads.length === 0) return null;
+    if (visibleRanges) {
+      const [start, end, offset] = String(currentSig).split(':').map(Number);
+      const source = priorReads[priorReads.length - 1].content;
+      const lineCount = typeof source === 'string' ? source.split('\n').length : Infinity;
+      const wantStart = start > 0 ? start : 1;
+      const wantEnd = end > 0 ? end : (start > 0 ? Math.min(lineCount, start + 199) : lineCount);
+      let through = wantStart - 1;
+      for (const [a, b] of visibleRanges[readPath] || []) {
+        if (a > through + 1) break;
+        through = Math.max(through, b);
+      }
+      // Historical reads are not evidence of current prompt visibility.
+      if (offset || through < wantEnd) return priorReads.length >= hardCap ? 'hard-cap' : null;
+    }
     if (priorReads.some((e) => summarizeReadRange(e) === currentSig)) return 'exact-repeat';
+    // Lines never read before are new information, not a repeat.
+    {
+      const parts = String(currentSig).split(':').map((v) => Number(v) || 0);
+      if (!parts[2] && parts[0] > 0) {
+        const want = [parts[0], parts[1] > 0 ? parts[1] : parts[0] + 199];
+        const spans = priorReads
+          .filter((e) => !readEventWasTruncated(e) && !(Number(e.offset) || 0))
+          .map((e) => ((Number(e.startLine) || 0) > 0 ? [Number(e.startLine), Number(e.endLine) || Number(e.startLine) + 199] : [1, Infinity]))
+          .sort((a, b) => a[0] - b[0]);
+        let reach = want[0] - 1;
+        for (const [a, b] of spans) { if (a > reach + 1) break; reach = Math.max(reach, b); }
+        if (reach < want[1]) return null;
+      }
+    }
     if (priorReads.length >= hardCap) return 'hard-cap';
     const last = priorReads[priorReads.length - 1];
     const sigParts = String(currentSig).split(':');
@@ -986,7 +1014,6 @@ Still unverified: ${pending.join('; ')}` : '';
       };
 
       let lastNarrationDetail = '';
-      let deterministicBatchNarrated = false;
       const appendAgentNarration = (text) => {
         const cleaned = deps.sanitizeAssistantText ? deps.sanitizeAssistantText(text) : text;
         const detail = String(cleaned || '').trim();
@@ -1007,28 +1034,6 @@ Still unverified: ${pending.join('; ')}` : '';
           status: 'done',
         });
         lastNarrationDetail = detail;
-      };
-
-      const buildDeterministicStartupNarration = (decision) => {
-        const tool = String(decision && decision.tool || '').toLowerCase();
-        const projectName = String((planSpec && planSpec.projectName) || deps.deriveProjectNameFromTask(taskText) || 'project').trim();
-        const expectedFiles = Array.isArray(planSpec && planSpec.expectedFiles)
-          ? planSpec.expectedFiles.map((p) => deps.normalizeWorkspacePath(p || '')).filter(Boolean)
-          : [];
-        const fileCount = expectedFiles.length;
-        if (tool === 'new_project') {
-          if (fileCount > 1) {
-            return `I'll create the ${projectName} workspace, scaffold the planned files, then validate and run it.`;
-          }
-          return `I'll create the ${projectName} workspace and start writing the project files.`;
-        }
-        if (tool === 'write_file' && fileCount > 0) {
-          const path = deps.normalizeWorkspacePath(decision && decision.path || '');
-          return path
-            ? `I'll start writing the planned project files, beginning with ${path}.`
-            : "I'll start writing the planned project files now.";
-        }
-        return '';
       };
 
       const setAgentProgress = (text) => {
@@ -1254,6 +1259,8 @@ Still unverified: ${pending.join('; ')}` : '';
         startLine: Number(decision && decision.start_line || 0),
         endLine: Number(decision && decision.end_line || 0),
         pathsSig: decisionPathsSignature(decision),
+        // A run with different user-flow checks is a different test.
+        checksSig: JSON.stringify(Array.isArray(decision && decision.checks) ? decision.checks : []),
         // run_command's identity is its command, not a path — every run_command
         // shares path '/'. Without this, a second, DIFFERENT command (e.g. `npx
         // prisma generate` after a blocked `node -e ...`) was flagged a duplicate
@@ -1288,6 +1295,7 @@ Still unverified: ${pending.join('; ')}` : '';
             && Number(event.startLine || 0) === signature.startLine
             && Number(event.endLine || 0) === signature.endLine
             && String(event.pathsSig || '') === signature.pathsSig
+            && String(event.checksSig || '[]') === signature.checksSig
             && String(event.command || '').trim() === signature.command;
         });
         if (lastIndex < 0) return '';
@@ -1374,6 +1382,8 @@ Still unverified: ${pending.join('; ')}` : '';
             const lastContent = String(lastEvent.content || '').trim();
             if (newContent && newContent !== lastContent) return '';
           }
+          // A stall is transient, not a verdict on the step: allow the retry (the timeout rule caps it).
+          if (lastEvent.toolTimedOut) return '';
           if (signature.tool === 'read_file' && /file not found/i.test(String(lastEvent.observation || ''))) {
             return `read_file blocked for ${signature.path || 'this file'}: it does not exist — re-reading cannot help. If it is a planned file, CREATE it now with write_file; otherwise take the next planned step.`;
           }
@@ -1951,9 +1961,6 @@ Still unverified: ${pending.join('; ')}` : '';
             ack = ack.replace(/^["'`]+|["'`]+$/g, '').trim();
             if (ack && !/^[{<[]/.test(ack)) {
               appendAgentNarration(ack);
-              // The kickoff sentence IS the intro — don't let the deterministic
-              // startup batch (new_project) add a second, blander one.
-              deterministicBatchNarrated = true;
             }
           }
         } catch (_) { /* best-effort; the tracker still shows the phases */ }
@@ -1966,23 +1973,40 @@ Still unverified: ${pending.join('; ')}` : '';
       let lastChecklistSignature = '';
       let planUpdatePending = false;
       let lastPlanUpdateSignature = '';
+      // Plain "what's done + why I paused + what next" for runs the provider cut short.
+      const pausedRunText = (why) => {
+        const written = [...new Set(toolEvents
+          .filter((event) => event && event.ok && ['write_file', 'edit_file', 'write_files'].includes(String(event.tool || '').toLowerCase()))
+          .map((event) => String(event.path || '').split('/').filter(Boolean).pop())
+          .filter(Boolean))];
+        const names = written.length > 4
+          ? `${written.slice(0, 4).join(', ')} and ${written.length - 4} more`
+          : written.length > 1 ? `${written.slice(0, -1).join(', ')} and ${written[written.length - 1]}` : written[0];
+        return names ? `I've written ${names}, but ${why}` : `I got started, but ${why}`;
+      };
+      // Work already happened: keep it in the chat; otherwise the provider-unavailable notice.
+      const endPausedRun = async (text, rawReason) => {
+        if (agentHasWorkspaceMutations()) await deps.refreshWorkspaceTree(true);
+        if (toolEvents.some((event) => event && event.ok)) {
+          deps.commitAssistantMessage(chatId, text, text, {
+            agentActivities,
+            agentMeta: agentMetaWithRevert({ startedAt, completedAt: Date.now(), collapsed: false }),
+            forceNeedsContinue: true,
+          });
+        } else if (typeof deps.surfaceAgentInferenceUnavailable === 'function') {
+          deps.surfaceAgentInferenceUnavailable(chatId, rawReason || text);
+        }
+      };
       const refreshChecklist = (finalizing = false, acceptedFinal = false) => {
         if (!checklistItems.length || typeof deps.computeAgentChecklistProgress !== 'function') return null;
         let progress = deps.computeAgentChecklistProgress(checklistItems, toolEvents, planSpec);
         const doneCount = progress.filter((p) => p && p.done).length;
         const allDone = doneCount >= progress.length && progress.length > 0;
         const signature = progress.map((p) => `${p.done ? '1' : '0'}:${p.text}`).join('|');
-        // Phased: tracker is the plan view; skip the duplicate flat "Plan N/N" card.
-        if (phaseState) return { progress, doneCount, total: progress.length, remaining: progress.filter((p) => p && !p.done).map((p) => p.text), allDone };
+        // Internal tracker only: the phase tracker is the user's plan view, and a flat
+        // "Plan 0/N" card that only the final audit ticks read as broken.
         if (signature !== lastChecklistSignature) {
           lastChecklistSignature = signature;
-          appendAgentActivity({
-            kind: 'checklist',
-            title: planUpdatePending ? 'Plan updated' : 'Plan',
-            meta: `${doneCount}/${progress.length}`,
-            items: progress.map((p) => ({ text: p.text, done: p.done })),
-            status: 'done',
-          });
           planUpdatePending = false;
         }
         return {
@@ -2511,6 +2535,7 @@ Still unverified: ${pending.join('; ')}` : '';
 
         deps.setThinkingStatus('');
         let agentPrompt = '';
+        let visibleReadRanges = null;
         let rawPlannerOutput = '';
         let decision = String(planSpec && planSpec.taskKind || '').toLowerCase() === 'project'
           ? deps.deriveFallbackAgentDecision(taskText, toolEvents, planSpec)
@@ -2553,6 +2578,7 @@ Still unverified: ${pending.join('; ')}` : '';
             plannerHeartbeatTimer = 0;
           };
           const decisionPrompt = await deps.buildAgentDecisionPrompt(chatId, taskText, toolEvents, step, planSpec);
+          visibleReadRanges = decisionPrompt && decisionPrompt.visibleReadRanges || null;
           agentPrompt = decisionPrompt && decisionPrompt.prompt ? decisionPrompt.prompt : decisionPrompt;
           const decisionSystemPrompt = (decisionPrompt && decisionPrompt.systemPrompt) || '';
           // A single transient inference failure (e.g. "API unavailable — check
@@ -2728,7 +2754,7 @@ Still unverified: ${pending.join('; ')}` : '';
             appendAgentActivity({
               kind: 'error',
               title: 'Stopped',
-              detail: (res && res.timedOut) ? 'Agent step timed out.' : ((res && res.message) || 'Agent step failed.'),
+              detail: (res && res.timedOut) ? 'The model took too long to answer' : ((res && res.message) || 'The model returned an error'),
               status: 'error',
             });
             recordDebugTrace('agent_error', {
@@ -2744,15 +2770,11 @@ Still unverified: ${pending.join('; ')}` : '';
               agentPrompt,
             });
             deps.consumeLiveAssistantText();
+            const providerReason = String((res && res.message) || '').replace(/\s*Try again, or switch[\s\S]*$/i, '').trim();
             const failure = (res && res.timedOut)
-              ? 'I started the workspace changes, but the agent timed out before finishing. Ask me to continue from the current project state.'
-              : 'I started the workspace changes, but the agent hit an error before finishing. Ask me to continue from the current project state.';
-            if (agentHasWorkspaceMutations()) {
-              await deps.refreshWorkspaceTree(true);
-            }
-            if (typeof deps.surfaceAgentInferenceUnavailable === 'function') {
-              deps.surfaceAgentInferenceUnavailable(chatId, (res && res.message) || failure);
-            }
+              ? pausedRunText('the model took too long to answer the next step, so I paused here. Press Continue and I\'ll pick up from there.')
+              : pausedRunText(`the model service returned an error${providerReason ? ` (${providerReason.slice(0, 220)})` : ''}, so I paused here. Press Continue to try again.`);
+            await endPausedRun(failure, (res && res.message) || failure);
             if (runLog) runLog.end({ errored: !(res && res.timedOut), timedOut: Boolean(res && res.timedOut), message: (res && res.message) || 'agent step failed' });
             return true;
           }
@@ -2859,13 +2881,8 @@ Still unverified: ${pending.join('; ')}` : '';
             rawPlannerOutput,
           });
           deps.consumeLiveAssistantText();
-          const failure = 'I started the workspace changes, but the agent returned an invalid planning step. Ask me to continue from the current project state.';
-          if (agentHasWorkspaceMutations()) {
-            await deps.refreshWorkspaceTree(true);
-          }
-          if (typeof deps.surfaceAgentInferenceUnavailable === 'function') {
-            deps.surfaceAgentInferenceUnavailable(chatId, failure);
-          }
+          const failure = pausedRunText('the model\'s next step came back unreadable, so I paused here. Press Continue and I\'ll try that step again.');
+          await endPausedRun(failure, failure);
           return true;
         }
 
@@ -2978,10 +2995,6 @@ Still unverified: ${pending.join('; ')}` : '';
             : '';
           const narration = isFinal ? finalThought : (decision.thought || decision.message || '');
           if (narration) appendAgentNarration(narration);
-        } else if (!deterministicBatchNarrated) {
-          const batchThought = decision.thought || decision.message || buildDeterministicStartupNarration(decision);
-          if (batchThought) appendAgentNarration(batchThought);
-          deterministicBatchNarrated = true;
         }
 
         recordDebugTrace('agent_decision', {
@@ -3032,6 +3045,7 @@ Still unverified: ${pending.join('; ')}` : '';
             startLine: Number(decision.start_line || 0),
             endLine: Number(decision.end_line || 0),
             pathsSig: decisionPathsSignature(decision),
+            checksSig: JSON.stringify(Array.isArray(decision.checks) ? decision.checks : []),
             observation: blockedObservation.slice(0, deps.agentMaxToolOutputChars),
           });
           recordDebugTrace('agent_tool_result', {
@@ -3554,7 +3568,7 @@ Still unverified: ${pending.join('; ')}` : '';
         // Route through appendAgentNarration (sanitize + dedupe). A raw append here
         // leaked "edit_file" etc.: humanization changed the copy narrated earlier,
         // so the exact-duplicate merge no longer dropped this one.
-        if (decision.thought) appendAgentNarration(decision.thought);
+        if (decision.thought && !decision._deterministic) appendAgentNarration(decision.thought);
 
         // Deadlock escape, ahead of every other file guard. Once per path.
         if (decision.action === 'tool'
@@ -3666,6 +3680,7 @@ Still unverified: ${pending.join('; ')}` : '';
               _guardBlock: true,
               _guardReason: 'already_cached',
               pathsSig: decisionPathsSignature(decision),
+              checksSig: JSON.stringify(Array.isArray(decision.checks) ? decision.checks : []),
               observation: 'Every requested file is already cached and unchanged. Do not repeat the batch. Use the dependency/signature brief in TOOL_RESULTS, make the planned change now, or run one targeted search for a specific unresolved symbol.',
             });
             recordDebugTrace('agent_batch_reread_blocked', {
@@ -3689,7 +3704,7 @@ Still unverified: ${pending.join('; ')}` : '';
         if (decision.action === 'tool' && String(decision.tool || '').toLowerCase() === 'read_file') {
           const readPath = deps.normalizeWorkspacePath(decision.path || '');
           const currentSig = `${Number(decision.start_line) || 0}:${Number(decision.end_line) || 0}:${Number(decision.offset) || 0}`;
-          const blockReason = readPath ? evaluateRepeatedRead(toolEvents, readPath, currentSig) : null;
+          const blockReason = readPath ? evaluateRepeatedRead(toolEvents, readPath, currentSig, 6, visibleReadRanges) : null;
           if (blockReason === 'subset-of-recent-read') {
             // Serve from cache instead of dead-ending: the model wants these
             // lines in front of it again — give them to it for free.
@@ -3745,7 +3760,7 @@ Still unverified: ${pending.join('; ')}` : '';
               _guardBlock: true,
               _guardReason: 'already_read',
               path: readPath,
-              observation: `You have already read the relevant parts of ${readPath} (${blockReason}) — stop re-reading; you have enough context. To find a specific selector/class/id/function, use ONE search_files query on ${readPath}. Otherwise MAKE THE EDIT now (edit_file) or finalize. Do NOT call read_file on ${readPath} again.`,
+              observation: `Not re-read: every line you asked for from ${readPath} is already in OPEN FILES above, line-numbered and current (edits included). Work from those lines — make the edit, or search ONE named symbol if you need a part you have not read.`,
             });
             continue;
           }
@@ -4402,12 +4417,16 @@ Still unverified: ${pending.join('; ')}` : '';
           command: String((decision && decision.command) || ''),
           // run_app reports startup crashes as ok:true + runErrorCount>0 (not !ok).
           runErrorCount: Number(toolResult && toolResult.runErrorCount) || 0,
+          checksRun: Number(toolResult && toolResult.checksRun) || 0,
+          noChangeNeeded: Boolean(toolResult && toolResult.noChangeNeeded),
+          toolTimedOut: Boolean(toolResult && toolResult._toolTimedOut),
           // Read range — for the range-aware read-loop guard.
           startLine: Number(decision.start_line) || 0,
           endLine: Number(decision.end_line) || 0,
           offset: Number(decision.offset) || 0,
           searchQuery: String(decision.tool || '').toLowerCase() === 'search_files' ? String(decision.content || decision.query || '') : '',
           pathsSig: decisionPathsSignature(decision),
+          checksSig: JSON.stringify(Array.isArray(decision.checks) ? decision.checks : []),
           observation: clippedObservation,
         });
         // validate_files may deterministically synchronize support files (currently

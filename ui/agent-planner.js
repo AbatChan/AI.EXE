@@ -248,7 +248,8 @@
         && String(event.tool || '').toLowerCase() === 'edit_file'
         && event.ok === false
         && normalizeWorkspacePath(event.path || '') === targetPath
-        && /already contains that exact text/i.test(String(event.observation || '')));
+        // The edit writer inspected the file and found it already satisfies the request.
+        && (event.noChangeNeeded === true || /already contains that exact text/i.test(String(event.observation || ''))));
       // "Check/verify X and fix IF broken" that found nothing broken is complete:
       // a zero-mutation run with a clean validate pass must not keep demanding
       // "update /x" (that forces the model to argue with the harness or invent
@@ -449,6 +450,21 @@
           label: 'run the app after the last code change to check it works',
           met: lastRun > lastMutation,
         });
+        // A web page the smoke run can drive: loading proves nothing about features.
+        const smokeTestedPage = events.some((event) => event && event.ok
+          && String(event.tool || '').toLowerCase() === 'run_app'
+          && /^run_app \/\S+\.html?:/.test(String(event.observation || '')));
+        if (smokeTestedPage) {
+          let lastChecked = -1;
+          events.forEach((event, index) => {
+            if (event && event.ok && String(event.tool || '').toLowerCase() === 'run_app' && Number(event.checksRun) > 0) lastChecked = index;
+          });
+          requirements.push({
+            id: 'checks_after_changes',
+            label: 'use the main features the way a user would (run_app with checks) after the last code change',
+            met: lastChecked > lastMutation,
+          });
+        }
       }
 
       if (!requirements.length) {
@@ -996,6 +1012,7 @@
         '- Keep the file internally consistent and runnable for its role.',
         '- If this is README.md, include setup or run instructions.',
         '- If this is a main source file, include the core functionality requested by the task.',
+        '- A web page with no build step must work when opened straight from disk (file://), where ES modules do not load: use classic <script src> files loaded in dependency order that share values through one global namespace — no import/export and no type="module".',
         generationHints.length ? `MVP_REQUIREMENTS:\n- ${generationHints.join('\n- ')}` : '',
         planSpec && planSpec.projectContract ? `PROJECT_CONTRACT:\n${String(planSpec.projectContract)}` : '',
         groundedProjectState ? `PROJECT_STATE:\n${groundedProjectState}` : '',
@@ -1413,6 +1430,87 @@
     // diagnostic (npm ls, node -e version print) already PROVED, so a weak model can't keep
     // re-theorizing against them — e.g. the ReactCurrentOwner run kept claiming a React
     // "version mismatch" after `npm ls` showed one deduped react@18.3.1. Pure/additive.
+    // Everything read this run, as line-numbered CURRENT content (union of read ranges,
+    // re-sliced after edits). Compacting reads to "N chars" made the model re-read in circles.
+    function buildOpenFileViews(allEvents, budget = 12000) {
+      const events = Array.isArray(allEvents) ? allEvents : [];
+      const files = new Map();
+      events.forEach((event, index) => {
+        if (!event || !event.ok) return;
+        const tool = String(event.tool || '').toLowerCase();
+        const path = normalizeWorkspacePath(event.path || '');
+        if (!path || path === '/') return;
+        const content = typeof event.content === 'string' ? event.content : '';
+        if (tool === 'read_file' && content) {
+          const entry = files.get(path) || { ranges: [], content, last: index };
+          const start = Number(event.startLine) || 0;
+          const end = Number(event.endLine) || 0;
+          entry.ranges.push(start > 0 ? [start, end > 0 ? end : start + 199] : [1, Infinity]);
+          entry.focus = entry.ranges[entry.ranges.length - 1];
+          entry.content = content;
+          entry.last = index;
+          files.set(path, entry);
+        } else if (['write_file', 'edit_file'].includes(tool) && content && files.has(path)) {
+          files.get(path).content = content;
+        } else if (['delete', 'move'].includes(tool)) {
+          files.delete(path);
+        }
+      });
+      const paths = new Set();
+      const visibleRanges = {};
+      if (!files.size) return { text: '', paths, visibleRanges };
+      let left = budget;
+      const blocks = [];
+      [...files.entries()].sort((a, b) => b[1].last - a[1].last).forEach(([path, entry]) => {
+        if (left < 400) return;
+        const lines = String(entry.content).split('\n');
+        const merged = [];
+        entry.ranges
+          .map(([a, b]) => [Math.max(1, a), Math.min(lines.length, b)])
+          .filter(([a, b]) => a <= b)
+          .sort((x, y) => x[0] - y[0])
+          .forEach(([a, b]) => {
+            const last = merged[merged.length - 1];
+            if (last && a <= last[1] + 3) last[1] = Math.max(last[1], b);
+            else merged.push([a, b]);
+          });
+        if (!merged.length) return;
+        const body = [];
+        let used = 0;
+        let clipped = false;
+        const focus = entry.focus && [Math.max(1, entry.focus[0]), Math.min(lines.length, entry.focus[1])];
+        const ordered = focus ? [focus, ...merged] : merged;
+        const shown = new Set();
+        ordered.forEach(([a, b], i) => {
+          if (clipped) return;
+          if (i > 0) body.push('     …');
+          for (let n = a; n <= b; n += 1) {
+            if (shown.has(n)) continue;
+            const row = `${String(n).padStart(4)}| ${lines[n - 1]}`;
+            if (used + row.length + 1 > left - 200) { clipped = true; body.push(`     … (more of the lines you read are not shown — read ${n}–${b} again only if you need them)`); return; }
+            body.push(row);
+            shown.add(n);
+            const spans = visibleRanges[path] || (visibleRanges[path] = []);
+            const tail = spans[spans.length - 1];
+            if (tail && tail[1] === n - 1) tail[1] = n;
+            else spans.push([n, n]);
+            used += row.length + 1;
+          }
+        });
+        const rangesLabel = merged.map(([a, b]) => (a === 1 && b === lines.length ? 'whole file' : `lines ${a}–${b}`)).join(', ');
+        blocks.push(`### ${path} (${lines.length} lines; ${rangesLabel})\n${body.join('\n')}`);
+        left -= used + 120;
+        paths.add(path);
+      });
+      Object.values(visibleRanges).forEach(spans => spans.sort((a, b) => a[0] - b[0]));
+      if (!blocks.length) return { text: '', paths, visibleRanges };
+      return {
+        text: `OPEN FILES (selected ranges from this run, as the file is NOW — edits included; line numbers are real. Use these instead of re-reading; read only lines not shown here):\n${blocks.join('\n\n')}\n\n`,
+        paths,
+        visibleRanges,
+      };
+    }
+
     function buildAgentEvidenceLedger(toolEvents) {
       const events = Array.isArray(toolEvents) ? toolEvents : [];
       // Dependency facts BEFORE the latest manifest/lockfile/install/node_modules change are
@@ -1840,6 +1938,8 @@
           return `EarlierResult ${index + 1}: ${String(event && event.tool ? event.tool : 'unknown')} ${String(event && event.path ? event.path : '')}\n${body.slice(0, agentMaxToolOutputChars)}`;
         }).join('\n\n')}\n\n`
         : '';
+      const openFiles = buildOpenFileViews(allEvents, Math.max(12000, expandedReadCap));
+      const openFilesLog = openFiles.text;
       const buildDependencyBrief = (path, content) => {
         const source = String(content || '');
         if (!source.trim()) return '';
@@ -1876,6 +1976,7 @@
       // file when editing instead of re-reading it.
       const contentCarriedPaths = new Set();
       if (expandedReadEvent) contentCarriedPaths.add(normalizeWorkspacePath(expandedReadEvent.path || ''));
+      openFiles.paths.forEach((path) => contentCarriedPaths.add(path));
       relevantOlder.forEach((event) => {
         if (!event || String(event.tool || '').toLowerCase() !== 'read_file') return;
         const carried = (event._fromBatchRead && String(event.content || '').trim())
@@ -1914,7 +2015,8 @@
         recentEvents.forEach((e, i) => { if (e && e.ok && String(e.tool || '').toLowerCase() === 'run_app') idx = i; });
         return idx;
       })();
-      const toolLog = appliedDigest + evidenceLedger + diagnosticsLog + expandedReadLog + relevantOlderLog + dependencyBriefLog + inspectedNote + recentEvents.map((event, index) => {
+      const expandedCovered = expandedReadEvent && openFiles.paths.has(normalizeWorkspacePath(expandedReadEvent.path || ''));
+      const toolLog = appliedDigest + evidenceLedger + diagnosticsLog + openFilesLog + (expandedCovered ? '' : expandedReadLog) + relevantOlderLog + dependencyBriefLog + inspectedNote + recentEvents.map((event, index) => {
         const tool = String(event && event.tool ? event.tool : 'unknown');
         const obs = String(event && event.observation ? event.observation : '');
         const isTail = index >= recentEvents.length - FULL_TOOL_TAIL;
@@ -1926,6 +2028,12 @@
         if (!isTail && event && event._fromBatchRead) {
           const p = String(event.path || '');
           return `ToolResult ${index + 1}: read_file ${p} — already inspected in a batch and unchanged. Use the cached dependency brief; do NOT repeat the batch. If one exact implementation detail is missing, search that named symbol only.`;
+        }
+        // The OPEN FILES view already shows these lines (current content) — don't repeat or hide them.
+        if (tool.toLowerCase() === 'read_file' && event && event.ok && openFiles.paths.has(normalizeWorkspacePath(event.path || ''))) {
+          const s0 = Number(event.startLine) || 0;
+          const range = s0 > 0 ? ` lines ${s0}–${Number(event.endLine) || 'end'}` : '';
+          return `ToolResult ${index + 1}: read_file ${normalizeWorkspacePath(event.path || '')}${range} — shown in OPEN FILES above`;
         }
         if (!isTail && obs.length > 1200 && ['read_file', 'list_dir', 'search_files'].includes(tool.toLowerCase())) {
           const p = String(event && event.path ? event.path : '');
@@ -1993,7 +2101,7 @@
             ? `Inspect first: ${planSpec.filesToInspect.join(', ')}`
             : '',
           Array.isArray(planSpec.doneCriteria) && planSpec.doneCriteria.length
-            ? `Done criteria: ${planSpec.doneCriteria.join(' | ')}`
+            ? `Done criteria (your own acceptance tests — the user does not see this list; before finishing, prove each one works, for a web page with run_app checks, and report any you could not prove): ${planSpec.doneCriteria.join(' | ')}`
             : '',
           Array.isArray(planSpec.validationSteps) && planSpec.validationSteps.length
             ? `Validation: ${planSpec.validationSteps.join(' | ')}`
@@ -2078,7 +2186,7 @@
       const splitIdx = prompt.indexOf(splitMarker);
       const systemPrompt = splitIdx > 0 ? prompt.slice(0, splitIdx).trim() : '';
       const userPrompt = splitIdx > 0 ? prompt.slice(splitIdx + 1).trim() : prompt;
-      return { prompt, systemPrompt, userPrompt };
+      return { prompt, systemPrompt, userPrompt, visibleReadRanges: openFiles.visibleRanges };
     }
 
     return {

@@ -64,7 +64,38 @@
     // "unclosed CSS blocks" / mid-function truncation that then traps the agent in a
     // repair loop). Brace/bracket imbalance or an obviously mid-token ending are
     // strong, language-agnostic signals.
-    function scanCodeStructure(content) {
+    // A '/' starts a regex (not division) after an operator, opener, or keyword.
+    function jsRegexCanStart(src, index) {
+      let j = index - 1;
+      while (j >= 0 && /\s/.test(src[j])) j -= 1;
+      if (j < 0) return true;
+      const prev = src[j];
+      if (/[(,=:[!&|?{};+\-*%<>~^]/.test(prev)) return true;
+      if (!/[\w$]/.test(prev)) return false;
+      let k = j;
+      while (k >= 0 && /[\w$]/.test(src[k])) k -= 1;
+      return /^(?:return|typeof|case|in|of|delete|void|throw|new|else|do|yield|await)$/.test(src.slice(k + 1, j + 1));
+    }
+
+    // Index of the closing '/' (plus flags), or -1 if this isn't a one-line regex.
+    function jsRegexLiteralEnd(src, start) {
+      let inClass = false;
+      for (let i = start + 1; i < src.length; i += 1) {
+        const ch = src[i];
+        if (ch === '\n') return -1;
+        if (ch === '\\') { i += 1; continue; }
+        if (inClass) { if (ch === ']') inClass = false; continue; }
+        if (ch === '[') { inClass = true; continue; }
+        if (ch === '/') {
+          let end = i;
+          while (/[a-z]/i.test(src[end + 1] || '')) end += 1;
+          return end;
+        }
+      }
+      return -1;
+    }
+
+    function scanCodeStructure(content, jsLike = false) {
       const text = String(content || '');
       const stack = [];
       let mode = 'code';
@@ -95,6 +126,11 @@
         if (ch === '`') { mode = 'template'; continue; }
         if (ch === '/' && next === '/') { mode = 'line'; i += 1; continue; }
         if (ch === '/' && next === '*') { mode = 'block'; i += 1; continue; }
+        // Regex literal: its quotes and brackets aren't code (/[",]/ read as an open string).
+        if (jsLike && ch === '/' && jsRegexCanStart(text, i)) {
+          const end = jsRegexLiteralEnd(text, i);
+          if (end !== -1) { i = end; continue; }
+        }
         if ('([{'.includes(ch)) stack.push(ch);
         else if (matching[ch]) {
           if (stack[stack.length - 1] === matching[ch]) stack.pop();
@@ -130,8 +166,16 @@
         const bal = (o, c) => (bare.split(o).length - 1) - (bare.split(c).length - 1);
         if (bal('{', '}') > 0 || bal('[', ']') > 0) return true;
       }
+      // Plain script JS: the real parser is authoritative — a file that parses is whole.
+      if (['js', 'cjs'].includes(ext) && !/^\s*(?:import|export)\b/m.test(text)) {
+        try {
+          // eslint-disable-next-line no-new, no-new-func
+          new Function(text);
+          return false;
+        } catch (_) {}
+      }
       if (['css', 'scss', 'less', 'js', 'mjs', 'cjs', 'ts', 'jsx', 'tsx'].includes(ext)) {
-        const structure = scanCodeStructure(text);
+        const structure = scanCodeStructure(text, !['css', 'scss', 'less'].includes(ext));
         // Quote-aware scanning prevents globs such as "./src/**/*.{ts,tsx}"
         // from looking like comments and catches TSX cut after a plausible </div>
         // while its enclosing return/function delimiters are still open.
@@ -850,38 +894,53 @@
     async function reviewAgentProjectCoherence(fileContents, taskText, phaseNote = '') {
       const entries = Object.entries(fileContents || {})
         .filter(([path, content]) => /\.(html?|css|js|mjs|cjs|ts|jsx|tsx|json)$/i.test(path) && String(content || '').trim())
-        .slice(0, 4);
+        .slice(0, 6);
       if (entries.length < 2) return [];
+      // Head + tail: exports usually sit at the end (a head-only clip invented a "missing" export).
+      const HEAD = 3600;
+      const TAIL = 2400;
+      const shown = [];
       const filesBlock = entries
         .map(([path, content]) => {
           const text = String(content);
-          // Clipped input must be labelled — the reviewer reported the clip point
-          // itself as an "unclosed tag" defect.
-          const clipNote = text.length > 6000
-            ? ' (TRUNCATED for this review — the real file continues; do NOT report missing closing tags/braces or anything at the cut-off as a defect)'
-            : '';
-          return `FILE ${path}${clipNote}:\n${text.slice(0, 6000)}`;
+          if (text.length <= HEAD + TAIL) { shown.push(text); return `FILE ${path}:\n${text}`; }
+          const head = text.slice(0, HEAD);
+          const tail = text.slice(-TAIL);
+          shown.push(head, tail);
+          const hiddenLines = text.slice(HEAD, -TAIL).split('\n').length;
+          return `FILE ${path} (PARTIAL — ${hiddenLines} middle lines hidden; anything may be defined there, so never report a name as missing or undefined for this file):\n${head}\n… [${hiddenLines} lines hidden] …\n${tail}`;
         })
         .join('\n\n');
       const prompt = [
         'Review this small multi-file project for REAL cross-file functional defects that a syntax check cannot see.',
         'The defect class: a control\'s HTML min/max/value disagreeing with the script default or the unit the script applies; the same setting initialized to different values in different files; styles or variables defined in one file but never driven by the file meant to drive them; a layout rule on an element that cannot affect the elements it is meant to arrange; script wiring that targets markup that does not exist.',
-        'Return EXACTLY one JSON object, nothing else: {"issues":["/file.ext: one concrete sentence", ...]}',
+        'Return EXACTLY one JSON object, nothing else: {"issues":[{"issue":"/file.ext: one concrete sentence","evidence":"a short line of code copied exactly from the files that shows the defect"}]}',
         'Rules:',
         '- At most 5 issues, ordered by user-visible impact.',
-        '- Only report defects you can point to in the provided code. No style opinions, no speculation.',
+        '- Only report defects you can point to in the provided code. No style opinions, no speculation, and never list something you checked and found fine.',
         '- If nothing qualifies, return {"issues":[]}.',
         String(phaseNote || '').trim(),
         taskText ? `TASK CONTEXT:\n${String(taskText).trim().slice(0, 600)}` : '',
         `PROJECT FILES:\n${filesBlock}`,
         'JSON:',
       ].filter(Boolean).join('\n');
-      const parsed = await runBoundedAgentJsonInference(prompt, 320, 18000);
+      const parsed = await runBoundedAgentJsonInference(prompt, 420, 18000);
       if (!parsed || !Array.isArray(parsed.issues)) return [];
-      const issues = parsed.issues.map((item) => String(item || '').trim()).filter(Boolean).slice(0, 5);
+      // Keep only issues whose quoted evidence really is in the code shown.
+      const squash = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+      const haystack = squash(shown.join('\n'));
+      const issues = parsed.issues
+        .filter((item) => item && typeof item === 'object')
+        .filter((item) => {
+          const evidence = squash(item.evidence);
+          return evidence.length >= 4 && haystack.includes(evidence);
+        })
+        .map((item) => String(item.issue || '').trim())
+        .filter(Boolean)
+        .slice(0, 5);
       recordDebugTrace('agent_coherence_review', {
         issueCount: String(issues.length),
-      }, { issues });
+      }, { issues, raw: parsed.issues });
       return issues;
     }
 

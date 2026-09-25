@@ -14,10 +14,10 @@ const js = "return '$' + n.toFixed(2);";
 assert.notEqual(page.replace(tag, `<script>${js}</script>`), `<body><script>${js}</script><p>after</p></body>`);
 assert.equal(page.replace(tag, () => `<script>${js}</script>`), `<body><script>${js}</script><p>after</p></body>`);
 
-assert.match(app, /html\.replace\(match\[0\], \(\) => `<script>/, 'script inlining must use a function replacement');
+assert.match(app, /html\.replace\(match\[0\], \(\) => inlined\)/, 'script inlining must use a function replacement');
 assert.match(app, /html\.replace\(match\[0\], \(\) => `<style>/, 'style inlining must use a function replacement');
 
 // A word "export" in a comment must not skip the real parser.
 assert.doesNotMatch(exec, /isPlainJs = [^\n]*\\b\(import\|export\)\\b/, 'plain-JS detection must not match prose');
-assert.match(exec, /Only real module statements excuse a parse failure/);
+assert.match(exec, /const parsed = getJsCorrectnessIssues\(text\)/);
 console.log('PASS: inliner keeps $ literal; check_code parses first');

@@ -92,9 +92,17 @@
         return;
       }
 
+      const selecting = typeof deps.isHistorySelecting === 'function' && deps.isHistorySelecting();
       chats.forEach((chat) => {
         const el = document.createElement('div');
         el.className = 'hist-item';
+        const picked = selecting && deps.isChatSelectedInHistory(chat.id);
+        if (selecting) {
+          el.classList.add('selectable');
+          el.setAttribute('role', 'checkbox');
+          el.setAttribute('aria-checked', picked ? 'true' : 'false');
+        }
+        if (picked) el.classList.add('picked');
         if (!deps.isInNewChatMode() && deps.getMiddleViewMode() === 'chat' && chat.id === deps.getActiveChatId()) {
           el.classList.add('active');
         }
@@ -130,7 +138,17 @@
           evt.stopPropagation();
           deps.openChatActionModal(chat.id);
         });
-        el.appendChild(dot);
+        if (selecting) {
+          const check = document.createElement('span');
+          check.className = 'hi-check';
+          check.setAttribute('aria-hidden', 'true');
+          check.innerHTML = picked
+            ? '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m4 8.5 2.5 2.5L12 5.5"/></svg>'
+            : '';
+          el.appendChild(check);
+        } else {
+          el.appendChild(dot);
+        }
         el.appendChild(text);
         el.appendChild(time);
         if (showRunning) {
@@ -141,8 +159,15 @@
           spinner.setAttribute('aria-hidden', 'true');
           el.appendChild(spinner);
         }
-        el.appendChild(menuBtn);
-        el.onclick = () => loadHistory(chat.id);
+        if (!selecting) el.appendChild(menuBtn);
+        el.onclick = (evt) => {
+          // Cmd/Ctrl-click starts (or extends) a multi-select instead of opening the chat.
+          if (selecting || (evt && (evt.metaKey || evt.ctrlKey) && typeof deps.toggleHistorySelection === 'function')) {
+            deps.toggleHistorySelection(chat.id);
+            return;
+          }
+          loadHistory(chat.id);
+        };
         deps.histList.appendChild(el);
       });
     }

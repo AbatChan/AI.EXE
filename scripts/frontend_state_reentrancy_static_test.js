@@ -14,8 +14,10 @@ const getter = aiExe.match(/function getPendingAgentCommandApproval\(chatId\) \{
 assert.match(getter, /scheduleAgentCommandApprovalInterrupted\(key, persisted\)/);
 assert.doesNotMatch(getter, /markAgentCommandApprovalInterrupted\(key, persisted\)/);
 
-const deleteFn = aiExe.match(/function deleteChatFromModal\(\) \{[\s\S]*?\n\}/)?.[0] || '';
-assert.match(deleteFn, /closeChatActionModal\(\);\s*saveChats\(\);/);
+const modalDelete = aiExe.match(/function deleteChatFromModal\(\) \{[\s\S]*?\n\}/)?.[0] || '';
+assert.match(modalDelete, /closeChatActionModal\(\);\s*deleteChatsByIds\(\[deletedChatId\]\);/);
+const deleteFn = aiExe.match(/function deleteChatsByIds\(ids\) \{[\s\S]*?\n\}/)?.[0] || '';
+assert.match(deleteFn, /inNewChatMode = !activeChatId;\s*saveChats\(\);/);
 assert.match(deleteFn, /const refreshSteps = \[/);
 assert.match(deleteFn, /\['renderArtifacts', \(\) => renderArtifacts\(\)\]/);
 assert.match(deleteFn, /refreshSteps\.forEach/);

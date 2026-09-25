@@ -10,13 +10,13 @@ assert.match(renderer, /return `Read \$\{groupFileCount\} files`/);
 assert.match(renderer, /done: `Updated \$\{groupFileCount\} file/);
 assert.match(renderer, /subgroup\.classList\.add\('compact-files'\)/);
 assert.match(renderer, /buildAgentActivityRow\(chatId, activity, phase === 'run' \? \{ runGrouped: true \} : \{ compactGrouped: true \}\)/);
-assert.match(renderer, /kind: guardSkip \? 'skip' : failKind/);
+assert.match(renderer, /if \(guardSkip\) return null;\n\s+return buildInlineAgentActivityBase\(\{\n\s+kind: failKind,/);
 assert.match(renderer, /const redundantOpenMeta = \/\^\(Open file\|Open folder\|Open target\)\$\/i/);
 assert.match(renderer, /msg-agent-subgroup-status \$\{outcomeKind\}/);
 
 assert.match(css, /\.msg-agent-subgroup-verb\s*\{[^}]*color:\s*var\(--text\)/s);
 assert.match(css, /\.msg-agent-subgroup-meta\s*\{[^}]*color:\s*var\(--text\)/s);
-assert.match(css, /\.msg-agent-subgroup\.compact-summary\[data-expanded="true"\] \.msg-agent-subgroup-meta\.count-meta\s*\{\s*display:\s*none;/s);
+assert.match(css, /\.msg-agent-subgroup\.compact-summary\[data-expanded="true"\] > \.msg-agent-subgroup-toggle \.msg-agent-subgroup-meta\.count-meta\s*\{\s*display:\s*none;/s);
 assert.match(css, /\.msg-agent-subgroup\.compact-summary \.msg-agent-subgroup-drawer\s*\{[^}]*background:\s*transparent/s);
 assert.match(css, /\.msg-agent-subgroup-drawer\[hidden\]\s*\{[^}]*display:\s*none\s*!important;[^}]*margin-top:\s*0;/s);
 assert.match(css, /\.msg-agent-files-drawer-inner\s*\{[^}]*padding:\s*0 0 0 2px;/s);
