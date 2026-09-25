@@ -1034,6 +1034,21 @@ Still unverified: ${pending.join('; ')}` : '';
           status: 'done',
         });
         lastNarrationDetail = detail;
+        stepNarrationDetail = detail;
+      };
+      // A step whose row is hidden (guard block) must not leave its note behind:
+      // two notes in a row with nothing between read like a missing step.
+      let stepNarrationDetail = '';
+      const retractStepNarration = () => {
+        const detail = stepNarrationDetail;
+        stepNarrationDetail = '';
+        if (!detail) return;
+        for (let i = agentActivities.length - 1; i >= 0; i -= 1) {
+          const a = agentActivities[i];
+          if (a && a.kind === 'thought' && a.detail === detail) { agentActivities.splice(i, 1); break; }
+        }
+        if (typeof deps.retractActiveAgentStreamThought === 'function') deps.retractActiveAgentStreamThought(chatId, detail);
+        lastNarrationDetail = '';
       };
 
       const setAgentProgress = (text) => {
@@ -2426,6 +2441,7 @@ Still unverified: ${pending.join('; ')}` : '';
         try {
           const card = deps.buildAgentActivityFromToolResult(blockedDecision, event, toolEvents);
           if (card) appendAgentActivity(card);
+          else retractStepNarration();
         } catch (_) { /* a missing card must never break the run */ }
       };
       // Guards compose into no-legal-move: read-back refuses the read, the edit gate
@@ -3019,6 +3035,7 @@ Still unverified: ${pending.join('; ')}` : '';
             ? decision.thought
             : '';
           const narration = isFinal ? finalThought : (decision.thought || decision.message || '');
+          stepNarrationDetail = '';
           if (narration) appendAgentNarration(narration);
         }
 
@@ -4572,7 +4589,9 @@ Still unverified: ${pending.join('; ')}` : '';
             observation: String(toolResult.observation || ''),
           });
         }
-        appendAgentActivity(deps.buildAgentActivityFromToolResult(decision, toolResult, toolEvents));
+        const toolRow = deps.buildAgentActivityFromToolResult(decision, toolResult, toolEvents);
+        if (!toolRow && toolResult && !toolResult.ok) retractStepNarration();
+        appendAgentActivity(toolRow);
         if (toolResult && toolResult.ok && String(decision.tool || '').toLowerCase() === 'new_project') {
           if (typeof deps.syncWorkspaceStateFromNative === 'function') {
             await deps.syncWorkspaceStateFromNative('new_project_created', { render: false, log: true });

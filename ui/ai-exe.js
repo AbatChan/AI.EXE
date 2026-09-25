@@ -17521,6 +17521,7 @@ const agentLoop = window.AIExeAgentLoop && typeof window.AIExeAgentLoop.createAg
     agentMaxToolOutputChars,
     mergeAgentActivityIntoList,
     pushActiveAgentStreamActivity,
+    retractActiveAgentStreamThought,
     scheduleLiveStreamRender,
     isInferenceActive,
     abortInFlightInference,
@@ -22846,6 +22847,10 @@ function pushActiveAgentStreamActivity(...args) {
     return chatRendererApi.pushActiveAgentStreamActivity(...args);
   }
   return undefined;
+}
+
+function retractActiveAgentStreamThought(...args) {
+  if (chatRendererApi.retractActiveAgentStreamThought) chatRendererApi.retractActiveAgentStreamThought(...args);
 }
 
 function buildAgentActivityFromToolResult(...args) {

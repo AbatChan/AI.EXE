@@ -567,6 +567,15 @@
       setActiveAgentStreamState(state);
     }
 
+    function retractActiveAgentStreamThought(chatId, detail) {
+      const state = ensureActiveAgentStreamState(chatId);
+      for (let i = state.activities.length - 1; i >= 0; i -= 1) {
+        const a = state.activities[i];
+        if (a && a.kind === 'thought' && a.detail === detail) { state.activities.splice(i, 1); break; }
+      }
+      setActiveAgentStreamState(state);
+    }
+
     function countTextLines(text) {
       const source = String(text || '');
       return source ? source.split('\n').length : 0;
@@ -1061,7 +1070,10 @@
             : null;
           return buildInlineAgentActivityBase({
             kind: 'command',
-            title: runtimeMissing ? 'Runtime missing' : (runErrors ? 'Build failed' : 'Build passed'),
+            // Test commands (npm test, unittest) read as tests, not builds.
+            title: runtimeMissing ? 'Runtime missing' : (/\b(?:npm test|unittest|pytest|vitest|jest)\b/.test(String(terminal.command))
+              ? (runErrors ? 'Tests failed' : 'Tests passed')
+              : (runErrors ? 'Build failed' : 'Build passed')),
             detail: terminal.command,
             terminal,
             hasIssues: runtimeMissing || runErrors > 0,
@@ -3610,6 +3622,7 @@
       resetActiveAgentStreamState,
       setActiveAgentStreamStatus,
       pushActiveAgentStreamActivity,
+      retractActiveAgentStreamThought,
       buildAgentActivityFromToolResult,
       buildAgentPendingActivity,
       buildAgentPlanActivity,

@@ -417,6 +417,7 @@
       three: '^0.169.0',
       typescript: '^5.5.4',
       vite: '^5.4.3',
+      vitest: '^2.1.9',
       zod: '^3.25.0',
       zustand: '^4.5.5',
     };
@@ -688,6 +689,9 @@
           devDependencies,
         }, null, 2)}\n`;
       }
+      // Planned test files (or an explicit Vitest ask) get a runnable `npm test`.
+      const wantsVitest = expectedFiles.some((p) => /\.(?:test|spec)\.[cm]?[jt]sx?$/i.test(String(p || '')))
+        || /\bvitest\b/i.test(task);
       return `${JSON.stringify({
         name: rawName,
         private: true,
@@ -697,6 +701,7 @@
           dev: 'vite',
           build: 'tsc -b && vite build',
           preview: 'vite preview',
+          ...(wantsVitest ? { test: 'vitest run' } : {}),
         },
         dependencies: {
           react: packageJsonSafeVersions.react,
@@ -708,6 +713,7 @@
           '@vitejs/plugin-react': packageJsonSafeVersions['@vitejs/plugin-react'],
           typescript: packageJsonSafeVersions.typescript,
           vite: packageJsonSafeVersions.vite,
+          ...(wantsVitest ? { vitest: packageJsonSafeVersions.vitest } : {}),
         },
       }, null, 2)}\n`;
     }
@@ -1357,6 +1363,9 @@ export default config;
         || String(packageScripts.build || '').toLowerCase().includes('vite')
       );
 
+      // A real test script (not npm's placeholder) runs after a passing build.
+      const hasRealTestScript = Boolean(packageScripts.test) && !/no test specified/i.test(String(packageScripts.test));
+      const thenTest = hasRealTestScript ? { thenCommand: 'npm test' } : {};
       if (packageText.trim() || packageJson) {
         if (hasVite) {
           return {
@@ -1364,7 +1373,7 @@ export default config;
             label: 'Vite build',
             passLabel: 'Vite build passed',
             failLabel: 'Vite build failed',
-            proof: { kind: 'command', command: 'npm run build', installCommand: 'npm install --no-audit --no-fund' },
+            proof: { kind: 'command', command: 'npm run build', installCommand: 'npm install --no-audit --no-fund', ...thenTest },
           };
         }
 
@@ -1374,11 +1383,11 @@ export default config;
             label: 'Node build',
             passLabel: 'Node build passed',
             failLabel: 'Node build failed',
-            proof: { kind: 'command', command: 'npm run build', installCommand: 'npm install --no-audit --no-fund' },
+            proof: { kind: 'command', command: 'npm run build', installCommand: 'npm install --no-audit --no-fund', ...thenTest },
           };
         }
 
-        if (packageScripts.test) {
+        if (hasRealTestScript) {
           return {
             stack: 'node',
             label: 'Node tests',
@@ -3280,7 +3289,9 @@ export default config;
             primaryQualityNote = ` Note: the generated CSS may still have issues (${cssIssues.join('; ')}); refine it with an edit pass if the page looks off.`;
           }
         }
-        if (projectStyleTask && primaryTarget && !modelSuppliedComplete && !structuralRepairAttempted && !getStructuralIssueForPath(path, content)) {
+        // Config files and the Vite entry (main.tsx) are small by design — never "thin".
+        const smallByDesign = /(?:^|\/)(?:[\w.-]+\.config\.[cm]?[jt]s|main\.[jt]sx?)$/i.test(path);
+        if (projectStyleTask && primaryTarget && !smallByDesign && !modelSuppliedComplete && !structuralRepairAttempted && !getStructuralIssueForPath(path, content)) {
           const shouldUsePythonGameGate = gameLikeTask && pythonTarget;
           const isValidPrimaryContent = shouldUsePythonGameGate
             ? deps.isLikelyCompletePythonGameSource(content)
@@ -3888,6 +3899,28 @@ export default config;
             return { ok: false, mutated, observation: `run_app could not start ${stackInfo.label || 'the proof command'}: ${(res && res.message) || 'unknown error'}.` };
           }
 
+          // After a passing build, run the project's tests too (proof.thenCommand).
+          const runThenCommand = async (passedNote) => {
+            const thenCommand = String(proof.thenCommand || '').trim();
+            if (!thenCommand) return null;
+            const thenClass = classifyAgentCommand(thenCommand);
+            if (thenClass.policy !== 'auto_safe') return null;
+            deps.setActiveAgentStreamStatus(chatId, `Running tests: ${thenCommand}`);
+            const thenRes = await deps.invokeWorkspaceAction('runCommand', {
+              program: thenClass.program,
+              argsLine: thenClass.args.join('\n'),
+            });
+            if (!thenRes || !thenRes.ok) {
+              return { ok: true, mutated, runErrorCount: 1, terminalCommand: thenCommand, observation: `run_app ${passedNote}, but could not start \`${thenCommand}\`: ${(thenRes && thenRes.message) || 'unknown error'}.` };
+            }
+            const thenStatus = parseRunCommandExitStatus(thenRes.message);
+            const thenTail = commandOutputTail(thenRes.output);
+            const thenProof = buildTerminalProof(thenCommand, thenRes, thenStatus);
+            if (!thenStatus.timedOut && thenStatus.exitCode === 0) {
+              return { ok: true, mutated, runErrorCount: 0, terminalCommand: thenCommand, terminalProof: thenProof, observation: `run_app ${passedNote}, and tests passed (${thenCommand} exited 0).${thenTail ? `\nOutput:\n${thenTail}` : ''}` };
+            }
+            return { ok: true, mutated, runErrorCount: 1, terminalCommand: thenCommand, terminalProof: thenProof, observation: `run_app ${passedNote}, but tests failed (${thenCommand} ${thenStatus.timedOut ? 'timed out' : `exited ${thenStatus.exitCode}`}). Read these real errors, fix the root cause, then run_app again.\nOutput:\n${thenTail || '(no output)'}` };
+          };
           const status = parseRunCommandExitStatus(res.message);
           const tail = commandOutputTail(res.output);
           const terminalProof = buildTerminalProof(proofCommand, res, status);
@@ -3910,6 +3943,8 @@ export default config;
           }
 
           if (status.exitCode === 0) {
+            const tested = await runThenCommand(`${stackInfo.passLabel || 'proof passed'} (${proofCommand} exited 0)${depReconcileNote ? ` —${depReconcileNote.replace(/\n/g, ' ')}` : ''}`);
+            if (tested) return tested;
             return {
               ok: true,
               mutated,
@@ -3955,6 +3990,8 @@ export default config;
                 const retryTail = commandOutputTail(retryRes.output);
                 const retryProof = buildTerminalProof(proofCommand, retryRes, retryStatus);
                 if (!retryStatus.timedOut && retryStatus.exitCode === 0) {
+                  const tested = await runThenCommand(`installed dependencies (\`${installCommand}\`) and ${stackInfo.passLabel || 'the proof passed'} (${proofCommand} exited 0)`);
+                  if (tested) return tested;
                   return {
                     ok: true,
                     mutated,

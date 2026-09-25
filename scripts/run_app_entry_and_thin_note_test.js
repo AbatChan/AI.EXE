@@ -23,4 +23,5 @@ const executor = fs.readFileSync(path.join(__dirname, '..', 'ui', 'agent-executo
 const cand = executor.slice(executor.indexOf('const htmlCandidates = normalizeWorkspacePathList(['), executor.indexOf(']);', executor.indexOf('const htmlCandidates')));
 assert.ok(cand.indexOf("'/index.html'") < cand.indexOf('plannedFiles.filter'), 'index.html is tried before planned helper pages');
 assert.match(executor, /const htmlTarget = \/\\\.html\?\$\/i\.test\(requestedHtml\)\n\s+\? requestedHtml/, 'an explicit page from the model wins');
+assert.match(executor, /const smallByDesign = .*config.*main/, 'config + Vite entry files skip the thin note');
 console.log('PASS: run_app tests the app entry page; big non-DOM modules are not "thin"');

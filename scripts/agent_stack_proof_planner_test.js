@@ -21,7 +21,7 @@ function createExecutor(reads, commandResult) {
         if (Object.prototype.hasOwnProperty.call(reads, target)) return { ok: true, output: reads[target] };
         return { ok: false, message: 'missing' };
       }
-      if (action === 'runCommand') return commandResult;
+      if (action === 'runCommand') return typeof commandResult === 'function' ? commandResult(data) : commandResult;
       return { ok: true };
     },
     runWorkspaceAppSmokeTest: async (target) => {
@@ -93,6 +93,29 @@ function createExecutor(reads, commandResult) {
       { program: 'python', argsLine: '-m\npy_compile\nmain.py' },
     );
     assert.equal(getSmokeTarget(), '');
+  }
+
+  // Habit Tracker: Vite build passed but Vitest never ran. A real test script runs after the build.
+  for (const testsPass of [true, false]) {
+    const { executor, calls } = createExecutor({
+      '/package.json': JSON.stringify({ scripts: { build: 'tsc -b && vite build', test: 'vitest run' }, devDependencies: { vite: '^5.4.3', vitest: '^2.1.9' } }),
+      '/vite.config.ts': 'export default {}\n',
+    }, (data) => (/test/.test(data.argsLine)
+      ? { ok: true, message: `exit_code=${testsPass ? 0 : 1}`, output: testsPass ? '16 passed\n' : 'FAIL src/lib/habits.test.ts > streak\n' }
+      : { ok: true, message: 'exit_code=0', output: 'built\n' }));
+    const result = await executor.executeDeveloperToolCall('chat_vite_tests', { action: 'tool', tool: 'run_app', path: '/' }, 'Verify.', [], { expectedFiles: ['/package.json'] });
+    const ran = calls.filter((c) => c.action === 'runCommand').map((c) => c.data.argsLine.replace(/\n/g, ' '));
+    assert.deepEqual(ran, ['run build', 'test'], 'build, then npm test');
+    assert.equal(result.runErrorCount, testsPass ? 0 : 1);
+    assert.match(result.observation, testsPass ? /Vite build passed[\s\S]*tests passed \(npm test exited 0\)/ : /tests failed \(npm test exited 1\)[\s\S]*habits\.test\.ts/);
+  }
+  // npm's placeholder test script is not a test suite.
+  {
+    const { executor, calls } = createExecutor({
+      '/package.json': JSON.stringify({ scripts: { build: 'vite build', test: 'echo "Error: no test specified" && exit 1' }, devDependencies: { vite: '^5.4.3' } }),
+    }, { ok: true, message: 'exit_code=0', output: 'built\n' });
+    await executor.executeDeveloperToolCall('chat_vite_notest', { action: 'tool', tool: 'run_app', path: '/' }, 'Verify.', [], { expectedFiles: ['/package.json'] });
+    assert.equal(calls.filter((c) => c.action === 'runCommand').length, 1, 'placeholder test script is skipped');
   }
 
   // Ledger CLI: Luna shipped a failing unittest suite it never ran. Tests present -> run_app runs them.
