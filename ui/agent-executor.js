@@ -1394,7 +1394,7 @@ export default config;
           return {
             stack: 'node',
             label: 'Node syntax proof',
-            passLabel: 'Node syntax proof passed',
+            passLabel: 'Node syntax proof passed (syntax only — it does not run the program; use run_command to run it)',
             failLabel: 'Node syntax proof failed',
             proof: { kind: 'command', command: `node --check ${rel}` },
           };
@@ -1419,13 +1419,31 @@ export default config;
       }
 
       if (pythonFiles.length > 0) {
+        // Tests present -> run them (like `npm test`); importing the code also
+        // surfaces its syntax errors. Otherwise syntax-only.
+        const workspaceFiles = await collectSearchableWorkspaceFiles('/', 200);
+        const testFiles = normalizeWorkspacePathList([...plannedFiles, ...workspaceFiles])
+          .filter((path) => /(?:^|\/)test_[^/]*\.py$|_test\.py$/i.test(path))
+          .filter((path) => !/\/(?:\.venv|venv|env|site-packages)\//i.test(path));
+        if (testFiles.length > 0) {
+          const dirs = Array.from(new Set(testFiles.map((path) => path.replace(/\/[^/]*$/, '') || '/')));
+          const rel = dirs.length === 1 && dirs[0] !== '/' ? toCommandPath(dirs[0]) : '';
+          const startDir = /\s/.test(rel) ? `"${rel}"` : rel;
+          return {
+            stack: 'python',
+            label: 'Python unit tests',
+            passLabel: 'Python unit tests passed',
+            failLabel: 'Python unit tests failed',
+            proof: { kind: 'command', command: `python -m unittest discover${startDir ? ` -s ${startDir}` : ''} -v` },
+          };
+        }
         const relFiles = normalizeWorkspacePathList(pythonFiles)
           .map(toCommandPath)
           .filter(Boolean);
         return {
           stack: 'python',
           label: 'Python syntax proof',
-          passLabel: 'Python syntax proof passed',
+          passLabel: 'Python syntax proof passed (syntax only — it does not run the program; use run_command to run it)',
           failLabel: 'Python syntax proof failed',
           proof: { kind: 'command', command: `python -m py_compile ${relFiles.join(' ')}` },
         };

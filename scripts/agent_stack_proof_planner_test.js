@@ -87,11 +87,38 @@ function createExecutor(reads, commandResult) {
     assert.equal(result.runErrorCount, 0);
     assert.equal(result.terminalCommand, 'python -m py_compile main.py');
     assert.match(result.observation, /Python syntax proof passed/);
+    assert.match(result.observation, /syntax only — it does not run the program/, 'syntax-only proof says so');
     assert.deepEqual(
       calls.find((call) => call.action === 'runCommand').data,
       { program: 'python', argsLine: '-m\npy_compile\nmain.py' },
     );
     assert.equal(getSmokeTarget(), '');
+  }
+
+  // Ledger CLI: Luna shipped a failing unittest suite it never ran. Tests present -> run_app runs them.
+  {
+    const { executor, calls } = createExecutor({
+      '/ledger.py': 'def main():\n    return 0\n',
+      '/tests/test_ledger.py': 'import unittest\n',
+    }, {
+      ok: true,
+      message: 'exit_code=1',
+      output: 'FAIL: test_invalid_amount (test_ledger.CommandLineTests)\nAssertionError: SystemExit not raised\nFAILED (failures=1)\n',
+    });
+    const result = await executor.executeDeveloperToolCall(
+      'chat_python_tests_stack',
+      { action: 'tool', tool: 'run_app', path: '/' },
+      'Verify this Python project.',
+      [],
+      { expectedFiles: ['/ledger.py', '/tests/test_ledger.py'] },
+    );
+    assert.equal(result.terminalCommand, 'python -m unittest discover -s tests -v');
+    assert.deepEqual(
+      calls.find((call) => call.action === 'runCommand').data,
+      { program: 'python', argsLine: '-m\nunittest\ndiscover\n-s\ntests\n-v' },
+    );
+    assert.equal(result.runErrorCount, 1, 'failing tests are a run error');
+    assert.match(result.observation, /Python unit tests failed[\s\S]*SystemExit not raised/);
   }
 
   {
