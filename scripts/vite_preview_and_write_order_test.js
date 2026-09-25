@@ -59,3 +59,11 @@ assert.match(loop, /if \(runErr && runAppFinishNudges < \(checksOnly \? 1 : 2\)\
 console.log('PASS: one nudge for failed self-checks');
 assert.match(loop, /if \(stillBrokenRun && !onlyChecksFailed\) \{/, 'failed self-checks are not called a startup error');
 console.log('PASS: no false "startup error" note');
+
+// Latency: route call runs alongside the mode call (API providers only); Venice list warmed at boot.
+const uiNow = read('ai-exe.js');
+assert.ok(uiNow.indexOf('const speculativePreflight') < uiNow.indexOf('const turnModes = await decideTurnModes(chatId, promptText, modes);'), 'route call starts before the mode call is awaited');
+assert.match(uiNow, /!isVeniceAdapterSelected\(\) && !requestToken\.preflightChoiceResolved/, 'not on the serialized Venice adapter');
+assert.match(uiNow, /const preflightDecision = \(speculativePreflight && await speculativePreflight\)/);
+assert.match(uiNow, /Warm the Venice list \(uncensored fallback\)/);
+console.log('PASS: routers overlap; first chat does not wait on the Venice list');

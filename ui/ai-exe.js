@@ -21463,6 +21463,12 @@ async function refreshComposerModelsFromProvider() {
   } catch (_) { renderComposerModelPill(); }
 }
 setTimeout(refreshComposerModelsFromProvider, 800);  // boot: after settings load
+// Warm the Venice list (uncensored fallback) so the first chat of a session doesn't wait ~1s on it.
+setTimeout(() => {
+  if (getSelectedInferenceProvider() !== 'local' && !getUncensoredEscalationModel() && getProviderApiKey('venice')) {
+    refreshProviderModelList('venice').catch(() => {});
+  }
+}, 2500);
 
 // ---- Composer action-chip overflow (+N) ------------------------------------
 // When [+][pill][chips] outgrow the row, trailing chips are hidden and replaced by a "+N"
@@ -26108,6 +26114,15 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
         resolution: pendingConfirmationResolution,
       });
     }
+    // The route call only matters on Agent turns, which the mode call decides — start it
+    // alongside (same inputs), use it if the turn goes Agent, drop it otherwise. Was two
+    // serial calls (4–15s) before an Agent turn could start.
+    const speculativePreflight = getSelectedInferenceProvider() !== 'local' && !isVeniceAdapterSelected() && !requestToken.preflightChoiceResolved
+      ? requestPreflightRouteDecision(chatId, promptText, {
+        agentEnabled: true,
+        forceCurrentWorkspace: Boolean(requestToken.forceCurrentWorkspace),
+      }).catch(() => null)
+      : null;
     // This reply's capabilities: toggles plus what the model or the user's message asks for.
     const turnModes = await decideTurnModes(chatId, promptText, modes);
     if (!isInferenceActive(requestToken)) return;
@@ -26200,11 +26215,12 @@ async function requestAssistantReply(chatId, promptText, alreadyCounted = false,
           latestUserInput: String(promptText || ''),
         });
       } else {
-        const preflightDecision = await requestPreflightRouteDecision(chatId, promptText, {
-          agentEnabled: developerAgentEnabled,
-          canvasEnabled: canvasModeUiEnabled,
-          forceCurrentWorkspace: Boolean(requestToken.forceCurrentWorkspace),
-        });
+        const preflightDecision = (speculativePreflight && await speculativePreflight)
+          || await requestPreflightRouteDecision(chatId, promptText, {
+            agentEnabled: developerAgentEnabled,
+            canvasEnabled: canvasModeUiEnabled,
+            forceCurrentWorkspace: Boolean(requestToken.forceCurrentWorkspace),
+          });
         const preflightDebug = preflightDecision && preflightDecision._debug ? preflightDecision._debug : null;
         const workspaceDebug = getWorkspaceDebugSnapshot();
         const normalizedWorkspaceForLog = preflightDebug

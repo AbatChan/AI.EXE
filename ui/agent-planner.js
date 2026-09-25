@@ -2061,6 +2061,15 @@
           const range = s0 > 0 ? ` lines ${s0}–${Number(event.endLine) || 'end'}` : '';
           return `ToolResult ${index + 1}: read_file ${normalizeWorkspacePath(event.path || '')}${range} — shown in OPEN FILES above`;
         }
+        // A batch read whose files are all in OPEN FILES would repeat them in full (Kindred
+        // phase 4: two 18K-char copies pushed steps to ~48K tokens and hit the TPM cap).
+        if (tool.toLowerCase() === 'read_files' && event && event.ok && event.pathsSig) {
+          const shownLower = new Set([...openFiles.paths].map((p) => p.toLowerCase()));
+          const batch = String(event.pathsSig).split(',').map((p) => normalizeWorkspacePath(p).toLowerCase()).filter((p) => p && p !== '/');
+          if (batch.length && batch.every((p) => shownLower.has(p))) {
+            return `ToolResult ${index + 1}: read_files ${batch.join(', ')} — shown in OPEN FILES above`;
+          }
+        }
         // A blocked repeat read re-serves the file; if OPEN FILES already shows it, point there instead.
         if (tool.toLowerCase() === 'read_file' && event && !event.ok && /^read_file blocked for /.test(obs)
           && openFiles.paths.has(normalizeWorkspacePath(event.path || ''))) {
