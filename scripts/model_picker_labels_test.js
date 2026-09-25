@@ -24,5 +24,7 @@ console.log('PASS: picker shows prices only when known, real vendor names, a pro
   assert.match(css, /\.update-badge\.ready \{ background: var\(--accent\); color: var\(--bg\); \}/);
   assert.match(ui, /status\.dataset\.tooltip = String\(tooltip \|\| label \|\| ''\);/, 'icon-only badge: words live in the tooltip');
   assert.doesNotMatch(script, /Downloading the update/, 'the updater window says Updating, not Downloading');
+  assert.match(ui, /status\.classList\.toggle\('has-progress', known\)/, 'known download % fills a ring');
+  assert.match(css, /\.update-badge\.busy\.has-progress::before \{[\s\S]{0,200}conic-gradient\(var\(--accent\) calc\(var\(--update-pct, 0\) \* 1%\)/);
   console.log('PASS: updater window + badge follow the graphite design; window text is ASCII');
 }

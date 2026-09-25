@@ -3887,6 +3887,11 @@ try {
     if (status.classList) {
       status.classList.toggle('busy', Boolean(options.disabled));
       status.classList.toggle('ready', !options.disabled && !options.hidden);
+      // Known download % fills a ring on the dot; unknown keeps the spinner.
+      const pct = Number(options.progress);
+      const known = Number.isFinite(pct) && pct >= 0;
+      status.classList.toggle('has-progress', known);
+      if (known && status.style) status.style.setProperty('--update-pct', String(Math.min(100, Math.round(pct))));
     }
     text.textContent = String(label || '');
     // Icon-only badge: the tooltip (and screen-reader label) carries the words.
@@ -4024,7 +4029,7 @@ try {
         if (st.bytes > lastStageBytes) lastStageBytes = st.bytes;
         if (st.bytes > 0) {
           const pct = updateInfo.size > 0 ? Math.min(99, Math.round((st.bytes * 100) / updateInfo.size)) : 0;
-          setStatus(pct ? `Downloading… ${pct}%` : 'Downloading update…', `Downloading v${updateInfo.version}${pct ? ` · ${pct}%` : '…'}`, { disabled: true });
+          setStatus(pct ? `Downloading… ${pct}%` : 'Downloading update…', `Downloading v${updateInfo.version}${pct ? ` · ${pct}%` : '…'}`, { disabled: true, ...(pct ? { progress: pct } : {}) });
         }
       } catch (err) {
         ulog('update_stage_status_error', { error: String(err && err.message ? err.message : err) });

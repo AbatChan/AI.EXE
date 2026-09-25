@@ -10326,4 +10326,14 @@ body::after { background: none; }
   animation: update-badge-spin 0.9s linear infinite;
 }
 .update-badge.ready { background: var(--accent); color: var(--bg); }
+/* Known download %: a ring that fills clockwise. */
+.update-badge.busy.has-progress::before {
+  width: 10px;
+  height: 10px;
+  border: 0;
+  animation: none;
+  background: conic-gradient(var(--accent) calc(var(--update-pct, 0) * 1%), var(--ink-16) 0);
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 2px), var(--bg) calc(100% - 2px));
+  mask: radial-gradient(farthest-side, transparent calc(100% - 2px), var(--bg) calc(100% - 2px));
+}
 @keyframes update-badge-spin { to { transform: rotate(360deg); } }
