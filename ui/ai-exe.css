@@ -10285,3 +10285,38 @@ body::after { background: none; }
 .msg-agent-subgroup.has-nested > .msg-agent-subgroup-drawer > .msg-agent-subgroup .msg-agent-subgroup-status.error { color: var(--bad); }
 .msg-agent-subgroup.has-nested > .msg-agent-subgroup-drawer > .msg-agent-subgroup .msg-agent-subgroup-toggle:hover :is(.msg-agent-subgroup-verb, .msg-agent-subgroup-meta) { color: var(--text2); }
 .msg-agent-subgroup.has-nested > .msg-agent-subgroup-drawer > .msg-agent-subgroup > .msg-agent-subgroup-drawer { margin-left: 7px; padding-left: 12px; border-left: 1px solid var(--ink-16); }
+
+/* Update badge — graphite pill like the rest of the app: quiet while downloading,
+   accent-ringed when an update is ready to install. */
+.update-badge {
+  gap: 6px;
+  margin-top: 8px;
+  padding: 4px 11px 4px 8px;
+  min-height: 26px;
+  border: 1px solid var(--border2);
+  background: var(--panel2);
+  color: var(--text2);
+  font: 500 12px/1 var(--font-sans);
+  letter-spacing: normal;
+  animation: none;
+  box-shadow: none;
+}
+.update-badge::after { display: none; }
+.update-badge > svg { width: 13px; height: 13px; color: var(--accent); }
+.update-badge:hover:not(:disabled) { transform: none; box-shadow: none; background: var(--ink-06); color: var(--text); }
+.update-badge:disabled { opacity: 1; }
+.update-badge.busy { cursor: default; }
+.update-badge.busy > svg { display: none; }
+.update-badge.busy::before {
+  content: '';
+  width: 11px;
+  height: 11px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  border: 1.5px solid var(--ink-16);
+  border-top-color: var(--accent);
+  animation: update-badge-spin 0.9s linear infinite;
+}
+.update-badge.ready { color: var(--text); border-color: var(--accent-32); background: var(--accent-06); }
+.update-badge.ready:hover { background: var(--accent-12); }
+@keyframes update-badge-spin { to { transform: rotate(360deg); } }

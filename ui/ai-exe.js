@@ -3883,6 +3883,11 @@ try {
     if (!status || !text) return;
     status.hidden = Boolean(options.hidden);
     status.disabled = Boolean(options.disabled);
+    // Working (downloading/restarting) vs ready to click.
+    if (status.classList) {
+      status.classList.toggle('busy', Boolean(options.disabled));
+      status.classList.toggle('ready', !options.disabled && !options.hidden);
+    }
     text.textContent = String(label || '');
     status.dataset.tooltip = String(tooltip || '');
   };
@@ -3965,7 +3970,7 @@ try {
       url: updateInfo.url, version: updateInfo.version, sha256: updateInfo.sha256,
     }).then((res) => {
       if (res && res.ok) return;
-      setStatus('Update ready', `v${updateInfo.version} installs when you quit — click to restart now`);
+      setStatus('Restart to update', `v${updateInfo.version} is ready — it installs when you quit, or click to restart now`);
       showAppNotification({ title: 'Could not restart for update', message: 'The update remains ready and will install when AI.EXE quits.', kind: 'warning' });
     });
   }
@@ -4005,7 +4010,7 @@ try {
           });
           if (!armed || !armed.ok) throw new Error('could not arm install-on-quit');
           ulog('update_staged', { version: updateInfo.version });
-          setStatus('Update ready', `v${updateInfo.version} installs when you quit — click to restart now`);
+          setStatus('Restart to update', `v${updateInfo.version} is ready — it installs when you quit, or click to restart now`);
           setSettingsStatus(`AI.EXE v${updateInfo.version} is downloaded and verified. It will install when AI.EXE quits.`, `v${updateInfo.version} ready · installs on quit`, 'busy');
           showAppNotification({
             title: `AI.EXE v${updateInfo.version} is ready`,

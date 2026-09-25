@@ -89,7 +89,7 @@ async function flush() {
 
   assert.ok(nativeCalls.some((call) => call.action === 'stageUpdate' && call.data.version === '10.3.0' && call.data.sha256 === sha));
   assert.ok(nativeCalls.some((call) => call.action === 'armUpdateOnQuit' && call.data.version === '10.3.0'));
-  assert.equal(elements.get('updateStatusText').textContent, 'Update ready');
+  assert.equal(elements.get('updateStatusText').textContent, 'Restart to update');
   assert.match(elements.get('settingsUpdateStatus').textContent, /v10\.3\.0 is downloaded and verified/);
 
   latest = '10.4.0';
