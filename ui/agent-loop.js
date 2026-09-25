@@ -842,11 +842,15 @@
       };
 
       // Audit completion and allow one verification after repairs.
+      // Re-audit only after real work: the nudge itself is an event, so a bare
+      // "done" again re-ran the same review and bounced the same final (budget run).
+      const realToolEventCount = () => toolEvents.filter((e) => e
+        && !['final_check', 'criteria_check'].includes(String(e.tool || '').toLowerCase())).length;
       const getUnmetCriteriaNudge = async () => {
-        if (criteriaAuditCount >= 2 || criteriaAuditEventCount === toolEvents.length
+        if (criteriaAuditCount >= 2 || criteriaAuditEventCount === realToolEventCount()
           || typeof deps.verifyAgentDoneCriteria !== 'function') return null;
         criteriaAuditCount += 1;
-        criteriaAuditEventCount = toolEvents.length;
+        criteriaAuditEventCount = realToolEventCount();
         // This is a slow model call — never leave the user staring at dead air.
         setAgentProgress('Reviewing the result...');
         const check = await deps.verifyAgentDoneCriteria(taskText, toolEvents, planSpec);
@@ -1747,6 +1751,7 @@ Still unverified: ${pending.join('; ')}` : '';
         }, { chatId: String(chatId || ''), workspace: resumeWorkspaceContext });
       }
       // A fresh new-project run must not adopt the open (unrelated) project's plan.md.
+      if (planSpec) delete planSpec._agentFinalNote;
       const freshNewProject = !isResume && String(planSpec && planSpec.workspaceIntent || '') === 'new';
       const filePhases = freshNewProject ? null : await readAgentPlanFilePhases();
       const fileHasUnfinished = filePhases && filePhases.length >= 2
@@ -3375,20 +3380,24 @@ Still unverified: ${pending.join('; ')}` : '';
           }, { chatId: String(chatId || ''), step, phaseState, planSpec, toolEvents });
         }
 
+        // Keep the model's own closing note: the completion writer must not drop its caveats.
+        if (planSpec && decision.action === 'final' && String(decision.message || '').trim()) {
+          planSpec._agentFinalNote = String(decision.message).trim().slice(0, 1500);
+        }
         if (decision.action !== 'tool' || decision.tool === 'none') {
           // Don't accept a finish (incl. a no-op tool:none) over an unrepaired run_app
           // failure — push the errors back and force a real repair attempt. (This is
           // exactly where the agent used to bail with a dangling "Inspecting…" note.)
           const runErr = unresolvedRunAppError();
-          if (runErr && runAppFinishNudges < 2) {
+          const runErrObs = String(runErr && runErr.observation || '');
+          // App started fine and only the model's own checks failed — say so, not "startup error".
+          const checksOnly = /started cleanly/i.test(runErrObs) && /Your checks: \d+\/\d+ passed/.test(runErrObs);
+          // Failed self-checks get one nudge; after that the model's explanation stands.
+          if (runErr && runAppFinishNudges < (checksOnly ? 1 : 2)) {
             runAppFinishNudges += 1;
-            const fullObs = String(runErr.observation || '');
-            // App started fine and only the model's own checks failed — say so, not "startup error".
-            const checksOnly = /started cleanly/i.test(fullObs) && /Your checks: \d+\/\d+ passed/.test(fullObs);
+            const fullObs = runErrObs;
             const observation = checksOnly
-              ? (runAppFinishNudges > 1
-                ? "Still not finished — the latest run_app checks are failing (result above). Fix the app or a wrong check, rerun, or finish and say plainly which checks fail."
-                : "Don't finish yet — the app starts cleanly but some of your run_app checks failed (latest run_app result above). Fix what they found; if a check itself was wrong (selector, timing, expected text), correct that check instead. Then run_app again. If it can't pass, finish and say plainly which checks fail.")
+              ? "Don't finish yet — the app starts cleanly but some of your run_app checks failed (latest run_app result above). Fix what they found; if a check itself was wrong (selector, timing, expected text), correct that check instead. Then run_app again. If it can't pass, finish and say plainly which checks fail."
               : `Don't finish yet — run_app reported startup/build error(s) that are not fixed:\n${fullObs.slice(0, 600)}\nRead the failing file(s), apply a real fix, then run_app again to verify. For Vite/React projects, keep the module setup and fix the reported build/runtime error instead of converting scripts to classic browser scripts.`;
             toolEvents.push({ tool: 'final_check', ok: false, observation });
             recordDebugTrace('agent_run_app_finish_blocked', {
@@ -3595,14 +3604,17 @@ Still unverified: ${pending.join('; ')}` : '';
           // If run_app still reports errors after the repair attempts, never end on a
           // clean message — disclose it and force Continue.
           const stillBrokenRun = unresolvedRunAppError();
-          if (stillBrokenRun) {
+          // Failed self-checks on a clean start aren't a startup error; the message already covers them.
+          const brokenObs = String(stillBrokenRun && stillBrokenRun.observation || '');
+          const onlyChecksFailed = /started cleanly/i.test(brokenObs) && /Your checks: \d+\/\d+ passed/.test(brokenObs);
+          if (stillBrokenRun && !onlyChecksFailed) {
             finalText += ' Note: the app still shows a startup error — press Continue and I\'ll keep working on it.';
           }
           finalText = await finalizeCompletion(finalText, contractLimitationNote() + criteriaLimitationNote(), toolEvents);
           // Tell the user WHERE to check the result (auto-open / Run button);
           // never auto-open an app that still crashes on startup.
           let finishRunHint = null;
-          if (!stillBrokenRun) {
+          if (!stillBrokenRun || onlyChecksFailed) {
             const surface = await buildFinishRunSurface({ autoOpen: true });
             if (surface.note) finalText += surface.note;
             finishRunHint = surface.runHint;

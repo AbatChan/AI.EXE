@@ -398,11 +398,19 @@
           });
         });
 
+        // Planned files are the planner's guess: once the model has read one and made its
+        // change elsewhere, leaving it untouched is its judgment (a rename run spent 5 steps
+        // proving AppHeader.tsx had no "Transactions" label).
+        const readThisRun = (path) => priorRead(path) || hasSuccessfulAgentTool(toolEvents, (event) => (
+          ['read_file', 'read_files'].includes(String(event.tool || '').toLowerCase())
+          && (normalizeWorkspacePath(event.path || '') === path
+            || (Array.isArray(event.paths) && event.paths.some((p) => normalizeWorkspacePath(p || '') === path)))
+        ));
         plannedAffectedFiles.slice(0, 8).forEach((path) => {
           requirements.push({
             id: `affected_${path}`,
             label: `update ${path}`,
-            met: affectedFileSatisfied(path),
+            met: affectedFileSatisfied(path) || (anyWorkspaceMutation && readThisRun(path)),
           });
         });
       }

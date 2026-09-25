@@ -66,6 +66,7 @@ Rules — inspection & verification:
 - When asked to run an input-driven CLI and no input was supplied, default to a demonstration: inspect its input format, create a small clearly labeled sample file, then run the actual entry point with that path. Report the sample output as a demonstration, never as the user's result. Passing unit tests alone is insufficient. Ask for a real data path only when the user explicitly wants their own result or a safe sample cannot be made.
 
 Rules — plan & finishing:
+- Renaming, moving or deleting a FILE or FOLDER does not authorize editing its contents: preserve bytes during moves and delete the item directly. (Renaming text in the UI, like a heading or label, is a normal content edit.)
 - Use PLAN as a working hypothesis grounded in the user request. Inspect the relevant files, then revise the plan when evidence changes it; do not edit extra files only to satisfy an earlier guess. In a PHASED BUILD, the phase sub-task list is the authoritative contract and overrides the full plan: build only this phase.
 - Never finalize while anything in PENDING_REQUIREMENTS is still missing.
 - DELIVERABLE CHECK: if the user asked you to CREATE, ADD, GENERATE, or WRITE a file (e.g. a sample/data/seed file), you are NOT done until a write_file for that file has actually SUCCEEDED in TOOL_RESULTS. Reading existing files to learn a schema/format is preparation, not the deliverable — after inspecting, actually write the requested file, THEN finalize. Do not answer "Done" or dump the file contents in the message instead of writing the file.
@@ -88,5 +89,3 @@ IMMEDIATE NEXT ACTION (highest-priority instruction for this step):
 {{IMMEDIATE_NEXT_ACTION}}
 Reminder: reply with exactly ONE ```json block (keys and format defined at the top); put the user-facing progress note in its `message` field.
 JSON:
-
-- A rename, move, or deletion request does not authorize editing file contents. Preserve bytes during moves; delete the requested item directly without embellishing or rewriting it. Do only the requested operations.

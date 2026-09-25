@@ -743,11 +743,19 @@
             raw: '[fallback-project-generate-onepass]',
           };
         }
-        // Keep the plan's order; only push README last (stable sort).
+        // Keep the plan's order, but write the root component (src/App.*, then src/main|index.*)
+        // after the modules it imports — written first, App inlined everything and the
+        // planned components went unused. README last.
+        const writeRank = (path) => {
+          if (path === '/README.md') return 3;
+          if (/^\/src\/(?:main|index)\.[jt]sx?$/i.test(path)) return 2;
+          if (/^\/src\/App\.(?:[jt]sx?|vue|svelte)$/i.test(path)) return 1;
+          return 0;
+        };
         const nextPath = expectedFiles
           .map((path) => normalizeWorkspacePath(path || ''))
           .filter((path) => path && path !== '/src' && !writtenPaths.includes(path))
-          .sort((a, b) => (a === '/README.md' ? 1 : 0) - (b === '/README.md' ? 1 : 0))[0] || '';
+          .sort((a, b) => writeRank(a) - writeRank(b))[0] || '';
         if (nextPath) {
           const lastAttemptForPath = Array.isArray(toolEvents)
             ? [...toolEvents].reverse().find((event) => (

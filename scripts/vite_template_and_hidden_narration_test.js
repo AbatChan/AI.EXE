@@ -31,5 +31,5 @@ assert.match(loop, /stepNarrationDetail = '';\n\s+if \(narration\) appendAgentNa
 const rsrc = fs.readFileSync(path.join(root, 'ui', 'chat-renderer.js'), 'utf8');
 assert.match(rsrc, /function retractActiveAgentStreamThought\(chatId, detail\)/);
 assert.match(fs.readFileSync(path.join(root, 'ui', 'ai-exe.js'), 'utf8'), /pushActiveAgentStreamActivity,\n\s+retractActiveAgentStreamThought,/, 'loop gets the retract dep');
-assert.match(fs.readFileSync(path.join(root, 'ui', 'chat-renderer.js'), 'utf8'), /\(runErrors \? 'Tests failed' : 'Tests passed'\)/, 'test commands are labelled as tests');
+assert.match(fs.readFileSync(path.join(root, 'ui', 'chat-renderer.js'), 'utf8'), /\(commandErrors \? 'Tests failed' : 'Tests passed'\)/, 'test commands are labelled as tests');
 console.log('PASS: a hidden guard step takes its narration with it');

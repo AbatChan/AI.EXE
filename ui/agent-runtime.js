@@ -1281,7 +1281,8 @@
       const nextPhaseRule = planSpec && planSpec._nextPhase
         ? `This phase is done; next is "${planSpec._nextPhase}". Close by saying, in your own words, what comes next and that they can press Continue for it. `
         : '';
-      const statusLineRule = `${planSpec && planSpec._completionLimitations ? `Unresolved evidence to explain briefly in your own words (do not paste the checklist): ${planSpec._completionLimitations}\n` : ''}${nextPhaseRule}Write the message in the user's language, then end with one final line, exactly one of: ${COMPLETION_STATUS_TOKENS.unverified} or ${COMPLETION_STATUS_TOKENS.verified}. Use ${COMPLETION_STATUS_TOKENS.unverified} whenever anything is unbuilt, failing, or unchecked. This line is machine-read and removed before the user sees it.`;
+      const agentNote = planSpec && planSpec._agentFinalNote ? String(planSpec._agentFinalNote) : '';
+      const statusLineRule = `${agentNote ? `The agent that did the work ended with this note — keep every limitation or caveat it states (it saw the code; you only see summaries): "${agentNote}"\n` : ''}${planSpec && planSpec._completionLimitations ? `Unresolved evidence to explain briefly in your own words (do not paste the checklist): ${planSpec._completionLimitations}\n` : ''}${nextPhaseRule}Write the message in the user's language, then end with one final line, exactly one of: ${COMPLETION_STATUS_TOKENS.unverified} or ${COMPLETION_STATUS_TOKENS.verified}. Use ${COMPLETION_STATUS_TOKENS.unverified} whenever anything is unbuilt, failing, or unchecked. This line is machine-read and removed before the user sees it.`;
       let prompt = [
         'Write a natural completion message for the user.',
         'Output ONLY the message itself. Do NOT preface it with a label or lead-in like "Here\'s a completion message:" and do not wrap it in quotes — start with the first word of the actual message.',

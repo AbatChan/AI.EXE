@@ -3828,6 +3828,100 @@ export default config;
       if (tool === 'run_app') {
         const stackInfo = await detectWorkspaceStack(planSpec || {});
         const proof = stackInfo && stackInfo.proof ? stackInfo.proof : null;
+        // Loads a page in the hidden preview and runs the model's checks (plain HTML, or a built bundle).
+        const runHtmlSmoke = async (htmlTarget, siteRoot = '') => {
+          deps.setActiveAgentStreamStatus(chatId, `Running ${htmlTarget} in the offline preview...`);
+          // A harness-issued re-run (no checks of its own) repeats the model's latest checks,
+          // so "started cleanly" can't stand in for checks that failed before the last edit.
+          let checks = Array.isArray(decision.checks) ? decision.checks : [];
+          let reusedChecks = false;
+          if (!checks.length && decision._deterministic) {
+            const prior = [...(Array.isArray(toolEvents) ? toolEvents : [])].reverse().find((event) => (
+              event && String(event.tool || '').toLowerCase() === 'run_app' && String(event.checksSig || '[]') !== '[]'
+            ));
+            try { checks = prior ? JSON.parse(prior.checksSig) : []; } catch (_) { checks = []; }
+            reusedChecks = checks.length > 0;
+          }
+          const result = await deps.runWorkspaceAppSmokeTest(htmlTarget, { checks, ...(siteRoot ? { siteRoot } : {}) });
+          if (!result || !result.ok) {
+            return { ok: false, mutated, observation: `run_app failed: ${(result && result.message) || 'could not load the page'}.` };
+          }
+          const errors = Array.isArray(result.errors) ? result.errors.filter(Boolean) : [];
+          const checkRows = Array.isArray(result.checks) ? result.checks.map(String) : [];
+          const failedChecks = checkRows.filter((row) => row.startsWith('✗')).length;
+          const checksText = checks.length
+            ? (checkRows.length
+              ? `\n${reusedChecks ? 'Your latest checks, run again after the change' : 'Your checks'}: ${checkRows.length - failedChecks}/${checkRows.length} passed\n${checkRows.join('\n')}${failedChecks ? '\nA failed check is evidence of a mismatch in this preview. Check the selector, expected value, load order and app behavior before editing; then rerun the same checks. Do not weaken the assertion just to pass.' : ''}`
+              : '\nYour checks did not run (the page never finished loading them).')
+            : '';
+          // Show the failing lines with each located error, like a stack trace's code frame.
+          const frames = [];
+          const seenFrames = new Set();
+          for (const text of errors) {
+            const at = String(text).match(/ at (\/[^\s:]+):(\d+):\d+/);
+            if (!at || seenFrames.has(`${at[1]}:${at[2]}`) || frames.length >= 2) continue;
+            seenFrames.add(`${at[1]}:${at[2]}`);
+            const file = await deps.invokeWorkspaceAction('workspaceReadFile', { path: deps.normalizeWorkspacePath(at[1]) });
+            if (!file || !file.ok) continue;
+            const lines = String(file.output || '').split('\n');
+            const hit = Number(at[2]);
+            if (!(hit >= 1 && hit <= lines.length)) continue;
+            const from = Math.max(1, hit - 6);
+            const to = Math.min(lines.length, hit + 5);
+            const rows = [];
+            for (let n = from; n <= to; n += 1) rows.push(`${n === hit ? '>' : ' '}${String(n).padStart(4)}| ${lines[n - 1]}`);
+            frames.push(`${at[1]}:${hit}\n${rows.join('\n')}`);
+          }
+          const framesText = frames.length ? `\nCode at the error${frames.length === 1 ? '' : 's'} (current file):\n${frames.join('\n\n')}` : '';
+          // Render snapshot: what the page ACTUALLY shows after load (DOM-measured,
+          // not phrase-based) — lets the agent verify visual claims itself.
+          const snap = result.snapshot && typeof result.snapshot === 'object' ? result.snapshot : null;
+          const snapshotText = snap ? (snap.error
+            ? `\nRender snapshot unavailable (${snap.error}).`
+            : [
+              '\nRender snapshot (measured from the live DOM after load — this is what the user sees):',
+              snap.title ? `- page title: ${snap.title}` : '',
+              `- visible text: "${String(snap.text || '(none)')}"`,
+              Array.isArray(snap.hiddenButRendered) && snap.hiddenButRendered.length
+                ? `- PROBLEM: has the hidden attribute but is still visibly rendered — CSS display rules are overriding the attribute: ${snap.hiddenButRendered.join(', ')}`
+                : '',
+              Array.isArray(snap.bigOverlays) && snap.bigOverlays.length
+                ? `- large overlays covering most of the viewport (may block interaction): ${snap.bigOverlays.join(', ')}`
+                : '',
+              snap.centerTop ? `- topmost element at viewport center (what a click there hits): ${snap.centerTop}` : '',
+              Array.isArray(snap.ids) && snap.ids.length ? `- element visibility: ${snap.ids.join(', ')}` : '',
+            ].filter(Boolean).join('\n')) : '';
+          // Interaction probe report: which elements were synthetically clicked and
+          // what the UI showed afterwards (only when it actually changed).
+          const after = result.snapshotAfter && typeof result.snapshotAfter === 'object' && !result.snapshotAfter.error
+            ? result.snapshotAfter
+            : null;
+          const clickedList = Array.isArray(result.clicked) && result.clicked.length
+            ? `\nInteraction probe (synthetic clicks on visible native controls + tap points): ${result.clicked.join(', ')}`
+            : '';
+          const afterChanged = after && snap && JSON.stringify(after) !== JSON.stringify(snap);
+          const afterText = afterChanged ? [
+            '\nAfter interaction:',
+            `- visible text: "${String(after.text || '(none)')}"`,
+            Array.isArray(after.hiddenButRendered) && after.hiddenButRendered.length
+              ? `- still marked hidden but visibly rendered: ${after.hiddenButRendered.join(', ')}`
+              : '',
+            Array.isArray(after.bigOverlays) && after.bigOverlays.length
+              ? `- large overlays now covering the viewport: ${after.bigOverlays.join(', ')}`
+              : '',
+          ].filter(Boolean).join('\n') : '';
+          return {
+            ok: true,
+            mutated,
+            runErrorCount: errors.length + failedChecks + (checks.length && !checkRows.length ? 1 : 0),
+            checksRun: checkRows.length,
+            checksFailed: failedChecks,
+            renderSnapshot: snap,
+            observation: (errors.length
+              ? `run_app ${htmlTarget}: ${errors.length} runtime error${errors.length === 1 ? '' : 's'} during the smoke run:\n- ${errors.join('\n- ')}${framesText}\nFix these (the file:line references point into the inlined sources; "[during interaction probe]" errors fired when a visible control/point was clicked), then run_app again to verify.`
+              : `run_app ${htmlTarget}: started cleanly — no runtime errors, unhandled rejections, or console.error during startup or the interaction probe.${checks.length ? '' : ' This only proves the page loads; it does not prove any feature works — add `checks` to test them like a user.'}`) + checksText + snapshotText + clickedList + afterText,
+          };
+        };
 
         if (proof && proof.kind === 'command') {
           if (typeof deps.invokeWorkspaceAction !== 'function') {
@@ -3928,6 +4022,25 @@ export default config;
             }
             return { ok: true, mutated, runErrorCount: 1, terminalCommand: thenCommand, terminalProof: thenProof, observation: `run_app ${passedNote}, but tests failed (${thenCommand} ${thenStatus.timedOut ? 'timed out' : `exited ${thenStatus.exitCode}`}). Read these real errors, fix the root cause, then run_app again.\nOutput:\n${thenTail || '(no output)'}` };
           };
+          // A web build only proves it compiles: load the built page too and run the model's
+          // checks there (they were silently dropped, so it re-ran identical builds).
+          const withBuiltPreview = async (passed) => {
+            if (!/\bbuild\b/.test(proofCommand) || typeof deps.runWorkspaceAppSmokeTest !== 'function') return passed;
+            const built = await deps.invokeWorkspaceAction('workspaceReadFile', { path: '/dist/index.html' });
+            if (!built || !built.ok || !/<script\b/i.test(String(built.output || ''))) return passed;
+            const preview = await runHtmlSmoke('/dist/index.html', '/dist');
+            if (!preview || !preview.ok) return passed;
+            const previewErrorCount = Number(preview.runErrorCount) || 0;
+            return {
+              ...passed,
+              checksRun: preview.checksRun,
+              checksFailed: preview.checksFailed,
+              renderSnapshot: preview.renderSnapshot,
+              previewErrorCount,
+              runErrorCount: (Number(passed.runErrorCount) || 0) + previewErrorCount,
+              observation: `${passed.observation}\nThen loaded the built app (dist/index.html) in the preview: ${String(preview.observation || '').replace(/^run_app \/dist\/index\.html: /, '')}`,
+            };
+          };
           const status = parseRunCommandExitStatus(res.message);
           const tail = commandOutputTail(res.output);
           const terminalProof = buildTerminalProof(proofCommand, res, status);
@@ -3951,15 +4064,14 @@ export default config;
 
           if (status.exitCode === 0) {
             const tested = await runThenCommand(`${stackInfo.passLabel || 'proof passed'} (${proofCommand} exited 0)${depReconcileNote ? ` —${depReconcileNote.replace(/\n/g, ' ')}` : ''}`);
-            if (tested) return tested;
-            return {
+            return withBuiltPreview(tested || {
               ok: true,
               mutated,
               runErrorCount: 0,
               terminalCommand: proofCommand,
               terminalProof,
               observation: `run_app ${stackInfo.passLabel || 'proof passed'} (${proofCommand} exited 0).${runtimeAdvisory}${depReconcileNote}${tail ? `\nOutput:\n${tail}` : ''}`,
-            };
+            });
           }
 
           const missingDeps = proof.installCommand && looksLikeMissingNodeDependencies(`${res.message || ''}\n${res.output || ''}`);
@@ -3998,15 +4110,14 @@ export default config;
                 const retryProof = buildTerminalProof(proofCommand, retryRes, retryStatus);
                 if (!retryStatus.timedOut && retryStatus.exitCode === 0) {
                   const tested = await runThenCommand(`installed dependencies (\`${installCommand}\`) and ${stackInfo.passLabel || 'the proof passed'} (${proofCommand} exited 0)`);
-                  if (tested) return tested;
-                  return {
+                  return withBuiltPreview(tested || {
                     ok: true,
                     mutated,
                     runErrorCount: 0,
                     terminalCommand: proofCommand,
                     terminalProof: retryProof,
                     observation: `run_app installed dependencies (\`${installCommand}\`) and ${stackInfo.passLabel || 'the proof passed'} (${proofCommand} exited 0).${retryTail ? `\nOutput:\n${retryTail}` : ''}`,
-                  };
+                  });
                 }
                 return {
                   ok: true,
@@ -4083,97 +4194,7 @@ export default config;
         const htmlTarget = /\.html?$/i.test(requestedHtml)
           ? requestedHtml
           : (proof && proof.kind === 'smoke' ? deps.normalizeWorkspacePath(proof.path || '/index.html') : '/index.html');
-        deps.setActiveAgentStreamStatus(chatId, `Running ${htmlTarget} in the offline preview...`);
-        // A harness-issued re-run (no checks of its own) repeats the model's latest checks,
-        // so "started cleanly" can't stand in for checks that failed before the last edit.
-        let checks = Array.isArray(decision.checks) ? decision.checks : [];
-        let reusedChecks = false;
-        if (!checks.length && decision._deterministic) {
-          const prior = [...(Array.isArray(toolEvents) ? toolEvents : [])].reverse().find((event) => (
-            event && String(event.tool || '').toLowerCase() === 'run_app' && String(event.checksSig || '[]') !== '[]'
-          ));
-          try { checks = prior ? JSON.parse(prior.checksSig) : []; } catch (_) { checks = []; }
-          reusedChecks = checks.length > 0;
-        }
-        const result = await deps.runWorkspaceAppSmokeTest(htmlTarget, { checks });
-        if (!result || !result.ok) {
-          return { ok: false, mutated, observation: `run_app failed: ${(result && result.message) || 'could not load the page'}.` };
-        }
-        const errors = Array.isArray(result.errors) ? result.errors.filter(Boolean) : [];
-        const checkRows = Array.isArray(result.checks) ? result.checks.map(String) : [];
-        const failedChecks = checkRows.filter((row) => row.startsWith('✗')).length;
-        const checksText = checks.length
-          ? (checkRows.length
-            ? `\n${reusedChecks ? 'Your latest checks, run again after the change' : 'Your checks'}: ${checkRows.length - failedChecks}/${checkRows.length} passed\n${checkRows.join('\n')}${failedChecks ? '\nA failed check is evidence of a mismatch in this preview. Check the selector, expected value, load order and app behavior before editing; then rerun the same checks. Do not weaken the assertion just to pass.' : ''}`
-            : '\nYour checks did not run (the page never finished loading them).')
-          : '';
-        // Show the failing lines with each located error, like a stack trace's code frame.
-        const frames = [];
-        const seenFrames = new Set();
-        for (const text of errors) {
-          const at = String(text).match(/ at (\/[^\s:]+):(\d+):\d+/);
-          if (!at || seenFrames.has(`${at[1]}:${at[2]}`) || frames.length >= 2) continue;
-          seenFrames.add(`${at[1]}:${at[2]}`);
-          const file = await deps.invokeWorkspaceAction('workspaceReadFile', { path: deps.normalizeWorkspacePath(at[1]) });
-          if (!file || !file.ok) continue;
-          const lines = String(file.output || '').split('\n');
-          const hit = Number(at[2]);
-          if (!(hit >= 1 && hit <= lines.length)) continue;
-          const from = Math.max(1, hit - 6);
-          const to = Math.min(lines.length, hit + 5);
-          const rows = [];
-          for (let n = from; n <= to; n += 1) rows.push(`${n === hit ? '>' : ' '}${String(n).padStart(4)}| ${lines[n - 1]}`);
-          frames.push(`${at[1]}:${hit}\n${rows.join('\n')}`);
-        }
-        const framesText = frames.length ? `\nCode at the error${frames.length === 1 ? '' : 's'} (current file):\n${frames.join('\n\n')}` : '';
-        // Render snapshot: what the page ACTUALLY shows after load (DOM-measured,
-        // not phrase-based) — lets the agent verify visual claims itself.
-        const snap = result.snapshot && typeof result.snapshot === 'object' ? result.snapshot : null;
-        const snapshotText = snap ? (snap.error
-          ? `\nRender snapshot unavailable (${snap.error}).`
-          : [
-            '\nRender snapshot (measured from the live DOM after load — this is what the user sees):',
-            snap.title ? `- page title: ${snap.title}` : '',
-            `- visible text: "${String(snap.text || '(none)')}"`,
-            Array.isArray(snap.hiddenButRendered) && snap.hiddenButRendered.length
-              ? `- PROBLEM: has the hidden attribute but is still visibly rendered — CSS display rules are overriding the attribute: ${snap.hiddenButRendered.join(', ')}`
-              : '',
-            Array.isArray(snap.bigOverlays) && snap.bigOverlays.length
-              ? `- large overlays covering most of the viewport (may block interaction): ${snap.bigOverlays.join(', ')}`
-              : '',
-            snap.centerTop ? `- topmost element at viewport center (what a click there hits): ${snap.centerTop}` : '',
-            Array.isArray(snap.ids) && snap.ids.length ? `- element visibility: ${snap.ids.join(', ')}` : '',
-          ].filter(Boolean).join('\n')) : '';
-        // Interaction probe report: which elements were synthetically clicked and
-        // what the UI showed afterwards (only when it actually changed).
-        const after = result.snapshotAfter && typeof result.snapshotAfter === 'object' && !result.snapshotAfter.error
-          ? result.snapshotAfter
-          : null;
-        const clickedList = Array.isArray(result.clicked) && result.clicked.length
-          ? `\nInteraction probe (synthetic clicks on visible native controls + tap points): ${result.clicked.join(', ')}`
-          : '';
-        const afterChanged = after && snap && JSON.stringify(after) !== JSON.stringify(snap);
-        const afterText = afterChanged ? [
-          '\nAfter interaction:',
-          `- visible text: "${String(after.text || '(none)')}"`,
-          Array.isArray(after.hiddenButRendered) && after.hiddenButRendered.length
-            ? `- still marked hidden but visibly rendered: ${after.hiddenButRendered.join(', ')}`
-            : '',
-          Array.isArray(after.bigOverlays) && after.bigOverlays.length
-            ? `- large overlays now covering the viewport: ${after.bigOverlays.join(', ')}`
-            : '',
-        ].filter(Boolean).join('\n') : '';
-        return {
-          ok: true,
-          mutated,
-          runErrorCount: errors.length + failedChecks + (checks.length && !checkRows.length ? 1 : 0),
-          checksRun: checkRows.length,
-          checksFailed: failedChecks,
-          renderSnapshot: snap,
-          observation: (errors.length
-            ? `run_app ${htmlTarget}: ${errors.length} runtime error${errors.length === 1 ? '' : 's'} during the smoke run:\n- ${errors.join('\n- ')}${framesText}\nFix these (the file:line references point into the inlined sources; "[during interaction probe]" errors fired when a visible control/point was clicked), then run_app again to verify.`
-            : `run_app ${htmlTarget}: started cleanly — no runtime errors, unhandled rejections, or console.error during startup or the interaction probe.${checks.length ? '' : ' This only proves the page loads; it does not prove any feature works — add `checks` to test them like a user.'}`) + checksText + snapshotText + clickedList + afterText,
-        };
+        return runHtmlSmoke(htmlTarget);
       }
 
       // Allowlisted run (python/pip/node/npm) → real output+exit for run→fix.

@@ -77,10 +77,9 @@ CHAT_HISTORY:
 {{CHAT_HISTORY}}
 CURRENT_WORKSPACE_ROOT:
 {{CURRENT_WORKSPACE_ROOT}}
+- Renaming, moving or deleting a FILE or FOLDER does not authorize editing its contents: preserve bytes during moves and delete the item directly. (Renaming text in the UI, like a heading or label, is a normal content edit.)
 CURRENT_SELECTION:
 {{CURRENT_SELECTION}} ({{CURRENT_SELECTION_KIND}})
 TASK:
 {{TASK}}
 JSON:
-
-- A rename, move, or deletion request does not authorize editing file contents. Preserve bytes during moves; delete the requested item directly without embellishing or rewriting it. Do only the requested operations.

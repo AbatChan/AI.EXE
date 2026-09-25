@@ -201,7 +201,7 @@ console.log('PASS: queue + steer, readable smoke errors mapped to file:line, cle
 {
   const core = fs.readFileSync(path.join(root, 'ui', 'agent-core.js'), 'utf8');
   assert.match(core, /if \(Array\.isArray\(parsed\.checks\)\) checksList = /);
-  assert.match(executor, /deps\.runWorkspaceAppSmokeTest\(htmlTarget, \{ checks \}\)/);
+  assert.match(executor, /deps\.runWorkspaceAppSmokeTest\(htmlTarget, \{ checks, \.\.\.\(siteRoot \? \{ siteRoot \} : \{\}\) \}\)/);
   assert.match(executor, /runErrorCount: errors\.length \+ failedChecks/);
   assert.match(executor, /This only proves the page loads; it does not prove any feature works/);
   assert.match(ui, /checks: \{\n\s+type: 'array',/, 'native tool schema carries checks');

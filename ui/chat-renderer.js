@@ -1068,13 +1068,22 @@
           const outputRows = String(terminal.outputPreview || '').trim()
             ? buildObservationPreviewRows(terminal.outputPreview)
             : null;
+          // The built app's preview result (checks) is separate from the command's own exit.
+          const previewErrors = Number(toolResult && toolResult.previewErrorCount) || 0;
+          const commandErrors = Math.max(0, runErrors - previewErrors);
+          const pChecks = Number(toolResult && toolResult.checksRun) || 0;
+          const pFailed = Number(toolResult && toolResult.checksFailed) || 0;
+          const previewNote = toolResult && toolResult.previewErrorCount != null
+            ? (previewErrors - pFailed > 0 ? ` · app: ${previewErrors - pFailed} runtime error${previewErrors - pFailed === 1 ? '' : 's'}` : ' · app started cleanly')
+              + (pChecks ? ` · checks ${pChecks - pFailed}/${pChecks} passed` : '')
+            : '';
           return buildInlineAgentActivityBase({
             kind: 'command',
             // Test commands (npm test, unittest) read as tests, not builds.
             title: runtimeMissing ? 'Runtime missing' : (/\b(?:npm test|unittest|pytest|vitest|jest)\b/.test(String(terminal.command))
-              ? (runErrors ? 'Tests failed' : 'Tests passed')
-              : (runErrors ? 'Build failed' : 'Build passed')),
-            detail: terminal.command,
+              ? (commandErrors ? 'Tests failed' : 'Tests passed')
+              : (commandErrors ? 'Build failed' : 'Build passed')),
+            detail: `${terminal.command}${previewNote}`,
             terminal,
             hasIssues: runtimeMissing || runErrors > 0,
             meta: exitLabel,

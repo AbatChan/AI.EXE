@@ -15201,10 +15201,12 @@ async function runWorkspaceAppSmokeTest(htmlPath, options = {}) {
   if (!htmlRes || !htmlRes.ok) return { ok: false, message: `could not read ${normalized}` };
   let html = String(htmlRes.output || '');
   const baseDir = parentWorkspacePath(normalized) || '/';
+  // A built bundle (dist/) references "/assets/..." from its own root, not the project's.
+  const siteRoot = options && options.siteRoot ? normalizeWorkspacePath(options.siteRoot) : '';
   const resolveRef = (ref) => {
     let r = String(ref || '').trim();
     if (!r || /^(?:https?:|data:|\/\/|#)/i.test(r)) return '';
-    if (r.startsWith('/')) return normalizeWorkspacePath(r);
+    if (r.startsWith('/')) return normalizeWorkspacePath(siteRoot && siteRoot !== '/' ? `${siteRoot}${r}` : r);
     let dir = baseDir;
     while (r.startsWith('../')) { r = r.slice(3); dir = parentWorkspacePath(dir) || '/'; }
     if (r.startsWith('./')) r = r.slice(2);
@@ -15225,18 +15227,25 @@ async function runWorkspaceAppSmokeTest(htmlPath, options = {}) {
   // of a wall of opaque "Script error" entries.
   const deferredScripts = [];
   let usesEsModules = /<script\b[^>]*type=["']module["']/i.test(html);
+  const moduleScriptsDeclared = (html.match(/<script\b[^>]*type=["']module["']/gi) || []).length;
+  let moduleScriptsInlined = 0;
   for (const match of [...html.matchAll(/<script\b[^>]*src=["']([^"']+)["'][^>]*>\s*<\/script>/gi)]) {
     const js = await inlineAsset(match[1]);
     if (js != null) {
       const srcLabel = String(match[1] || '').split(/[?#]/)[0].replace(/^\.?\/*/, '/');
       const inlined = `<script>\n//@aiexe-src ${srcLabel}\n${js}\n</script>`;
+      // A bundler's single-file module (no import/export left) runs fine inline, deferred like a module.
+      const bundledModule = siteRoot && /type=["']module["']/i.test(match[0])
+        && !/(?:^|[;}\n])\s*(?:import\s*[{*\w"']|export\s|import\.meta)/.test(js);
+      if (bundledModule) moduleScriptsInlined += 1;
       // Inline scripts ignore defer; execute these after the body has been parsed.
-      if (/\sdefer(?:\s|=|>)/i.test(match[0])) {
+      if (bundledModule || /\sdefer(?:\s|=|>)/i.test(match[0])) {
         deferredScripts.push(inlined);
         html = html.replace(match[0], () => '');
       } else html = html.replace(match[0], () => inlined);
     }
   }
+  if (moduleScriptsDeclared && moduleScriptsInlined === moduleScriptsDeclared) usesEsModules = false;
   if (deferredScripts.length) {
     const deferred = deferredScripts.join('\n');
     html = /<\/body\s*>/i.test(html)
