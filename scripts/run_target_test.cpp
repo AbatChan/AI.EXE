@@ -13,6 +13,11 @@ static void Write(const fs::path& path, const std::string& body) {
 }
 
 int main() {
+  const auto args = ParseRunArgsLines("/tmp/a file.csv\n--mode=preview\r\n\n");
+  assert(args.size() == 2);
+  assert(args[0] == "/tmp/a file.csv");
+  assert(args[1] == "--mode=preview");
+
   const fs::path base = fs::temp_directory_path() / "aiexe-run-target-test";
   std::error_code ec;
   fs::remove_all(base, ec);

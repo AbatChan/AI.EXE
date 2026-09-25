@@ -13,6 +13,7 @@ from .finance import FinanceStore
 from .modules import ModuleStore
 from .projects import ProjectStore
 from .provider import ProviderStore
+from .token_usage import TokenUsageLedger
 from .usage import ApiKeyStore, UsageManager
 
 usage_manager = UsageManager(
@@ -52,5 +53,6 @@ autopilot = Autopilot(settings.data_dir, quote_feed.crypto_hourly_candles,
 
 # Durable chat storage — see chatstore.py. Never trimmed to reclaim space.
 chat_store = ChatStore(data_dir=settings.data_dir)
+token_usage_ledger = TokenUsageLedger(os.path.join(settings.data_dir, "token_usage.json"))
 
 adapter_manager = AdapterManager(settings.data_dir)

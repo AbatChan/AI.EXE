@@ -6,7 +6,9 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <sstream>
 #include <string>
+#include <vector>
 
 // Decide what "Run" should do for an open project. Web projects are served over
 // localhost; Python projects are launched with the user's installed interpreter.
@@ -21,6 +23,17 @@ struct RunTarget {
   // entry to run. Always an absolute path inside the project root.
   std::filesystem::path entry;
 };
+
+inline std::vector<std::string> ParseRunArgsLines(const std::string& lines) {
+  std::vector<std::string> args;
+  std::istringstream input(lines.substr(0, 8192));
+  std::string line;
+  while (args.size() < 16 && std::getline(input, line)) {
+    if (!line.empty() && line.back() == '\r') line.pop_back();
+    if (!line.empty()) args.push_back(line);
+  }
+  return args;
+}
 
 inline int StableVitePortForRoot(const std::filesystem::path& root) {
   std::string key = root.lexically_normal().generic_string();

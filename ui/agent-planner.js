@@ -2175,6 +2175,8 @@
       const effectiveMaxSteps = effectiveAgentMaxSteps(planSpec);
       const vars = {
         AGENT_ENVIRONMENT: getAgentEnvironmentContext('decision'),
+        // The clock changes every minute: it lives in the per-step tail, not the cached prefix.
+        AGENT_NOW: typeof deps.getAgentNowLine === 'function' ? deps.getAgentNowLine() : '',
         AGENT_STEP: Number(stepIndex),
         AGENT_MAX_STEPS: effectiveMaxSteps,
         CURRENT_WORKSPACE_ROOT: currentWorkspaceRoot,
@@ -2188,8 +2190,9 @@
         IMMEDIATE_NEXT_ACTION: buildImmediateNextAction(taskText, toolEvents, planSpec, stepIndex),
       };
       const prompt = renderPromptTemplate(template, vars);
-      // Split at the dynamic section so remote APIs receive proper system/user roles.
-      const splitMarker = '\nAgent step: ';
+      // System = the fixed rules; user = PLAN + TOOL_RESULTS (append-mostly) + the
+      // per-step tail. Stable text first keeps provider prompt caches hitting.
+      const splitMarker = '\nPLAN:\n';
       const splitIdx = prompt.indexOf(splitMarker);
       const systemPrompt = splitIdx > 0 ? prompt.slice(0, splitIdx).trim() : '';
       const userPrompt = splitIdx > 0 ? prompt.slice(splitIdx + 1).trim() : prompt;

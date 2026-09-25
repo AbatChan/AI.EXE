@@ -1414,7 +1414,14 @@ bool WorkspaceRevealEntry(const WebRuntimeBridge &runtime,
 // an install hint if neither exists, then opens it (a console runs .bat files).
 bool LaunchPythonConsoleWin(const std::filesystem::path &root,
                             const std::string &entry_filename,
+                            const std::vector<std::string> &args,
                             std::string *err) {
+  for (const auto &arg : args) {
+    if (arg.find_first_of("\"%!^&|<>") != std::string::npos) {
+      if (err) *err = "This argument has characters the Windows launcher cannot safely pass.";
+      return false;
+    }
+  }
   // Run inside a project-local .venv so `pip install` works without touching the
   // system Python, and install requirements.txt (if present) before the entry.
   // `where` picks the interpreter; the chosen one is used for venv + run.
@@ -1439,7 +1446,9 @@ bool LaunchPythonConsoleWin(const std::filesystem::path &root,
       << "  echo Installing dependencies...\r\n"
       << "  \"%VPY%\" -m pip install --quiet --disable-pip-version-check -r requirements.txt\r\n"
       << ")\r\n"
-      << "\"%VPY%\" \"" << entry_filename << "\"\r\n"
+      << "\"%VPY%\" \"" << entry_filename << "\"";
+  for (const auto &arg : args) bat << " \"" << arg << "\"";
+  bat << "\r\n"
       << ":end\r\n"
       << "popd\r\n"
       << ":finish\r\n"
@@ -3120,8 +3129,18 @@ private:
       DevServerManager::Instance().StopAll();
       ClearWorkspaceRootOverride();
       message = "Project closed.";
+    } else if (action == "inspectRunTarget") {
+      const std::filesystem::path root = WorkspaceRootOrEmpty();
+      if (root.empty()) {
+        ok = false;
+        message = "No project is open to run.";
+      } else {
+        const RunTarget target = DetectRunTarget(root);
+        output = target.kind == RunTargetKind::kPython ? "python" : "other";
+      }
     } else if (action == "runWorkspaceApp") {
       const std::filesystem::path root = WorkspaceRootOrEmpty();
+      const std::vector<std::string> run_args = ParseRunArgsLines(ExtractJsonStringField(request_json, "argsLine"));
       if (root.empty()) {
         ok = false;
         message = "No project is open to run.";
@@ -3175,7 +3194,7 @@ private:
           }
         } else if (target.kind == RunTargetKind::kPython) {
           const std::string entry = target.entry.filename().string();
-          if (LaunchPythonConsoleWin(root, entry, &op_err)) {
+          if (LaunchPythonConsoleWin(root, entry, run_args, &op_err)) {
             output = entry;
             message = std::string("Running ") + entry + " in a console.";
           } else {

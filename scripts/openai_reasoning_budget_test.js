@@ -31,7 +31,7 @@ console.log('PASS: OpenAI small completion caps get a reasoning floor; tool call
 
 // Think mode reaches Agent calls; DeepSeek reasoning gets room.
 {
-  assert.match(ui, /\}, Boolean\(thinkActive\)\)\)\),/, 'agent requests no longer hard-code thinking off');
+  assert.match(ui, /\}, Boolean\(thinkActive\)\)\)\);/, 'agent requests no longer hard-code thinking off');
   assert.match(ui, /activeInferenceRequest\.operationKind === 'agent' && inferenceModes\(\)\.think/);
   const a = ui.indexOf('function applyThinkingMode(');
   const b = ui.indexOf('\n}\n', a) + 2;

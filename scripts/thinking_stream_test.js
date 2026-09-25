@@ -1,11 +1,11 @@
 const assert=require('node:assert/strict'),fs=require('fs'),vm=require('vm');
 const src=fs.readFileSync('ui/ai-exe.js','utf8');
 const encoder=new TextEncoder();
-let sent, chunks=[],reads=0;
-const events=[{choices:[{delta:{reasoning_content:'Reason <thinking>quoted</thinking> completely.',content:'Final answer.'}}]},{choices:[{delta:{},finish_reason:'stop'}]}];
-const ctx={AbortController,TextDecoder,Date,remoteProvidersEnabled:true,
+let sent, usageOwner, chunks=[],reads=0;
+const events=[{usage:{prompt_tokens:12,completion_tokens:4}},{choices:[{delta:{reasoning_content:'Reason <thinking>quoted</thinking> completely.',content:'Final answer.'}}]},{choices:[{delta:{},finish_reason:'stop'}]}];
+const ctx={activeInferenceRequest:{chatId:"original"},AbortController,TextDecoder,Date,remoteProvidersEnabled:true,
  getInferenceProviderDef:()=>({label:'test'}),getProviderApiKey:()=> 'fixture',getProviderModel:()=> 'fixture',getProviderEndpoint:()=> 'https://example.invalid',shouldUseNativeCustomOpenAiRelay:()=>false,
- buildApiMessagePayloadFromPrompt:()=>({messages:[{role:'user',content:'Task'}]}),adaptOpenAiRequest:(_p,r)=>r,getOpenAiCompatibleAuthHeader:()=> 'fixture',
- fetch:async(_u,o)=>{sent=JSON.parse(o.body);return {ok:true,body:{getReader:()=>({read:async()=>reads++?{done:true}:{done:false,value:encoder.encode(events.map(e=>'data: '+JSON.stringify(e)+'\n\n').join(''))}})}};}
-};vm.createContext(ctx);vm.runInContext(src.match(/^function applyThinkingMode\([^]*?^}/m)[0],ctx);vm.runInContext(src.match(/^async function streamOpenAiCompatibleChatCompletion\([^]*?^}/m)[0],ctx);
-(async()=>{const res=await ctx.streamOpenAiCompatibleChatCompletion('deepseek','Task',{onDelta:x=>chunks.push(x)},{thinkActive:true});assert.equal(res.ok,true);assert.equal(sent.thinking.type,'enabled');assert.equal(res.output,'<native_thinking>Reason <thinking>quoted</thinking> completely.</native_thinking>Final answer.');assert.equal(chunks.join(''),res.output);console.log('PASS: native reasoning and answer in same SSE frame both preserved, isolated wrapper');})().catch(e=>{console.error(e);process.exitCode=1;});
+ buildApiMessagePayloadFromPrompt:()=>({messages:[{role:'user',content:'Task'}]}),adaptOpenAiRequest:(_p,r)=>r,applyPromptCacheHints:(_p,r)=>r,STREAM_USAGE_PROVIDERS:new Set(['deepseek']),recordProviderUsage:(_p,_m,u,id)=>{usageOwner=id;return u;},getOpenAiCompatibleAuthHeader:()=> 'fixture',
+ fetch:async(_u,o)=>{sent=JSON.parse(o.body);ctx.activeInferenceRequest={chatId:"other"};return {ok:true,body:{getReader:()=>({releaseLock:()=>{},read:async()=>reads++?{done:true}:{done:false,value:encoder.encode(events.map(e=>'data: '+JSON.stringify(e)+'\n\n').join(''))}})}};}
+};vm.createContext(ctx);vm.runInContext(src.match(/^async function\* readProviderSseFrames\([^]*?^}/m)[0],ctx);vm.runInContext(src.match(/^function applyThinkingMode\([^]*?^}/m)[0],ctx);vm.runInContext(src.match(/^async function streamOpenAiCompatibleChatCompletion\([^]*?^}/m)[0],ctx);
+(async()=>{const res=await ctx.streamOpenAiCompatibleChatCompletion('deepseek','Task',{onDelta:x=>chunks.push(x)},{thinkActive:true});assert.equal(res.ok,true);assert.equal(usageOwner,'original','usage stays with request owner after chat switching');assert.equal(sent.thinking.type,'enabled');assert.deepEqual(JSON.parse(JSON.stringify(sent.stream_options)),{include_usage:true});assert.equal(res.output,'<native_thinking>Reason <thinking>quoted</thinking> completely.</native_thinking>Final answer.');assert.equal(chunks.join(''),res.output);console.log('PASS: native reasoning and answer in same SSE frame both preserved, isolated wrapper');})().catch(e=>{console.error(e);process.exitCode=1;});

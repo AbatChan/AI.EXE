@@ -19,7 +19,7 @@ from ..models import (ApiKeySetRequest, ApiKeyStatusResponse, ProviderCompleteRe
                       ProviderUsageResponse, UsageResponse)
 from ..provider import is_local_provider
 from ..provider_usage import read_provider_balance, read_provider_health
-from ..services import api_key_store, provider_store, usage_manager
+from ..services import api_key_store, provider_store, token_usage_ledger, usage_manager
 
 router = APIRouter(tags=["usage"])
 
@@ -214,3 +214,16 @@ def set_api_key(payload: ApiKeySetRequest) -> ApiKeyStatusResponse:
 @router.get("/api-key", response_model=ApiKeyStatusResponse)
 def get_api_key() -> ApiKeyStatusResponse:
     return ApiKeyStatusResponse(set=api_key_store.is_set(), masked=api_key_store.masked())
+
+
+@router.post("/token-usage")
+def token_usage_record(payload: dict) -> dict:
+    """One provider call's normalised usage (input/cached/cache_write/output/reasoning)."""
+    payload = payload if isinstance(payload, dict) else {}
+    row = token_usage_ledger.record(payload.get("provider"), payload.get("model"), payload.get("usage") or {}, chat_id=payload.get("chat_id", ""))
+    return {"ok": True, "row": row}
+
+
+@router.get("/token-usage")
+def token_usage_summary(period: str = "") -> dict:
+    return token_usage_ledger.summary(period)

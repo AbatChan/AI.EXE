@@ -733,6 +733,36 @@
       }
     }
 
+    function requestPythonRunArgs() {
+      return new Promise((resolve) => {
+        const dialog = document.createElement('dialog');
+        dialog.className = 'python-run-dialog';
+        dialog.innerHTML = `<form method="dialog">
+          <h3>Run Python project</h3>
+          <p>Enter a file path or other arguments the script needs. Use one argument per line, or leave this empty.</p>
+          <textarea aria-label="Python script arguments" spellcheck="false" rows="3" maxlength="8192" placeholder="path/to/input.csv"></textarea>
+          <div class="python-run-actions"><button type="submit" value="cancel">Cancel</button><button type="submit" value="run">Run in Terminal</button></div>
+        </form>`;
+        dialog.querySelector('form').addEventListener('submit', (event) => {
+          if (event.submitter.value !== 'run') return;
+          const count = dialog.querySelector('textarea').value.split('\n').filter((line) => line.trim()).length;
+          if (count <= 16) return;
+          event.preventDefault();
+          window.alert('Use up to 16 arguments.');
+        });
+        dialog.addEventListener('close', () => {
+          const value = dialog.returnValue === 'run'
+            ? dialog.querySelector('textarea').value.split('\n').map((line) => line.trim()).filter(Boolean).join('\n')
+            : null;
+          dialog.remove();
+          resolve(value);
+        }, { once: true });
+        document.body.appendChild(dialog);
+        dialog.showModal();
+        dialog.querySelector('textarea').focus();
+      });
+    }
+
     async function runWorkspaceApp() {
       deps.closeExplorerMenus();
       if (window.aiexeRunAppBusy) return; // a launch is already in flight
@@ -745,13 +775,20 @@
         window.alert('Open a project first, then click Run to launch it.');
         return;
       }
+      const target = await deps.invokeWorkspaceAction('inspectRunTarget', {});
+      if (!target || !target.ok) {
+        window.alert((target && target.message) || 'Could not inspect this project.');
+        return;
+      }
+      const argsLine = target.output === 'python' ? await requestPythonRunArgs() : '';
+      if (argsLine === null) return;
       setRunAppBusy(true);
       const preRunIds = (await listDevServerRows() || []).map((row) => row.id);
       try {
         // Serves the open project over http://127.0.0.1 and opens it in the browser.
         // file:// breaks ES modules, fetch(), and many APIs ("only the UI shows");
         // a real http origin makes the generated app actually work.
-        const response = await deps.invokeWorkspaceAction('runWorkspaceApp', {});
+        const response = await deps.invokeWorkspaceAction('runWorkspaceApp', { argsLine });
         if (!response || !response.ok) {
           window.alert((response && response.message) || 'Failed to run the project.');
           return;

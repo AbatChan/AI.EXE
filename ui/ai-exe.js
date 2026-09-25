@@ -3397,7 +3397,10 @@ let thinkingStartedAt = 0;
 // user can see the run is alive (and notice when it stalls).
 let agentElapsedInterval = null;
 let agentElapsedStartedAt = 0;
+// Real per-session token totals (filled by recordProviderUsage); declared early for the token ring.
+const providerUsageSession = { calls: 0, input: 0, cached: 0, output: 0 };
 function formatTokenCount(n) {
+  if (n >= 1e6) return `${(n / 1e6).toFixed(2).replace(/\.?0+$/, '')}M`;
   if (n >= 1000) return `${(n / 1000).toFixed(1).replace(/\.0$/, '')}k`;
   return String(n);
 }
@@ -3502,17 +3505,9 @@ function updateTokenRing() {
   ring.classList.toggle('full', ctx > 0 && pct >= 0.98);
   const pctEl = document.getElementById('tokenRingPct');
   if (pctEl) pctEl.textContent = ctx > 0 && pct >= 0.01 ? `${Math.round(pct * 100)}%` : '';
-  let label = ctx > 0
+  const label = ctx > 0
     ? `Context: ${formatTokenCount(tokens)} of ${formatTokenCount(ctx)} tokens (${Math.round(pct * 100)}%)`
     : `Context: ${formatTokenCount(tokens)} tokens`;
-  if (agentRunInferenceChars > 0 && typeof isViewingAgentRunChat === 'function' && isViewingAgentRunChat()) {
-    label += isAgentElapsedTimerActive()
-      ? ` · run ≈${formatTokenCount(Math.round(agentRunInferenceChars / 4))} tok`
-      : ` · last agent run ≈${formatTokenCount(Math.round(agentRunInferenceChars / 4))} tok`;
-  }
-  if (agentSessionInferenceChars > agentRunInferenceChars) {
-    label += ` · session ≈${formatTokenCount(Math.round(agentSessionInferenceChars / 4))} tok`;
-  }
   // Use the app's custom tooltip system (global delegation on .ui-tooltip-anchor[data-tooltip]).
   ring.classList.add('ui-tooltip-anchor');
   ring.dataset.tooltip = label;
@@ -9968,13 +9963,18 @@ function buildRecentWorkContext(currentChatId = '') {
   } catch (_) { return ''; }
 }
 
-function getAgentEnvironmentContext() {
+function getAgentNowLine() {
+  return `Current date/time: ${buildAssistantDateTimeContext()}. Use it for today/yesterday references and any generated dates.`;
+}
+
+function getAgentEnvironmentContext(kind = '') {
   const provider = getSelectedInferenceProvider();
   const def = getInferenceProviderDef(provider);
   const label = String((def && def.label) || provider || 'Local Model');
   const model = String(getProviderModel(provider) || '').trim();
   const isLocal = provider === 'local';
-  const nowLine = `- Current date/time: ${buildAssistantDateTimeContext()}. Use it for today/yesterday references and any generated dates.`;
+  // Step decisions get the clock in their per-step tail (AGENT_NOW) so this block stays cacheable.
+  const nowLine = kind === 'decision' ? '' : `- ${getAgentNowLine()}`;
   if (isLocal) {
     return [
       'AGENT_ENVIRONMENT:',
@@ -9983,7 +9983,7 @@ function getAgentEnvironmentContext() {
       '- Prefer self-contained local projects that run without hosted services, cloud databases, external APIs, or internet-only assets.',
       '- If the user asks for React/Tailwind/TypeScript/Next/Vue and the local environment cannot reliably run a build step, downgrade to a rich static/local implementation and explain the limitation in the final response.',
       '- For static web output opened with file://, links must be relative (about.html, css/style.css), never root-relative (/x).',
-    ].join('\n');
+    ].filter(Boolean).join('\n');
   }
   return [
     'AGENT_ENVIRONMENT:',
@@ -9992,7 +9992,7 @@ function getAgentEnvironmentContext() {
     '- Do NOT downgrade framework requests just because a local/offline fallback exists. If the user asks for React, Tailwind CSS, TypeScript, Next, Vue, or a component architecture, plan and build the corresponding local project files.',
     '- You may plan normal local development files such as package.json, src/App.tsx, src/main.tsx, tsconfig.json, vite.config.ts, and local mock data/state when they fit the request.',
     '- Honor the user\'s product constraints: do not add hosted databases, payment processors, authentication providers, or external APIs unless the user asks for them.',
-  ].join('\n');
+  ].filter(Boolean).join('\n');
 }
 
 const workerCapabilityLabels = {
@@ -10421,9 +10421,10 @@ function openSettingsSection(section) {
   settingsPanes.forEach((pane) => {
     pane.classList.toggle('active', String(pane.dataset.settingsPane || '').trim().toLowerCase() === key);
   });
+  if (key === 'usage') void renderUsageDashboard();
   const meta = getSettingsSectionMeta(key);
-  if (settingsViewTitle) settingsViewTitle.textContent = meta.title;
-  if (settingsViewSubtitle) settingsViewSubtitle.textContent = meta.subtitle;
+  if (settingsViewTitle) settingsViewTitle.textContent = key === 'usage' ? 'Usage' : meta.title;
+  if (settingsViewSubtitle) settingsViewSubtitle.textContent = key === 'usage' ? 'See where your tokens go.' : meta.subtitle;
 }
 
 // Model IDs differ per provider/account and go stale fast, so fetch the real list
@@ -12404,6 +12405,7 @@ function extractOpenAiCompatibleMessageText(payload) {
 }
 
 async function requestNativeOpenAiCompatibleCompletion(provider, prompt, maxTokens, options = {}) {
+  const usageChatId = String((activeInferenceRequest && activeInferenceRequest.chatId) || '');
   if (!remoteProvidersEnabled) {
     return { ok: false, message: 'Remote inference providers are disabled in this offline build.' };
   }
@@ -12459,6 +12461,7 @@ async function requestNativeOpenAiCompatibleCompletion(provider, prompt, maxToke
     return { ok: false, message: `${def.label} returned invalid JSON.` };
   }
 
+  const usage = recordProviderUsage(provider, model, parsed && parsed.usage, usageChatId);
   const text = extractOpenAiCompatibleMessageText(parsed);
   if (!text) {
     return { ok: false, message: `${def.label} response did not include assistant text.` };
@@ -12468,6 +12471,8 @@ async function requestNativeOpenAiCompatibleCompletion(provider, prompt, maxToke
     ok: true,
     output: text,
     raw: parsed,
+    usage,
+    model,
     status: {
       lastInferenceRoute: `${provider}:${model}`,
       lastPersistentError: '',
@@ -12477,7 +12482,120 @@ async function requestNativeOpenAiCompatibleCompletion(provider, prompt, maxToke
   };
 }
 
+// Preserve split event boundaries and a final event without a blank line.
+async function* readProviderSseFrames(body) {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      buffer += done ? decoder.decode() : decoder.decode(value, { stream: true });
+      const frames = buffer.split(/\r?\n\r?\n/);
+      buffer = frames.pop() || '';
+      for (const frame of frames) if (frame.trim()) yield frame;
+      if (done) {
+        if (buffer.trim()) yield buffer;
+        break;
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+// Real token usage from each provider's own usage block (not our char/4 estimate).
+// Shapes: OpenAI/Venice/Gemini prompt_tokens + prompt_tokens_details.cached_tokens,
+// DeepSeek prompt_cache_hit_tokens, Anthropic input_tokens + cache_read/creation.
+const STREAM_USAGE_PROVIDERS = new Set(['openai', 'deepseek', 'venice', 'gemini']);
+const PROMPT_CACHE_KEY_PROVIDERS = new Set(['openai', 'venice']);
+function normalizeProviderUsage(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const n = (v) => (Number.isFinite(Number(v)) && Number(v) > 0 ? Math.round(Number(v)) : 0);
+  const pd = raw.prompt_tokens_details || raw.input_tokens_details || {};
+  const cd = raw.completion_tokens_details || raw.output_tokens_details || {};
+  let input = 0; let cached = 0; let cacheWrite = 0; let output = 0;
+  if (raw.cache_read_input_tokens != null || raw.cache_creation_input_tokens != null) {
+    // Anthropic: input_tokens excludes cache reads/writes.
+    cached = n(raw.cache_read_input_tokens);
+    cacheWrite = n(raw.cache_creation_input_tokens);
+    input = n(raw.input_tokens) + cached + cacheWrite;
+    output = n(raw.output_tokens);
+  } else {
+    input = n(raw.prompt_tokens != null ? raw.prompt_tokens : raw.input_tokens);
+    cached = n(raw.prompt_cache_hit_tokens != null ? raw.prompt_cache_hit_tokens : pd.cached_tokens);
+    cacheWrite = n(pd.cache_write_tokens != null ? pd.cache_write_tokens : pd.cache_creation_input_tokens);
+    output = n(raw.completion_tokens != null ? raw.completion_tokens : raw.output_tokens);
+  }
+  if (!input && !output) return null;
+  return { input, cached: Math.min(cached, input), cache_write: cacheWrite, output, reasoning: n(cd.reasoning_tokens) };
+}
+
+function recordProviderUsage(provider, model, rawUsage, chatId = '') {
+  const usage = normalizeProviderUsage(rawUsage);
+  if (!usage) return null;
+  providerUsageSession.calls += 1;
+  providerUsageSession.input += usage.input;
+  providerUsageSession.cached += usage.cached;
+  providerUsageSession.output += usage.output;
+  try {
+    void fetch(`${getAIExeBackendUrl()}/api/token-usage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ provider: String(provider || ''), model: String(model || ''), usage, chat_id: chatId }),
+    }).catch(() => undefined);
+  } catch (_) { /* usage is best-effort */ }
+  return usage;
+}
+
+// GPT-5.6+/GPT-6 bill cache WRITES at 1.25x input and write at automatic breakpoints
+// by default, so one-off agent calls (plan, file gen, checks) paid extra for caches
+// nobody read (Ledger run: 45.7k written, 4.7k read). Agent calls go explicit: no
+// automatic writes; step decisions mark one breakpoint after the fixed system prompt.
+function openAiExplicitCaching(provider, model) {
+  return provider === 'openai' && /^(?:gpt-6|gpt-5\.(?:[6-9]|\d{2}))/i.test(String(model || ''));
+}
+function applyOpenAiAgentCacheControl(provider, model, req, { breakpointOnSystem = false } = {}) {
+  if (!req || !openAiExplicitCaching(provider, model)) return req;
+  req.prompt_cache_options = { mode: 'explicit' };
+  if (breakpointOnSystem && Array.isArray(req.messages) && req.messages[0] && req.messages[0].role === 'system'
+    && typeof req.messages[0].content === 'string' && req.messages[0].content) {
+    req.messages[0] = {
+      role: 'system',
+      content: [{ type: 'text', text: req.messages[0].content, prompt_cache_breakpoint: { mode: 'explicit' } }],
+    };
+  }
+  return req;
+}
+function stripOpenAiCacheControl(req) {
+  if (!req) return req;
+  delete req.prompt_cache_options;
+  delete req.prompt_cache_key;
+  delete req.stream_options;
+  if (Array.isArray(req.messages) && req.messages[0] && Array.isArray(req.messages[0].content)
+    && req.messages[0].content.length === 1 && req.messages[0].content[0].prompt_cache_breakpoint) {
+    req.messages[0] = { role: req.messages[0].role, content: req.messages[0].content[0].text };
+  }
+  return req;
+}
+const CACHE_FIELD_REJECTION = /stream_options|include_usage|prompt_cache|unrecognized|unknown (?:field|parameter)|additional properties/i;
+
+// Claude caches only what's marked: the fixed system prompt is the stable prefix.
+function anthropicCachedSystem(system) {
+  const text = String(system || '');
+  return text ? [{ type: 'text', text, cache_control: { type: 'ephemeral' } }] : undefined;
+}
+
+// Cache routing hint per chat (OpenAI/Venice); harmless where caching is automatic.
+function applyPromptCacheHints(provider, req) {
+  if (!req || !PROMPT_CACHE_KEY_PROVIDERS.has(provider)) return req;
+  const chatId = String((activeInferenceRequest && activeInferenceRequest.chatId) || '').trim();
+  if (chatId && !req.prompt_cache_key) req.prompt_cache_key = `aiexe-${chatId}`.slice(0, 64);
+  return req;
+}
+
 async function streamOpenAiCompatibleChatCompletion(provider, prompt, handlers = {}, options = {}) {
+  const usageChatId = String((activeInferenceRequest && activeInferenceRequest.chatId) || '');
   if (!remoteProvidersEnabled) {
     return { ok: false, message: 'Remote inference providers are disabled in this offline build.' };
   }
@@ -12525,11 +12643,14 @@ async function streamOpenAiCompatibleChatCompletion(provider, prompt, handlers =
   // Think mode keeps the model's native reasoning on; otherwise off for speed.
   applyThinkingMode(provider, req, Boolean(options.thinkActive));
   adaptOpenAiRequest(provider, req);
+  applyPromptCacheHints(provider, req);
+  if (options.agentCall) applyOpenAiAgentCacheControl(provider, model, req);
+  if (STREAM_USAGE_PROVIDERS.has(provider)) req.stream_options = { include_usage: true };
   if (typeof handlers.onStart === 'function') {
     handlers.onStart(`${provider}_${Date.now()}`);
   }
   try {
-    const response = await fetch(endpointUrl, {
+    const send = () => fetch(endpointUrl, {
       method: 'POST',
       headers: {
         Authorization: getOpenAiCompatibleAuthHeader(provider, apiKey, endpointUrl),
@@ -12538,6 +12659,15 @@ async function streamOpenAiCompatibleChatCompletion(provider, prompt, handlers =
       body: JSON.stringify(req),
       signal: controller.signal,
     });
+    let response = await send();
+    // A server that rejects the optional usage/cache fields gets one retry without them.
+    if (!response.ok && response.status === 400 && (req.stream_options || req.prompt_cache_key || req.prompt_cache_options)) {
+      const body400 = await response.clone().text().catch(() => '');
+      if (CACHE_FIELD_REJECTION.test(body400)) {
+        stripOpenAiCacheControl(req);
+        response = await send();
+      }
+    }
     if (!response.ok) {
       const body = await response.text().catch(() => '');
       let message = humanizeProviderErrorMessage(def.label, response.status, body || response.statusText || '');
@@ -12561,16 +12691,8 @@ async function streamOpenAiCompatibleChatCompletion(provider, prompt, handlers =
     let output = '';
     let reasoningOpen = false;
     let streamFinishReason = '';
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const frames = buffer.split('\n\n');
-      buffer = frames.pop() || '';
-      for (const frame of frames) {
+    let streamUsage = null;
+    for await (const frame of readProviderSseFrames(response.body)) {
         const lines = String(frame || '').split('\n');
         for (const line of lines) {
           const trimmed = line.trim();
@@ -12583,6 +12705,7 @@ async function streamOpenAiCompatibleChatCompletion(provider, prompt, handlers =
           } catch (_) {
             continue;
           }
+          if (parsed && parsed.usage && typeof parsed.usage === 'object') streamUsage = parsed.usage;
           const finishReason = parsed && Array.isArray(parsed.choices) && parsed.choices[0]
             && parsed.choices[0].finish_reason ? String(parsed.choices[0].finish_reason) : '';
           if (finishReason) streamFinishReason = finishReason;
@@ -12617,18 +12740,20 @@ async function streamOpenAiCompatibleChatCompletion(provider, prompt, handlers =
             handlers.onDelta(closing + delta);
           }
         }
-      }
     }
     if (reasoningOpen) {
       output += '</native_thinking>';
       if (typeof handlers.onDelta === 'function') handlers.onDelta('</native_thinking>');
     }
+    const usage = recordProviderUsage(provider, model, streamUsage, usageChatId);
     if (!output.trim()) {
       return { ok: false, message: `${def.label} streamed response was empty.` };
     }
     return {
       ok: true,
       output,
+      usage,
+      model,
       truncated: streamFinishReason === 'length',
       status: {
         lastInferenceRoute: `${provider}:${model}`,
@@ -12649,6 +12774,7 @@ async function streamOpenAiCompatibleChatCompletion(provider, prompt, handlers =
 }
 
 async function streamAnthropicChatCompletion(prompt, handlers = {}, options = {}) {
+  const usageChatId = String((activeInferenceRequest && activeInferenceRequest.chatId) || '');
   if (!remoteProvidersEnabled) {
     return { ok: false, message: 'Remote inference providers are disabled in this offline build.' };
   }
@@ -12668,7 +12794,7 @@ async function streamAnthropicChatCompletion(prompt, handlers = {}, options = {}
   const payload = buildApiMessagePayloadFromPrompt(prompt);
   const req = {
     model,
-    system: payload.system || undefined,
+    system: anthropicCachedSystem(payload.system),
     messages: payload.messages.map((entry) => ({
       role: entry.role,
       content: entry.content,
@@ -12704,16 +12830,8 @@ async function streamAnthropicChatCompletion(prompt, handlers = {}, options = {}
       return { ok: false, message: `${def.label} response body is empty.` };
     }
     let output = '';
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const frames = buffer.split('\n\n');
-      buffer = frames.pop() || '';
-      for (const frame of frames) {
+    let anthropicUsage = {};
+    for await (const frame of readProviderSseFrames(response.body)) {
         const lines = String(frame || '').split('\n');
         let eventName = '';
         let payloadText = '';
@@ -12731,6 +12849,12 @@ async function streamAnthropicChatCompletion(prompt, handlers = {}, options = {}
           parsed = JSON.parse(payloadText);
         } catch (_) {
           continue;
+        }
+        // Usage: input + cache counts in message_start, output in message_delta.
+        if (eventName === 'message_start' && parsed && parsed.message && parsed.message.usage) {
+          anthropicUsage = { ...anthropicUsage, ...parsed.message.usage };
+        } else if (eventName === 'message_delta' && parsed && parsed.usage) {
+          anthropicUsage = { ...anthropicUsage, ...parsed.usage };
         }
         let delta = '';
         if (eventName === 'content_block_delta'
@@ -12751,11 +12875,12 @@ async function streamAnthropicChatCompletion(prompt, handlers = {}, options = {}
         if (typeof handlers.onDelta === 'function') {
           handlers.onDelta(delta);
         }
-      }
     }
     return {
       ok: true,
       output,
+      usage: recordProviderUsage(provider, model, anthropicUsage, usageChatId),
+      model,
       status: {
         lastInferenceRoute: `${provider}:${model}`,
         lastPersistentError: '',
@@ -13131,6 +13256,7 @@ function makeThinkingDeltaFilter(onDelta) {
 }
 
 async function requestOpenAiCompatibleTextCompletion(provider, prompt, maxTokens, systemPrompt = '', signal = null, thinkActive = false) {
+  const usageChatId = String((activeInferenceRequest && activeInferenceRequest.chatId) || '');
   if (!remoteProvidersEnabled) return null;
   const def = getInferenceProviderDef(provider);
   const apiKey = getProviderApiKey(provider);
@@ -13143,22 +13269,32 @@ async function requestOpenAiCompatibleTextCompletion(provider, prompt, maxTokens
   }
   if (!apiKey || !model || !endpointUrl) return null;
   try {
-    const response = await fetch(endpointUrl, {
+    const req = applyPromptCacheHints(provider, adaptOpenAiRequest(provider, applyThinkingMode(provider, {
+      model,
+      messages: systemPrompt
+        ? [{ role: 'system', content: String(systemPrompt) }, { role: 'user', content: String(prompt || '') }]
+        : [{ role: 'user', content: String(prompt || '') }],
+      max_tokens: Math.max(1, Number(maxTokens) || agentFileContentMaxTokens),
+      ...(systemPrompt && def && def.supportsToolCalling ? { tools: [agentStepFunctionSchema] } : {}),
+    }, Boolean(thinkActive))));
+    applyOpenAiAgentCacheControl(provider, model, req, { breakpointOnSystem: Boolean(systemPrompt) });
+    const send = () => fetch(endpointUrl, {
       method: 'POST',
       ...(signal ? { signal } : {}),
       headers: {
         Authorization: getOpenAiCompatibleAuthHeader(provider, apiKey, endpointUrl),
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify(adaptOpenAiRequest(provider, applyThinkingMode(provider, {
-        model,
-        messages: systemPrompt
-          ? [{ role: 'system', content: String(systemPrompt) }, { role: 'user', content: String(prompt || '') }]
-          : [{ role: 'user', content: String(prompt || '') }],
-        max_tokens: Math.max(1, Number(maxTokens) || agentFileContentMaxTokens),
-        ...(systemPrompt && def && def.supportsToolCalling ? { tools: [agentStepFunctionSchema] } : {}),
-      }, Boolean(thinkActive)))),
+      body: JSON.stringify(req),
     });
+    let response = await send();
+    if (!response.ok && response.status === 400 && (req.prompt_cache_key || req.prompt_cache_options)) {
+      const body400 = await response.clone().text().catch(() => '');
+      if (CACHE_FIELD_REJECTION.test(body400)) {
+        stripOpenAiCacheControl(req);
+        response = await send();
+      }
+    }
     if (!response.ok) {
       const status = response.status;
       const errBody = await response.json().catch(() => null);
@@ -13179,13 +13315,15 @@ async function requestOpenAiCompatibleTextCompletion(provider, prompt, maxTokens
       : (msg && typeof msg.content === 'string' ? msg.content : '');
     const choice0 = payload && Array.isArray(payload.choices) ? payload.choices[0] : null;
     const truncated = choice0 ? String(choice0.finish_reason || '').toLowerCase() === 'length' : false;
-    return text ? { ok: true, output: text, truncated } : null;
+    const usage = recordProviderUsage(provider, model, payload && payload.usage, usageChatId);
+    return text ? { ok: true, output: text, truncated, usage, model } : null;
   } catch (_) {
     return null;
   }
 }
 
 async function requestAnthropicTextCompletion(prompt, maxTokens, systemPrompt = '') {
+  const usageChatId = String((activeInferenceRequest && activeInferenceRequest.chatId) || '');
   if (!remoteProvidersEnabled) return null;
   const provider = 'anthropic';
   const def = getInferenceProviderDef(provider);
@@ -13208,7 +13346,7 @@ async function requestAnthropicTextCompletion(prompt, maxTokens, systemPrompt = 
       body: JSON.stringify({
         model,
         max_tokens: Math.max(1, Number(maxTokens) || agentFileContentMaxTokens),
-        ...(systemPrompt ? { system: String(systemPrompt) } : {}),
+        ...(systemPrompt ? { system: anthropicCachedSystem(systemPrompt) } : {}),
         messages: [{ role: 'user', content: String(prompt || '') }],
         ...(useTools ? {
           tools: [{
@@ -13231,7 +13369,8 @@ async function requestAnthropicTextCompletion(prompt, maxTokens, systemPrompt = 
         .map((block) => block.text)
         .join('');
     const truncated = String((payload && payload.stop_reason) || '').toLowerCase() === 'max_tokens';
-    return text ? { ok: true, output: text, truncated } : null;
+    const usage = recordProviderUsage(provider, model, payload && payload.usage, usageChatId);
+    return text ? { ok: true, output: text, truncated, usage, model } : null;
   } catch (_) {
     return null;
   }
@@ -13318,6 +13457,7 @@ async function requestSelectedRemoteTextCompletion(prompt, maxTokens, systemProm
       maxTokens: Number(maxTokens) || 0,
       promptChars: String(prompt || '').length,
       outputChars: String((result && result.output) || '').length,
+      usage: (result && result.usage) || null,
       systemPrompt: String(systemPrompt || ''),
       prompt: String(prompt || ''),
       output: String((result && result.output) || ''),
@@ -13407,6 +13547,7 @@ async function requestRemoteTextCompletionForCapability(capability, prompt, maxT
     const result = await streamRemoteChatCompletion(provider, prompt, {
       onDelta: userDelta && agentThink ? makeThinkingDeltaFilter(userDelta) : userDelta,
     }, {
+      agentCall: true,
       maxTokens: Math.max(1, Number(maxTokens) || 64),
       thinkActive: agentThink,
       // Wire the registered abortController into the actual stream so a timeout / new run
@@ -17285,6 +17426,7 @@ const agentPlanner = window.AIExeAgentPlanner && typeof window.AIExeAgentPlanner
     requestAgentPlannerInference,
     getWorkspaceContext,
     getAgentEnvironmentContext,
+    getAgentNowLine,
     buildAgentUserGuidance,
     deriveProjectNameFromTask,
     agentMaxSteps,
@@ -19827,6 +19969,144 @@ async function refreshAccountUsageInline() {
   }
 }
 
+let usageDashboardPeriod = '';
+let usageDashboardRequest = 0;
+async function renderUsageDashboard() {
+  const root = document.getElementById('usageDashboard');
+  if (!root) return;
+  const now = new Date();
+  if (!usageDashboardPeriod) usageDashboardPeriod = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  const request = ++usageDashboardRequest;
+  const e = (value) => escapeHtml(String(value));
+  const n = (value) => Number.isFinite(Number(value)) ? Math.max(0, Number(value)) : 0;
+  const total = (row) => n(row.input) + n(row.output);
+  const fmt = (value) => formatTokenCount(n(value));
+  const exact = (value) => n(value).toLocaleString();
+  root.setAttribute('aria-busy', 'true');
+  if (!root.children.length) root.textContent = 'Loading usage…';
+  let data;
+  try {
+    const response = await fetch(`${getAIExeBackendUrl()}/api/token-usage?period=${encodeURIComponent(usageDashboardPeriod)}`);
+    if (!response.ok) throw new Error('Usage could not be loaded.');
+    data = await response.json();
+  } catch (_) {
+    if (request !== usageDashboardRequest) return;
+    root.innerHTML = '<p class="usage-muted">Usage is unavailable. Check the local service and try again.</p><button type="button" class="usage-button" data-usage-retry>Try again</button>';
+    root.querySelector('[data-usage-retry]').onclick = () => void renderUsageDashboard();
+    root.setAttribute('aria-busy', 'false');
+    return;
+  }
+  if (request !== usageDashboardRequest) return;
+  const models = [];
+  Object.entries(data.providers || {}).forEach(([provider, entries]) => {
+    Object.entries(entries || {}).forEach(([model, row]) => models.push({ provider, model, ...row }));
+  });
+  models.sort((a, b) => total(b) - total(a));
+  const sums = {input:0, output:0, cached:0, cache_write:0, reasoning:0, calls:0};
+  models.forEach(row => Object.keys(sums).forEach(key => { sums[key] += n(row[key]); }));
+  const sum = total(sums);
+  const pct = sums.input ? Math.round(sums.cached / sums.input * 100) : 0;
+  const [year, month] = usageDashboardPeriod.split('-').map(Number);
+  const dayCount = new Date(year, month, 0).getDate();
+  const days = Array.from({length: dayCount}, (_, i) => {
+    const date = `${usageDashboardPeriod}-${String(i + 1).padStart(2, '0')}`;
+    return {date, day:i + 1, ...(data.days || {})[date]};
+  });
+  const dailyTotal = days.reduce((acc, row) => acc + total(row), 0);
+  const peak = Math.max(1, ...days.map(total));
+  const chatEntries = Object.entries(data.chats || {}).map(([id, row]) => ({id, ...row})).sort((a,b) => total(b) - total(a));
+  const attributed = chatEntries.reduce((acc, row) => acc + (row.id ? total(row) : 0), 0);
+  const extra = Math.max(0, sum - chatEntries.reduce((acc, row) => acc + total(row), 0));
+  if (extra) chatEntries.push({id:'', input:extra, output:0, legacy:true});
+  const detail = row => `<dl class="usage-detail"><div><dt>Input</dt><dd>${exact(row.input)}</dd></div><div><dt>Output</dt><dd>${exact(row.output)}</dd></div><div><dt>Cache reads</dt><dd>${exact(row.cached)}</dd></div><div><dt>Cache writes</dt><dd>${exact(row.cache_write)}</dd></div><div><dt>Reasoning</dt><dd>${exact(row.reasoning)}</dd></div><div><dt>Calls</dt><dd>${exact(row.calls)}</dd></div></dl>`;
+  root.innerHTML = `
+    <div class="usage-toolbar"><details class="usage-month-picker"><summary aria-label="Choose usage month">${e(new Date(year, month - 1).toLocaleDateString(undefined, {month:'long', year:'numeric'}))}<svg class="usage-chevron" aria-hidden="true" viewBox="0 0 16 16" fill="none"><path d="m4 6 4 4 4-4"/></svg></summary><div class="usage-month-panel"><div class="usage-year-nav"><button type="button" aria-label="Previous year" data-usage-year="-1">‹</button><strong data-usage-year-label>${year}</strong><button type="button" aria-label="Next year" data-usage-year="1">›</button></div><div class="usage-month-grid"></div><button type="button" class="usage-button" data-usage-today>This month</button></div></details><button class="usage-button" type="button" data-usage-refresh>Refresh</button></div>
+    <div class="usage-overview"><div><span class="usage-muted">Tokens used</span><div class="usage-total" title="${exact(sum)} tokens">${fmt(sum)}</div><span class="usage-muted">${exact(sums.calls)} provider calls</span></div><div class="usage-summary"><div><span>Input</span><strong>${fmt(sums.input)}</strong></div><div><span>Output</span><strong>${fmt(sums.output)}</strong></div><div><span>Input served from cache</span><strong>${pct}%</strong></div></div></div>
+    <section class="usage-section" aria-label="Daily token usage"><div class="usage-section-heading"><h3>Daily activity</h3><div class="usage-legend"><span>Input</span><span>Output</span></div></div>
+    <div class="usage-chart" aria-label="Daily input and output tokens">${days.map(row => {
+      const label = `${row.date}: ${exact(row.input)} input, ${exact(row.output)} output, ${exact(row.cached)} cached, ${exact(row.calls)} calls`;
+      const dateLabel = new Date(year, month - 1, row.day).toLocaleDateString(undefined, {month:'short', day:'numeric', year:'numeric'});
+      const breakdown = total(row) ? `<span><span>Input</span><strong>${exact(row.input)}</strong></span><span><span>Output</span><strong>${exact(row.output)}</strong></span><span><span>Cached</span><strong>${exact(row.cached)}</strong></span><span><span>Calls</span><strong>${exact(row.calls)}</strong></span>` : '<span class="usage-day-empty">No recorded usage</span>';
+      return `<button type="button" class="usage-day" data-usage-day="${row.day}" aria-label="${e(label)}" style="--usage-height:${total(row) / peak * 100}%;--usage-output:${total(row) ? n(row.output) / total(row) * 100 : 0}%"><span class="usage-bar"><span></span></span><small>${row.day === 1 || row.day % 5 === 0 || row.day === dayCount ? row.day : ''}</small><span class="usage-day-tooltip" aria-hidden="true"><strong>${e(dateLabel)}</strong><span class="usage-day-breakdown">${breakdown}</span></span></button>`;
+    }).join('')}</div>
+    ${dailyTotal < sum ? '<p class="usage-muted usage-note">Daily history starts with this update. Earlier usage is included in the monthly total.</p>' : ''}
+    </section>
+    <section class="usage-section"><div class="usage-section-heading"><h3>Chats using the most</h3><span class="usage-muted">Input + output</span></div>
+    ${chatEntries.length ? chatEntries.sort((a,b) => total(b)-total(a)).map((row, index) => {
+      const chat = row.id ? findChatById(row.id) : null;
+      const name = chat ? chat.name : row.id ? 'Deleted or unavailable chat' : row.legacy ? 'Earlier usage' : 'Other activity';
+      return `<details class="usage-ranked"><summary data-usage-tooltip="${index}"><span class="usage-ranked-name">${e(name)}</span><span>${fmt(total(row))}</span><span class="usage-share">${sum ? Math.round(total(row)/sum*100) : 0}%</span></summary><div class="usage-rank-track"><span style="width:${sum ? total(row)/sum*100 : 0}%"></span></div><div class="usage-expanded">${row.legacy ? '<p class="usage-muted">Recorded before chat attribution was available.</p>' : detail(row)}${chat ? `<button type="button" class="usage-button" data-usage-chat="${e(row.id)}">Open chat</button>` : ''}</div></details>`;
+    }).join('') : '<p class="usage-empty">Your chats will appear here after a provider reports usage.</p>'}
+    ${sum && attributed < sum ? '<p class="usage-muted usage-note">Earlier usage and calls without a chat stay separate; they are never assigned to a guessed chat.</p>' : ''}</section>
+    <section class="usage-section"><h3>Providers & models</h3>${models.length ? models.map(row => `<details class="usage-ranked"><summary><span class="usage-ranked-name">${e(row.model)}<small>${e((getInferenceProviderDef(row.provider) || {}).label || row.provider)}</small></span><span>${fmt(total(row))}</span><span class="usage-share">${exact(row.calls)} calls</span></summary><div class="usage-expanded">${detail(row)}</div></details>`).join('') : '<p class="usage-empty">No recorded usage for this month.</p>'}</section>
+    <p class="usage-muted usage-note">Provider-reported usage from this device, not your account balance. Cache reads and writes are included in input; reasoning is included in output. Calls without a usage report are not counted.</p>`;
+  root.setAttribute('aria-busy', 'false');
+  const picker = root.querySelector('.usage-month-picker');
+  const grid = root.querySelector('.usage-month-grid');
+  let pickerYear = year;
+  const chooseMonth = (value) => { usageDashboardPeriod = value; void renderUsageDashboard(); };
+  const paintMonths = () => {
+    root.querySelector('[data-usage-year-label]').textContent = pickerYear;
+    grid.innerHTML = Array.from({length:12}, (_, i) => `<button type="button" aria-pressed="${pickerYear === year && i === month - 1}" data-month="${i + 1}">${new Date(pickerYear, i).toLocaleDateString(undefined, {month:'short'})}</button>`).join('');
+    grid.querySelectorAll('button').forEach(button => { button.onclick = () => chooseMonth(`${pickerYear}-${String(button.dataset.month).padStart(2, '0')}`); });
+  };
+  paintMonths();
+  root.querySelectorAll('[data-usage-year]').forEach(button => { button.onclick = () => { pickerYear = Math.max(2000, Math.min(9999, pickerYear + Number(button.dataset.usageYear))); paintMonths(); }; });
+  root.querySelector('[data-usage-today]').onclick = () => chooseMonth(`${now.getFullYear()}-${String(now.getMonth()+1).padStart(2, '0')}`);
+  picker.addEventListener('keydown', event => { if (event.key === 'Escape') { picker.open = false; picker.querySelector('summary').focus(); } });
+  root.onpointerdown = event => { if (!picker.contains(event.target)) picker.open = false; };
+  const tooltip = document.createElement('div');
+  tooltip.className = 'usage-chat-tooltip'; tooltip.id = 'usageChatTooltip'; tooltip.role = 'tooltip'; tooltip.hidden = true;
+  root.appendChild(tooltip);
+  root.querySelectorAll('[data-usage-tooltip]').forEach(summary => {
+    const hide = () => { tooltip.hidden = true; summary.removeAttribute('aria-describedby'); };
+    const show = () => {
+      const row = chatEntries[Number(summary.dataset.usageTooltip)];
+      tooltip.innerHTML = `<strong>${e(summary.querySelector('.usage-ranked-name').textContent)}</strong><p>${exact(total(row))} tokens this month</p>${row.legacy ? '<p>Recorded before chat tracking began.</p>' : detail(row)}`;
+      tooltip.hidden = false; summary.setAttribute('aria-describedby', tooltip.id);
+      const rect = summary.getBoundingClientRect();
+      tooltip.style.left = `${Math.max(12, Math.min(rect.left, window.innerWidth - tooltip.offsetWidth - 12))}px`;
+      tooltip.style.top = `${Math.max(12, rect.top - tooltip.offsetHeight - 10)}px`;
+    };
+    summary.addEventListener('mouseenter', show); summary.addEventListener('focus', show);
+    summary.addEventListener('mouseleave', hide); summary.addEventListener('blur', hide); summary.addEventListener('click', hide);
+    summary.addEventListener('keydown', event => { if (event.key === 'Escape') hide(); });
+  });
+  root.closest('.settings-pane').onscroll = () => { tooltip.hidden = true; };
+  root.querySelector('[data-usage-refresh]').onclick = () => void renderUsageDashboard();
+  root.querySelectorAll('[data-usage-chat]').forEach(button => {
+    button.onclick = () => { closeSettingsModal(); loadHistory(button.dataset.usageChat); };
+  });
+}
+
+async function readTrackedTokenUsage(provider) {
+  try {
+    const res = await fetch(`${getAIExeBackendUrl()}/api/token-usage`);
+    if (!res.ok) return '';
+    const data = await res.json();
+    const models = (data && data.providers && data.providers[provider]) || {};
+    return Object.keys(models).map((model) => {
+      const row = models[model];
+      const pct = row.input ? Math.round((row.cached / row.input) * 100) : 0;
+      return `${model} tracked this month: ${row.calls} calls · ${formatTokenCount(row.input)} in (${pct}% cached) · ${formatTokenCount(row.output)} out`;
+    }).join('\n');
+  } catch (_) {
+    return '';
+  }
+}
+// DeepSeek publishes the real balance: GET /user/balance.
+async function readDeepSeekBalance(key) {
+  try {
+    const res = await fetch('https://api.deepseek.com/user/balance', { headers: { Authorization: `Bearer ${key}` } });
+    if (!res.ok) return '';
+    const data = await res.json();
+    const info = Array.isArray(data && data.balance_infos) ? data.balance_infos[0] : null;
+    return info ? `Balance: ${info.total_balance} ${info.currency}` : '';
+  } catch (_) {
+    return '';
+  }
+}
+
 async function showProviderUsageNotification() {
   const provider = getSelectedInferenceProvider();
   const def = getInferenceProviderDef(provider);
@@ -19876,7 +20156,16 @@ async function showProviderUsageNotification() {
   const base = String(getProviderEndpoint(provider) || '').replace(/\/chat\/completions\/?$/i, '');
   const key = String(getProviderApiKey(provider) || '').trim();
   if (!/venice/i.test(base) || !base || !key) {
-    showAppNotification({ title: 'Usage', message: 'Live usage is only available for Venice and local providers.', kind: 'info' });
+    // Every other API: the usage its own responses reported this month (+ DeepSeek's balance).
+    const tracked = await readTrackedTokenUsage(provider);
+    const balance = provider === 'deepseek' && key ? await readDeepSeekBalance(key) : '';
+    const lines = [balance, tracked].filter(Boolean);
+    updateAccountUsageSubline(balance || (tracked ? tracked.split('\n')[0] : 'Provider usage'));
+    showAppNotification({
+      title: `${(def && def.label) || 'Provider'} usage`,
+      message: lines.length ? lines.join('\n') : 'No provider-reported usage recorded by this app this month.',
+      kind: 'info',
+    });
     return;
   }
   showAppNotification({ title: 'Usage', message: 'Checking your Venice balance…', kind: 'info' });

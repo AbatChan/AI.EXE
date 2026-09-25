@@ -1641,6 +1641,7 @@ bool WorkspaceRevealEntry(const WebRuntimeBridge &runtime,
 // an install hint if neither exists, then opens it (Terminal runs .command files).
 bool LaunchPythonConsoleMac(const std::filesystem::path &root,
                             const std::string &entry_filename,
+                            const std::vector<std::string> &args,
                             std::string *err) {
   auto sh_quote = [](const std::string &s) {
     // Single-quote for the shell: close, escaped-quote, reopen.
@@ -1671,8 +1672,9 @@ bool LaunchPythonConsoleMac(const std::filesystem::path &root,
          << "  VPY=.venv/bin/python\n"
          << "  if [ ! -x \"$VPY\" ]; then VPY=\"$PY\"; fi\n"
          << "  if [ -f requirements.txt ]; then echo 'Installing dependencies...'; \"$VPY\" -m pip install --quiet --disable-pip-version-check -r requirements.txt; fi\n"
-         << "  \"$VPY\" " << sh_quote(entry_filename) << "\n"
-         << "fi\n"
+         << "  \"$VPY\" " << sh_quote(entry_filename);
+  for (const auto &arg : args) script << " " << sh_quote(arg);
+  script << "\nfi\n"
          << "echo\n"
          << "read -n 1 -s -r -p 'Press any key to close this window...'\n";
 
@@ -2771,8 +2773,18 @@ static bool IsPreventingIdleSleepOnMac() {
     DevServerManager::Instance().StopAll();
     ClearWorkspaceRootOverride();
     message = "Project closed.";
+  } else if (action == "inspectRunTarget") {
+    const std::filesystem::path root = WorkspaceRootOrEmpty();
+    if (root.empty()) {
+      ok = false;
+      message = "No project is open to run.";
+    } else {
+      const RunTarget target = DetectRunTarget(root);
+      output = target.kind == RunTargetKind::kPython ? "python" : "other";
+    }
   } else if (action == "runWorkspaceApp") {
     const std::filesystem::path root = WorkspaceRootOrEmpty();
+    const std::vector<std::string> run_args = ParseRunArgsLines(ExtractJsonStringField(requestJson, "argsLine"));
     if (root.empty()) {
       ok = false;
       message = "No project is open to run.";
@@ -2825,7 +2837,7 @@ static bool IsPreventingIdleSleepOnMac() {
         }
       } else if (target.kind == RunTargetKind::kPython) {
         const std::string entry = target.entry.filename().string();
-        if (LaunchPythonConsoleMac(root, entry, &op_err)) {
+        if (LaunchPythonConsoleMac(root, entry, run_args, &op_err)) {
           output = entry;
           message = std::string("Running ") + entry + " in Terminal.";
         } else {

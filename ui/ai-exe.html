@@ -228,7 +228,7 @@
                 <span>Usage remaining</span>
                 <span class="account-popover-sub" id="accountUsageSub">Check balance</span>
               </span>
-              <span class="account-popover-arrow">›</span>
+              <svg class="account-popover-arrow" aria-hidden="true" width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="m6 4 4 4-4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
             </button>
             <button class="account-popover-item" id="accountLogoutBtn" type="button">
               <span class="account-popover-icon">
@@ -815,6 +815,9 @@
               </span>
               <span>Models & Inference</span>
             </button>
+            <button class="settings-nav-btn" type="button" data-settings-section="usage">
+              <span class="settings-nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 20V10m8 10V4m8 16v-7"/></svg></span><span>Usage</span>
+            </button>
             <button class="settings-nav-btn" type="button" data-settings-section="workers">
               <span class="settings-nav-icon">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -999,6 +1002,9 @@
             </div>
           </div>
 
+          <div class="settings-pane" data-settings-pane="usage">
+            <div class="settings-section usage-dashboard" id="usageDashboard" aria-live="polite"></div>
+          </div>
           <div class="settings-pane" data-settings-pane="workers">
             <div class="settings-section">
               <div class="settings-section-title">Providers</div>
