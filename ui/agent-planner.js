@@ -142,6 +142,8 @@
       const hasInteraction = /click|submit|input|change|keydown|toggle|show|hide|reveal|surprise/i.test(lower);
       const taskWantsReveal = /\b(surprise|reveal|secret|easter egg|modal|landing|website|site|page)\b/i.test(lowerTask);
       if (text.trim().length >= 320 && isDomScript && hasInteraction && (taskWantsReveal || score >= 2)) return true;
+      // A substantial structured module (e.g. a formula engine, no DOM) isn't "thin".
+      if (text.trim().length >= 3000 && score >= 1) return true;
       return text.trim().length >= 700 && score >= 3;
     }
 

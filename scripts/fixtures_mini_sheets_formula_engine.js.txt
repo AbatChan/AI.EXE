@@ -1,0 +1,371 @@
+(() => {
+  "use strict";
+
+  const ADDRESS_PATTERN = /^[A-Z](?:[1-9]|[1-4]\d|50)$/;
+  const NUMBER_PATTERN = /^(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/;
+
+  class FormulaError extends Error {
+    constructor(code) {
+      super(code);
+      this.code = code;
+    }
+  }
+
+  function fail(code = "#ERR") {
+    throw new FormulaError(code);
+  }
+
+  function tokenize(source) {
+    const tokens = [];
+    let position = 0;
+
+    while (position < source.length) {
+      const rest = source.slice(position);
+      const whitespace = /^\s+/.exec(rest);
+      if (whitespace) {
+        position += whitespace[0].length;
+        continue;
+      }
+
+      const number = /^(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?/.exec(rest);
+      if (number) {
+        const value = Number(number[0]);
+        if (!Number.isFinite(value)) fail();
+        tokens.push({ type: "number", value });
+        position += number[0].length;
+        continue;
+      }
+
+      const word = /^[A-Za-z_][A-Za-z0-9_]*/.exec(rest);
+      if (word) {
+        tokens.push({ type: "word", value: word[0] });
+        position += word[0].length;
+        continue;
+      }
+
+      const character = source[position];
+      if ("+-*/():,".includes(character)) {
+        tokens.push({ type: character, value: character });
+        position += 1;
+        continue;
+      }
+
+      fail();
+    }
+
+    tokens.push({ type: "eof", value: "" });
+    return tokens;
+  }
+
+  function parseFormula(source) {
+    const tokens = tokenize(source);
+    let position = 0;
+
+    function peek(type) {
+      return tokens[position].type === type;
+    }
+
+    function consume(type) {
+      if (!peek(type)) fail();
+      return tokens[position++];
+    }
+
+    function parseExpression() {
+      let node = parseTerm();
+
+      while (peek("+") || peek("-")) {
+        const operator = tokens[position++].type;
+        node = { type: "binary", operator, left: node, right: parseTerm() };
+      }
+
+      return node;
+    }
+
+    function parseTerm() {
+      let node = parseUnary();
+
+      while (peek("*") || peek("/")) {
+        const operator = tokens[position++].type;
+        node = { type: "binary", operator, left: node, right: parseUnary() };
+      }
+
+      return node;
+    }
+
+    function parseUnary() {
+      if (peek("+") || peek("-")) {
+        const operator = tokens[position++].type;
+        return { type: "unary", operator, value: parseUnary() };
+      }
+      return parsePrimary();
+    }
+
+    function parsePrimary() {
+      if (peek("number")) {
+        return { type: "number", value: consume("number").value };
+      }
+
+      if (peek("(")) {
+        consume("(");
+        const expression = parseExpression();
+        consume(")");
+        return expression;
+      }
+
+      if (!peek("word")) fail();
+      const name = consume("word").value;
+      const upperName = name.toUpperCase();
+
+      if (peek("(")) {
+        if (!["SUM", "AVERAGE", "MIN", "MAX"].includes(upperName)) fail();
+        consume("(");
+
+        const args = [];
+        if (!peek(")")) {
+          args.push(parseExpression());
+          while (peek(",")) {
+            consume(",");
+            args.push(parseExpression());
+          }
+        }
+
+        consume(")");
+        return { type: "function", name: upperName, args };
+      }
+
+      const address = upperName;
+      if (!ADDRESS_PATTERN.test(address)) fail();
+
+      if (peek(":")) {
+        consume(":");
+        if (!peek("word")) fail();
+
+        const endAddress = consume("word").value.toUpperCase();
+        if (!ADDRESS_PATTERN.test(endAddress)) fail();
+
+        return { type: "range", start: address, end: endAddress };
+      }
+
+      return { type: "reference", address };
+    }
+
+    const ast = parseExpression();
+    if (!peek("eof")) fail();
+    return ast;
+  }
+
+  function columnIndex(address) {
+    return address.charCodeAt(0) - 65;
+  }
+
+  function rowIndex(address) {
+    return Number(address.slice(1)) - 1;
+  }
+
+  function addressAt(row, column) {
+    return `${String.fromCharCode(65 + column)}${row + 1}`;
+  }
+
+  function addressesInRange(start, end) {
+    const firstColumn = columnIndex(start);
+    const lastColumn = columnIndex(end);
+    const firstRow = rowIndex(start);
+    const lastRow = rowIndex(end);
+
+    const addresses = [];
+    for (
+      let row = Math.min(firstRow, lastRow);
+      row <= Math.max(firstRow, lastRow);
+      row += 1
+    ) {
+      for (
+        let column = Math.min(firstColumn, lastColumn);
+        column <= Math.max(firstColumn, lastColumn);
+        column += 1
+      ) {
+        addresses.push(addressAt(row, column));
+      }
+    }
+
+    return addresses;
+  }
+
+  function recalculate(cells) {
+    const sourceCells = cells && typeof cells === "object" ? cells : Object.create(null);
+    const cache = Object.create(null);
+    const states = Object.create(null);
+    const values = Object.create(null);
+
+    function asFormulaError(error) {
+      return error instanceof FormulaError ? error : new FormulaError("#ERR");
+    }
+
+    function numericValue(value) {
+      if (typeof value !== "number" || !Number.isFinite(value)) fail();
+      return value;
+    }
+
+    function evaluateAst(node) {
+      if (node.type === "number") return { value: node.value, blank: false };
+
+      if (node.type === "reference") {
+        const result = evaluateCell(node.address);
+        if (result.error) fail(result.error);
+        return result;
+      }
+
+      if (node.type === "range") {
+        fail();
+      }
+
+      if (node.type === "unary") {
+        const operand = numericValue(evaluateAst(node.value).value);
+        const result = node.operator === "-" ? -operand : operand;
+        if (!Number.isFinite(result)) fail();
+        return { value: result, blank: false };
+      }
+
+      if (node.type === "binary") {
+        const left = numericValue(evaluateAst(node.left).value);
+        const right = numericValue(evaluateAst(node.right).value);
+        let result;
+
+        switch (node.operator) {
+          case "+":
+            result = left + right;
+            break;
+          case "-":
+            result = left - right;
+            break;
+          case "*":
+            result = left * right;
+            break;
+          case "/":
+            if (right === 0) fail("#DIV/0");
+            result = left / right;
+            break;
+          default:
+            fail();
+        }
+
+        if (!Number.isFinite(result)) fail();
+        return { value: result, blank: false };
+      }
+
+      if (node.type === "function") {
+        return evaluateFunction(node);
+      }
+
+      fail();
+    }
+
+    function evaluateFunction(node) {
+      const numbers = [];
+
+      for (const argument of node.args) {
+        if (argument.type === "range") {
+          for (const address of addressesInRange(argument.start, argument.end)) {
+            const item = evaluateCell(address);
+            if (item.error) fail(item.error);
+            if (!item.blank && typeof item.value === "number") {
+              numbers.push(item.value);
+            }
+          }
+          continue;
+        }
+
+        const item = evaluateAst(argument);
+        if (!item.blank && typeof item.value === "number") {
+          numbers.push(item.value);
+        }
+      }
+
+      let result;
+      switch (node.name) {
+        case "SUM":
+          result = numbers.reduce((total, number) => total + number, 0);
+          break;
+        case "AVERAGE":
+          if (numbers.length === 0) fail("#DIV/0");
+          result = numbers.reduce((total, number) => total + number, 0) / numbers.length;
+          break;
+        case "MIN":
+          result = numbers.length ? Math.min(...numbers) : 0;
+          break;
+        case "MAX":
+          result = numbers.length ? Math.max(...numbers) : 0;
+          break;
+        default:
+          fail();
+      }
+
+      if (!Number.isFinite(result)) fail();
+      return { value: result, blank: false };
+    }
+
+    function evaluateCell(address) {
+      if (!ADDRESS_PATTERN.test(address)) fail();
+      if (states[address] === 1) fail("#CYCLE");
+      if (states[address] === 2) return cache[address];
+
+      const rawValue = sourceCells[address];
+      if (rawValue === undefined || rawValue === null || rawValue === "") {
+        return { value: 0, blank: true };
+      }
+
+      states[address] = 1;
+
+      try {
+        let result;
+
+        if (typeof rawValue === "number") {
+          if (!Number.isFinite(rawValue)) fail();
+          result = { value: rawValue, blank: false };
+        } else if (typeof rawValue !== "string") {
+          result = { value: String(rawValue), blank: false };
+        } else if (rawValue.startsWith("=")) {
+          result = evaluateAst(parseFormula(rawValue.slice(1)));
+        } else if (NUMBER_PATTERN.test(rawValue.trim())) {
+          const number = Number(rawValue.trim());
+          if (!Number.isFinite(number)) fail();
+          result = { value: number, blank: false };
+        } else {
+          result = { value: rawValue, blank: false };
+        }
+
+        states[address] = 2;
+        cache[address] = result;
+        return result;
+      } catch (error) {
+        const formulaError = asFormulaError(error);
+        const result = { value: formulaError.code, error: formulaError.code, blank: false };
+        states[address] = 2;
+        cache[address] = result;
+        return result;
+      }
+    }
+
+    for (const [address, rawValue] of Object.entries(sourceCells)) {
+      if (!ADDRESS_PATTERN.test(address) || rawValue === "" || rawValue === null || rawValue === undefined) {
+        continue;
+      }
+
+      const result = evaluateCell(address);
+      values[address] = result.error
+        ? { value: result.error, error: result.error }
+        : { value: result.value };
+    }
+
+    return { values };
+  }
+
+  const engine = {
+    recalculate,
+    calculateSheet: recalculate,
+    calculate: recalculate,
+    evaluateSheet: recalculate
+  };
+
+  const root = typeof globalThis !== "undefined" ? globalThis : window;
+  root.MiniSheetsFormulaEngine = engine;
+})();

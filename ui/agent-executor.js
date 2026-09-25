@@ -1526,9 +1526,11 @@ export default config;
         };
       }
 
+      // The app's entry page first: a follow-up that plans a helper page (tests.html)
+      // must not make run_app smoke-test that page instead of the app.
       const htmlCandidates = normalizeWorkspacePathList([
-        ...plannedFiles.filter((path) => /\.html?$/i.test(path)),
         '/index.html',
+        ...plannedFiles.filter((path) => /\.html?$/i.test(path)),
       ]);
       for (const path of htmlCandidates) {
         if (plannedFiles.includes(path)) {
@@ -4015,9 +4017,10 @@ export default config;
           return { ok: false, mutated, observation: 'run_app is not available in this build.' };
         }
         const requestedHtml = deps.normalizeWorkspacePath(decision.path || '');
-        const htmlTarget = proof && proof.kind === 'smoke'
-          ? deps.normalizeWorkspacePath(proof.path || '/index.html')
-          : (/\.html?$/i.test(requestedHtml) ? requestedHtml : '/index.html');
+        // An explicit page from the model wins; otherwise the detected entry page.
+        const htmlTarget = /\.html?$/i.test(requestedHtml)
+          ? requestedHtml
+          : (proof && proof.kind === 'smoke' ? deps.normalizeWorkspacePath(proof.path || '/index.html') : '/index.html');
         deps.setActiveAgentStreamStatus(chatId, `Running ${htmlTarget} in the offline preview...`);
         // A harness-issued re-run (no checks of its own) repeats the model's latest checks,
         // so "started cleanly" can't stand in for checks that failed before the last edit.
