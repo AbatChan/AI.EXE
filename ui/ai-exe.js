@@ -10415,6 +10415,7 @@ function syncSettingsWorkModeUi() {
 
 function openSettingsSection(section) {
   const key = String(section || 'general').trim().toLowerCase();
+  if (key !== 'usage') clearTimeout(creditBalanceTimer);
   settingsNavButtons.forEach((btn) => {
     btn.classList.toggle('active', String(btn.dataset.settingsSection || '').trim().toLowerCase() === key);
   });
@@ -12545,6 +12546,7 @@ function recordProviderUsage(provider, model, rawUsage, chatId = '') {
       body: JSON.stringify({ provider: String(provider || ''), model: String(model || ''), usage, chat_id: chatId }),
     }).catch(() => undefined);
   } catch (_) { /* usage is best-effort */ }
+  if (CREDIT_BALANCE_PROVIDERS.includes(provider) && isUsageDashboardVisible()) scheduleCreditBalanceRefresh(10000);
   return usage;
 }
 
@@ -15399,6 +15401,7 @@ async function openSettingsModal() {
 
 function closeSettingsModal() {
   if (!settingsBackdrop) return;
+  clearTimeout(creditBalanceTimer);
   settingsBackdrop.classList.remove('open');
   settingsBackdrop.setAttribute('aria-hidden', 'true');
   setSettingsLoading(false);
@@ -19969,6 +19972,263 @@ async function refreshAccountUsageInline() {
   }
 }
 
+const CREDIT_REFERENCE_STORE = 'aiexe-credit-references-v1';
+const CREDIT_BALANCE_PROVIDERS = ['deepseek', 'venice'];
+// Standard text rates per million tokens, checked against provider pricing on 2026-09-25.
+const CREDIT_COST_RATES = {
+  openai: {
+    'gpt-6-astra': { input: 10, cached: 1, write: 12.5, output: 50 },
+    'gpt-6-sol': { input: 2, cached: .2, write: 2.5, output: 10 },
+    'gpt-6-luna': { input: .1, cached: .01, write: .125, output: .5 },
+  },
+  anthropic: {
+    'claude-opus-5-5': { input: 4, cached: .2, write: 5, output: 20 },
+    'claude-sonnet-5': { input: 2, cached: .2, write: 2.5, output: 10 },
+    'claude-haiku-4-5-20251001': { input: 1, cached: .1, write: 1.25, output: 5 },
+  },
+  gemini: {
+    'gemini-3.8-flash': { input: .75, cached: .075, output: 3.75, through: '2026-12' },
+    'gemini-3.7-flash': { input: .75, cached: .075, output: 3.75, through: '2026-12' },
+    'gemini-3.5-flash': { input: 1.5, cached: .15, output: 9 },
+  },
+};
+const CREDIT_PRICE_URLS = {
+  openai: 'https://developers.openai.com/api/docs/pricing',
+  anthropic: 'https://platform.claude.com/docs/en/about-claude/pricing',
+  gemini: 'https://ai.google.dev/gemini-api/docs/pricing',
+};
+let creditReferences = null;
+let creditBalanceRows = [];
+let creditBalanceCheckedAt = 0;
+let creditBalanceSourceKey = '';
+let creditBalancePending = null;
+let creditBalanceTimer = null;
+let usageDashboardCostData = null;
+
+function parseDeepSeekCreditBalances(data) {
+  return (Array.isArray(data && data.balance_infos) ? data.balance_infos : [])
+    .map((info) => ({
+      currency: String(info && info.currency || '').toUpperCase(),
+      amount: info && info.total_balance != null && String(info.total_balance).trim() !== '' ? Number(info.total_balance) : NaN,
+    }))
+    .filter((row) => /^[A-Z]{3}$/.test(row.currency) && Number.isFinite(row.amount) && row.amount >= 0);
+}
+
+function creditRemainingPercent(amount, reference) {
+  if (!(reference > 0) || !Number.isFinite(amount)) return 0;
+  return Math.max(0, Math.min(100, amount / reference * 100));
+}
+
+function getCreditReferences() {
+  if (creditReferences) return creditReferences;
+  try {
+    const saved = JSON.parse(localStorage.getItem(CREDIT_REFERENCE_STORE) || '{}');
+    creditReferences = saved && typeof saved === 'object' && !Array.isArray(saved) ? saved : {};
+  } catch (_) { creditReferences = {}; }
+  return creditReferences;
+}
+
+function saveCreditReferences() {
+  try { localStorage.setItem(CREDIT_REFERENCE_STORE, JSON.stringify(getCreditReferences())); } catch (_) { /* best effort */ }
+}
+
+function getCreditReference(row, reset = false) {
+  const id = `${row.provider}:${row.keyTag}:${row.currency}`;
+  const saved = getCreditReferences();
+  let record = saved[id];
+  if (reset || !record || !Number.isFinite(Number(record.amount)) || Number(record.amount) < row.amount) {
+    record = { amount: row.amount, since: Date.now() };
+    saved[id] = record;
+    saveCreditReferences();
+  }
+  return record;
+}
+
+function creditKeyTag(key) {
+  let hash = 2166136261;
+  for (let i = 0; i < key.length; i++) hash = Math.imul(hash ^ key.charCodeAt(i), 16777619);
+  return `${key.length}:${(hash >>> 0).toString(16)}`;
+}
+
+function configuredCreditSources() {
+  const provider = getSelectedInferenceProvider();
+  if (!CREDIT_BALANCE_PROVIDERS.includes(provider)) return [];
+  const key = getProviderApiKey(provider);
+  return key ? [{ provider, key, keyTag: creditKeyTag(key) }] : [];
+}
+
+function isUsageDashboardVisible() {
+  const root = document.getElementById('usageDashboard');
+  return Boolean(root && settingsBackdrop && settingsBackdrop.classList.contains('open')
+    && root.closest('.settings-pane') && root.closest('.settings-pane').classList.contains('active'));
+}
+
+function formatCreditAmount(amount, currency) {
+  const value = Number(amount).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 });
+  if (currency === 'USD') return `$${value}`;
+  if (currency === 'CNY') return `¥${value}`;
+  return `${value} ${currency}`;
+}
+
+function estimateModelUsageCost(provider, model, row, period) {
+  const rates = CREDIT_COST_RATES[provider] || {};
+  const rate = Object.prototype.hasOwnProperty.call(rates, model) ? rates[model] : null;
+  if (!rate || (rate.through && period > rate.through)) return null;
+  const count = (value) => Number.isFinite(Number(value)) ? Math.max(0, Number(value)) : 0;
+  const input = count(row.input);
+  const cached = Math.min(input, count(row.cached));
+  const write = Math.min(input - cached, count(row.cache_write));
+  const ordinary = input - cached - write;
+  return (ordinary * rate.input + cached * rate.cached + write * (rate.write ?? rate.input) + count(row.output) * rate.output) / 1000000;
+}
+
+function renderEstimatedProviderCost(provider) {
+  const data = usageDashboardCostData;
+  if (!data || data.period !== usageDashboardPeriod) return '<p class="usage-muted">Checking recorded usage…</p>';
+  if (data.error) return '<p class="usage-muted">Spend estimate is unavailable while local usage data is offline.</p>';
+  const entries = Object.entries((data.providers || {})[provider] || {});
+  if (!entries.length) return '<p class="usage-muted">No API usage recorded for this provider this month.</p>';
+  let cost = 0;
+  let pricedCalls = 0;
+  let unpricedCalls = 0;
+  entries.forEach(([model, row]) => {
+    const estimate = estimateModelUsageCost(provider, model, row, data.period);
+    if (estimate === null) unpricedCalls += Number(row.calls) || 0;
+    else { cost += estimate; pricedCalls += Number(row.calls) || 0; }
+  });
+  if (!pricedCalls) return '<p class="usage-muted">No verified price for the models used here. Check the provider’s billing page for spend.</p>';
+  const amount = cost < .01 && cost > 0 ? `$${cost.toFixed(4)}` : `$${cost.toFixed(2)}`;
+  const source = CREDIT_PRICE_URLS[provider];
+  const sourceLink = source ? `<a href="${source}" target="_blank" rel="noopener noreferrer">Published rates</a>` : '';
+  const coverage = unpricedCalls ? ` · ${unpricedCalls.toLocaleString()} calls have no verified price` : '';
+  const month = new Date(Number(data.period.slice(0, 4)), Number(data.period.slice(5, 7)) - 1)
+    .toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
+  return `<div class="usage-cost-head"><span>Estimated from ${pricedCalls.toLocaleString()} recorded calls</span><strong>${amount}</strong></div>
+    <p class="usage-muted usage-cost-note">${escapeHtml(month)} · Standard text rates checked Sep 2026${coverage}. ${sourceLink} · Your bill may differ.</p>`;
+}
+
+function renderCreditBalances() {
+  const content = document.querySelector('#usageDashboard [data-credit-balances]');
+  if (!content) return;
+  const sources = configuredCreditSources();
+  const provider = getSelectedInferenceProvider();
+  const providerDef = getInferenceProviderDef(provider);
+  const label = escapeHtml(providerDef.label || provider);
+  const esc = (value) => escapeHtml(String(value));
+  const note = document.querySelector('#usageDashboard .usage-credit-note');
+  if (note) note.hidden = !sources.length;
+  const refresh = document.querySelector('#usageDashboard [data-credit-refresh]');
+  if (refresh) refresh.hidden = !sources.length;
+  const heading = document.querySelector('#usageDashboard .usage-balance-section h3');
+  if (heading) heading.textContent = sources.length ? 'API balance' : 'API spend';
+  if (provider === 'local') {
+    content.innerHTML = '<p class="usage-muted">The local model does not use API credit.</p>';
+    return;
+  }
+  if (providerDef.keyField && !getProviderApiKey(provider)) {
+    content.innerHTML = `<p class="usage-muted">Add a ${label} key to check its balance.</p>`;
+    return;
+  }
+  if (!sources.length) {
+    content.innerHTML = `${renderEstimatedProviderCost(provider)}<p class="usage-muted usage-cost-note">${label} doesn't report a remaining balance for this key, so this is estimated from recorded usage.</p>`;
+    return;
+  }
+  if (!creditBalanceRows.length && creditBalancePending) {
+    content.innerHTML = '<div class="usage-credit-loading" aria-label="Checking API balances"><span></span><span></span></div>';
+    return;
+  }
+  const rows = sources.flatMap((source) => {
+    const matches = creditBalanceRows.filter((row) => row.provider === source.provider && row.keyTag === source.keyTag);
+    return matches.length ? matches : [{ provider: source.provider, keyTag: source.keyTag, error: creditBalancePending ? 'Checking balance…' : 'Balance unavailable' }];
+  });
+  content.innerHTML = rows.map((row) => {
+    const label = esc((getInferenceProviderDef(row.provider) || {}).label || row.provider);
+    if (row.error) return `<div class="usage-credit-row"><div class="usage-credit-head"><span>${label}</span><span class="usage-muted">${esc(row.error)}</span></div></div>`;
+    const reference = getCreditReference(row);
+    const pct = creditRemainingPercent(row.amount, Number(reference.amount));
+    const rounded = pct < 10 && pct > 0 ? Math.round(pct * 10) / 10 : Math.round(pct);
+    const amount = formatCreditAmount(row.amount, row.currency);
+    const since = new Date(Number(reference.since) || Date.now()).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+    const checked = new Date(row.checkedAt).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+    return `<div class="usage-credit-row${pct <= 20 ? ' low' : ''}">
+      <div class="usage-credit-head"><span>${label}<small>${esc(row.currency)} · checked ${esc(checked)}</small></span><strong>${esc(amount)}</strong></div>
+      <div class="usage-credit-track" role="progressbar" aria-label="${label} ${esc(row.currency)} balance since ${esc(since)}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${rounded}"><span style="width:${pct}%"></span></div>
+      <div class="usage-credit-foot"><span>${rounded}% of the balance first seen ${esc(since)}</span><button type="button" data-credit-reset="${esc(row.provider)}:${esc(row.currency)}">Reset reference</button></div>
+    </div>`;
+  }).join('');
+  content.querySelectorAll('[data-credit-reset]').forEach((button) => {
+    button.onclick = () => {
+      const row = creditBalanceRows.find((item) => `${item.provider}:${item.currency}` === button.dataset.creditReset && !item.error);
+      if (row) { getCreditReference(row, true); renderCreditBalances(); }
+    };
+  });
+}
+
+async function fetchCreditBalance(source) {
+  const url = source.provider === 'deepseek'
+    ? 'https://api.deepseek.com/user/balance'
+    : 'https://api.venice.ai/api/v1/api_keys/rate_limits';
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10000);
+  try {
+    const response = await fetch(url, { headers: { Authorization: `Bearer ${source.key}` }, signal: controller.signal });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const data = await response.json();
+    const balances = source.provider === 'deepseek'
+      ? parseDeepSeekCreditBalances(data)
+      : Object.entries(extractVeniceBalances(data))
+        .map(([currency, amount]) => ({ currency, amount: Number(amount) }))
+        .filter((row) => Number.isFinite(row.amount) && row.amount >= 0);
+    if (!balances.length) throw new Error('No balance returned');
+    return balances.map((row) => ({ ...row, provider: source.provider, keyTag: source.keyTag, checkedAt: Date.now() }));
+  } finally { clearTimeout(timeout); }
+}
+
+async function refreshCreditBalances(force = false) {
+  if (!isUsageDashboardVisible()) return;
+  const sources = configuredCreditSources();
+  const sourceKey = sources.map((source) => `${source.provider}:${source.keyTag}`).join('|');
+  if (!force && creditBalanceSourceKey === sourceKey && Date.now() - creditBalanceCheckedAt < 60000) {
+    renderCreditBalances();
+    return;
+  }
+  if (creditBalancePending) {
+    await creditBalancePending;
+    if (isUsageDashboardVisible()) return refreshCreditBalances(force && creditBalanceSourceKey !== sourceKey);
+    return;
+  }
+  if (!sources.length) {
+    creditBalanceRows = [];
+    creditBalanceSourceKey = '';
+    creditBalanceCheckedAt = 0;
+    renderCreditBalances();
+    return;
+  }
+  creditBalancePending = Promise.all(sources.map(async (source) => {
+    try { return await fetchCreditBalance(source); }
+    catch (_) {
+      return [{ provider: source.provider, keyTag: source.keyTag, error: 'Couldn’t refresh. Check the key or try again.' }];
+    }
+  }));
+  renderCreditBalances();
+  try {
+    creditBalanceRows = (await creditBalancePending).flat();
+    creditBalanceSourceKey = sourceKey;
+    creditBalanceCheckedAt = Date.now();
+  } finally {
+    creditBalancePending = null;
+    if (isUsageDashboardVisible()) renderCreditBalances();
+  }
+}
+
+function scheduleCreditBalanceRefresh(delay = 60000) {
+  clearTimeout(creditBalanceTimer);
+  if (!isUsageDashboardVisible() || !configuredCreditSources().length) return;
+  creditBalanceTimer = setTimeout(() => {
+    void refreshCreditBalances(true).finally(() => scheduleCreditBalanceRefresh());
+  }, delay);
+}
+
 let usageDashboardPeriod = '';
 let usageDashboardRequest = 0;
 async function renderUsageDashboard() {
@@ -19977,13 +20237,24 @@ async function renderUsageDashboard() {
   const now = new Date();
   if (!usageDashboardPeriod) usageDashboardPeriod = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
   const request = ++usageDashboardRequest;
+  usageDashboardCostData = null;
   const e = (value) => escapeHtml(String(value));
   const n = (value) => Number.isFinite(Number(value)) ? Math.max(0, Number(value)) : 0;
   const total = (row) => n(row.input) + n(row.output);
   const fmt = (value) => formatTokenCount(n(value));
   const exact = (value) => n(value).toLocaleString();
-  root.setAttribute('aria-busy', 'true');
-  if (!root.children.length) root.textContent = 'Loading usage…';
+  if (!root.querySelector('[data-usage-stats]')) root.innerHTML = `
+    <div data-usage-stats><p class="usage-muted">Loading usage…</p></div>
+    <section class="usage-block usage-balance-section" aria-label="Selected provider API balance">
+      <div class="usage-section-heading"><h3>API balance</h3><button type="button" class="usage-link-button" data-credit-refresh>Refresh</button></div>
+      <div class="usage-card" data-credit-balances aria-live="polite"></div>
+      <p class="usage-muted usage-credit-note">Percentages start with the first balance seen on this device and reset if the balance rises. They are not lifetime credit totals.</p>
+    </section>`;
+  root.querySelector('[data-credit-refresh]').onclick = () => void refreshCreditBalances(true);
+  void refreshCreditBalances();
+  scheduleCreditBalanceRefresh();
+  const statsRoot = root.querySelector('[data-usage-stats]');
+  statsRoot.setAttribute('aria-busy', 'true');
   let data;
   try {
     const response = await fetch(`${getAIExeBackendUrl()}/api/token-usage?period=${encodeURIComponent(usageDashboardPeriod)}`);
@@ -19991,12 +20262,16 @@ async function renderUsageDashboard() {
     data = await response.json();
   } catch (_) {
     if (request !== usageDashboardRequest) return;
-    root.innerHTML = '<p class="usage-muted">Usage is unavailable. Check the local service and try again.</p><button type="button" class="usage-button" data-usage-retry>Try again</button>';
+    usageDashboardCostData = { period: usageDashboardPeriod, error: true };
+    renderCreditBalances();
+    statsRoot.innerHTML = '<p class="usage-muted">Usage is unavailable. Check the local service and try again.</p><button type="button" class="usage-button" data-usage-retry>Try again</button>';
     root.querySelector('[data-usage-retry]').onclick = () => void renderUsageDashboard();
-    root.setAttribute('aria-busy', 'false');
+    statsRoot.setAttribute('aria-busy', 'false');
     return;
   }
   if (request !== usageDashboardRequest) return;
+  usageDashboardCostData = data;
+  renderCreditBalances();
   const models = [];
   Object.entries(data.providers || {}).forEach(([provider, entries]) => {
     Object.entries(entries || {}).forEach(([model, row]) => models.push({ provider, model, ...row }));
@@ -20014,33 +20289,60 @@ async function renderUsageDashboard() {
   });
   const dailyTotal = days.reduce((acc, row) => acc + total(row), 0);
   const peak = Math.max(1, ...days.map(total));
-  const chatEntries = Object.entries(data.chats || {}).map(([id, row]) => ({id, ...row})).sort((a,b) => total(b) - total(a));
-  const attributed = chatEntries.reduce((acc, row) => acc + (row.id ? total(row) : 0), 0);
-  const extra = Math.max(0, sum - chatEntries.reduce((acc, row) => acc + total(row), 0));
+  const rawChats = Object.entries(data.chats || {}).map(([id, row]) => ({id, ...row}));
+  const attributed = rawChats.reduce((acc, row) => acc + (row.id ? total(row) : 0), 0);
+  const extra = Math.max(0, sum - rawChats.reduce((acc, row) => acc + total(row), 0));
+  // Chats that no longer exist fold into one row; unattributed usage stays its own row.
+  const chatEntries = [];
+  const gone = {id:'', gone:true, count:0, input:0, output:0, cached:0, cache_write:0, reasoning:0, calls:0};
+  rawChats.forEach(row => {
+    if (row.id && !findChatById(row.id)) { gone.count += 1; ['input','output','cached','cache_write','reasoning','calls'].forEach(k => { gone[k] += n(row[k]); }); }
+    else chatEntries.push(row);
+  });
+  if (gone.count) chatEntries.push(gone);
   if (extra) chatEntries.push({id:'', input:extra, output:0, legacy:true});
+  chatEntries.sort((a,b) => total(b) - total(a));
+  const CHAT_ROWS_SHOWN = 6;
   const detail = row => `<dl class="usage-detail"><div><dt>Input</dt><dd>${exact(row.input)}</dd></div><div><dt>Output</dt><dd>${exact(row.output)}</dd></div><div><dt>Cache reads</dt><dd>${exact(row.cached)}</dd></div><div><dt>Cache writes</dt><dd>${exact(row.cache_write)}</dd></div><div><dt>Reasoning</dt><dd>${exact(row.reasoning)}</dd></div><div><dt>Calls</dt><dd>${exact(row.calls)}</dd></div></dl>`;
-  root.innerHTML = `
-    <div class="usage-toolbar"><details class="usage-month-picker"><summary aria-label="Choose usage month">${e(new Date(year, month - 1).toLocaleDateString(undefined, {month:'long', year:'numeric'}))}<svg class="usage-chevron" aria-hidden="true" viewBox="0 0 16 16" fill="none"><path d="m4 6 4 4 4-4"/></svg></summary><div class="usage-month-panel"><div class="usage-year-nav"><button type="button" aria-label="Previous year" data-usage-year="-1">‹</button><strong data-usage-year-label>${year}</strong><button type="button" aria-label="Next year" data-usage-year="1">›</button></div><div class="usage-month-grid"></div><button type="button" class="usage-button" data-usage-today>This month</button></div></details><button class="usage-button" type="button" data-usage-refresh>Refresh</button></div>
-    <div class="usage-overview"><div><span class="usage-muted">Tokens used</span><div class="usage-total" title="${exact(sum)} tokens">${fmt(sum)}</div><span class="usage-muted">${exact(sums.calls)} provider calls</span></div><div class="usage-summary"><div><span>Input</span><strong>${fmt(sums.input)}</strong></div><div><span>Output</span><strong>${fmt(sums.output)}</strong></div><div><span>Input served from cache</span><strong>${pct}%</strong></div></div></div>
-    <section class="usage-section" aria-label="Daily token usage"><div class="usage-section-heading"><h3>Daily activity</h3><div class="usage-legend"><span>Input</span><span>Output</span></div></div>
+  const tile = (label, value, sub, extraHtml = '') => `<div class="usage-tile"><span>${label}</span><strong>${value}</strong>${sub ? `<small>${sub}</small>` : ''}${extraHtml}</div>`;
+  const chatName = row => {
+    if (row.gone) return row.count === 1 ? 'Deleted chat' : `Deleted chats (${row.count})`;
+    if (row.legacy) return 'Before per-chat tracking';
+    const chat = row.id ? findChatById(row.id) : null;
+    return chat ? chat.name : 'Other activity';
+  };
+  const chatRow = (row, index) => {
+    const chat = row.id ? findChatById(row.id) : null;
+    const share = sum ? total(row) / sum * 100 : 0;
+    return `<details class="usage-ranked${row.legacy || row.gone ? ' is-muted' : ''}${index >= CHAT_ROWS_SHOWN ? ' is-extra' : ''}"><summary data-usage-tooltip="${index}"><span class="usage-ranked-name">${e(chatName(row))}</span><span class="usage-ranked-value">${fmt(total(row))}</span><span class="usage-share">${Math.round(share)}%</span></summary><div class="usage-rank-track"><span style="width:${share}%"></span></div><div class="usage-expanded">${row.legacy ? '<p class="usage-muted">Recorded before chat attribution was available.</p>' : detail(row)}${chat ? `<button type="button" class="usage-button" data-usage-chat="${e(row.id)}">Open chat</button>` : ''}</div></details>`;
+  };
+  statsRoot.innerHTML = `
+    <div class="usage-toolbar"><details class="usage-month-picker"><summary aria-label="Choose usage month">${e(new Date(year, month - 1).toLocaleDateString(undefined, {month:'long', year:'numeric'}))}<svg class="usage-chevron" aria-hidden="true" viewBox="0 0 16 16" fill="none"><path d="m4 6 4 4 4-4"/></svg></summary><div class="usage-month-panel"><div class="usage-year-nav"><button type="button" aria-label="Previous year" data-usage-year="-1">‹</button><strong data-usage-year-label>${year}</strong><button type="button" aria-label="Next year" data-usage-year="1">›</button></div><div class="usage-month-grid"></div><button type="button" class="usage-button" data-usage-today>This month</button></div></details><button class="usage-link-button" type="button" data-usage-refresh>Refresh</button></div>
+    <div class="usage-card usage-tiles">
+      ${tile('Tokens used', `<span title="${exact(sum)} tokens">${fmt(sum)}</span>`, `${exact(sums.calls)} provider calls`)}
+      ${tile('Input', fmt(sums.input), 'sent to the model')}
+      ${tile('Output', fmt(sums.output), sums.reasoning ? `${fmt(sums.reasoning)} reasoning` : 'written by the model')}
+      ${tile('From cache', `${pct}%`, 'of input', `<div class="usage-mini-track" aria-hidden="true"><span style="width:${pct}%"></span></div>`)}
+    </div>
+    <section class="usage-block" aria-label="Daily token usage"><div class="usage-section-heading"><h3>Daily activity</h3><div class="usage-legend"><span>Input</span><span>Output</span></div></div>
+    <div class="usage-card usage-chart-card"><div class="usage-chart-peak usage-muted">${peak > 1 ? `Peak ${fmt(peak)}` : 'No daily usage yet'}</div>
     <div class="usage-chart" aria-label="Daily input and output tokens">${days.map(row => {
       const label = `${row.date}: ${exact(row.input)} input, ${exact(row.output)} output, ${exact(row.cached)} cached, ${exact(row.calls)} calls`;
       const dateLabel = new Date(year, month - 1, row.day).toLocaleDateString(undefined, {month:'short', day:'numeric', year:'numeric'});
       const breakdown = total(row) ? `<span><span>Input</span><strong>${exact(row.input)}</strong></span><span><span>Output</span><strong>${exact(row.output)}</strong></span><span><span>Cached</span><strong>${exact(row.cached)}</strong></span><span><span>Calls</span><strong>${exact(row.calls)}</strong></span>` : '<span class="usage-day-empty">No recorded usage</span>';
-      return `<button type="button" class="usage-day" data-usage-day="${row.day}" aria-label="${e(label)}" style="--usage-height:${total(row) / peak * 100}%;--usage-output:${total(row) ? n(row.output) / total(row) * 100 : 0}%"><span class="usage-bar"><span></span></span><small>${row.day === 1 || row.day % 5 === 0 || row.day === dayCount ? row.day : ''}</small><span class="usage-day-tooltip" aria-hidden="true"><strong>${e(dateLabel)}</strong><span class="usage-day-breakdown">${breakdown}</span></span></button>`;
-    }).join('')}</div>
-    ${dailyTotal < sum ? '<p class="usage-muted usage-note">Daily history starts with this update. Earlier usage is included in the monthly total.</p>' : ''}
+      return `<button type="button" class="usage-day${total(row) ? '' : ' is-empty'}" data-usage-day="${row.day}" aria-label="${e(label)}" style="--usage-height:${total(row) / peak * 100}%;--usage-output:${total(row) ? n(row.output) / total(row) * 100 : 0}%"><span class="usage-bar"><span></span></span><small>${row.day === 1 || row.day % 5 === 0 || row.day === dayCount ? row.day : ''}</small><span class="usage-day-tooltip" aria-hidden="true"><strong>${e(dateLabel)}</strong><span class="usage-day-breakdown">${breakdown}</span></span></button>`;
+    }).join('')}</div></div>
     </section>
-    <section class="usage-section"><div class="usage-section-heading"><h3>Chats using the most</h3><span class="usage-muted">Input + output</span></div>
-    ${chatEntries.length ? chatEntries.sort((a,b) => total(b)-total(a)).map((row, index) => {
-      const chat = row.id ? findChatById(row.id) : null;
-      const name = chat ? chat.name : row.id ? 'Deleted or unavailable chat' : row.legacy ? 'Earlier usage' : 'Other activity';
-      return `<details class="usage-ranked"><summary data-usage-tooltip="${index}"><span class="usage-ranked-name">${e(name)}</span><span>${fmt(total(row))}</span><span class="usage-share">${sum ? Math.round(total(row)/sum*100) : 0}%</span></summary><div class="usage-rank-track"><span style="width:${sum ? total(row)/sum*100 : 0}%"></span></div><div class="usage-expanded">${row.legacy ? '<p class="usage-muted">Recorded before chat attribution was available.</p>' : detail(row)}${chat ? `<button type="button" class="usage-button" data-usage-chat="${e(row.id)}">Open chat</button>` : ''}</div></details>`;
-    }).join('') : '<p class="usage-empty">Your chats will appear here after a provider reports usage.</p>'}
-    ${sum && attributed < sum ? '<p class="usage-muted usage-note">Earlier usage and calls without a chat stay separate; they are never assigned to a guessed chat.</p>' : ''}</section>
-    <section class="usage-section"><h3>Providers & models</h3>${models.length ? models.map(row => `<details class="usage-ranked"><summary><span class="usage-ranked-name">${e(row.model)}<small>${e((getInferenceProviderDef(row.provider) || {}).label || row.provider)}</small></span><span>${fmt(total(row))}</span><span class="usage-share">${exact(row.calls)} calls</span></summary><div class="usage-expanded">${detail(row)}</div></details>`).join('') : '<p class="usage-empty">No recorded usage for this month.</p>'}</section>
-    <p class="usage-muted usage-note">Provider-reported usage from this device, not your account balance. Cache reads and writes are included in input; reasoning is included in output. Calls without a usage report are not counted.</p>`;
-  root.setAttribute('aria-busy', 'false');
+    <section class="usage-block"><div class="usage-section-heading"><h3>Chats using the most</h3><span class="usage-muted">Input + output</span></div>
+    <div class="usage-card usage-list">${chatEntries.length ? chatEntries.map(chatRow).join('') : '<p class="usage-empty">Your chats will appear here after a provider reports usage.</p>'}</div>
+    ${chatEntries.length > CHAT_ROWS_SHOWN ? `<button type="button" class="usage-link-button usage-show-all" data-usage-show-all>Show all ${chatEntries.length}</button>` : ''}</section>
+    <section class="usage-block"><div class="usage-section-heading"><h3>Providers &amp; models</h3></div><div class="usage-card usage-list">${models.length ? models.map(row => `<details class="usage-ranked"><summary><span class="usage-ranked-name">${e(row.model)}<small>${e((getInferenceProviderDef(row.provider) || {}).label || row.provider)}</small></span><span class="usage-ranked-value">${fmt(total(row))}</span><span class="usage-share">${exact(row.calls)} calls</span></summary><div class="usage-expanded">${detail(row)}</div></details>`).join('') : '<p class="usage-empty">No recorded usage for this month.</p>'}</div></section>
+    <p class="usage-muted usage-footnote">Counts come from each provider's usage reports for calls made on this device. Cache reads and writes count as input; reasoning counts as output.${dailyTotal < sum ? ' Daily history starts with the September update; earlier usage is in the monthly total.' : ''}${sum && attributed < sum ? ' Usage recorded without a chat is never assigned to a guessed one.' : ''}</p>`;
+  statsRoot.setAttribute('aria-busy', 'false');
+  // The footnote closes the page, below the balance/spend card.
+  const footnote = statsRoot.querySelector('.usage-footnote');
+  root.querySelectorAll(':scope > .usage-footnote').forEach(old => old.remove());
+  if (footnote) root.appendChild(footnote);
   const picker = root.querySelector('.usage-month-picker');
   const grid = root.querySelector('.usage-month-grid');
   let pickerYear = year;
@@ -20074,6 +20376,8 @@ async function renderUsageDashboard() {
   });
   root.closest('.settings-pane').onscroll = () => { tooltip.hidden = true; };
   root.querySelector('[data-usage-refresh]').onclick = () => void renderUsageDashboard();
+  const showAll = root.querySelector('[data-usage-show-all]');
+  if (showAll) showAll.onclick = () => { root.querySelectorAll('.usage-ranked.is-extra').forEach(el => el.classList.remove('is-extra')); showAll.remove(); };
   root.querySelectorAll('[data-usage-chat]').forEach(button => {
     button.onclick = () => { closeSettingsModal(); loadHistory(button.dataset.usageChat); };
   });

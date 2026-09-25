@@ -10360,14 +10360,28 @@ body::after { background: none; }
 .usage-button:hover { background: var(--hover); border-color: var(--accent-32); }
 .usage-dashboard :is(button, input, summary):focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 .usage-muted { color: var(--text2); font-size: 13px; line-height: 1.6; }
-.usage-overview { display: grid; grid-template-columns: 1fr 1fr; gap: 32px; align-items: center; padding: 32px 0; }
-.usage-total { font-size: clamp(32px, 4vw, 48px); line-height: 1.2; letter-spacing: -.035em; margin: 8px 0; color: var(--text); }
-.usage-summary { display: grid; gap: 16px; font-size: 13px; }
-.usage-summary > div { display: flex; justify-content: space-between; gap: 12px; color: var(--text2); }
-.usage-summary strong { font-weight: 500; color: var(--text); }
-.usage-section { padding: 26px 0; border-top: 1px solid var(--set-line); }
-.usage-section h3 { font: 500 15px var(--font-sans); margin: 0 0 16px; color: var(--text); }
-.usage-section-heading h3 { margin: 0; }
+.usage-credit-row { padding: 12px 0 10px; }
+.usage-credit-head, .usage-credit-foot { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+.usage-credit-head > span { color: var(--text); font-size: 14px; font-weight: 500; }
+.usage-credit-head small { display: block; margin-top: 4px; color: var(--text2); font-size: 11px; font-weight: 400; }
+.usage-credit-head strong { color: var(--text); font-size: 17px; font-weight: 550; letter-spacing: -.015em; white-space: nowrap; }
+.usage-credit-head > .usage-muted { font-size: 12px; font-weight: 400; text-align: right; }
+.usage-credit-track { height: 3px; margin: 12px 0 7px; overflow: hidden; border-radius: 99px; background: var(--ink-08); }
+.usage-credit-track span { display: block; height: 100%; border-radius: inherit; background: var(--accent); transition: width .5s ease; }
+.usage-credit-row.low .usage-credit-track span { background: var(--warn); box-shadow: none; }
+.usage-credit-foot { color: var(--text2); font-size: 10px; }
+.usage-credit-foot button { border: 0; padding: 3px 0; background: transparent; color: var(--text2); font: inherit; cursor: pointer; }
+.usage-credit-foot button:hover { color: var(--text); }
+.usage-credit-note { margin: 7px 0 0; font-size: 11px; }
+.usage-cost-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-top: 9px; color: var(--text2); font-size: 12px; }
+.usage-cost-head strong { color: var(--text); font-size: 17px; font-weight: 550; font-variant-numeric: tabular-nums; }
+.usage-cost-note { margin: 6px 0 0; font-size: 11px; }
+.usage-cost-note a { color: var(--text2); text-decoration: underline; text-underline-offset: 2px; }
+.usage-cost-note a:hover { color: var(--text); }
+.usage-credit-loading { display: grid; gap: 11px; padding: 16px 0; }
+.usage-credit-loading span { display: block; height: 9px; border-radius: 99px; background: var(--ink-08); }
+.usage-credit-loading span:first-child { width: 42%; }
+.usage-credit-loading span:last-child { width: 100%; height: 6px; }
 .usage-legend { display: flex; gap: 14px; font-size: 12px; color: var(--text2); }
 .usage-legend span::before { content: ''; display: inline-block; width: 7px; height: 7px; border-radius: 2px; margin-right: 6px; background: var(--accent); }
 .usage-legend span:last-child::before { background: var(--violet); }
@@ -10414,7 +10428,8 @@ body::after { background: none; }
 .usage-note { margin: 8px 0 0; font-size: 12px; }
 .usage-empty { font-size: 13px; color: var(--text2); padding: 20px 0; }
 @keyframes usage-reveal { from { opacity: 0; } to { opacity: 1; } }
-@media (max-width: 650px) { .usage-overview { grid-template-columns: 1fr; gap: 20px; } .usage-detail { grid-template-columns: repeat(2,minmax(0,1fr)); } .usage-chart { gap: 2px; } .usage-toolbar { gap: 8px; } }
+@media (max-width: 650px) { .usage-detail { grid-template-columns: repeat(2,minmax(0,1fr)); } .usage-chart { gap: 2px; } .usage-toolbar { gap: 8px; } }
+@media (max-width: 650px) { .usage-credit-head { align-items: flex-start; } .usage-credit-foot { flex-wrap: wrap; } }
 @media (prefers-reduced-motion: reduce) { .usage-dashboard *, .usage-dashboard *::after { animation: none !important; transition: none !important; } }
 
 .usage-month-picker { position: relative; z-index: 3; }
@@ -10442,4 +10457,50 @@ body::after { background: none; }
 .usage-month-picker { margin:0; }
 .usage-year-nav strong { font:500 13px/18px var(--font-sans); }
 .usage-month-panel .usage-button { padding:7px 0 0; }
-.usage-overview { padding-top:20px; }
+
+/* Usage page on the Settings card pattern: section heading outside, rounded card inside. */
+.usage-dashboard { --usage-card-pad: 18px; }
+.usage-toolbar { margin-bottom: 14px; }
+.usage-block { margin-top: 32px; }
+.usage-section-heading { margin-bottom: 12px; }
+.usage-section-heading h3 { margin: 0; font: 500 15px var(--font-sans); color: var(--text); }
+.usage-card { border: 1px solid var(--set-line); border-radius: 12px; background: var(--set-surface); overflow: hidden; }
+.usage-link-button { border: 0; padding: 6px 9px; margin: -6px -9px; border-radius: 7px; background: transparent; color: var(--text2); font: 500 12.5px var(--font-sans); cursor: pointer; transition: color .16s, background .16s; }
+.usage-link-button:hover { color: var(--text); background: var(--ink-06); }
+.usage-tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.usage-tile { display: grid; align-content: start; gap: 5px; padding: 16px var(--usage-card-pad) 17px; border-left: 1px solid var(--ink-06); min-width: 0; }
+.usage-tile:first-child { border-left: 0; }
+.usage-tile > span { color: var(--text2); font-size: 12px; }
+.usage-tile > strong { color: var(--text); font: 600 22px/1.2 var(--font-sans); letter-spacing: -.02em; }
+.usage-tile > small { color: var(--text2); font-size: 11.5px; }
+.usage-mini-track { height: 3px; margin-top: 4px; border-radius: 99px; background: var(--ink-08); overflow: hidden; }
+.usage-mini-track > span { display: block; height: 100%; border-radius: inherit; background: var(--accent); }
+.usage-chart-card { overflow: visible; padding: 12px var(--usage-card-pad) 10px; }
+.usage-chart-peak { font-size: 11px; }
+.usage-chart { height: 150px; margin-top: 8px; background: linear-gradient(var(--ink-08), var(--ink-08)) left bottom 22px / 100% 1px no-repeat; }
+.usage-day.is-empty .usage-bar { visibility: hidden; }
+.usage-list .usage-ranked { padding: 12px var(--usage-card-pad); border-bottom: 0; border-top: 1px solid var(--ink-06); }
+.usage-list .usage-ranked:first-child { border-top: 0; }
+.usage-list .usage-ranked.is-extra { display: none; }
+.usage-ranked-value { color: var(--text); font-size: 13px; }
+.usage-ranked.is-muted .usage-ranked-name { color: var(--text2); }
+.usage-list .usage-rank-track { margin-top: 9px; }
+.usage-list .usage-empty { padding: 16px var(--usage-card-pad); }
+.usage-show-all { display: block; margin: 12px auto 0 0; }
+.usage-balance-section [data-credit-balances] { padding: 4px var(--usage-card-pad) 14px; }
+.usage-balance-section .usage-muted:only-child { margin: 10px 0 0; }
+.usage-cost-head { align-items: center; margin-top: 12px; }
+.usage-cost-head > span { font-size: 12.5px; }
+.usage-cost-head strong { font-size: 24px; font-weight: 600; letter-spacing: -.02em; }
+.usage-cost-note { margin: 6px 0 0; font-size: 11.5px; line-height: 1.5; }
+.usage-credit-note { margin: 8px 2px 0; font-size: 11.5px; }
+.usage-footnote { margin: 28px 2px 0; font-size: 11.5px; line-height: 1.55; }
+@media (max-width: 650px) {
+  .usage-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .usage-tile:nth-child(3) { border-left: 0; }
+  .usage-tile:nth-child(n+3) { border-top: 1px solid var(--ink-06); }
+}
+
+/* Settings pages scroll under their title: fade the top edge so rows never collide with it. */
+.settings-main-head { padding-bottom: 10px; }
+.settings-pane { -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 18px); mask-image: linear-gradient(to bottom, transparent 0, #000 18px); }
