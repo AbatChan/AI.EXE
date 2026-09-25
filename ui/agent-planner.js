@@ -1881,7 +1881,10 @@
         }
       } catch (_) { }
       const allEvents = toolEvents || [];
-      const recentEvents = allEvents.slice(-10);
+      // Shows 10–14 recent results and advances 5 at a time, so the list only grows
+      // between jumps and the prompt prefix stays cacheable (was a sliding last-10).
+      const windowStart = allEvents.length > 10 ? Math.floor((allEvents.length - 10) / 5) * 5 : 0;
+      const recentEvents = allEvents.slice(windowStart);
       const olderEvents = allEvents.slice(0, allEvents.length - recentEvents.length);
       const mutationTools = new Set(['write_file', 'edit_file', 'new_project', 'mkdir', 'move', 'delete', 'remember_project', 'forget_project_memory']);
       const inspectedMap = new Map();
@@ -1935,8 +1938,13 @@
           return `EXPANDED CURRENT READ CONTENT (use this instead of re-reading ${path}):\nFile: ${path}\n${clipped}\n\n`;
         })()
         : '';
-      const relevantOlderLog = relevantOlder.length
-        ? `RELEVANT EARLIER RESULTS (carried forward because they match this task — prefer these over re-reading):\n${relevantOlder.map((event, index) => {
+      const openFiles = buildOpenFileViews(allEvents, Math.max(12000, expandedReadCap));
+      const openFilesLog = openFiles.text;
+      // OPEN FILES holds the CURRENT content; older reads of those paths are stale duplicates.
+      const inOpenFiles = (event) => openFiles.paths.has(normalizeWorkspacePath(event && event.path ? event.path : ''));
+      const relevantOlderShown = relevantOlder.filter((event) => !(String(event && event.tool || '').toLowerCase() === 'read_file' && inOpenFiles(event)));
+      const relevantOlderLog = relevantOlderShown.length
+        ? `RELEVANT EARLIER RESULTS (carried forward because they match this task — prefer these over re-reading):\n${relevantOlderShown.map((event, index) => {
           // A batch-read pointer references a result that may no longer be in
           // this prompt — carry the real content instead of a dangling pointer.
           const body = event && event._fromBatchRead && String(event.content || '').trim()
@@ -1945,8 +1953,6 @@
           return `EarlierResult ${index + 1}: ${String(event && event.tool ? event.tool : 'unknown')} ${String(event && event.path ? event.path : '')}\n${body.slice(0, agentMaxToolOutputChars)}`;
         }).join('\n\n')}\n\n`
         : '';
-      const openFiles = buildOpenFileViews(allEvents, Math.max(12000, expandedReadCap));
-      const openFilesLog = openFiles.text;
       const buildDependencyBrief = (path, content) => {
         const source = String(content || '');
         if (!source.trim()) return '';
@@ -1969,7 +1975,7 @@
         if (dependencyBriefRows.length >= 8 || !event || !event.ok) return;
         if (String(event.tool || '').toLowerCase() !== 'read_file') return;
         const path = normalizeWorkspacePath(event.path || '');
-        if (!path || briefSeen.has(path) || !String(event.content || '').trim()) return;
+        if (!path || briefSeen.has(path) || openFiles.paths.has(path) || !String(event.content || '').trim()) return;
         const row = buildDependencyBrief(path, event.content);
         if (!row) return;
         briefSeen.add(path);
@@ -1984,7 +1990,7 @@
       const contentCarriedPaths = new Set();
       if (expandedReadEvent) contentCarriedPaths.add(normalizeWorkspacePath(expandedReadEvent.path || ''));
       openFiles.paths.forEach((path) => contentCarriedPaths.add(path));
-      relevantOlder.forEach((event) => {
+      relevantOlderShown.forEach((event) => {
         if (!event || String(event.tool || '').toLowerCase() !== 'read_file') return;
         const carried = (event._fromBatchRead && String(event.content || '').trim())
           || (!event._fromBatchRead && String(event.observation || '').trim());
@@ -1992,7 +1998,9 @@
       });
       const inspectedNote = olderInspected.length
         ? `Files already inspected this run:\n${olderInspected.map(([path, meta]) => {
-          const flags = meta.wasTruncated
+          const flags = openFiles.paths.has(normalizeWorkspacePath(path))
+            ? '[current content is in OPEN FILES — do not re-read]'
+            : meta.wasTruncated
             ? '[TRUNCATED — re-read allowed]'
             : meta.modifiedAfter
             ? '[updated by your own edit — the edit result in TOOL_RESULTS is the current content; do not re-read]'
@@ -2023,7 +2031,10 @@
         return idx;
       })();
       const expandedCovered = expandedReadEvent && openFiles.paths.has(normalizeWorkspacePath(expandedReadEvent.path || ''));
-      const toolLog = appliedDigest + evidenceLedger + diagnosticsLog + openFilesLog + (expandedCovered ? '' : expandedReadLog) + relevantOlderLog + dependencyBriefLog + inspectedNote + recentEvents.map((event, index) => {
+      // Order for prompt caching: files/facts (change on edits) → results (append-only) → per-step context.
+      const toolLogHead = appliedDigest + evidenceLedger + diagnosticsLog + openFilesLog + (expandedCovered ? '' : expandedReadLog) + dependencyBriefLog;
+      const toolLogTail = relevantOlderLog + inspectedNote;
+      const toolEntries = recentEvents.map((event, index) => {
         const tool = String(event && event.tool ? event.tool : 'unknown');
         const obs = String(event && event.observation ? event.observation : '');
         const isTail = index >= recentEvents.length - FULL_TOOL_TAIL;
@@ -2042,12 +2053,26 @@
           const range = s0 > 0 ? ` lines ${s0}–${Number(event.endLine) || 'end'}` : '';
           return `ToolResult ${index + 1}: read_file ${normalizeWorkspacePath(event.path || '')}${range} — shown in OPEN FILES above`;
         }
+        // A blocked repeat read re-serves the file; if OPEN FILES already shows it, point there instead.
+        if (tool.toLowerCase() === 'read_file' && event && !event.ok && /^read_file blocked for /.test(obs)
+          && openFiles.paths.has(normalizeWorkspacePath(event.path || ''))) {
+          const esc = obs.match(/\n\nESCALATION:[^\n]*/);
+          return `ToolResult ${index + 1}: read_file ${normalizeWorkspacePath(event.path || '')} — blocked: unchanged since your last read; its current content is in OPEN FILES above.${esc ? esc[0] : ''}`;
+        }
         if (!isTail && obs.length > 1200 && ['read_file', 'list_dir', 'search_files'].includes(tool.toLowerCase())) {
           const p = String(event && event.path ? event.path : '');
           return `ToolResult ${index + 1}: ${tool} ${p} — ${obs.length} chars (compacted; use its cached brief/result and do not broadly re-read)`;
         }
         return `ToolResult ${index + 1}: ${tool}\n${obs.slice(0, agentMaxToolOutputChars)}`;
-      }).join('\n\n');
+      });
+      // \uE000 marks cache points; placed before rendering (it trims/collapses lines), removed after.
+      const CACHE_MARK = '\uE000';
+      const entries = toolEntries.map((entry) => String(entry).replace(/[ \t]+$/gm, '').trimEnd());
+      const toolList = entries.length > 1
+        ? `${entries.slice(0, -1).join('\n\n')}${CACHE_MARK}\n\n${entries[entries.length - 1]}${CACHE_MARK}`
+        : (entries.length ? `${entries[0]}${CACHE_MARK}` : '');
+      const toolLog = (toolLogHead && entries.length ? `${toolLogHead}${CACHE_MARK}` : toolLogHead) + toolList
+        + (toolLogTail ? `${toolList ? '\n\n' : ''}${toolLogTail.trimEnd()}` : '');
       // Scope this run to the current phase only.
       const activePhase = planSpec && planSpec._activePhase;
       const phaseTasksText = activePhase && Array.isArray(activePhase.tasks) ? activePhase.tasks.join(' ') : '';
@@ -2189,14 +2214,26 @@
         PLAN_SUMMARY: [projectMemory, planSummary, userGuidance, phaseScope].filter(Boolean).join('\n'),
         IMMEDIATE_NEXT_ACTION: buildImmediateNextAction(taskText, toolEvents, planSpec, stepIndex),
       };
-      const prompt = renderPromptTemplate(template, vars);
+      let prompt = String(renderPromptTemplate(template, vars) || '');
+      const markAt = [];
+      for (let i = prompt.indexOf('\uE000'); i !== -1; i = prompt.indexOf('\uE000', i)) {
+        markAt.push(i);
+        prompt = prompt.slice(0, i) + prompt.slice(i + 1);
+      }
       // System = the fixed rules; user = PLAN + TOOL_RESULTS (append-mostly) + the
       // per-step tail. Stable text first keeps provider prompt caches hitting.
       const splitMarker = '\nPLAN:\n';
       const splitIdx = prompt.indexOf(splitMarker);
       const systemPrompt = splitIdx > 0 ? prompt.slice(0, splitIdx).trim() : '';
       const userPrompt = splitIdx > 0 ? prompt.slice(splitIdx + 1).trim() : prompt;
-      return { prompt, systemPrompt, userPrompt, visibleReadRanges: openFiles.visibleRanges };
+      // Cache points (chars from the END, so they survive dropping the system copy): after the
+      // files/facts head, before the newest result (last step's end), and after all results.
+      const cacheBreaksFromEnd = [];
+      markAt.forEach((at) => {
+        const fromEnd = prompt.length - at;
+        if (splitIdx > 0 && at > splitIdx && fromEnd > 0 && !cacheBreaksFromEnd.includes(fromEnd)) cacheBreaksFromEnd.push(fromEnd);
+      });
+      return { prompt, systemPrompt, userPrompt, cacheBreaksFromEnd, visibleReadRanges: openFiles.visibleRanges };
     }
 
     return {

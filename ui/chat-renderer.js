@@ -1082,12 +1082,17 @@
             status: runtimeMissing || runErrors ? 'error' : 'done',
           });
         }
+        // Failed checks are the model's own tests, not runtime errors — label them apart.
+        const checksRun = Number(toolResult && toolResult.checksRun) || 0;
+        const checksFailed = Number(toolResult && toolResult.checksFailed) || 0;
+        const appErrors = Math.max(0, runErrors - checksFailed);
+        const checksNote = checksRun ? ` · checks ${checksRun - checksFailed}/${checksRun} passed` : '';
         return buildInlineAgentActivityBase({
           kind: 'validate',
           title: 'Ran the app',
-          detail: runErrors
-            ? `${runErrors} runtime error${runErrors === 1 ? '' : 's'} at startup.`
-            : 'Started cleanly — no runtime errors.',
+          detail: appErrors
+            ? `${appErrors} runtime error${appErrors === 1 ? '' : 's'}.${checksNote}`
+            : `Started cleanly${checksNote || ' — no runtime errors.'}`,
           hasIssues: runErrors > 0,
           meta: '',
           status: 'done',

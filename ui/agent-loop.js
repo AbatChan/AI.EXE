@@ -2643,6 +2643,7 @@ Still unverified: ${pending.join('; ')}` : '';
           visibleReadRanges = decisionPrompt && decisionPrompt.visibleReadRanges || null;
           agentPrompt = decisionPrompt && decisionPrompt.prompt ? decisionPrompt.prompt : decisionPrompt;
           const decisionSystemPrompt = (decisionPrompt && decisionPrompt.systemPrompt) || '';
+          const decisionCacheBreaks = (decisionPrompt && Array.isArray(decisionPrompt.cacheBreaksFromEnd)) ? decisionPrompt.cacheBreaksFromEnd : [];
           // A single transient inference failure (e.g. "API unavailable — check
           // your connection") used to kill the whole run. Retry a couple of times
           // with short backoff so a momentary network/provider blip is survived.
@@ -2660,7 +2661,7 @@ Still unverified: ${pending.join('; ')}` : '';
             const suspendedDuringStep = () => Math.max(0, suspendedDuringRunMs() - suspendedBeforeStep);
             // Capture + swallow so an inference abandoned by the timeout (and later
             // aborted) cannot surface as an unhandledRejection.
-            const inferPromise = deps.requestAgentPlannerInference(agentPrompt, deps.agentDecisionMaxTokens, deps.agentDecisionGrammar, decisionSystemPrompt, { tracePurpose: 'step_decision' });
+            const inferPromise = deps.requestAgentPlannerInference(agentPrompt, deps.agentDecisionMaxTokens, deps.agentDecisionGrammar, decisionSystemPrompt, { tracePurpose: 'step_decision', cacheBreaksFromEnd: decisionCacheBreaks });
             inferPromise.catch(() => {});
             res = await Promise.race([
               inferPromise,
@@ -3381,12 +3382,15 @@ Still unverified: ${pending.join('; ')}` : '';
           const runErr = unresolvedRunAppError();
           if (runErr && runAppFinishNudges < 2) {
             runAppFinishNudges += 1;
-            const obs = String(runErr.observation || '').slice(0, 600);
-            toolEvents.push({
-              tool: 'final_check',
-              ok: false,
-              observation: `Don't finish yet — run_app reported startup/build error(s) that are not fixed:\n${obs}\nRead the failing file(s), apply a real fix, then run_app again to verify. For Vite/React projects, keep the module setup and fix the reported build/runtime error instead of converting scripts to classic browser scripts.`,
-            });
+            const fullObs = String(runErr.observation || '');
+            // App started fine and only the model's own checks failed — say so, not "startup error".
+            const checksOnly = /started cleanly/i.test(fullObs) && /Your checks: \d+\/\d+ passed/.test(fullObs);
+            const observation = checksOnly
+              ? (runAppFinishNudges > 1
+                ? "Still not finished — the latest run_app checks are failing (result above). Fix the app or a wrong check, rerun, or finish and say plainly which checks fail."
+                : "Don't finish yet — the app starts cleanly but some of your run_app checks failed (latest run_app result above). Fix what they found; if a check itself was wrong (selector, timing, expected text), correct that check instead. Then run_app again. If it can't pass, finish and say plainly which checks fail.")
+              : `Don't finish yet — run_app reported startup/build error(s) that are not fixed:\n${fullObs.slice(0, 600)}\nRead the failing file(s), apply a real fix, then run_app again to verify. For Vite/React projects, keep the module setup and fix the reported build/runtime error instead of converting scripts to classic browser scripts.`;
+            toolEvents.push({ tool: 'final_check', ok: false, observation });
             recordDebugTrace('agent_run_app_finish_blocked', {
               chatId: String(chatId || ''), step: String(step), attempt: String(runAppFinishNudges),
             }, { chatId: String(chatId || ''), step, runErr });

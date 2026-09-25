@@ -45,9 +45,10 @@ console.log('PASS: no run deadline; stops only after 10 steps with nothing new; 
 // and a 6.7 KB file was read in four overlapping slices.
 {
   const ex = fs.readFileSync(path.join(__dirname, '..', 'ui', 'agent-executor.js'), 'utf8');
-  assert.match(ui, /if \(!matches && Date\.now\(\) - assertionStarted < 5000\) \{ setTimeout\(step, 40\); return; \}/, 'expect waits up to 5s');
-  assert.match(ui, /if \(\(!el \|\| el\.disabled\) && \(!assertionStarted \|\| Date\.now\(\) - assertionStarted < 5000\)\) \{/, 'click waits for an enabled control');
-  assert.match(ui, /window\.setTimeout\(finish, Math\.min\(90000, 6000 \+ checks\.length \* 2500\)\);/, 'budget covers the waits');
+  assert.match(ui, /var waitMs = function \(s\) \{ var t = Number\(s && s\.timeout\); return t >= 1000 \? Math\.min\(30000, t\) : 5000; \};/, 'checks wait 5s by default, up to 30s when asked');
+  assert.match(ui, /if \(!matches && Date\.now\(\) - assertionStarted < waitMs\(s\)\) \{ setTimeout\(step, 40\); return; \}/, 'expect waits');
+  assert.match(ui, /Math\.min\(150000, checkBudget\)/, 'smoke budget grows with per-check timeouts');
+  assert.match(ui, /if \(\(!el \|\| el\.disabled\) && \(!assertionStarted \|\| Date\.now\(\) - assertionStarted < waitMs\(s\)\)\) \{/, 'click waits for an enabled control');
   assert.match(ex, /const wholeSmallFile = startLine > 0 && body\.length <= cap;/);
   assert.match(loop, /startLine: toolResult && toolResult\.wholeFile \? 0 :/, 'recorded as a full read so later slices count as seen');
   console.log('PASS: checks wait like a user; small-file slices return the whole file');

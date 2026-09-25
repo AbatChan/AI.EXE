@@ -12578,7 +12578,7 @@ function recordProviderUsage(provider, model, rawUsage, chatId = '', serviceTier
 function openAiExplicitCaching(provider, model) {
   return provider === 'openai' && /^(?:gpt-6|gpt-5\.(?:[6-9]|\d{2}))/i.test(String(model || ''));
 }
-function applyOpenAiAgentCacheControl(provider, model, req, { breakpointOnSystem = false } = {}) {
+function applyOpenAiAgentCacheControl(provider, model, req, { breakpointOnSystem = false, userBreaksFromEnd = null } = {}) {
   if (!req || !openAiExplicitCaching(provider, model)) return req;
   req.prompt_cache_options = { mode: 'explicit' };
   if (breakpointOnSystem && Array.isArray(req.messages) && req.messages[0] && req.messages[0].role === 'system'
@@ -12588,6 +12588,16 @@ function applyOpenAiAgentCacheControl(provider, model, req, { breakpointOnSystem
       content: [{ type: 'text', text: req.messages[0].content, prompt_cache_breakpoint: { mode: 'explicit' } }],
     };
   }
+  // Step results grow append-only: mark last step's end and this step's end (OpenAI's agent recipe).
+  const user = Array.isArray(req.messages) ? req.messages[req.messages.length - 1] : null;
+  if (user && user.role === 'user' && typeof user.content === 'string') {
+    const parts = splitAtCacheBreaks(user.content, userBreaksFromEnd);
+    if (parts.length > 1) {
+      user.content = parts.map((text, i) => (i < parts.length - 1
+        ? { type: 'text', text, prompt_cache_breakpoint: { mode: 'explicit' } }
+        : { type: 'text', text }));
+    }
+  }
   return req;
 }
 function stripOpenAiCacheControl(req) {
@@ -12595,10 +12605,12 @@ function stripOpenAiCacheControl(req) {
   delete req.prompt_cache_options;
   delete req.prompt_cache_key;
   delete req.stream_options;
-  if (Array.isArray(req.messages) && req.messages[0] && Array.isArray(req.messages[0].content)
-    && req.messages[0].content.length === 1 && req.messages[0].content[0].prompt_cache_breakpoint) {
-    req.messages[0] = { role: req.messages[0].role, content: req.messages[0].content[0].text };
-  }
+  (Array.isArray(req.messages) ? req.messages : []).forEach((m, i) => {
+    if (m && Array.isArray(m.content) && m.content.length && m.content.every((b) => b && b.type === 'text')
+      && m.content.some((b) => b.prompt_cache_breakpoint)) {
+      req.messages[i] = { role: m.role, content: m.content.map((b) => b.text).join('') };
+    }
+  });
   return req;
 }
 const CACHE_FIELD_REJECTION = /stream_options|include_usage|prompt_cache|unrecognized|unknown (?:field|parameter)|additional properties/i;
@@ -12613,10 +12625,38 @@ function openAiServiceTierFor(provider, purpose) {
   return '';
 }
 
+// Step prompts embed the rules that also go as the system message; send them once.
+function withoutRepeatedSystem(prompt, systemPrompt) {
+  const text = String(prompt || '');
+  const sys = String(systemPrompt || '');
+  return sys && text.startsWith(sys) ? text.slice(sys.length).trim() : text;
+}
+// Cut the user text at cache points given as chars-from-end; returns ordered segments.
+function splitAtCacheBreaks(text, breaksFromEnd) {
+  const s = String(text || '');
+  const cuts = (Array.isArray(breaksFromEnd) ? breaksFromEnd : [])
+    .map((n) => s.length - Number(n))
+    .filter((at) => Number.isFinite(at) && at > 0 && at < s.length)
+    .sort((a, b) => a - b)
+    .filter((at, i, all) => i === 0 || at !== all[i - 1])
+    .slice(-3);
+  const parts = [];
+  let from = 0;
+  cuts.forEach((at) => { parts.push(s.slice(from, at)); from = at; });
+  parts.push(s.slice(from));
+  return parts.filter(Boolean);
+}
+
 // Claude caches only what's marked: the fixed system prompt is the stable prefix.
 function anthropicCachedSystem(system) {
   const text = String(system || '');
   return text ? [{ type: 'text', text, cache_control: { type: 'ephemeral' } }] : undefined;
+}
+// Agent steps: results so far are marked too (4 marks max incl. system).
+function anthropicCachedUser(prompt, breaksFromEnd) {
+  const parts = splitAtCacheBreaks(prompt, breaksFromEnd);
+  if (parts.length < 2) return String(prompt || '');
+  return parts.map((text, i) => (i < parts.length - 1 ? { type: 'text', text, cache_control: { type: 'ephemeral' } } : { type: 'text', text }));
 }
 
 // Cache routing hint per chat (OpenAI/Venice); harmless where caching is automatic.
@@ -13248,7 +13288,7 @@ const agentStepFunctionSchema = {
         end_line: { type: 'number', description: 'Last line to read (inclusive). Use with start_line.' },
         checks: {
           type: 'array',
-          description: 'For run_app on a web page: user-flow steps run in order, like a user. Each item is ONE of {"click":"<css>"}, {"dblclick":"<css>"}, {"fill":"<css>","text":"<replacement value>"}, {"select":"<css>","value":"<option value>"}, {"type":"<text typed into the focused element>"}, {"key":"Enter|Tab|Escape|Backspace|ArrowDown|Shift+R|Control+Z|..."}, {"expect":"<css>","text":"<exact visible text or input value>"} (add "contains":true for a substring).',
+          description: 'For run_app on a web page: user-flow steps run in order, like a user. Each item is ONE of {"click":"<css>"}, {"dblclick":"<css>"}, {"fill":"<css>","text":"<replacement value>"}, {"select":"<css>","value":"<option value>"}, {"type":"<text typed into the focused element>"}, {"key":"Enter|Tab|Escape|Backspace|ArrowDown|Shift+R|Control+Z|..."}, {"expect":"<css>","text":"<exact visible text or input value>"} (add "contains":true for a substring). Clicks wait up to 5s for the control to be enabled and expects up to 5s for the text; add "timeout":<ms> (max 30000) to a step that follows a longer animation.',
           items: { type: 'object' },
         },
       },
@@ -13296,7 +13336,7 @@ function makeThinkingDeltaFilter(onDelta) {
   };
 }
 
-async function requestOpenAiCompatibleTextCompletion(provider, prompt, maxTokens, systemPrompt = '', signal = null, thinkActive = false, serviceTier = '') {
+async function requestOpenAiCompatibleTextCompletion(provider, prompt, maxTokens, systemPrompt = '', signal = null, thinkActive = false, serviceTier = '', cacheBreaksFromEnd = null) {
   const usageChatId = String((activeInferenceRequest && activeInferenceRequest.chatId) || '');
   if (!remoteProvidersEnabled) return null;
   const def = getInferenceProviderDef(provider);
@@ -13318,7 +13358,7 @@ async function requestOpenAiCompatibleTextCompletion(provider, prompt, maxTokens
       max_tokens: Math.max(1, Number(maxTokens) || agentFileContentMaxTokens),
       ...(systemPrompt && def && def.supportsToolCalling ? { tools: [agentStepFunctionSchema] } : {}),
     }, Boolean(thinkActive))));
-    applyOpenAiAgentCacheControl(provider, model, req, { breakpointOnSystem: Boolean(systemPrompt) });
+    applyOpenAiAgentCacheControl(provider, model, req, { breakpointOnSystem: Boolean(systemPrompt), userBreaksFromEnd: systemPrompt ? cacheBreaksFromEnd : null });
     if (serviceTier && provider === 'openai') req.service_tier = serviceTier;
     const send = () => fetch(endpointUrl, {
       method: 'POST',
@@ -13369,7 +13409,7 @@ async function requestOpenAiCompatibleTextCompletion(provider, prompt, maxTokens
   }
 }
 
-async function requestAnthropicTextCompletion(prompt, maxTokens, systemPrompt = '') {
+async function requestAnthropicTextCompletion(prompt, maxTokens, systemPrompt = '', cacheBreaksFromEnd = null) {
   const usageChatId = String((activeInferenceRequest && activeInferenceRequest.chatId) || '');
   if (!remoteProvidersEnabled) return null;
   const provider = 'anthropic';
@@ -13394,7 +13434,7 @@ async function requestAnthropicTextCompletion(prompt, maxTokens, systemPrompt = 
         model,
         max_tokens: Math.max(1, Number(maxTokens) || agentFileContentMaxTokens),
         ...(systemPrompt ? { system: anthropicCachedSystem(systemPrompt) } : {}),
-        messages: [{ role: 'user', content: String(prompt || '') }],
+        messages: [{ role: 'user', content: anthropicCachedUser(prompt, systemPrompt ? cacheBreaksFromEnd : null) }],
         ...(useTools ? {
           tools: [{
             name: agentStepFunctionSchema.function.name,
@@ -13621,7 +13661,7 @@ async function requestRemoteTextCompletionForCapability(capability, prompt, maxT
   if (getInferenceProviderDef(provider).protocol === 'ollama') {
     const result = await requestOllamaChatCompletion(
       provider,
-      prompt,
+      withoutRepeatedSystem(prompt, completionOptions && completionOptions.systemPrompt),
       maxTokens,
       completionOptions && completionOptions.systemPrompt ? completionOptions.systemPrompt : '',
       Boolean(completionOptions && completionOptions.thinkActive),
@@ -13641,13 +13681,13 @@ async function requestRemoteTextCompletionForCapability(capability, prompt, maxT
     return result ? { ...result, workerId: worker.id } : result;
   }
   if (provider === 'anthropic') {
-    const result = await requestAnthropicTextCompletion(prompt, maxTokens, completionOptions && completionOptions.systemPrompt ? completionOptions.systemPrompt : '');
+    const result = await requestAnthropicTextCompletion(withoutRepeatedSystem(prompt, completionOptions.systemPrompt), maxTokens, completionOptions && completionOptions.systemPrompt ? completionOptions.systemPrompt : '', completionOptions.cacheBreaksFromEnd);
     return result ? { ...result, workerId: worker.id, provider, model: getProviderModel(provider) } : result;
   }
   const abortSignal = completionOptions && completionOptions.abortController instanceof AbortController
     ? completionOptions.abortController.signal
     : null;
-  const result = await requestOpenAiCompatibleTextCompletion(provider, prompt, maxTokens, completionOptions && completionOptions.systemPrompt ? completionOptions.systemPrompt : '', abortSignal, agentThink, completionOptions.serviceTier || '');
+  const result = await requestOpenAiCompatibleTextCompletion(provider, withoutRepeatedSystem(prompt, completionOptions.systemPrompt), maxTokens, completionOptions && completionOptions.systemPrompt ? completionOptions.systemPrompt : '', abortSignal, agentThink, completionOptions.serviceTier || '', completionOptions.cacheBreaksFromEnd);
   return result ? { ...result, workerId: worker.id, provider, model: getProviderModel(provider) } : result;
 }
 
@@ -13874,6 +13914,7 @@ async function requestPreflightRouteModelDecision(chatId, latestUserMessage, con
     '- A report that the open project or a file has something WRONG with its contents — wrong, stray, leftover, duplicated, misplaced, or unwanted content, something that "got added/injected/left in" by mistake, or a request to remove / delete / clean up / undo / take out part of a file => route="agent" (modify or debug). The user is pointing at something in the FILES to correct, not asking for conversation. Decide by meaning even when it is phrased as a calm observation ("I think you put X in the file").',
     '- Agent being ON means file-producing or file-changing requests SHOULD go to route="agent". It does NOT mean every message goes to agent.',
     '- Workspace being open means workspace questions can use route="inspect". It does NOT mean every message is about the workspace.',
+    '- The open workspace is just the last project the user had open. When "This chat created/owns the open workspace" says no and the message asks for something unrelated to that project (it neither names nor plainly continues it), that is a separate project => workspace_intent="new". Changing someone else\'s project into a different app is never the safe guess; use "current" only when the message is about the open project.',
     '- If the user wants something fixed, improved, restyled, redesigned, polished, or made to look/work better in the open project, that is route="agent" (modify) EVEN IF they also say "check", "look at", or describe the symptoms first. "check and fix it" = agent, not inspect. Use route="inspect" only when the user asks purely to understand/explain/diagnose with no change requested.',
     '- "build on your previous answer", "fix your explanation", "design it as a table" are route="chat" (they are about the conversation, not files).',
     '- PAUSED BUILD: the "Paused build" line below states whether work is half-finished and waiting. When it says yes, the question is what the latest message DOES about that pending work:',
@@ -15072,6 +15113,8 @@ function aiexeRunSmokeChecks(steps, report, done) {
     }
     if (twice) mouse(el, 'dblclick', 2);
   };
+  // Default 5s wait (like Playwright); a step may ask for up to 30s ("timeout" ms) for long animations.
+  var waitMs = function (s) { var t = Number(s && s.timeout); return t >= 1000 ? Math.min(30000, t) : 5000; };
   var step = function () {
     if (i >= steps.length || i >= 40) { done(results); return; }
     var s = steps[i] || {};
@@ -15104,13 +15147,13 @@ function aiexeRunSmokeChecks(steps, report, done) {
         var el = document.querySelector(sel);
         // Like a person (and Playwright): wait up to 5s for the control to appear and be
         // enabled — animated apps lock buttons mid-animation, which read as "races".
-        if ((!el || el.disabled) && (!assertionStarted || Date.now() - assertionStarted < 5000)) {
+        if ((!el || el.disabled) && (!assertionStarted || Date.now() - assertionStarted < waitMs(s))) {
           if (!assertionStarted) assertionStarted = Date.now();
           setTimeout(step, 40); return;
         }
         assertionStarted = 0;
         if (!el) results.push('✗ ' + n + '. ' + (s.dblclick != null ? 'double-click ' : 'click ') + sel + ' — nothing matches that selector');
-        else if (el.disabled) results.push('✗ ' + n + '. control stayed disabled for 5s: ' + sel);
+        else if (el.disabled) results.push('✗ ' + n + '. control stayed disabled for ' + Math.round(waitMs(s) / 1000) + 's: ' + sel);
         else { click(el, s.dblclick != null); results.push('✓ ' + n + '. ' + (s.dblclick != null ? 'double-clicked ' : 'clicked ') + sel); }
       } else if (s.type != null) {
         String(s.type).split('').forEach(press);
@@ -15130,7 +15173,7 @@ function aiexeRunSmokeChecks(steps, report, done) {
         var want = String(s.text == null ? '' : s.text).replace(/\s+/g, ' ').trim();
         if (!assertionStarted) assertionStarted = Date.now();
         var matches = target && (s.contains ? textOf(target).indexOf(want) !== -1 : textOf(target) === want);
-        if (!matches && Date.now() - assertionStarted < 5000) { setTimeout(step, 40); return; }
+        if (!matches && Date.now() - assertionStarted < waitMs(s)) { setTimeout(step, 40); return; }
         assertionStarted = 0;
         if (!target) results.push('✗ ' + n + '. expected ' + s.expect + ' — nothing matches that selector');
         else {
@@ -15302,7 +15345,8 @@ if(CHECKS.length){phase='checks';try{runChecks(CHECKS,report,function(r){phase='
     document.body.appendChild(iframe);
     iframe.srcdoc = html;
     // load + snapshot + checks (each may wait up to 5s) + interaction probe + settle
-    window.setTimeout(finish, Math.min(90000, 6000 + checks.length * 2500));
+    const checkBudget = checks.reduce((ms, c) => ms + 2500 + Math.max(0, Math.min(30000, Number(c.timeout) || 0) - 5000), 6000);
+    window.setTimeout(finish, Math.min(150000, checkBudget));
   });
 }
 
@@ -17432,6 +17476,7 @@ async function requestAgentPlannerInferenceInner(prompt, maxTokens, grammar = ''
       : {};
     let remote = await requestSelectedRemoteTextCompletion(prompt, maxTokens, systemPrompt, {
       tracePurpose: String((callOptions && callOptions.tracePurpose) || 'planner_other'),
+      ...(callOptions && Array.isArray(callOptions.cacheBreaksFromEnd) ? { cacheBreaksFromEnd: callOptions.cacheBreaksFromEnd } : {}),
       isolatedAdapterChat: true,
       adapterChatScope: 'agent-planner',
       ...adapterStructuredOptions,
@@ -17446,6 +17491,7 @@ async function requestAgentPlannerInferenceInner(prompt, maxTokens, grammar = ''
       await new Promise((resolve) => setTimeout(resolve, 2500));
       remote = await requestSelectedRemoteTextCompletion(prompt, maxTokens, systemPrompt, {
         tracePurpose: String((callOptions && callOptions.tracePurpose) || 'planner_other'),
+        ...(callOptions && Array.isArray(callOptions.cacheBreaksFromEnd) ? { cacheBreaksFromEnd: callOptions.cacheBreaksFromEnd } : {}),
         isolatedAdapterChat: true,
         adapterChatScope: 'agent-planner',
         ...adapterStructuredOptions,
