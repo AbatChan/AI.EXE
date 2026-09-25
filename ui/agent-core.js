@@ -1485,7 +1485,9 @@
       return String(title || '').replace(/^(?:\s*phase\s*\d+\s*[—–·:.\-]*\s*)+/i, '').trim();
     }
 
-    function parseAgentPlanPhases(raw, maxPhases = 4, maxTasks = 6) {
+    // maxTasks matches the 40-file plan cap: phases list every file, and a cap of 6
+    // silently dropped most of Phase 1 into a trailing "Remaining deliverables".
+    function parseAgentPlanPhases(raw, maxPhases = 4, maxTasks = 40) {
       // "/.gitignore" and ".gitignore" are the same deliverable — without this they
       // shipped as two rows that both stayed unchecked forever.
       const taskKey = (text) => String(text || '').trim().toLowerCase()
@@ -1680,6 +1682,19 @@
       return match ? normalizeWorkspacePath(match[1]) : '';
     }
 
+    // Every planned file a task names ("a.ts and b.ts shared setup" -> both).
+    function extractPlannedPathsFromPhaseTask(task) {
+      const text = String((task && task.text) || task || '');
+      const rx = /(?:^|\s)(\/?[a-z0-9._@+()\[\]-]+(?:\/[a-z0-9._@+()\[\]-]+)*\.(?:prisma|example|html?|css|scss|sass|less|js|mjs|cjs|ts|jsx|tsx|md|txt|json|csv|py))\b/gi;
+      const out = [];
+      let m;
+      while ((m = rx.exec(text))) {
+        const path = normalizeWorkspacePath(m[1]);
+        if (path && !out.includes(path)) out.push(path);
+      }
+      return out;
+    }
+
     function phaseTaskForPath(path) {
       return { text: String(path || '').replace(/^\//, ''), done: false };
     }
@@ -1725,18 +1740,14 @@
           || /^\/(?:src\/)?app\/globals\.(?:css|scss|sass|less)$/i.test(path)
         ));
         const foundationSet = new Set(foundation);
-        const firstPaths = (list[0].tasks || []).map(extractPlannedPathFromPhaseTask).filter(path => expectedSet.has(path));
+        const firstPaths = (list[0].tasks || []).flatMap(extractPlannedPathsFromPhaseTask).filter(path => expectedSet.has(path));
         const firstFiles = [...new Set([...foundation, ...firstPaths])];
         const normalized = [Object.assign({}, list[0], { tasks: firstFiles.map(phaseTaskForPath) })];
         const assigned = new Set(firstFiles);
         list.slice(1).forEach((phase) => {
-          const tasks = (Array.isArray(phase.tasks) ? phase.tasks : [])
-            .map((task) => {
-              const path = extractPlannedPathFromPhaseTask(task);
-              return path && expectedSet.has(path) && !foundationSet.has(path) && !assigned.has(path)
-                ? phaseTaskForPath(path) : null;
-            })
-            .filter(Boolean);
+          const tasks = [...new Set((Array.isArray(phase.tasks) ? phase.tasks : []).flatMap(extractPlannedPathsFromPhaseTask))]
+            .filter((path) => expectedSet.has(path) && !foundationSet.has(path) && !assigned.has(path))
+            .map(phaseTaskForPath);
           tasks.forEach((task) => assigned.add(extractPlannedPathFromPhaseTask(task)));
           if (tasks.length) normalized.push(Object.assign({}, phase, { tasks }));
         });

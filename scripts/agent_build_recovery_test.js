@@ -14,7 +14,7 @@ assert.equal(ctx.looksLikeMissingNodeDependencies('sh: vite: command not found')
 assert.equal(ctx.looksLikeMissingNodeDependencies('ENOENT: missing src/app/page.tsx'),false);
 assert.equal(ctx.looksLikeMissingNodeDependencies('missing script: build'),false);
 const core=fs.readFileSync('ui/agent-core.js','utf8');const c={normalizeWorkspacePath:norm};vm.createContext(c);
-for(const f of ['extractPlannedPathFromPhaseTask','phaseTaskForPath','normalizeWebProjectPhases'])vm.runInContext(core.match(new RegExp('    function '+f+'\\([^]*?\\n    }'))[0],c);
+for(const f of ['extractPlannedPathFromPhaseTask','extractPlannedPathsFromPhaseTask','phaseTaskForPath','normalizeWebProjectPhases'])vm.runInContext(core.match(new RegExp('    function '+f+'\\([^]*?\\n    }'))[0],c);
 const phases=c.normalizeWebProjectPhases([{title:'Auth',tasks:['src/app/login/page.tsx']},{title:'Profile',tasks:['src/app/[username]/page.tsx']}],['/package.json','/src/app/page.tsx','/src/app/login/page.tsx','/src/app/[username]/page.tsx'],'web');
 assert.equal(phases.length,2);assert.ok(phases[0].tasks.some(t=>t.text==='src/app/login/page.tsx'));assert.equal(phases[1].tasks[0].text,'src/app/[username]/page.tsx');
 console.log('PASS: failed proof not forced again without changes, missing Next install detected, dynamic routes and Prisma retained in original phases');
