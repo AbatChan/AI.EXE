@@ -2490,6 +2490,7 @@ Still unverified: ${pending.join('; ')}` : '';
           || /toggles\s+\.[\w-]+.*define that class/.test(s)
           || /but (?:neither|the)\b.*\bdefine/.test(s);
       };
+      let inspectPrefetchDone = false;
       for (let step = 1; step <= executionStepLimit; step += 1) {
         if (planSpec) planSpec._executionStepLimit = executionStepLimit;
         if (!deps.isInferenceActive(requestToken)) return true;
@@ -2542,6 +2543,28 @@ Still unverified: ${pending.join('; ')}` : '';
         let decision = String(planSpec && planSpec.taskKind || '').toLowerCase() === 'project'
           ? deps.deriveFallbackAgentDecision(taskText, toolEvents, planSpec)
           : null;
+        // Edit runs: read the plan's files_to_inspect in ONE batch up front instead of
+        // one model round trip per file. Once, before anything else was read.
+        if (!decision && !inspectPrefetchDone && String(planSpec && planSpec.taskKind || '').toLowerCase() === 'edit') {
+          inspectPrefetchDone = true;
+          const inspect = Array.from(new Set((Array.isArray(planSpec.filesToInspect) ? planSpec.filesToInspect : [])
+            .map((p) => deps.normalizeWorkspacePath(p || ''))
+            .filter((p) => p && p !== '/'))).slice(0, 6);
+          const readAlready = toolEvents.some((e) => e && /^read_files?$/i.test(String(e.tool || '')));
+          if (inspect.length >= 2 && !readAlready) {
+            decision = {
+              action: 'tool',
+              tool: 'read_files',
+              paths: inspect,
+              path: '',
+              content: '',
+              srcPath: '',
+              dstPath: '',
+              message: '',
+              raw: '[prefetch-files-to-inspect]',
+            };
+          }
+        }
         if (decision) {
           decision._deterministic = true;
           if (runLog) runLog.emitDecision(step, 'deterministic', decision);
