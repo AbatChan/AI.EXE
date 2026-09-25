@@ -376,6 +376,14 @@
     const comparablePath = path.toLowerCase();
     const activeIndex = Math.max(0, Math.min(phaseState.phases.length - 1, Number(phaseState.activeIndex) || 0));
     let changed = 0;
+    // A task naming several files is done only when ALL exist (one package.json write
+    // ticked "package.json, vite.config, tsconfig, tailwind, postcss" in the Dating run).
+    if (!(phaseState.writtenPaths instanceof Set)) phaseState.writtenPaths = new Set();
+    phaseState.writtenPaths.add(comparablePath);
+    const present = (p) => {
+      const key = String(p || '').toLowerCase();
+      return phaseState.writtenPaths.has(key) || Boolean(phaseState.diskPresent && phaseState.diskPresent.has(key));
+    };
     // Credit the file to whichever phase owns it, even when the model creates it
     // early as support work for the active phase. Marking it durably complete
     // prevents the later phase from regenerating the same file.
@@ -385,8 +393,9 @@
         if (!task || task.done || task.liveDone) return;
         const matches = extractFileLikeTaskPaths(task.text || task, norm);
         const globPrefixes = extractDirGlobTaskPrefixes(task.text || task, norm);
-        if (matches.some((candidate) => String(candidate || '').toLowerCase() === comparablePath)
-          || globPrefixes.some((prefix) => comparablePath.startsWith(`${String(prefix).toLowerCase()}/`))) {
+        const namesThisFile = matches.some((candidate) => String(candidate || '').toLowerCase() === comparablePath);
+        if ((namesThisFile && matches.every(present))
+          || (!namesThisFile && globPrefixes.some((prefix) => comparablePath.startsWith(`${String(prefix).toLowerCase()}/`)))) {
           task.liveDone = true;
           // Active-phase tasks remain "live" until that phase passes validation
           // and finalizes. Future-phase ownership is durable immediately so the
@@ -2461,6 +2470,10 @@ Still unverified: ${pending.join('; ')}` : '';
           if (!event) continue;
           const tool = String(event.tool || '').toLowerCase();
           if (tool !== 'run_app' && tool !== 'run_command') continue;
+          // An install proves nothing about the build (a clean `npm install autoprefixer`
+          // after a red build auto-finished the Dating run unverified).
+          if (tool === 'run_command' && /^\s*(?:npm|pnpm|yarn|bun)\s+(?:install|i|add|ci)\b|^\s*(?:pip3?|python3?\s+-m\s+pip)\s+install\b/i
+            .test(String(event.terminalCommand || event.command || ''))) continue;
           return event.ok === false || Number(event.runErrorCount || 0) > 0;
         }
         return false;

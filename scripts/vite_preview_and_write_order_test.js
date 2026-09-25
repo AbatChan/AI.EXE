@@ -96,3 +96,7 @@ assert.match(loopNow, /if what the request refers to isn't in this project — f
 console.log('PASS: chat reopens its own project; no internal labels in the feed');
 assert.match(read('ai-exe.js'), /if \(openRootIsOtherChats\) \{\n\s+const name = String\(binding && binding\.rootName/, 'a failed restore stops instead of running in another chat\'s project');
 console.log('PASS: no run in another chat\'s project when its own folder is gone');
+assert.match(read('agent-loop.js'), /An install proves nothing about the build/, 'installs do not clear a red build');
+console.log('PASS: a clean npm install does not count as a passing build');
+let executor2; assert.match(executor2 = read('agent-executor.js'), /Tailwind is configured but no stylesheet loads it/, 'names the missing @tailwind cause');
+console.log('PASS: unstyled report names a Tailwind that is never loaded');

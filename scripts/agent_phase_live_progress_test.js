@@ -261,3 +261,17 @@ assert.equal(
 );
 
 console.log('Passed phase live progress tests.');
+
+// Dating Discovery: one package.json write ticked a five-file config task.
+{
+  const { markPhaseTaskLiveProgressForPath: mark } = global.AIExeAgentLoop;
+  const norm = (p) => { let s = String(p || '').trim(); if (!s.startsWith('/')) s = `/${s}`; return s; };
+  const state = { activeIndex: 0, phases: [{ tasks: [{ text: '/package.json, /vite.config.ts, /tsconfig.json, /tailwind.config.ts, and /postcss.config.js configure React, TypeScript, and Tailwind.' }] }] };
+  mark(state, '/package.json', norm);
+  assert.equal(Boolean(state.phases[0].tasks[0].liveDone), false, 'one of five files is not the task');
+  ['/vite.config.ts', '/tsconfig.json', '/tailwind.config.ts'].forEach((p) => mark(state, p, norm));
+  assert.equal(Boolean(state.phases[0].tasks[0].liveDone), false, 'four of five still owed');
+  mark(state, '/postcss.config.js', norm);
+  assert.equal(state.phases[0].tasks[0].liveDone, true, 'all five written -> done');
+  console.log('PASS: multi-file phase tasks tick only when every file exists');
+}

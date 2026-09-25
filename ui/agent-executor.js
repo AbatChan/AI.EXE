@@ -272,6 +272,21 @@
         const missing = extractJsxClassNames(res.output).filter((c) => !defined.has(c));
         if (missing.length) found.push({ path: file, classes: missing });
       }
+      // Tailwind configured but no stylesheet loads it: every utility class is missing
+      // (Dating Discovery: 477 classes, index.css had no @tailwind lines).
+      if (found.length) {
+        const hasTwConfig = await Promise.all(['/tailwind.config.ts', '/tailwind.config.js', '/tailwind.config.cjs', '/tailwind.config.mjs']
+          .map((p) => deps.invokeWorkspaceAction('workspaceReadFile', { path: p }).then((r) => Boolean(r && r.ok)).catch(() => false)));
+        if (hasTwConfig.some(Boolean)) {
+          const cssFiles = (await collectSearchableWorkspaceFiles('/src', 200)).filter((f) => /\.(?:css|scss|pcss)$/i.test(f));
+          let loadsTailwind = false;
+          for (const f of cssFiles) {
+            const r = await deps.invokeWorkspaceAction('workspaceReadFile', { path: f });
+            if (r && r.ok && /@tailwind\s+utilities|@import\s+["']tailwindcss/i.test(String(r.output || ''))) { loadsTailwind = true; break; }
+          }
+          if (!loadsTailwind) found.tailwindNotLoaded = true;
+        }
+      }
       return found;
     }
 
@@ -734,6 +749,9 @@
       // Planned test files (or an explicit Vitest ask) get a runnable `npm test`.
       const wantsVitest = expectedFiles.some((p) => /\.(?:test|spec)\.[cm]?[jt]sx?$/i.test(String(p || '')))
         || /\bvitest\b/i.test(task);
+      // A planned tailwind/postcss config needs its packages (Dating build failed on autoprefixer).
+      const wantsTailwind = expectedFiles.some((p) => /(?:^|\/)(?:tailwind|postcss)\.config\.[cm]?[jt]s$/i.test(String(p || '')))
+        || /\btailwind/i.test(task);
       return `${JSON.stringify({
         name: rawName,
         private: true,
@@ -756,6 +774,11 @@
           typescript: packageJsonSafeVersions.typescript,
           vite: packageJsonSafeVersions.vite,
           ...(wantsVitest ? { vitest: packageJsonSafeVersions.vitest } : {}),
+          ...(wantsTailwind ? {
+            tailwindcss: packageJsonSafeVersions.tailwindcss,
+            postcss: packageJsonSafeVersions.postcss,
+            autoprefixer: packageJsonSafeVersions.autoprefixer,
+          } : {}),
         },
       }, null, 2)}\n`;
     }
@@ -4050,7 +4073,7 @@ export default config;
               const unstyled = await findUnstyledClassNames(built.output);
               const total = unstyled.reduce((n, u) => n + u.classes.length, 0);
               if (total) {
-                unstyledText = `\nUnstyled classes — used in components but no CSS rule exists in the build, so those elements render with browser defaults (${total}):\n${unstyled.slice(0, 8).map((u) => `- ${u.path}: ${u.classes.slice(0, 24).join(', ')}${u.classes.length > 24 ? ', …' : ''}`).join('\n')}\nAdd rules for them in the stylesheet (or use classes that exist).`;
+                unstyledText = `${unstyled.tailwindNotLoaded ? '\nTailwind is configured but no stylesheet loads it (no `@tailwind base; @tailwind components; @tailwind utilities;` in the entry CSS), so NO utility class is generated.' : ''}\nUnstyled classes — used in components but no CSS rule exists in the build, so those elements render with browser defaults (${total}):\n${unstyled.slice(0, 8).map((u) => `- ${u.path}: ${u.classes.slice(0, 24).join(', ')}${u.classes.length > 24 ? ', …' : ''}`).join('\n')}\nAdd rules for them in the stylesheet (or use classes that exist).`;
               }
             } catch (_) { /* advisory */ }
             return {

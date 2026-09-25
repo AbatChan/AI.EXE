@@ -22,6 +22,11 @@ const noTests = JSON.parse(ctx.build('/package.json', 'Vite + React + TypeScript
 assert.equal(noTests.scripts.test, undefined);
 assert.equal(noTests.devDependencies.vitest, undefined);
 console.log('PASS: Vite template adds vitest + npm test only when tests are planned');
+// Dating Discovery: planned tailwind/postcss configs but no packages -> build failed on autoprefixer.
+const withTw = JSON.parse(ctx.build('/package.json', 'dating platform UI', { projectName: 'x', expectedFiles: ['/vite.config.ts', '/tailwind.config.ts', '/postcss.config.js', '/src/App.tsx'] }));
+assert.ok(withTw.devDependencies.tailwindcss && withTw.devDependencies.postcss && withTw.devDependencies.autoprefixer, 'planned Tailwind config -> its packages');
+assert.equal(noTests.devDependencies.tailwindcss, undefined, 'no Tailwind planned -> none added');
+console.log('PASS: planned Tailwind/PostCSS configs bring their packages');
 
 const loop = fs.readFileSync(path.join(root, 'ui', 'agent-loop.js'), 'utf8');
 assert.match(loop, /const toolRow = deps\.buildAgentActivityFromToolResult\(decision, toolResult, toolEvents\);\n\s+if \(!toolRow && toolResult && !toolResult\.ok\) retractStepNarration\(\);/);
