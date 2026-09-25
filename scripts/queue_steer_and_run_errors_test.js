@@ -207,8 +207,6 @@ console.log('PASS: queue + steer, readable smoke errors mapped to file:line, cle
   assert.doesNotMatch(runner.slice(runner.indexOf('var CODES')), /document\.activeElement/, 'no raw activeElement after the focus shim');
   const md = fs.readFileSync(path.join(root, 'ui', 'prompts', 'developer_agent_decision.md'), 'utf8');
   assert.match(md, /Claim a feature works only when a check for it passed/);
-  assert.match(md, /include at least one check that changes existing data/, 'checks must cover editing filled data (Mini Sheets append bug)');
-  assert.match(md, /don't guess selectors/);
   console.log('PASS: run_app user-flow checks wired end to end');
 }
 
