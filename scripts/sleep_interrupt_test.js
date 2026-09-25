@@ -55,8 +55,8 @@ assert.ok(resolveFn.indexOf("=== 'powerEvent'") < resolveFn.indexOf('if (!msg.id
 assert.match(aiExe, /function getMachineSuspendedMs\(\)/, 'suspended wall-clock is tracked');
 assert.match(aiExe, /function noteMachineSuspendGap\(/, 'gaps are recorded');
 assert.match(aiExe, /getMachineSuspendedMs,\n\s*noteMachineSuspendGap,/, 'both are passed to the loop');
-assert.match(loop, /const deadlineNow = \(\) => baseDeadlineAt \+ suspendedDuringRunMs\(\);/,
-  'the run deadline extends by suspended time');
+assert.match(loop, /const deadlineNow = \(\) => Number\.POSITIVE_INFINITY;/,
+  'no wall-clock run deadline (sleep can never eat a run budget)');
 assert.doesNotMatch(loop, /Date\.now\(\) >= deadlineAt/, 'no raw deadline compare survives');
 assert.match(loop, /const idleMs = Math\.max\(0, \(now - lastProgress\) - suspendedMs\);/,
   'the idle watchdog discounts suspended time');

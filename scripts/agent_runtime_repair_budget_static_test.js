@@ -9,7 +9,7 @@ const runtime = fs.readFileSync(path.join(root, 'ui', 'agent-runtime.js'), 'utf8
 const app = fs.readFileSync(path.join(root, 'ui', 'ai-exe.js'), 'utf8');
 const executor = fs.readFileSync(path.join(root, 'ui', 'agent-executor.js'), 'utf8');
 
-assert.match(loop, /let executionStepLimit = Number\(deps\.agentMaxSteps\) \|\| 28/);
+assert.match(loop, /let executionStepLimit = Number\(deps\.agentMaxSteps\) \|\| 150/);
 assert.match(loop, /const runtimeRepairGraceSteps = 10/);
 assert.match(loop, /String\(decision\.tool \|\| ''\)\.toLowerCase\(\) === 'run_app'/);
 assert.match(loop, /Number\(toolResult\.runErrorCount \|\| 0\) > 0/);

@@ -716,8 +716,9 @@
       const suspendedDuringRunMs = () => (typeof deps.getMachineSuspendedMs === 'function'
         ? Math.max(0, (Number(deps.getMachineSuspendedMs()) || 0) - runSuspendedMsAtStart)
         : 0);
-      const baseDeadlineAt = startedAt + deps.agentTotalTimeoutMs;
-      const deadlineNow = () => baseDeadlineAt + suspendedDuringRunMs();
+      // No wall-clock limit: a run that keeps making progress is never cut off. It ends
+      // when the model finishes, the user stops it, or the stuck detector trips.
+      const deadlineNow = () => Number.POSITIVE_INFINITY;
       let planSpec = null;
       // Total-deadline hit: the wrap-up must not make more slow model calls.
       let totalTimedOut = false;
@@ -2283,7 +2284,32 @@ Still unverified: ${pending.join('; ')}` : '';
       // bounded repair window instead of stopping exactly when the next actionable
       // error appears. The wall-clock deadline and repeated-failure circuit breakers
       // still apply, so this cannot become an unlimited build loop.
-      let executionStepLimit = Number(deps.agentMaxSteps) || 28;
+      // Safety ceiling only (runaway cost); the real stop is the stuck detector below.
+      let executionStepLimit = Number(deps.agentMaxSteps) || 150;
+      // "Truly stuck" = this many steps in a row with nothing new: no file changed, no new
+      // check/test outcome, nothing new read. Every step counts, including blocked ones.
+      const STUCK_AFTER_STEPS = 10;
+      let stepsWithoutProgress = 0;
+      let stuckStop = false;
+      const seenOutcomeSignatures = new Set();
+      const seenReadKeys = new Set();
+      const noteStepProgress = (stepDecision, result) => {
+        const tool = String(stepDecision && stepDecision.tool || '').toLowerCase();
+        const ok = Boolean(result && result.ok);
+        let progressed = false;
+        if (ok && result.mutated && !result.noChangeNeeded) progressed = true;
+        if (ok && ['new_project', 'mkdir', 'move', 'delete'].includes(tool)) progressed = true;
+        if (['run_app', 'run_command', 'validate_files', 'check_code'].includes(tool) && result) {
+          const sig = `${tool}|${ok}|${Number(result.runErrorCount) || 0}|${String(result.observation || '').replace(/\d+(?:\.\d+)?\s?m?s\b/g, '').slice(0, 600)}`;
+          if (!seenOutcomeSignatures.has(sig)) { seenOutcomeSignatures.add(sig); progressed = true; }
+        }
+        if (ok && ['read_file', 'read_files', 'list_dir', 'search_files'].includes(tool)) {
+          const key = [tool, stepDecision.path || '', Array.isArray(stepDecision.paths) ? stepDecision.paths.join(',') : '',
+            stepDecision.start_line || stepDecision.startLine || '', stepDecision.end_line || stepDecision.endLine || '', stepDecision.content || ''].join('|');
+          if (!seenReadKeys.has(key)) { seenReadKeys.add(key); progressed = true; }
+        }
+        if (progressed) stepsWithoutProgress = 0;
+      };
       const runtimeRepairGraceSteps = 10;
       // Progress-based: grace re-arms while each rebuild exposes a DIFFERENT
       // error (real forward progress), capped at 3 extensions. Same error twice
@@ -2526,27 +2552,22 @@ Still unverified: ${pending.join('; ')}` : '';
           recordDebugTrace('agent_steer_applied', { chatId: String(chatId || ''), step: String(step) });
         });
         await ensureAgentPlanFile();
-        if (Date.now() >= deadlineNow()) {
-          recordDebugTrace('agent_timeout', {
+        stepsWithoutProgress += 1;
+        if (stepsWithoutProgress > STUCK_AFTER_STEPS) {
+          recordDebugTrace('agent_stuck_stop', {
             chatId: String(chatId || ''),
-            stage: 'total',
-            elapsedMs: String(Date.now() - startedAt),
-          }, {
-            chatId: String(chatId || ''),
-            stage: 'total',
-            elapsedMs: Date.now() - startedAt,
-          });
+            step: String(step),
+            stepsWithoutProgress: String(stepsWithoutProgress - 1),
+          }, { chatId: String(chatId || ''), step, toolEvents });
           appendAgentActivity({
             kind: 'error',
-            title: 'Stopped',
-            detail: 'Agent timed out before finishing.',
+            title: 'Paused',
+            detail: `No progress in the last ${STUCK_AFTER_STEPS} steps.`,
             status: 'error',
           });
-          totalTimedOut = true;
-          if (runLog) runLog.emit('note', 'completed', { kind: 'total_timeout', elapsedMs: Date.now() - startedAt });
-          // Keep a live status through the wrap-up — "Stopped." with a hidden
-          // 2-minute completion call behind it reads as a frozen app.
-          setAgentProgress('Out of time — writing the wrap-up...');
+          stuckStop = true;
+          if (runLog) runLog.emit('note', 'completed', { kind: 'stuck_stop', steps: STUCK_AFTER_STEPS, elapsedMs: Date.now() - startedAt });
+          setAgentProgress('Stuck — writing the wrap-up...');
           deps.setThinkingStatus('');
           deps.consumeLiveAssistantText();
           break;
@@ -4462,9 +4483,9 @@ Still unverified: ${pending.join('; ')}` : '';
           checksRun: Number(toolResult && toolResult.checksRun) || 0,
           noChangeNeeded: Boolean(toolResult && toolResult.noChangeNeeded),
           toolTimedOut: Boolean(toolResult && toolResult._toolTimedOut),
-          // Read range — for the range-aware read-loop guard.
-          startLine: Number(decision.start_line) || 0,
-          endLine: Number(decision.end_line) || 0,
+          // Read range — for the range-aware read-loop guard (a small file returns whole).
+          startLine: toolResult && toolResult.wholeFile ? 0 : (Number(decision.start_line) || 0),
+          endLine: toolResult && toolResult.wholeFile ? 0 : (Number(decision.end_line) || 0),
           offset: Number(decision.offset) || 0,
           searchQuery: String(decision.tool || '').toLowerCase() === 'search_files' ? String(decision.content || decision.query || '') : '',
           pathsSig: decisionPathsSignature(decision),
@@ -4631,6 +4652,7 @@ Still unverified: ${pending.join('; ')}` : '';
               : `Progress ${cl.doneCount}/${cl.total} — continuing...`);
           }
         }
+        noteStepProgress(decision, toolResult);
         const repairSignatureMatch = String((toolResult && toolResult.observation) || '')
           .match(/(?:Type error:|error TS\d+:|SyntaxError:|ReferenceError:|Error:)[^\n]*/);
         const repairErrorSignature = repairSignatureMatch ? repairSignatureMatch[0].slice(0, 200) : '';
@@ -5192,7 +5214,7 @@ Still unverified: ${pending.join('; ')}` : '';
           // browser-runnable file that means the final state was never verified —
           // say so instead of implying it works.
           if (/\.(html?|css|scss|sass|less|js|mjs|cjs|ts|jsx|tsx|json|py|php|java|c|cc|cpp|h|hpp|cs|go|rs)$/i.test(String(event.path || ''))) {
-            unresolvedValidationClause = ' Note: I made the change but ran out of steps before verifying it runs — press Continue and I\'ll run it and fix anything that breaks.';
+            unresolvedValidationClause = ' I made the change but haven\'t verified it runs yet — press Continue and I\'ll run it and fix anything that breaks.';
           }
           break;
         }
@@ -5228,27 +5250,23 @@ Still unverified: ${pending.join('; ')}` : '';
           if (fallbackChanged.length) fallback += ` Changed: ${fallbackChanged.slice(0, 6).join(', ')}.`;
           if (gaps.length) fallback += ` Still to do: ${gaps.map((g) => g.text || g.path).join('; ')}.`;
           fallback += " Press Continue and I'll keep going from this phase.";
-        } else if (totalTimedOut) {
-          // After a total timeout, another slow completion call just extends the
-          // hang — report deterministically and hand the user Continue.
-          fallback = `I ran out of time before finishing.${changedClause} Press Continue and I'll pick up where I left off.`;
         } else {
           fallback = String(await deps.generateAgentCompletionText(taskText, toolEvents, getWorkspaceLabel(), planSpec) || '').trim();
           usedNaturalCompletion = Boolean(fallback);
         }
       }
-      if (fallback && !usedNaturalCompletion && !phaseState && !(cl && cl.allDone)) {
-        fallback += " I didn't get to finish everything — press Continue and I'll keep going.";
-      }
+      // ONE closing line says why the run paused (it used to stack three versions).
+      const pauseReason = stuckStop
+        ? " I stopped because the last few steps weren't getting anywhere — tell me what to change, or press Continue to try again."
+        : " This was a long run, so I paused here — press Continue and I'll keep going.";
       if (!fallback) {
         fallback = fallbackChanged.length
-          ? "I made some changes but didn't fully wrap up — press Continue to keep going, or tell me what to adjust."
-          : "I couldn't finish in time — press Continue to keep going, or tell me the exact change you want.";
+          ? `I made some changes but didn't fully wrap up.${changedClause}`
+          : "I couldn't finish this yet.";
       }
-      // The natural completion already passed through the hard truth gate and
-      // carries the verified/unverified verdict. Appending another canned warning
-      // produced three versions of the same disclosure in one message.
-      if (unresolvedValidationClause && !usedNaturalCompletion) fallback += unresolvedValidationClause;
+      // The natural completion already passed the truth gate and carries its own verdict.
+      if (!usedNaturalCompletion && unresolvedValidationClause) fallback += unresolvedValidationClause;
+      else if (!phaseState && !(cl && cl.allDone)) fallback += pauseReason;
       // Self-aware exit: if we bailed because the model kept re-editing an already-correct file,
       // don't pretend it's finished (it tends to confabulate what it "changed"). Be honest that
       // it was circling and ask the user to pin down what they actually want.

@@ -52,7 +52,7 @@ async function runAssertion(readyAfter) {
 }
 (async()=>{
  assert.match((await runAssertion(300))[0],/^✓/);
- assert.match((await runAssertion(2000))[0],/^✗/);
+ assert.match((await runAssertion(6000))[0],/^✗/);
  // An unrelated iframe cannot finish or poison this run.
  let listener; const own={}; const iframe={contentWindow:own,style:{},setAttribute(){},remove(){}};
  const html='<html><head><script src="app.js" defer></script></head><body><button id="add">Add</button></body></html>';

@@ -4084,7 +4084,8 @@ try {
 // legitimate multi-step work reach completion.
 // Large framework phases can consume the old ceiling just writing their planned
 // files, leaving no step to validate the final repair.
-const agentMaxSteps = 28;
+// Safety ceiling only: runs end on finish, user stop, or the loop's stuck detector.
+const agentMaxSteps = 150;
 // Read window. Sized so a typical single app file (HTML/CSS/JS up to ~25KB) is
 // returned whole in one read instead of being truncated — truncation forced the
 // model to page through the tail, which the read-loop guard then blocked, so it
@@ -13247,7 +13248,7 @@ const agentStepFunctionSchema = {
         end_line: { type: 'number', description: 'Last line to read (inclusive). Use with start_line.' },
         checks: {
           type: 'array',
-          description: 'For run_app on a web page: user-flow steps run in order, like a user. Each item is ONE of {"click":"<css>"}, {"dblclick":"<css>"}, {"fill":"<css>","text":"<replacement value>"}, {"select":"<css>","value":"<option value>"}, {"type":"<text typed into the focused element>"}, {"key":"Enter|Tab|Escape|Backspace|ArrowDown|..."}, {"expect":"<css>","text":"<exact visible text or input value>"} (add "contains":true for a substring).',
+          description: 'For run_app on a web page: user-flow steps run in order, like a user. Each item is ONE of {"click":"<css>"}, {"dblclick":"<css>"}, {"fill":"<css>","text":"<replacement value>"}, {"select":"<css>","value":"<option value>"}, {"type":"<text typed into the focused element>"}, {"key":"Enter|Tab|Escape|Backspace|ArrowDown|Shift+R|Control+Z|..."}, {"expect":"<css>","text":"<exact visible text or input value>"} (add "contains":true for a substring).',
           items: { type: 'object' },
         },
       },
@@ -15010,9 +15011,12 @@ function aiexeRunSmokeChecks(steps, report, done) {
     var v = (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT') ? el.value : (el.innerText != null ? el.innerText : el.textContent);
     return String(v == null ? '' : v).replace(/\s+/g, ' ').trim();
   };
+  // Modifiers held for the current key (from "Shift+R", "Control+Z"...); typed capitals hold Shift.
+  var held = { shiftKey: false, ctrlKey: false, altKey: false, metaKey: false };
   var keyEvent = function (type, key) {
     var code = CODES[key] || (key.length === 1 ? key.toUpperCase().charCodeAt(0) : 0);
-    var ev = new KeyboardEvent(type, { key: key, bubbles: true, cancelable: true, charCode: type === 'keypress' ? key.charCodeAt(0) : 0 });
+    var ev = new KeyboardEvent(type, { key: key, bubbles: true, cancelable: true, charCode: type === 'keypress' ? key.charCodeAt(0) : 0,
+      shiftKey: held.shiftKey || (key.length === 1 && key !== key.toLowerCase()), ctrlKey: held.ctrlKey, altKey: held.altKey, metaKey: held.metaKey });
     try { Object.defineProperty(ev, 'keyCode', { get: function () { return type === 'keypress' ? key.charCodeAt(0) : code; } }); Object.defineProperty(ev, 'which', { get: function () { return type === 'keypress' ? key.charCodeAt(0) : code; } }); } catch (e) {}
     return ev;
   };
@@ -15098,21 +15102,35 @@ function aiexeRunSmokeChecks(steps, report, done) {
       } else if (s.click != null || s.dblclick != null) {
         var sel = String(s.click != null ? s.click : s.dblclick);
         var el = document.querySelector(sel);
+        // Like a person (and Playwright): wait up to 5s for the control to appear and be
+        // enabled — animated apps lock buttons mid-animation, which read as "races".
+        if ((!el || el.disabled) && (!assertionStarted || Date.now() - assertionStarted < 5000)) {
+          if (!assertionStarted) assertionStarted = Date.now();
+          setTimeout(step, 40); return;
+        }
+        assertionStarted = 0;
         if (!el) results.push('✗ ' + n + '. ' + (s.dblclick != null ? 'double-click ' : 'click ') + sel + ' — nothing matches that selector');
-        else if (el.disabled) results.push('✗ ' + n + '. control is disabled: ' + sel);
+        else if (el.disabled) results.push('✗ ' + n + '. control stayed disabled for 5s: ' + sel);
         else { click(el, s.dblclick != null); results.push('✓ ' + n + '. ' + (s.dblclick != null ? 'double-clicked ' : 'clicked ') + sel); }
       } else if (s.type != null) {
         String(s.type).split('').forEach(press);
         results.push('✓ ' + n + '. typed "' + s.type + '" into ' + name(active()));
       } else if (s.key != null) {
-        press(String(s.key));
+        // "Shift+R" / "Control+z" / "Meta+Enter": modifiers are held, the last part is pressed.
+        var parts = String(s.key).split('+');
+        var main = parts.length > 1 && parts[parts.length - 1] === '' ? '+' : parts.pop();
+        var mods = { shift: 'shiftKey', control: 'ctrlKey', ctrl: 'ctrlKey', alt: 'altKey', option: 'altKey', meta: 'metaKey', cmd: 'metaKey', command: 'metaKey' };
+        parts.forEach(function (m) { var f = mods[String(m).toLowerCase()]; if (f) held[f] = true; });
+        // Shift+letter reports the capital, as a real keyboard does.
+        if (held.shiftKey && main.length === 1) main = main.toUpperCase();
+        try { press(main); } finally { held = { shiftKey: false, ctrlKey: false, altKey: false, metaKey: false }; }
         results.push('✓ ' + n + '. pressed ' + s.key + ' (focus now ' + name(active()) + ')');
       } else if (s.expect != null) {
         var target = document.querySelector(String(s.expect));
         var want = String(s.text == null ? '' : s.text).replace(/\s+/g, ' ').trim();
         if (!assertionStarted) assertionStarted = Date.now();
         var matches = target && (s.contains ? textOf(target).indexOf(want) !== -1 : textOf(target) === want);
-        if (!matches && Date.now() - assertionStarted < 1000) { setTimeout(step, 40); return; }
+        if (!matches && Date.now() - assertionStarted < 5000) { setTimeout(step, 40); return; }
         assertionStarted = 0;
         if (!target) results.push('✗ ' + n + '. expected ' + s.expect + ' — nothing matches that selector');
         else {
@@ -15283,7 +15301,8 @@ if(CHECKS.length){phase='checks';try{runChecks(CHECKS,report,function(r){phase='
     window.addEventListener('message', onMessage);
     document.body.appendChild(iframe);
     iframe.srcdoc = html;
-    window.setTimeout(finish, 4500 + checks.length * 1100); // load + snapshot + checks + interaction probe + settle
+    // load + snapshot + checks (each may wait up to 5s) + interaction probe + settle
+    window.setTimeout(finish, Math.min(90000, 6000 + checks.length * 2500));
   });
 }
 

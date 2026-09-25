@@ -2882,7 +2882,12 @@ export default config;
         let fromLine = 0;
         let totalLines = 0;
         let continuationHint = '';
-        if (startLine > 0) {
+        // A slice of a file that fits in one read returns the whole file: reading one
+        // small file as 95-190, 85-190, 100-220, 90-220 wasted four steps (Cube Lab).
+        const wholeSmallFile = startLine > 0 && body.length <= cap;
+        if (wholeSmallFile) {
+          rangeNote = ` (whole file, ${body.split(/\r?\n/).length} lines — small enough to show in full)`;
+        } else if (startLine > 0) {
           const lines = body.split(/\r?\n/);
           totalLines = lines.length;
           fromLine = Math.max(0, startLine - 1);
@@ -2916,7 +2921,7 @@ export default config;
           : (chunk + continuationHint);
         deps.syncFileTabFromWorkspaceWrite(path, body, deps.workspaceBaseName(path));
         observation = `read_file ${path}${rangeNote}\n${clipped || '(empty file)'}`;
-        return { ok: true, mutated, observation: observation + buildCaretFreeDependencyNote(path, body), readPath: path, readContent: body };
+        return { ok: true, mutated, observation: observation + buildCaretFreeDependencyNote(path, body), readPath: path, readContent: body, ...(wholeSmallFile ? { wholeFile: true } : {}) };
       }
 
       // Single-pass project generation: one model call emits all files (like chat),
