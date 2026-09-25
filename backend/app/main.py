@@ -21,7 +21,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from .config import settings
-from .routers import (adapter, broker, chats, finance, generate, health, modules, package, pdf, projects,
+from .routers import (adapter, broker, chats, finance, generate, health, modules, npm, package, pdf, projects,
                       run, status, usage, workshop)
 from . import access_token
 from .services import adapter_manager, autopilot, paper_test_runner
@@ -150,6 +150,7 @@ app.include_router(broker.router, prefix="/api")
 app.include_router(pdf.router, prefix="/api")
 app.include_router(adapter.router, prefix="/api")
 app.include_router(chats.router, prefix="/api")
+app.include_router(npm.router, prefix="/api")
 
 
 app.include_router(workshop.router)

@@ -22,13 +22,26 @@ const dependencyBlock = sliceBetween(executor, 'function hasOwn(', 'function scr
 // Source-level guarantees: no unknown → "latest", unknown packages surfaced for review.
 assert.doesNotMatch(dependencyBlock, /packageJsonSafeVersions\[name\]\s*\|\|\s*['"]latest['"]/, 'unknown deps must never fall back to "latest"');
 assert.match(dependencyBlock, /unknown\.push\(\{ name, importers \}\)/, 'unknown packages must be returned for review');
-assert.match(executor, /Skipped unverified imported packages; they were NOT added automatically/, 'user must be told unknown deps were blocked');
-assert.match(executor, /Inspect these names for typos\/hallucinations before installing anything/, 'post-failure advisory must flag unknown imports');
+assert.match(executor, /Skipped imported packages that failed the npm registry check; they were NOT added/, 'user must be told unknown deps were blocked');
+assert.match(executor, /These did not pass the npm registry check/, 'post-failure advisory must flag unknown imports');
 
 // Execute the REAL helpers out of the source (they are closure-scoped, not exported).
-const sandbox = { console };
+const vetCalls = [];
+const sandbox = {
+  console,
+  deps: {
+    vetNpmPackages: async (list) => {
+      vetCalls.push(list.slice());
+      return list.map((name) => (name === 'nanoid'
+        ? { name, trusted: true, version: '^3.0.3' }
+        : name === 'sneaky-pkg'
+          ? { name, trusted: true, version: 'latest' }
+          : { name, trusted: false, reason: 'does not exist on npm' }));
+    },
+  },
+};
 vm.createContext(sandbox);
-vm.runInContext(`${safeVersionsBlock}\n${dependencyBlock}\nthis.api = { isMangledPackageVersion, collectMissingAppDependencies, reconcilePackageJsonWithImports, repairPackageJsonDependencyVersions };`, sandbox);
+vm.runInContext(`${safeVersionsBlock}\n${dependencyBlock}\nthis.api = { isMangledPackageVersion, collectMissingAppDependencies, reconcilePackageJsonWithImports, repairPackageJsonDependencyVersions, vetUnknownPackages };`, sandbox);
 const api = sandbox.api;
 
 const plain = (v) => JSON.parse(JSON.stringify(v));
@@ -90,5 +103,28 @@ assert.match(scaffolder, /packageJsonSafeVersions\[name\]\) \{/, 'scaffolder onl
 const cmakeVersion = (cmake.match(/set\(AI_EXE_APP_VERSION "([^"]+)"/) || [])[1];
 assert.ok(cmakeVersion, 'CMakeLists.txt must declare AI_EXE_APP_VERSION');
 assert.equal(packageJson.version, cmakeVersion, 'package.json version must stay synced to CMake AI_EXE_APP_VERSION');
+
+// Registry-vetted packages get their vetted pin; failures stay unknown with a reason;
+// a "trusted" result without a real caret version is ignored.
+(async () => {
+  const miss = [{ name: 'nanoid', importers: ['/a.ts'] }, { name: 'framer-motion', importers: ['/b.tsx'] },
+    { name: 'bcryptz', importers: ['/a.ts'] }, { name: 'sneaky-pkg', importers: ['/c.ts'] }];
+  const vetted = plain(await api.vetUnknownPackages(miss));
+  assert.deepEqual(vetCalls, [['nanoid', 'bcryptz', 'sneaky-pkg']], 'table packages are not sent to the registry');
+  assert.deepEqual(vetted.versions, { nanoid: '^3.0.3' });
+  assert.equal(vetted.reasons.bcryptz, 'does not exist on npm');
+  assert.ok(vetted.reasons['sneaky-pkg'], 'non-pinned "trusted" result is rejected');
+  const rec = plain(api.reconcilePackageJsonWithImports('{"dependencies":{}}', miss, vetted.versions));
+  const deps2 = JSON.parse(rec.content).dependencies;
+  assert.equal(deps2.nanoid, '^3.0.3');
+  assert.equal(deps2['framer-motion'], '^11.5.4');
+  assert.equal(deps2.bcryptz, undefined);
+  assert.deepEqual(rec.unknown.map((d) => d.name).sort(), ['bcryptz', 'sneaky-pkg']);
+  sandbox.deps.vetNpmPackages = async () => { throw new Error('offline'); };
+  const off = plain(await api.vetUnknownPackages([{ name: 'nanoid' }]));
+  assert.deepEqual(off.versions, {}, 'offline trusts nothing');
+  assert.equal(off.reasons.nanoid, 'npm registry unreachable');
+  console.log('PASS: registry-vetted deps pinned, failures blocked with reasons, offline trusts nothing');
+})().catch((e) => { console.error(e); process.exit(1); });
 
 console.log('PASS: known deps pinned, unknown/typo imports blocked (never "latest"), valid specs preserved, versions synced');

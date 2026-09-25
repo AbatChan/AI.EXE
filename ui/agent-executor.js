@@ -380,6 +380,8 @@
     }
 
     const packageJsonSafeVersions = {
+      '@auth/prisma-adapter': '^2.7.0',
+      '@prisma/client': '^6.9.0',
       '@radix-ui/react-slot': '^1.3.1',
       '@react-three/drei': '^9.114.0',
       '@react-three/fiber': '^8.17.10',
@@ -391,6 +393,7 @@
       '@typescript-eslint/parser': '^7.18.0',
       '@vitejs/plugin-react': '^4.3.1',
       autoprefixer: '^10.4.20',
+      bcryptjs: '^3.0.2',
       clsx: '^2.1.1',
       'class-variance-authority': '^0.7.0',
       'date-fns': '^3.6.0',
@@ -401,7 +404,9 @@
       'framer-motion': '^11.5.4',
       'lucide-react': '^0.468.0',
       next: '^15.0.0',
+      'next-auth': '^4.24.11',
       postcss: '^8.4.45',
+      prisma: '^6.9.0',
       react: '^18.3.1',
       'react-dom': '^18.3.1',
       'react-router-dom': '^6.26.2',
@@ -412,6 +417,7 @@
       three: '^0.169.0',
       typescript: '^5.5.4',
       vite: '^5.4.3',
+      zod: '^3.25.0',
       zustand: '^4.5.5',
     };
 
@@ -506,9 +512,9 @@
         .sort((a, b) => a.name.localeCompare(b.name));
     }
 
-    // Add ONLY known-table packages (pinned) to package.json. Unknown names are returned for
-    // review and NEVER written — a hallucinated/typo import can't become an install.
-    function reconcilePackageJsonWithImports(packageJsonContent, missingDependencies) {
+    // Add known-table or registry-vetted packages to package.json. Anything else is returned
+    // for review and NEVER written — a hallucinated/typo import can't become an install.
+    function reconcilePackageJsonWithImports(packageJsonContent, missingDependencies, vettedVersions = {}) {
       const original = String(packageJsonContent || '');
       const empty = { content: original, added: [], unknown: [] };
       if (!Array.isArray(missingDependencies) || !missingDependencies.length) return empty;
@@ -526,12 +532,36 @@
         const name = String(typeof dep === 'string' ? dep : (dep && dep.name) || '').trim();
         const importers = Array.isArray(dep && dep.importers) ? dep.importers.map(String).filter(Boolean) : [];
         if (!name || declared.has(name)) return;
-        if (!hasOwn(packageJsonSafeVersions, name)) { unknown.push({ name, importers }); return; }
-        pkg.dependencies[name] = packageJsonSafeVersions[name];
+        const version = hasOwn(packageJsonSafeVersions, name) ? packageJsonSafeVersions[name]
+          : (hasOwn(vettedVersions, name) ? vettedVersions[name] : '');
+        if (!version) { unknown.push({ name, importers }); return; }
+        pkg.dependencies[name] = version;
         declared.add(name);
-        added.push({ name, version: packageJsonSafeVersions[name], importers });
+        added.push({ name, version, importers });
       });
       return { content: added.length ? `${JSON.stringify(pkg, null, 2)}\n` : original, added, unknown };
+    }
+
+    // Registry check for imports outside the trusted table (backend: exists, not
+    // deprecated, 90+ days old, 5k+ weekly downloads). Offline = nothing trusted.
+    async function vetUnknownPackages(missingDependencies) {
+      const out = { versions: {}, reasons: {} };
+      const names = (Array.isArray(missingDependencies) ? missingDependencies : [])
+        .map((d) => String((d && d.name) || d || '').trim())
+        .filter((n) => n && !hasOwn(packageJsonSafeVersions, n));
+      if (!names.length || typeof deps.vetNpmPackages !== 'function') return out;
+      try {
+        const results = await deps.vetNpmPackages(names);
+        (Array.isArray(results) ? results : []).forEach((r) => {
+          const name = String((r && r.name) || '');
+          if (!name) return;
+          if (r.trusted && /^\^\d+\.\d+\.\d+/.test(String(r.version || ''))) out.versions[name] = String(r.version);
+          else out.reasons[name] = String(r.reason || 'failed the npm check');
+        });
+      } catch (_) {
+        names.forEach((n) => { out.reasons[n] = 'npm registry unreachable'; });
+      }
+      return out;
     }
 
     // Caret semver footnote-mangles in the render channel ("^8.17.10" -> "^1^.17.10"),
@@ -3797,7 +3827,8 @@ export default config;
               const pkgRead = await deps.invokeWorkspaceAction('workspaceReadFile', { path: '/package.json' });
               if (pkgRead && pkgRead.ok) {
                 const missing = collectMissingAppDependencies(toolEvents, pkgRead.output);
-                const reconciled = reconcilePackageJsonWithImports(pkgRead.output, missing);
+                const vetted = await vetUnknownPackages(missing);
+                const reconciled = reconcilePackageJsonWithImports(pkgRead.output, missing, vetted.versions);
                 const notes = [];
                 if (reconciled.added.length) {
                   const wrote = await deps.invokeWorkspaceAction('workspaceWriteFile', { path: '/package.json', content: reconciled.content });
@@ -3813,8 +3844,8 @@ export default config;
                   }
                 }
                 if (reconciled.unknown.length) {
-                  const labels = reconciled.unknown.map((d) => `${d.name} (imported by ${d.importers.length ? d.importers.join(', ') : 'unknown source'})`);
-                  notes.push(`Skipped unverified imported packages; they were NOT added automatically: ${labels.join('; ')}. Check these names for typos/hallucinations, then request explicit install approval if they are real.`);
+                  const labels = reconciled.unknown.map((d) => `${d.name} (${vetted.reasons[d.name] || 'not checked'}; imported by ${d.importers.length ? d.importers.join(', ') : 'unknown source'})`);
+                  notes.push(`Skipped imported packages that failed the npm registry check; they were NOT added: ${labels.join('; ')}. Replace these imports with a well-known package or plain code.`);
                   if (typeof deps.recordDebugTrace === 'function') {
                     deps.recordDebugTrace('agent_unknown_imported_dependencies_blocked', {
                       packages: reconciled.unknown.map((d) => d.name).join(', '),
@@ -3964,7 +3995,7 @@ export default config;
                 lines.push([
                   'Unverified imported packages were NOT added or auto-installed:',
                   ...unknown.map((d) => `- ${d.name} — imported by ${d.importers.length ? d.importers.join(', ') : 'unknown source'}`),
-                  'Inspect these names for typos/hallucinations before installing anything.',
+                  'These did not pass the npm registry check — replace the import with a well-known package or plain code.',
                 ].join('\n'));
               }
               if (lines.length) missingDepsAdvisory = `\n${lines.join('\n')}`;

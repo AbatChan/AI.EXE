@@ -1730,7 +1730,9 @@ Still unverified: ${pending.join('; ')}` : '';
           workspaceRootName: String(resumeWorkspaceContext.workspaceRootName || ''),
         }, { chatId: String(chatId || ''), workspace: resumeWorkspaceContext });
       }
-      const filePhases = await readAgentPlanFilePhases();
+      // A fresh new-project run must not adopt the open (unrelated) project's plan.md.
+      const freshNewProject = !isResume && String(planSpec && planSpec.workspaceIntent || '') === 'new';
+      const filePhases = freshNewProject ? null : await readAgentPlanFilePhases();
       const fileHasUnfinished = filePhases && filePhases.length >= 2
         && typeof deps.firstUnfinishedPhaseIndex === 'function'
         && deps.firstUnfinishedPhaseIndex(filePhases) >= 0;

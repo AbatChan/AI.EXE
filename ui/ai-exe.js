@@ -10256,7 +10256,7 @@ function humanizeProviderErrorMessage(label, status, rawBody = '') {
     return `${name} doesn't recognize the selected model. Pick a different model in Settings.`;
   }
   if (code === 429) {
-    return `${name} is rate-limiting requests (you've hit your plan's per-minute cap — large models like the 480B coder allow ~20/min). Wait a minute, or switch to a lighter/faster model, then try again.`;
+    return `${name} is rate-limiting requests (you've hit your plan's per-minute cap). Wait a minute, or switch to a lighter/faster model, then try again.`;
   }
   if (code >= 500) {
     return `${name} is having a temporary problem on its side (${code}). Try again in a bit.`;
@@ -10331,9 +10331,8 @@ function shouldUseNativeCustomOpenAiRelay(provider) {
     && document.documentElement.classList.contains('platform-mac');
 }
 
-// Provider picker: Local, OpenAI, Claude, Gemini, DeepSeek, Venice. The other provider defs/code are kept, just
-// hidden — flip a name out of this set to re-enable it.
-const HIDDEN_INFERENCE_PROVIDERS = new Set(['huggingface', 'customopenai']);
+// Hidden provider ids stay defined; HF + Custom OpenAI (Ollama/NOMAD) are shown for open-model tests.
+const HIDDEN_INFERENCE_PROVIDERS = new Set([]);
 function syncInferenceProviderOptions() {
   if (!settingsProviderSelect) return;
   // Remove hidden providers outright. A native macOS <select> ignores option.hidden
@@ -17361,6 +17360,17 @@ const agentExecutor = window.AIExeAgentExecutor && typeof window.AIExeAgentExecu
     isIgnoredWorkspaceEntryName,
     deriveProjectNameFromTask,
     invokeWorkspaceAction,
+    // npm registry check for imported packages not in the trusted table.
+    vetNpmPackages: async (names) => {
+      const res = await fetch(`${getAIExeBackendUrl()}/api/npm/vet`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ names }),
+      });
+      if (!res.ok) throw new Error(`npm check failed (${res.status})`);
+      const data = await res.json();
+      return Array.isArray(data && data.results) ? data.results : [];
+    },
     saveWorkspaceRootPath,
     getWorkspaceRootName: () => workspaceRootName,
     getWorkspaceTreeState: () => workspaceTreeState,

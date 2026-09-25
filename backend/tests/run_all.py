@@ -33,6 +33,7 @@ TESTS = [
     "smoke_llm_params",  # newer models: max_completion_tokens / no temperature
     "smoke_archive_extract",  # zip/tar attachments: in-memory, capped, bomb-safe
     "smoke_autopilot_ai",  # autopilot has its own AI choice; key stays private
+    "smoke_npm_vet",    # agent imports vetted against the npm registry
 ]
 
 
