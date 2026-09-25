@@ -201,6 +201,10 @@ console.log('PASS: queue + steer, readable smoke errors mapped to file:line, cle
   assert.match(ui, /checks: \{\n\s+type: 'array',/, 'native tool schema carries checks');
   const runner = fn(ui, 'aiexeRunSmokeChecks');
   assert.match(runner, /if \(!kp\.defaultPrevented && editable\(target\)\) insertText\(target, key\);/, 'typed text lands where focus is after handlers, like a browser');
+  // WKWebView ignores script focus() in the hidden sandboxed frame; typing went to <body>.
+  assert.match(runner, /proto\.focus = function/, 'runner tracks focus the frame refuses');
+  assert.match(runner, /var t = active\(\) \|\| document\.body;/, 'keys go to the tracked focus');
+  assert.doesNotMatch(runner.slice(runner.indexOf('var CODES')), /document\.activeElement/, 'no raw activeElement after the focus shim');
   const md = fs.readFileSync(path.join(root, 'ui', 'prompts', 'developer_agent_decision.md'), 'utf8');
   assert.match(md, /Claim a feature works only when a check for it passed/);
   console.log('PASS: run_app user-flow checks wired end to end');

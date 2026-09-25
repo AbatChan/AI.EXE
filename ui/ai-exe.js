@@ -14783,6 +14783,32 @@ function aiexeRunSmokeChecks(steps, report, done) {
   var results = [];
   var i = 0;
   var assertionStarted = 0;
+  // Hidden sandboxed frames refuse script focus(); track it ourselves so typing
+  // reaches the element the page focused.
+  var vFocus = null;
+  var active = function () {
+    var real = document.activeElement;
+    if (real && real !== document.body && real !== document.documentElement) return real;
+    return vFocus && vFocus.isConnected !== false ? vFocus : (real || document.body);
+  };
+  var proto = typeof HTMLElement === 'function' ? HTMLElement.prototype : {};
+  var nativeFocus = proto.focus || function () {};
+  var nativeBlur = proto.blur || function () {};
+  proto.focus = function () {
+    var prev = active();
+    try { nativeFocus.apply(this, arguments); } catch (e) {}
+    if (document.activeElement === this) { vFocus = this; return; }
+    if (prev === this) return;
+    vFocus = this;
+    if (prev && prev !== document.body) { prev.dispatchEvent(new FocusEvent('blur')); prev.dispatchEvent(new FocusEvent('focusout', { bubbles: true, relatedTarget: this })); }
+    this.dispatchEvent(new FocusEvent('focus'));
+    this.dispatchEvent(new FocusEvent('focusin', { bubbles: true, relatedTarget: prev }));
+  };
+  proto.blur = function () {
+    var was = active() === this;
+    try { nativeBlur.apply(this, arguments); } catch (e) {}
+    if (was && vFocus === this) { vFocus = null; this.dispatchEvent(new FocusEvent('blur')); this.dispatchEvent(new FocusEvent('focusout', { bubbles: true })); }
+  };
   var CODES = { Enter: 13, Tab: 9, Escape: 27, Backspace: 8, Delete: 46, ArrowLeft: 37, ArrowUp: 38, ArrowRight: 39, ArrowDown: 40, Home: 36, End: 35, ' ': 32 };
   var name = function (el) {
     if (!el || el.nodeType !== 1) return 'nothing';
@@ -14808,28 +14834,28 @@ function aiexeRunSmokeChecks(steps, report, done) {
     el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));
   };
   var press = function (key) {
-    var t = document.activeElement || document.body;
+    var t = active() || document.body;
     var kd = keyEvent('keydown', key);
     t.dispatchEvent(kd);
     if (!kd.defaultPrevented) {
       if (key.length === 1) {
         var kp = keyEvent('keypress', key);
-        (document.activeElement || document.body).dispatchEvent(kp);
-        var target = document.activeElement;
+        active().dispatchEvent(kp);
+        var target = active();
         if (!kp.defaultPrevented && editable(target)) insertText(target, key);
-      } else if (key === 'Backspace' && editable(document.activeElement) && !document.activeElement.isContentEditable) {
-        var el = document.activeElement, a = el.selectionStart, b = el.selectionEnd, v = String(el.value || '');
+      } else if (key === 'Backspace' && editable(active()) && !active().isContentEditable) {
+        var el = active(), a = el.selectionStart, b = el.selectionEnd, v = String(el.value || '');
         if (a != null) { var from = a === b ? Math.max(0, a - 1) : a; el.value = v.slice(0, from) + v.slice(b); el.selectionStart = el.selectionEnd = from; el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'deleteContentBackward' })); }
       } else if (key === 'Tab') {
         var all = Array.prototype.filter.call(document.querySelectorAll('input,textarea,select,button,a[href],[tabindex]'), function (n) { return n.tabIndex >= 0 && !n.disabled && n.getClientRects().length; });
-        var at = all.indexOf(document.activeElement);
+        var at = all.indexOf(active());
         if (all.length) all[(at + 1) % all.length].focus();
-      } else if (key === 'Enter' && document.activeElement && document.activeElement.form && document.activeElement.tagName === 'INPUT') {
-        var f = document.activeElement.form;
+      } else if (key === 'Enter' && active() && active().form && active().tagName === 'INPUT') {
+        var f = active().form;
         if (typeof f.requestSubmit === 'function') f.requestSubmit();
       }
     }
-    (document.activeElement || document.body).dispatchEvent(keyEvent('keyup', key));
+    active().dispatchEvent(keyEvent('keyup', key));
   };
   var mouse = function (el, type, detail) {
     var r = el.getBoundingClientRect();
@@ -14845,7 +14871,7 @@ function aiexeRunSmokeChecks(steps, report, done) {
       var md = mouse(el, 'mousedown', n);
       if (!md.defaultPrevented) {
         var f = focusTarget(el);
-        if (f && f.focus) f.focus(); else if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+        if (f && f.focus) f.focus(); else if (active() && active().blur) active().blur();
       }
       mouse(el, 'pointerup', n);
       mouse(el, 'mouseup', n);
@@ -14888,10 +14914,10 @@ function aiexeRunSmokeChecks(steps, report, done) {
         else { click(el, s.dblclick != null); results.push('✓ ' + n + '. ' + (s.dblclick != null ? 'double-clicked ' : 'clicked ') + sel); }
       } else if (s.type != null) {
         String(s.type).split('').forEach(press);
-        results.push('✓ ' + n + '. typed "' + s.type + '" into ' + name(document.activeElement));
+        results.push('✓ ' + n + '. typed "' + s.type + '" into ' + name(active()));
       } else if (s.key != null) {
         press(String(s.key));
-        results.push('✓ ' + n + '. pressed ' + s.key + ' (focus now ' + name(document.activeElement) + ')');
+        results.push('✓ ' + n + '. pressed ' + s.key + ' (focus now ' + name(active()) + ')');
       } else if (s.expect != null) {
         var target = document.querySelector(String(s.expect));
         var want = String(s.text == null ? '' : s.text).replace(/\s+/g, ' ').trim();
