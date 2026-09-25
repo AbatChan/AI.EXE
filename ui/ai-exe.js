@@ -3967,12 +3967,12 @@ try {
   }
   function doApplyUpdate() {
     if (!updateInfo || !updateStaged) return;
-    setStatus('Restarting…', `Restarting to update to v${updateInfo.version}…`, { disabled: true });
+    setStatus('Restarting…', 'Restarting to update…', { disabled: true });
     nativeBridge.invoke('applyUpdate', {
       url: updateInfo.url, version: updateInfo.version, sha256: updateInfo.sha256,
     }).then((res) => {
       if (res && res.ok) return;
-      setStatus('Restart to update', `AI.EXE v${updateInfo.version} is ready — click to restart and update (or it updates when you quit)`);
+      setStatus('Restart to update', 'Update ready — click to restart');
       showAppNotification({ title: 'Could not restart for update', message: 'The update remains ready and will install when AI.EXE quits.', kind: 'warning' });
     });
   }
@@ -3994,7 +3994,7 @@ try {
       }
     }).catch(() => {});
     ulog('update_stage_started', { version: updateInfo.version });
-    setStatus('Downloading update…', `Downloading AI.EXE v${stagedVersion} in the background…`, { disabled: true });
+    setStatus('Downloading update…', `Downloading v${stagedVersion}…`, { disabled: true });
     stagePoll = setInterval(async () => {
       try {
         if (generation !== stageGeneration || !updateInfo || updateInfo.version !== stagedVersion) {
@@ -4012,7 +4012,7 @@ try {
           });
           if (!armed || !armed.ok) throw new Error('could not arm install-on-quit');
           ulog('update_staged', { version: updateInfo.version });
-          setStatus('Restart to update', `AI.EXE v${updateInfo.version} is ready — click to restart and update (or it updates when you quit)`);
+          setStatus('Restart to update', 'Update ready — click to restart');
           setSettingsStatus(`AI.EXE v${updateInfo.version} is downloaded and verified. It will install when AI.EXE quits.`, `v${updateInfo.version} ready · installs on quit`, 'busy');
           showAppNotification({
             title: `AI.EXE v${updateInfo.version} is ready`,
@@ -4024,7 +4024,7 @@ try {
         if (st.bytes > lastStageBytes) lastStageBytes = st.bytes;
         if (st.bytes > 0) {
           const pct = updateInfo.size > 0 ? Math.min(99, Math.round((st.bytes * 100) / updateInfo.size)) : 0;
-          setStatus(pct ? `Downloading… ${pct}%` : 'Downloading update…', `Downloading AI.EXE v${updateInfo.version} in the background${pct ? ` — ${pct}%` : '…'}`, { disabled: true });
+          setStatus(pct ? `Downloading… ${pct}%` : 'Downloading update…', `Downloading v${updateInfo.version}${pct ? ` · ${pct}%` : '…'}`, { disabled: true });
         }
       } catch (err) {
         ulog('update_stage_status_error', { error: String(err && err.message ? err.message : err) });
