@@ -2522,7 +2522,7 @@ Still unverified: ${pending.join('; ')}` : '';
           detail: path.split('/').filter(Boolean).pop() || path,
           openPath: path,
           openKind: 'file',
-          meta: 'current content · unblocking',
+          meta: '',
           status: 'done',
         });
         recordDebugTrace('agent_guard_deadlock_broken', {
@@ -3240,7 +3240,8 @@ Still unverified: ${pending.join('; ')}` : '';
                   toolEvents,
                 });
                 // The model's narration already rendered for the OLD target.
-                appendAgentNarration(`That's already handled — moving to ${deps.normalizeWorkspacePath(fallbackDecision.path || '') || 'the next step'}.`);
+                // Its note described the old target; drop it rather than narrate for the model.
+                retractStepNarration();
                 decision = fallbackDecision;
                 duplicateRepairedToFallback = true;
               }
@@ -3309,7 +3310,8 @@ Still unverified: ${pending.join('; ')}` : '';
                 duplicateDecisionObservation,
                 toolEvents,
               });
-              appendAgentNarration(`That's already handled — moving to ${deps.normalizeWorkspacePath(fallbackDecision.path || '') || 'the next step'}.`);
+              // Its note described the old target; drop it rather than narrate for the model.
+              retractStepNarration();
               decision = fallbackDecision;
             } else {
               setAgentProgress('Continuing...');
@@ -3820,7 +3822,7 @@ Still unverified: ${pending.join('; ')}` : '';
                 openKind: 'file',
                 openStartLine: reqStart,
                 openEndLine: reqEnd,
-                meta: cacheRangeLabel ? `${cacheRangeLabel} · cached` : 'cached',
+                meta: cacheRangeLabel || '',
                 status: 'done',
               });
               recordDebugTrace('agent_read_served_from_cache', {
@@ -3881,7 +3883,7 @@ Still unverified: ${pending.join('; ')}` : '';
               _guardBlock: true,
               _guardReason: 'enough_context',
               path: deps.normalizeWorkspacePath(decision.path || ''),
-              observation: `You already have ${inspections} focused inspection result${inspections === 1 ? '' : 's'} and no unresolved symbol or error was named for this request. Stop gathering broad context. Create the next missing planned file now, make the targeted edit using cached evidence, or run ONE search only if you can name the exact symbol/selector/error you still need.${checklistSteer}`,
+              observation: `You already have ${inspections} focused inspection result${inspections === 1 ? '' : 's'} and no unresolved symbol or error was named for this request. Stop gathering broad context. Make the change using what you have, run ONE search only if you can name the exact symbol/selector/error you still need, or — if what the request refers to isn't in this project — finish and say so plainly.${checklistSteer}`,
             });
             continue;
           }

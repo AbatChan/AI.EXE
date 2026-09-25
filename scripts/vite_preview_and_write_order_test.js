@@ -27,8 +27,8 @@ const rankSrc = core.slice(core.indexOf('const writeRank = (path) => {'), core.i
 const writeRank = new Function(`${rankSrc}; return writeRank;`)();
 const plan = ['/package.json', '/src/main.tsx', '/src/App.tsx', '/README.md', '/src/styles.css', '/src/components/Chart.tsx', '/src/hooks/useData.ts'];
 const order = [...plan].sort((a, b) => writeRank(a) - writeRank(b));
-assert.deepEqual(order, ['/package.json', '/src/styles.css', '/src/components/Chart.tsx', '/src/hooks/useData.ts', '/src/App.tsx', '/src/main.tsx', '/README.md']);
-console.log('PASS: App/main are written after their components');
+assert.deepEqual(order, ['/package.json', '/src/components/Chart.tsx', '/src/hooks/useData.ts', '/src/App.tsx', '/src/main.tsx', '/src/styles.css', '/README.md']);
+console.log('PASS: App/main after their components; stylesheets after everything that uses classes');
 
 // Completion keeps the agent's own caveat.
 assert.match(loop, /planSpec\._agentFinalNote = String\(decision\.message\)\.trim\(\)\.slice\(0, 1500\);/);
@@ -67,3 +67,32 @@ assert.match(uiNow, /!isVeniceAdapterSelected\(\) && !requestToken\.preflightCho
 assert.match(uiNow, /const preflightDecision = \(speculativePreflight && await speculativePreflight\)/);
 assert.match(uiNow, /Warm the Venice list \(uncensored fallback\)/);
 console.log('PASS: routers overlap; first chat does not wait on the Venice list');
+
+// Kindred: 38 classes (whole chat window) had no CSS rule; the build + validate passed.
+const exSrc = executor.slice(executor.indexOf('    function extractJsxClassNames(source) {'), executor.indexOf('    // After a web build:'));
+const extractJsxClassNames = new Function(`${exSrc}; return extractJsxClassNames;`)();
+const jsx = `<div className="chat-bubble chat-bubble--mine"><p className={\`row \${mine ? 'row--mine' : ''}\`} />
+<b className={mode === 'login' ? 'tab tab--active' : 'tab'} /><i className={cn('icon', open && "icon--open")} /></div>`;
+assert.deepEqual(extractJsxClassNames(jsx).sort(), ['chat-bubble', 'chat-bubble--mine', 'icon', 'icon--open', 'row', 'row--mine', 'tab', 'tab--active'].sort(), 'compared values (login) are not classes');
+assert.match(executor, /Unstyled classes — used in components but no CSS rule exists in the build/);
+assert.match(executor, /const unstyled = await findUnstyledClassNames\(built\.output\);/);
+// Tailwind template: no uninstalled plugin; shadcn tokens only when the CSS defines them.
+const twSrc = executor.slice(executor.indexOf('    function buildDeterministicTailwindConfig(path, toolEvents = []) {'), executor.indexOf('    // A code file cut mid-statement'));
+const buildTw = new Function('deps', `${twSrc}; return buildDeterministicTailwindConfig;`)({ normalizeWorkspacePath: norm });
+const plainTw = buildTw('/tailwind.config.ts', [{ ok: true, path: '/src/index.css', content: ':root { --accent: #c64d68; }' }]);
+assert.ok(!/require\(/.test(plainTw) && !/--primary/.test(plainTw) && /plugins: \[\]/.test(plainTw), 'no shadcn tokens or plugin without matching CSS');
+const shadTw = buildTw('/tailwind.config.ts', [{ ok: true, path: '/src/index.css', content: ':root { --primary: 222.2 47.4% 11.2%; }' }]);
+assert.ok(/hsl\(var\(--primary\)\)/.test(shadTw), 'shadcn tokens when the CSS defines them');
+console.log('PASS: unstyled-class sensor + consistent Tailwind template');
+
+// A chat's follow-up runs in ITS project when another chat's project is open.
+let uiNow2; assert.match(uiNow2 = read('ai-exe.js'), /if \(requestToken && \(requestToken\.isAgentResume \|\| openRootIsOtherChats\)\) \{/);
+assert.match(uiNow2, /String\(c\.id\) !== String\(chatId\)/, 'only another chat\'s project triggers the switch');
+// Harness internals stay out of the user's feed.
+const loopNow = read('agent-loop.js');
+assert.ok(!/unblocking'/.test(loopNow) && !/· cached/.test(loopNow), 'no internal read labels');
+assert.ok(!/That's already handled — moving to/.test(loopNow), 'harness does not narrate in the model\'s voice');
+assert.match(loopNow, /if what the request refers to isn't in this project — finish and say so plainly/);
+console.log('PASS: chat reopens its own project; no internal labels in the feed');
+assert.match(read('ai-exe.js'), /if \(openRootIsOtherChats\) \{\n\s+const name = String\(binding && binding\.rootName/, 'a failed restore stops instead of running in another chat\'s project');
+console.log('PASS: no run in another chat\'s project when its own folder is gone');

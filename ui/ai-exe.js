@@ -18144,7 +18144,16 @@ async function runSelectedDeveloperAgentReply(requestToken, chatId, rawPromptTex
   // A phased chat owns the project it created. The global explorer root can be
   // cleared by a relaunch/native-state sync, so restore the chat's root before
   // planning a Continue; otherwise deterministic project setup creates "(1)".
-  if (requestToken && requestToken.isAgentResume) {
+  // Same for any follow-up while ANOTHER chat's project is open: switching chats doesn't
+  // switch the explorer, so "round the summary cards" searched Kindred for a budget card.
+  // A folder no chat owns (opened by the user) is left as is.
+  const ownChat = findChatById(chatId);
+  const ownRoot = String(ownChat && ownChat.agentWorkspace && ownChat.agentWorkspace.rootPath || '').replace(/[/\\]+$/, '');
+  const openRootNow = String(workspaceRootPath || '').replace(/[/\\]+$/, '');
+  const openRootIsOtherChats = Boolean(ownRoot && openRootNow && ownRoot !== openRootNow
+    && (Array.isArray(chats) ? chats : []).some((c) => c && String(c.id) !== String(chatId)
+      && String(c.agentWorkspace && c.agentWorkspace.rootPath || '').replace(/[/\\]+$/, '') === openRootNow));
+  if (requestToken && (requestToken.isAgentResume || openRootIsOtherChats)) {
     const resumeChat = findChatById(chatId);
     const binding = resumeChat && resumeChat.agentWorkspace && typeof resumeChat.agentWorkspace === 'object'
       ? resumeChat.agentWorkspace
@@ -18173,6 +18182,15 @@ async function runSelectedDeveloperAgentReply(requestToken, chatId, rawPromptTex
           chatId: String(chatId || ''),
           error: debugPreview(String(restoreErr && restoreErr.message || restoreErr || ''), 220),
         }, { chatId: String(chatId || ''), binding, error: String(restoreErr && restoreErr.stack || restoreErr || '') });
+        // Never fall through into ANOTHER chat's project (Memory Match edited Kindred's
+        // ProfileCard.tsx after its own folder had been moved). Returning here also skips
+        // re-binding this chat to the wrong root.
+        if (openRootIsOtherChats) {
+          const name = String(binding && binding.rootName || 'this chat\'s project');
+          const text = `I stopped before changing anything: this chat's project folder "${name}" isn't at ${boundRootPath} anymore, and the project that's open belongs to another chat. Open this chat's project folder (or tell me where it moved), then send the request again.`;
+          commitAssistantMessage(chatId, text, text, {});
+          return true;
+        }
       }
     }
   }

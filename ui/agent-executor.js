@@ -233,6 +233,48 @@
       return all.length ? all : getActivePlannedFiles(planSpec);
     }
 
+    // Class names a JSX file puts in className: literal strings, static template parts, and
+    // string results inside expressions (not values compared with ===/!==).
+    function extractJsxClassNames(source) {
+      const src = String(source || '');
+      const out = new Set();
+      const add = (text) => String(text || '').split(/\s+/).forEach((t) => { if (/^[A-Za-z_-][\w:/.\[\]%-]*$/.test(t)) out.add(t); });
+      for (const m of src.matchAll(/className\s*=\s*"([^"]*)"/g)) add(m[1]);
+      const addExpr = (expr) => {
+        for (const q of String(expr).matchAll(/(['"`])((?:(?!\1)[^\\]|\\.)*)\1/g)) {
+          const before = expr.slice(0, q.index);
+          const after = expr.slice(q.index + q[0].length);
+          if (/[=!]==?\s*$/.test(before) || /^\s*[=!]==?/.test(after)) continue;
+          add(q[2].replace(/\$\{[^}]*\}/g, ' '));
+          for (const inner of q[2].matchAll(/\$\{([^}]*)\}/g)) addExpr(inner[1]);
+        }
+      };
+      for (const m of src.matchAll(/className\s*=\s*\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}/g)) addExpr(m[1]);
+      return [...out];
+    }
+
+    // After a web build: className tokens with no rule in the built CSS render unstyled
+    // (Kindred's whole chat window). Code sensor over real files, reported to the model.
+    async function findUnstyledClassNames(distHtml) {
+      const refs = [...String(distHtml || '').matchAll(/<link\b[^>]*href=["']([^"']+\.css)["']/gi)].map((m) => m[1]);
+      let css = '';
+      for (const ref of refs) {
+        const res = await deps.invokeWorkspaceAction('workspaceReadFile', { path: deps.normalizeWorkspacePath(`/dist/${String(ref).replace(/^\.?\/+/, '')}`) });
+        if (res && res.ok) css += String(res.output || '');
+      }
+      if (!css) return [];
+      const defined = new Set([...css.matchAll(/\.((?:\\.|[\w-])+)/g)].map((m) => m[1].replace(/\\/g, '')));
+      const files = (await collectSearchableWorkspaceFiles('/src', 200)).filter((f) => /\.[jt]sx$/i.test(f));
+      const found = [];
+      for (const file of files) {
+        const res = await deps.invokeWorkspaceAction('workspaceReadFile', { path: file });
+        if (!res || !res.ok) continue;
+        const missing = extractJsxClassNames(res.output).filter((c) => !defined.has(c));
+        if (missing.length) found.push({ path: file, classes: missing });
+      }
+      return found;
+    }
+
     async function collectSearchableWorkspaceFiles(rootPath, maxFiles = 80) {
       const queue = [deps.normalizeWorkspacePath(rootPath || '/') || '/'];
       const files = [];
@@ -718,78 +760,50 @@
       }, null, 2)}\n`;
     }
 
-    function buildDeterministicTailwindConfig(path) {
+    // shadcn color tokens only when the project's CSS defines their variables (Kindred got
+    // hsl(var(--primary)) classes with no --primary anywhere); no plugin that isn't installed.
+    function buildDeterministicTailwindConfig(path, toolEvents = []) {
       const normalized = deps.normalizeWorkspacePath(path || '');
       if (!/(?:^|\/)tailwind\.config\.ts$/i.test(normalized)) return '';
-      return `import type { Config } from "tailwindcss";
-
-const config: Config = {
-  darkMode: ["class"],
-  content: [
-    "./pages/**/*.{ts,tsx}",
-    "./components/**/*.{ts,tsx}",
-    "./app/**/*.{ts,tsx}",
-    "./src/**/*.{ts,tsx}",
-  ],
-  theme: {
-    extend: {
+      const cssDefinesTokens = (Array.isArray(toolEvents) ? toolEvents : []).some((e) => e && e.ok
+        && /\.(?:css|scss)$/i.test(String(e.path || ''))
+        && /--primary\s*:\s*[\d.]+\s+[\d.]+%/.test(String(e.content || '')));
+      const tokenTheme = cssDefinesTokens ? `
       colors: {
         border: "hsl(var(--border))",
         input: "hsl(var(--input))",
         ring: "hsl(var(--ring))",
         background: "hsl(var(--background))",
         foreground: "hsl(var(--foreground))",
-        primary: {
-          DEFAULT: "hsl(var(--primary))",
-          foreground: "hsl(var(--primary-foreground))",
-        },
-        secondary: {
-          DEFAULT: "hsl(var(--secondary))",
-          foreground: "hsl(var(--secondary-foreground))",
-        },
-        destructive: {
-          DEFAULT: "hsl(var(--destructive))",
-          foreground: "hsl(var(--destructive-foreground))",
-        },
-        muted: {
-          DEFAULT: "hsl(var(--muted))",
-          foreground: "hsl(var(--muted-foreground))",
-        },
-        accent: {
-          DEFAULT: "hsl(var(--accent))",
-          foreground: "hsl(var(--accent-foreground))",
-        },
-        popover: {
-          DEFAULT: "hsl(var(--popover))",
-          foreground: "hsl(var(--popover-foreground))",
-        },
-        card: {
-          DEFAULT: "hsl(var(--card))",
-          foreground: "hsl(var(--card-foreground))",
-        },
+        primary: { DEFAULT: "hsl(var(--primary))", foreground: "hsl(var(--primary-foreground))" },
+        secondary: { DEFAULT: "hsl(var(--secondary))", foreground: "hsl(var(--secondary-foreground))" },
+        destructive: { DEFAULT: "hsl(var(--destructive))", foreground: "hsl(var(--destructive-foreground))" },
+        muted: { DEFAULT: "hsl(var(--muted))", foreground: "hsl(var(--muted-foreground))" },
+        accent: { DEFAULT: "hsl(var(--accent))", foreground: "hsl(var(--accent-foreground))" },
+        popover: { DEFAULT: "hsl(var(--popover))", foreground: "hsl(var(--popover-foreground))" },
+        card: { DEFAULT: "hsl(var(--card))", foreground: "hsl(var(--card-foreground))" },
       },
       borderRadius: {
         lg: "var(--radius)",
         md: "calc(var(--radius) - 2px)",
         sm: "calc(var(--radius) - 4px)",
-      },
-      keyframes: {
-        "accordion-down": {
-          from: { height: "0" },
-          to: { height: "var(--radix-accordion-content-height)" },
-        },
-        "accordion-up": {
-          from: { height: "var(--radix-accordion-content-height)" },
-          to: { height: "0" },
-        },
-      },
-      animation: {
-        "accordion-down": "accordion-down 0.2s ease-out",
-        "accordion-up": "accordion-up 0.2s ease-out",
-      },
+      },` : '';
+      return `import type { Config } from "tailwindcss";
+
+const config: Config = {
+  darkMode: ["class"],
+  content: [
+    "./index.html",
+    "./pages/**/*.{ts,tsx}",
+    "./components/**/*.{ts,tsx}",
+    "./app/**/*.{ts,tsx}",
+    "./src/**/*.{ts,tsx,js,jsx}",
+  ],
+  theme: {
+    extend: {${tokenTheme}
     },
   },
-  plugins: [require("tailwindcss-animate")],
+  plugins: [],
 };
 
 export default config;
@@ -3173,7 +3187,7 @@ export default config;
           }
         }
         if (tailwindConfigTarget) {
-          const tailwindFallback = buildDeterministicTailwindConfig(path);
+          const tailwindFallback = buildDeterministicTailwindConfig(path, toolEvents);
           const suppliedIssue = String(content || '').trim() ? getStructuralIssueForPath(path, content) : 'empty';
           if (!String(content || '').trim() || suppliedIssue || String(content || '').length > 8000) {
             content = tailwindFallback;
@@ -3231,7 +3245,7 @@ export default config;
           if (generated) content = generated;
         }
         if (tailwindConfigTarget && (getStructuralIssueForPath(path, content) || String(content || '').length > 8000)) {
-          content = buildDeterministicTailwindConfig(path);
+          content = buildDeterministicTailwindConfig(path, toolEvents);
           primaryQualityNote = ' Note: replaced an invalid/oversized generation with the bounded canonical Tailwind/shadcn configuration.';
         }
         if (!String(content).trim()) {
@@ -3514,7 +3528,7 @@ export default config;
           && originalContent.length > 8000
           && Boolean(getStructuralIssueForPath(path, originalContent));
         if (brokenTailwindConfig) {
-          const content = buildDeterministicTailwindConfig(path);
+          const content = buildDeterministicTailwindConfig(path, toolEvents);
           const response = await deps.invokeWorkspaceAction('workspaceWriteFile', { path, content });
           if (!response || !response.ok) {
             return { ok: false, mutated, observation: `edit_file failed for ${path}: could not save the recovered configuration.` };
@@ -4031,6 +4045,14 @@ export default config;
             const preview = await runHtmlSmoke('/dist/index.html', '/dist');
             if (!preview || !preview.ok) return passed;
             const previewErrorCount = Number(preview.runErrorCount) || 0;
+            let unstyledText = '';
+            try {
+              const unstyled = await findUnstyledClassNames(built.output);
+              const total = unstyled.reduce((n, u) => n + u.classes.length, 0);
+              if (total) {
+                unstyledText = `\nUnstyled classes — used in components but no CSS rule exists in the build, so those elements render with browser defaults (${total}):\n${unstyled.slice(0, 8).map((u) => `- ${u.path}: ${u.classes.slice(0, 24).join(', ')}${u.classes.length > 24 ? ', …' : ''}`).join('\n')}\nAdd rules for them in the stylesheet (or use classes that exist).`;
+              }
+            } catch (_) { /* advisory */ }
             return {
               ...passed,
               checksRun: preview.checksRun,
@@ -4038,7 +4060,7 @@ export default config;
               renderSnapshot: preview.renderSnapshot,
               previewErrorCount,
               runErrorCount: (Number(passed.runErrorCount) || 0) + previewErrorCount,
-              observation: `${passed.observation}\nThen loaded the built app (dist/index.html) in the preview: ${String(preview.observation || '').replace(/^run_app \/dist\/index\.html: /, '')}`,
+              observation: `${passed.observation}\nThen loaded the built app (dist/index.html) in the preview: ${String(preview.observation || '').replace(/^run_app \/dist\/index\.html: /, '')}${unstyledText}`,
             };
           };
           const status = parseRunCommandExitStatus(res.message);

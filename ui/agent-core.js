@@ -745,9 +745,12 @@
         }
         // Keep the plan's order, but write the root component (src/App.*, then src/main|index.*)
         // after the modules it imports — written first, App inlined everything and the
-        // planned components went unused. README last.
+        // planned components went unused. Then stylesheets, then README.
         const writeRank = (path) => {
-          if (path === '/README.md') return 3;
+          if (path === '/README.md') return 4;
+          // Stylesheets after every file that uses classes, so the CSS covers them all
+          // (Kindred wrote index.css before Modal/ChatWindow; their classes had no rules).
+          if (/\.(?:css|scss|sass|less)$/i.test(path)) return 3;
           if (/^\/src\/(?:main|index)\.[jt]sx?$/i.test(path)) return 2;
           if (/^\/src\/App\.(?:[jt]sx?|vue|svelte)$/i.test(path)) return 1;
           return 0;
